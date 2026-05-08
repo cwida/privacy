@@ -181,7 +181,7 @@ Rscript --vanilla benchmark/clickbench/plot_clickbench_results.R
 
 ### Figure 8: Utility — TPC-H and ClickBench (SF30, 100 runs)
 
-Runs each non-rejected query 100 times with `pac_diffcols` and compares PAC-privatized output against the non-private reference. Reports MAPE (Mean Absolute Percentage Error), recall, and precision per query.
+Runs each non-rejected query 100 times with `privacy_diffcols` and compares PAC-privatized output against the non-private reference. Reports MAPE (Mean Absolute Percentage Error), recall, and precision per query.
 
 ```bash
 # TPC-H utility (requires tpch_sf30.db from RQ2)

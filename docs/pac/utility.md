@@ -1,12 +1,12 @@
-# PAC Utility Diff
+# Privacy Utility Diff
 
-The PAC Utility Diff feature allows you to measure the accuracy of privacy-preserving query results by comparing them to exact (non-private) results. This is essential for evaluating the trade-off between privacy and statistical accuracy.
+The Privacy Utility Diff feature allows you to measure the accuracy of privacy-preserving query results by comparing them to exact (non-private) results. This is essential for evaluating the trade-off between privacy and statistical accuracy.
 
 ## Overview
 
-When `pac_diffcols` is set, PAC performs a **utility comparison** by:
+When `privacy_diffcols` is set, the privacy compiler performs a **utility comparison** by:
 
-1. Executing the PAC-compiled (private) query
+1. Executing the privacy-compiled query
 2. Executing a deep-copied reference (exact) query
 3. Joining both result sets using a FULL OUTER JOIN
 4. Computing relative error for each numeric measure column
@@ -14,7 +14,7 @@ When `pac_diffcols` is set, PAC performs a **utility comparison** by:
 
 ## Configuration
 
-### The `pac_diffcols` Setting
+### The `privacy_diffcols` Setting
 
 | Format | Description |
 |--------|-------------|
@@ -24,41 +24,41 @@ When `pac_diffcols` is set, PAC performs a **utility comparison** by:
 | `'/path/to/file.csv'` | Auto-detect key columns and append results to CSV file |
 | `NULL` | Disable utility diff (default) |
 
-The number of key columns can be omitted to enable auto-detection. When auto-detecting, PAC infers the key column count from the number of GROUP BY columns in the query. Ungrouped (scalar) aggregates default to positional matching.
+The number of key columns can be omitted to enable auto-detection. When auto-detecting, the compiler infers the key column count from the number of GROUP BY columns in the query. Ungrouped (scalar) aggregates default to positional matching.
 
 **Examples:**
 
 ```sql
 -- Auto-detect key columns from GROUP BY
-SET pac_diffcols = 'true';
+SET privacy_diffcols = 'true';
 
 -- Auto-detect with CSV output
-SET pac_diffcols = '/tmp/utility_results.csv';
+SET privacy_diffcols = '/tmp/utility_results.csv';
 
 -- Positional matching (no key columns) - use for ungrouped queries
-SET pac_diffcols = '0';
+SET privacy_diffcols = '0';
 
 -- Key-based matching with 1 key column (e.g., GROUP BY single column)
-SET pac_diffcols = '1';
+SET privacy_diffcols = '1';
 
 -- Key-based matching with 2 key columns
-SET pac_diffcols = '2';
+SET privacy_diffcols = '2';
 
 -- Output to CSV file
-SET pac_diffcols = '1:/tmp/utility_results.csv';
+SET privacy_diffcols = '1:/tmp/utility_results.csv';
 
 -- Disable
-SET pac_diffcols = NULL;
+SET privacy_diffcols = NULL;
 ```
 
 ### Key Columns vs Measure Columns
 
-The `pac_diffcols` value specifies how many **leading columns** in the result are used as keys for row matching:
+The `privacy_diffcols` value specifies how many **leading columns** in the result are used as keys for row matching:
 
-- **Key columns** (first N columns): Used to match rows between PAC and reference results
+- **Key columns** (first N columns): Used to match rows between private and reference results
 - **Measure columns** (remaining columns): Numeric columns where relative error is computed
 
-For example, with `pac_diffcols = '1'` on a query `SELECT grp, SUM(val) FROM t GROUP BY grp`:
+For example, with `privacy_diffcols = '1'` on a query `SELECT grp, SUM(val) FROM t GROUP BY grp`:
 - Column 0 (`grp`) is the key column — used to match rows
 - Column 1 (`SUM(val)`) is the measure column — error is computed here
 
@@ -74,7 +74,7 @@ When utility diff is enabled, the query output is transformed:
 | Numeric measure columns | Relative error percentage: `100 * \|ref - pac\| / max(0.00001, \|ref\|)` |
 
 **Interpretation:**
-- `0` = perfect accuracy (PAC result matches reference exactly)
+- `0` = perfect accuracy (private result matches reference exactly)
 - `5` = 5% relative error
 - `100` = 100% relative error (PAC result is twice or zero compared to reference)
 
@@ -103,7 +103,7 @@ At query completion, PAC prints (or appends to CSV) two metrics:
 
 ```sql
 SET privacy_noise = true;
-SET pac_diffcols = '0';
+SET privacy_diffcols = '0';
 
 SELECT SUM(val) AS total_val FROM data_table;
 -- Output: relative error % for total_val
@@ -113,7 +113,7 @@ SELECT SUM(val) AS total_val FROM data_table;
 
 ```sql
 SET privacy_noise = true;
-SET pac_diffcols = '1';
+SET privacy_diffcols = '1';
 
 SELECT category, SUM(amount) AS total FROM sales GROUP BY category ORDER BY category;
 -- Output: category (ref value), relative error % for total
@@ -122,7 +122,7 @@ SELECT category, SUM(amount) AS total FROM sales GROUP BY category ORDER BY cate
 ### Multiple Key Columns
 
 ```sql
-SET pac_diffcols = '2';
+SET privacy_diffcols = '2';
 
 SELECT region, year, SUM(revenue) FROM sales GROUP BY region, year;
 -- Matches rows by (region, year), computes error on SUM(revenue)
@@ -131,13 +131,13 @@ SELECT region, year, SUM(revenue) FROM sales GROUP BY region, year;
 ### CSV Output for Benchmarking
 
 ```sql
-SET pac_diffcols = '1:/tmp/benchmark_utility.csv';
+SET privacy_diffcols = '1:/tmp/benchmark_utility.csv';
 
 -- Run multiple queries; each appends: utility,recall
 SELECT dept, AVG(salary) FROM employees GROUP BY dept;
 SELECT dept, COUNT(*) FROM employees GROUP BY dept;
 
-SET pac_diffcols = NULL;
+SET privacy_diffcols = NULL;
 
 -- /tmp/benchmark_utility.csv now contains:
 -- 2.5,1.0
@@ -154,7 +154,7 @@ SET pac_diffcols = NULL;
    ```
 
 2. **Match key columns to GROUP BY:**
-   If your query has `GROUP BY a, b`, use `pac_diffcols = '2'`
+   If your query has `GROUP BY a, b`, use `privacy_diffcols = '2'`
 
 3. **Order results for consistent comparison:**
    Add `ORDER BY` on key columns for deterministic row ordering
@@ -166,7 +166,7 @@ SET pac_diffcols = NULL;
 
 | Error | Cause | Solution |
 |-------|-------|----------|
-| `num_key_cols must be less than number of columns` | All columns are keys, none left for measures | Reduce `pac_diffcols` value |
+| `num_key_cols must be less than number of columns` | All columns are keys, none left for measures | Reduce `privacy_diffcols` value |
 | `unexpected NULL in key column` | Key column contains NULL values | Ensure key columns are NOT NULL |
 
 ## Related Settings
@@ -177,4 +177,3 @@ SET pac_diffcols = NULL;
 | `pac_mi` | Counter index affects noise level |
 | `privacy_seed` | Set for reproducible PAC results |
 | `pac_deterministic_noise` | Use `true` for reproducible testing |
-

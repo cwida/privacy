@@ -1,5 +1,5 @@
 //
-// PAC Utility Summary - Streaming pass-through operator
+// Privacy Utility Summary - Streaming pass-through operator
 //
 // Computes recall (row matching rate) and precision (value accuracy) from the
 // diff projection output.  All rows pass through unchanged; metrics are
@@ -98,7 +98,7 @@ OperatorResultType PhysicalPacUtilitySummary::Execute(ExecutionContext &context,
 		}
 		if (null_keys > 0) {
 			if (null_keys < num_key_cols) {
-				throw InternalException("pac_diffcols: unexpected NULL in key column; "
+				throw InternalException("privacy_diffcols: unexpected NULL in key column; "
 				                        "key columns must not contain NULL values");
 			}
 			gstate.missing_rows++;
@@ -143,7 +143,7 @@ OperatorFinalResultType PhysicalPacUtilitySummary::OperatorFinalize(Pipeline &pi
 	auto &gstate = input.global_state.Cast<PacUtilitySummaryGlobalState>();
 
 	// Compute recall: matched / (matched + missing)
-	// recall measures how many reference rows PAC found (1.0 = no missing rows)
+	// recall measures how many reference rows privacy found (1.0 = no missing rows)
 	idx_t ref_rows = gstate.matched_rows + gstate.missing_rows;
 	double recall = (ref_rows > 0) ? static_cast<double>(gstate.matched_rows) / static_cast<double>(ref_rows) : 1.0;
 

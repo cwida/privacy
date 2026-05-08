@@ -495,7 +495,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	bool do_diff = false;
 	{
 		Value val;
-		if (input.context.TryGetCurrentSetting("pac_diffcols", val) && !val.IsNull()) {
+		if (input.context.TryGetCurrentSetting("privacy_diffcols", val) && !val.IsNull()) {
 			string val_str = val.ToString();
 			if (!val_str.empty()) {
 				if (std::isdigit(val_str[0])) {

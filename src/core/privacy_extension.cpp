@@ -229,7 +229,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));
 	// Utility diff mode: number of key columns for matching + optional output path
 	db.config.AddExtensionOption(
-	    "pac_diffcols", "Measure utility: specify number of key columns and optional output path (e.g. '2:out.csv')",
+	    "privacy_diffcols",
+	    "Measure utility: specify number of key columns and optional output path (e.g. '2:out.csv')",
 	    LogicalType::VARCHAR);
 	// Utility threshold: probabilistically NULL cells where |noised_value| / noise_std_dev < threshold.
 	// Z-score threshold for utility NULLing: NULLs cells whose signal-to-noise ratio is below threshold.

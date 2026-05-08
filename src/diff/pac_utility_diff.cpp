@@ -1,7 +1,7 @@
 //
-// PAC Utility Diff - Plan-level rewrite
+// Privacy Utility Diff - Plan-level rewrite
 //
-// When pac_diffcols is set, this wraps the complete PAC plan and the
+// When privacy_diffcols is set, this wraps the complete privacy plan and the
 // deep-copied reference plan in a FULL OUTER JOIN and builds a diff projection
 // on top that encodes utility % for numeric columns and NULL patterns for
 // extra/missing rows.  Both plans (including any LIMIT/ORDER BY) go under the
@@ -188,7 +188,7 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 #endif
 
 	if (num_key_cols >= num_cols) {
-		throw InvalidInputException("pac_diffcols: num_key_cols (" + std::to_string(num_key_cols) +
+		throw InvalidInputException("privacy_diffcols: num_key_cols (" + std::to_string(num_key_cols) +
 		                            ") must be less than number of columns (" + std::to_string(num_cols) +
 		                            "); at least one measure column is required");
 	}

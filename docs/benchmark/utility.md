@@ -4,11 +4,11 @@ Lightweight SQL scripts for quick PAC testing directly through the DuckDB CLI, w
 
 ## Overview
 
-The utility scripts provide a fast way to exercise the PAC query compiler against TPC-H and ClickBench workloads and measure utility. Each script sets the `pac_diffcols` configuration before every query, enabling PAC differential column tracking for the query's output.
+The utility scripts provide a fast way to exercise the privacy query compiler against TPC-H and ClickBench workloads and measure utility. Each script sets the `privacy_diffcols` configuration before every query, enabling privacy differential column tracking for the query's output.
 
-### What is `pac_diffcols`?
+### What is `privacy_diffcols`?
 
-The `pac_diffcols` setting tells DuckDB which columns to use for PAC utility diffs. PAC's UtiityDiff operator compares the original query result with the privatized result and measures error percentage, precision and recall. Error percentage is 100*(noised/exact-1). Precision and recall count which fraction of the keys in the noised result are in the exact, resp. the fraction of axact keys in the noised result. The utility difference mode is active if `pac_diffcols` is defined (non-null), and modifies queries to return the precision in each non-key numeric cell instead of its actual value, and it shows overall prevision (the average of the column precisions, where each column precision is the average of precisions in the column), recall and precision in a single line printed on (stderr) console output, or appended to a file. It computes these values by performing a full outer join between the original and noised query. The assumption is that the X leading columns of the results form a key to perform this comparison join on. The format is:
+The `privacy_diffcols` setting tells DuckDB which columns to use for privacy utility diffs. The utility diff operator compares the original query result with the privatized result and measures error percentage, precision and recall. Error percentage is 100*(noised/exact-1). Precision and recall count which fraction of the keys in the noised result are in the exact, resp. the fraction of exact keys in the noised result. The utility difference mode is active if `privacy_diffcols` is defined (non-null), and modifies queries to return the precision in each non-key numeric cell instead of its actual value, and it shows overall precision (the average of the column precisions, where each column precision is the average of precisions in the column), recall and precision in a single line printed on (stderr) console output, or appended to a file. It computes these values by performing a full outer join between the original and noised query. The assumption is that the X leading columns of the results form a key to perform this comparison join on. The format is:
 
 ```
 'N:filename.csv'
@@ -28,12 +28,12 @@ Where `N` is the number of `GROUP BY` columns in the query and `filename.csv` is
 
 **Script:** `benchmark/tpch/utility_tpch.sql`
 
-Runs 17 TPC-H queries via `PRAGMA tpch(N)` with `pac_diffcols` set before each query. The covered queries are: Q1, Q4, Q5, Q6, Q7, Q8, Q9, Q11, Q12, Q13, Q14, Q15, Q17, Q19, Q20, Q21, Q22.
+Runs 17 TPC-H queries via `PRAGMA tpch(N)` with `privacy_diffcols` set before each query. The covered queries are: Q1, Q4, Q5, Q6, Q7, Q8, Q9, Q11, Q12, Q13, Q14, Q15, Q17, Q19, Q20, Q21, Q22.
 
 Each entry in the script follows this pattern:
 
 ```sql
-set pac_diffcols = '2:q01.csv';
+set privacy_diffcols = '2:q01.csv';
 pragma tpch(1);
 ```
 
@@ -71,9 +71,9 @@ bash benchmark/tpch/run_utility_tpch_100.sh
 bash benchmark/tpch/run_utility_tpch_100.sh tpch_sf30.db ./build/release/duckdb
 ```
 
-### `pac_diffcols` Settings
+### `privacy_diffcols` Settings
 
-| Query | `pac_diffcols` | Group-by columns |
+| Query | `privacy_diffcols` | Group-by columns |
 |-------|----------------|------------------|
 | Q1    | `'2:q01.csv'`  | 2                |
 | Q4    | `'1:q04.csv'`  | 1                |
@@ -97,12 +97,12 @@ bash benchmark/tpch/run_utility_tpch_100.sh tpch_sf30.db ./build/release/duckdb
 
 **Script:** `benchmark/clickbench/clickbench_queries/utility.sql`
 
-Runs all 43 ClickBench queries (Q1--Q43) with `pac_diffcols` set before each query. Unlike the TPC-H utility, these are full SQL queries executed directly against the `hits` table rather than pragmas.
+Runs all 43 ClickBench queries (Q1--Q43) with `privacy_diffcols` set before each query. Unlike the TPC-H utility, these are full SQL queries executed directly against the `hits` table rather than pragmas.
 
 Each entry follows this pattern:
 
 ```sql
-set pac_diffcols='0:q01.csv';
+set privacy_diffcols='0:q01.csv';
 SELECT COUNT(*) FROM hits;
 ```
 

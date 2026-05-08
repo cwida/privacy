@@ -213,7 +213,7 @@ This gives a formal (ε,δ)-DP guarantee at the **user level** — neighboring d
 | `privacy_min_group_count` | `NULL` | both | Suppress GROUP BY cells below this count (PAC: low-SNR suppression; DP: τ-thresholding) |
 | `pac_mi` | `1/128` | pac | Mutual information bound (higher = less noise, more leakage) |
 | `pac_ctas` | `true` | pac | Propagate PAC metadata through CTAS |
-| `pac_diffcols` | `NULL` | pac | [Utility diff](docs/pac/utility.md): compare noised vs exact results |
+| `privacy_diffcols` | `NULL` | both | [Utility diff](docs/pac/utility.md): compare noised vs exact results |
 | `dp_epsilon` | `1.0` | dp_elastic | Privacy budget ε |
 | `dp_delta` | `1e-6` | dp_elastic | Failure probability δ (0 = pure DP) |
 | `dp_sum_bound` | required | dp_elastic | Clipping bound for `SUM`/`AVG` inputs: values are clipped to `[-bound, bound]` |
