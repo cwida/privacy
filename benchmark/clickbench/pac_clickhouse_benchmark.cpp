@@ -28,6 +28,8 @@
 #include <stdexcept>
 #include <ctime>
 #include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <iomanip>
 #include <unistd.h>
 #include <limits.h>
@@ -91,6 +93,178 @@ static vector<string> SplitLines(const string &content) {
         }
     }
     return lines;
+}
+
+static string ToLowerAscii(string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+
+static string Trim(const string &s) {
+    size_t start = s.find_first_not_of(" \t\r\n");
+    if (start == string::npos) {
+        return "";
+    }
+    size_t end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
+
+static string CsvQuote(const string &s) {
+    string out = "\"";
+    for (char c : s) {
+        if (c == '"') {
+            out += "\"\"";
+        } else {
+            out += c;
+        }
+    }
+    out += "\"";
+    return out;
+}
+
+static string SqlQuote(const string &s) {
+    string out = "'";
+    for (char c : s) {
+        if (c == '\'') {
+            out += "''";
+        } else {
+            out += c;
+        }
+    }
+    out += "'";
+    return out;
+}
+
+static size_t FindKeywordOutsideParens(const string &lower, const string &keyword, size_t start = 0) {
+    int depth = 0;
+    for (size_t i = start; i + keyword.size() <= lower.size(); i++) {
+        char c = lower[i];
+        if (c == '(') {
+            depth++;
+        } else if (c == ')' && depth > 0) {
+            depth--;
+        }
+        if (depth == 0 && lower.compare(i, keyword.size(), keyword) == 0) {
+            return i;
+        }
+    }
+    return string::npos;
+}
+
+static vector<string> ExtractSumAvgArgs(const string &query) {
+    vector<string> args;
+    string lower = ToLowerAscii(query);
+    size_t pos = 0;
+    while (pos < lower.size()) {
+        size_t sum_pos = lower.find("sum(", pos);
+        size_t avg_pos = lower.find("avg(", pos);
+        size_t fn_pos = string::npos;
+        if (sum_pos != string::npos && (avg_pos == string::npos || sum_pos < avg_pos)) {
+            fn_pos = sum_pos;
+        } else if (avg_pos != string::npos) {
+            fn_pos = avg_pos;
+        }
+        if (fn_pos == string::npos) {
+            break;
+        }
+        size_t arg_start = fn_pos + 4;
+        int depth = 1;
+        size_t i = arg_start;
+        for (; i < query.size(); i++) {
+            if (query[i] == '(') {
+                depth++;
+            } else if (query[i] == ')') {
+                depth--;
+                if (depth == 0) {
+                    break;
+                }
+            }
+        }
+        if (i < query.size()) {
+            string arg = Trim(query.substr(arg_start, i - arg_start));
+            if (!arg.empty() && arg != "*") {
+                args.push_back(arg);
+            }
+            pos = i + 1;
+        } else {
+            break;
+        }
+    }
+    return args;
+}
+
+static string ExtractFromWhereClause(const string &query) {
+    string lower = ToLowerAscii(query);
+    size_t from_pos = FindKeywordOutsideParens(lower, " from ");
+    if (from_pos == string::npos) {
+        return "";
+    }
+    size_t end = query.size();
+    vector<string> terminators = {" group by ", " order by ", " limit ", " offset "};
+    for (auto &term : terminators) {
+        size_t p = FindKeywordOutsideParens(lower, term, from_pos + 1);
+        if (p != string::npos) {
+            end = std::min(end, p);
+        }
+    }
+    string clause = Trim(query.substr(from_pos, end - from_pos));
+    if (!clause.empty() && clause.back() == ';') {
+        clause.pop_back();
+    }
+    return clause;
+}
+
+static string BuildBoundQuery(const string &query) {
+    auto args = ExtractSumAvgArgs(query);
+    if (args.empty()) {
+        return "";
+    }
+    string from_where = ExtractFromWhereClause(query);
+    if (from_where.empty()) {
+        return "";
+    }
+    string expr;
+    for (idx_t i = 0; i < args.size(); i++) {
+        if (i > 0) {
+            expr += ", ";
+        }
+        expr += "abs(CAST((" + args[i] + ") AS DOUBLE))";
+    }
+    if (args.size() > 1) {
+        expr = "greatest(" + expr + ")";
+    }
+    return "SELECT max(" + expr + ") " + from_where;
+}
+
+static bool ReadLastUtilityLine(const string &path, string &utility, string &recall, string &precision) {
+    std::ifstream in(path);
+    if (!in.is_open()) {
+        return false;
+    }
+    string line;
+    string last;
+    while (std::getline(in, line)) {
+        if (!Trim(line).empty()) {
+            last = Trim(line);
+        }
+    }
+    if (last.empty()) {
+        return false;
+    }
+    std::istringstream ss(last);
+    if (!std::getline(ss, utility, ',')) {
+        return false;
+    }
+    if (!std::getline(ss, recall, ',')) {
+        return false;
+    }
+    if (!std::getline(ss, precision, ',')) {
+        return false;
+    }
+    utility = Trim(utility);
+    recall = Trim(recall);
+    precision = Trim(precision);
+    return true;
 }
 
 static int ExecuteCommand(const string &cmd) {
@@ -182,11 +356,19 @@ static bool ReadAllBytes(int fd, void *buf, size_t n) {
 
 struct BenchmarkQueryResult {
     int query_num;
-    string mode;  // "baseline" or "PAC"
+    string mode;
     int run;
     double time_ms;
     bool success;
     string error_msg;
+    string utility;
+    string recall;
+    string precision;
+    string epsilon;
+    string bound_scenario;
+    string dp_sum_bound;
+    string pac_mi;
+    int64_t seed = 0;
 };
 
 // =====================================================================
@@ -205,6 +387,16 @@ static constexpr uint8_t CMD_STOP = 0;
 static constexpr uint8_t CMD_QUERY = 1;
 static constexpr uint8_t CMD_SETUP_PAC = 2;
 static constexpr uint8_t CMD_UNSET_PAC = 3;
+
+static void WriteStatus(int write_fd, const string &error) {
+    uint8_t ok = error.empty() ? 1 : 0;
+    uint32_t err_len = static_cast<uint32_t>(error.size());
+    WriteAllBytes(write_fd, &ok, sizeof(ok));
+    WriteAllBytes(write_fd, &err_len, sizeof(err_len));
+    if (err_len > 0) {
+        WriteAllBytes(write_fd, error.data(), err_len);
+    }
+}
 
 [[noreturn]] static void ChildWorkerMain(int read_fd, int write_fd,
                                           const string &db_path) {
@@ -225,17 +417,30 @@ static constexpr uint8_t CMD_UNSET_PAC = 3;
             if (cmd == CMD_STOP) {
                 break;
             } else if (cmd == CMD_UNSET_PAC) {
-                con.Query("ALTER TABLE hits UNSET PU;");
+                con.Query("SET privacy_diffcols=NULL;");
+                con.Query("SET privacy_mode='pac';");
+                con.Query("RESET dp_sum_bound;");
+                con.Query("PRAGMA clear_privacy_metadata;");
             } else if (cmd == CMD_SETUP_PAC) {
                 uint32_t count = 0;
                 if (!ReadAllBytes(read_fd, &count, sizeof(count))) break;
+                string setup_error;
                 for (uint32_t i = 0; i < count; i++) {
                     uint32_t len = 0;
                     if (!ReadAllBytes(read_fd, &len, sizeof(len))) goto done;
                     string stmt(len, '\0');
                     if (!ReadAllBytes(read_fd, &stmt[0], len)) goto done;
-                    con.Query(stmt);
+                    if (setup_error.empty()) {
+                        auto setup_result = con.Query(stmt);
+                        if (setup_result && setup_result->HasError()) {
+                            setup_error = "setup failed: " + stmt + " -> " + setup_result->GetError();
+                            if (setup_error.size() > 300) {
+                                setup_error = setup_error.substr(0, 300);
+                            }
+                        }
+                    }
                 }
+                WriteStatus(write_fd, setup_error);
             } else if (cmd == CMD_QUERY) {
                 uint32_t sql_len = 0;
                 if (!ReadAllBytes(read_fd, &sql_len, sizeof(sql_len))) break;
@@ -307,6 +512,7 @@ struct ForkWorker {
     double result_time_ms = 0;
     bool result_ok = false;
     string result_error;
+    string setup_error;
 
     enum SubmitResult { SR_OK, SR_TIMEOUT, SR_CHILD_DIED };
 
@@ -371,8 +577,9 @@ struct ForkWorker {
         return static_cast<size_t>(rss) * static_cast<size_t>(sysconf(_SC_PAGESIZE));
     }
 
-    // Send a "setup PAC" command with the given statements
-    bool SendSetupPAC(const vector<string> &stmts) {
+    // Send setup statements to the child. These run outside measured query time.
+    bool SendSetupStatements(const vector<string> &stmts) {
+        setup_error.clear();
         if (child_pid <= 0) return false;
         uint8_t cmd = CMD_SETUP_PAC;
         if (!WriteAllBytes(to_child_fd, &cmd, sizeof(cmd))) return false;
@@ -383,10 +590,23 @@ struct ForkWorker {
             if (!WriteAllBytes(to_child_fd, &len, sizeof(len))) return false;
             if (!WriteAllBytes(to_child_fd, s.data(), len)) return false;
         }
-        return true;
+        uint8_t ok = 0;
+        uint32_t err_len = 0;
+        if (!ReadAllBytes(from_child_fd, &ok, sizeof(ok)) || !ReadAllBytes(from_child_fd, &err_len, sizeof(err_len))) {
+            setup_error = "child process died during setup";
+            return false;
+        }
+        if (err_len > 0) {
+            setup_error.resize(err_len);
+            if (!ReadAllBytes(from_child_fd, &setup_error[0], err_len)) {
+                setup_error = "child process died while reading setup error";
+                return false;
+            }
+        }
+        return ok != 0;
     }
 
-    // Send an "unset PAC" command
+    // Clear privacy metadata/settings for the next run.
     bool SendUnsetPAC() {
         if (child_pid <= 0) return false;
         uint8_t cmd = CMD_UNSET_PAC;
@@ -523,23 +743,6 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
         // Dataset path
         string parquet_path = work_dir + "/hits.parquet";
 
-        if (!FileExists(parquet_path)) {
-            Log("Downloading ClickHouse hits dataset (parquet format)...");
-            string download_cmd = "wget -O \"" + parquet_path + "\" https://datasets.clickhouse.com/hits_compatible/hits.parquet";
-            int ret = ExecuteCommand(download_cmd);
-            if (ret != 0) {
-                Log("wget failed, trying curl...");
-                download_cmd = "curl -L -o \"" + parquet_path + "\" https://datasets.clickhouse.com/hits_compatible/hits.parquet";
-                ret = ExecuteCommand(download_cmd);
-                if (ret != 0) {
-                    throw std::runtime_error("Failed to download hits.parquet");
-                }
-            }
-            Log("Download complete.");
-        } else {
-            Log("hits.parquet already exists, skipping download.");
-        }
-
         // Determine database path
         string db_actual;
         if (!db_path.empty()) {
@@ -584,6 +787,33 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 
         Log(string("Found ") + std::to_string(queries.size()) + " queries to benchmark");
 
+        vector<int> diff_key_cols = {
+            0, 0, 0, 0, 0, 0, 0, 1, 1, 1,
+            1, 2, 1, 1, 2, 1, 2, 2, 3, 0,
+            0, 1, 1, 0, 0, 0, 0, 1, 1, 0,
+            2, 2, 2, 1, 2, 4, 1, 1, 1, 5,
+            2, 2, 1
+        };
+        if (diff_key_cols.size() != queries.size()) {
+            throw std::runtime_error("ClickBench privacy_diffcols metadata does not match query count");
+        }
+
+        vector<double> dp_epsilons;
+        for (int exp = -13; exp <= 0; exp++) {
+            dp_epsilons.push_back(std::ldexp(1.0, exp));
+        }
+        vector<std::pair<string, double>> dp_bound_scenarios = {
+            {"perfect", 1.0},
+            {"near", 10.0},
+            {"bad", 1000.0}
+        };
+        const string pac_mi_default = "0.0078125";
+        vector<bool> query_has_sum_avg(queries.size(), false);
+        vector<double> perfect_bounds(queries.size(), 0.0);
+        for (idx_t q = 0; q < queries.size(); q++) {
+            query_has_sum_avg[q] = !ExtractSumAvgArgs(queries[q]).empty();
+        }
+
         // =====================================================================
         // Setup phase: create table and load data (in a temporary process)
         // We open the DB briefly to check/load, then close it so the fork
@@ -627,6 +857,26 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
             }
 
             if (!table_exists || needs_reload) {
+                if (!FileExists(parquet_path)) {
+                    Log("Downloading ClickHouse hits dataset (parquet format)...");
+                    string download_cmd =
+                        "wget -O \"" + parquet_path + "\" https://datasets.clickhouse.com/hits_compatible/hits.parquet";
+                    int ret = ExecuteCommand(download_cmd);
+                    if (ret != 0) {
+                        Log("wget failed, trying curl...");
+                        download_cmd =
+                            "curl -L -o \"" + parquet_path +
+                            "\" https://datasets.clickhouse.com/hits_compatible/hits.parquet";
+                        ret = ExecuteCommand(download_cmd);
+                        if (ret != 0) {
+                            throw std::runtime_error("Failed to download hits.parquet");
+                        }
+                    }
+                    Log("Download complete.");
+                } else {
+                    Log("hits.parquet already exists, skipping download.");
+                }
+
                 if (!table_exists) {
                     Log("Creating hits table...");
                     auto create_result = con.Query(create_sql);
@@ -658,8 +908,33 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                 Log("hits table already exists, skipping creation and loading.");
             }
 
-            // Ensure PAC is disabled
-            con.Query("ALTER TABLE hits UNSET PU;");
+            // Ensure privacy metadata is disabled before bound inference and baseline runs.
+            con.Query("PRAGMA clear_privacy_metadata;");
+
+            Log("Inferring per-query perfect dp_sum_bound values...");
+            for (idx_t q = 0; q < queries.size(); q++) {
+                string bound_sql = BuildBoundQuery(queries[q]);
+                if (bound_sql.empty()) {
+                    continue;
+                }
+                auto bound_result = con.Query(bound_sql);
+                if (!bound_result || bound_result->HasError()) {
+                    string err = bound_result ? bound_result->GetError() : "unknown error";
+                    Log(string("Q") + std::to_string(q + 1) + " bound inference failed: " + err);
+                    continue;
+                }
+                auto chunk = bound_result->Fetch();
+                if (chunk && chunk->size() > 0) {
+                    auto value = chunk->GetValue(0, 0);
+                    if (!value.IsNull()) {
+                        perfect_bounds[q] = value.DefaultCastAs(LogicalType::DOUBLE).GetValue<double>();
+                    }
+                }
+                if (perfect_bounds[q] > 0) {
+                    Log(string("Q") + std::to_string(q + 1) + " perfect dp_sum_bound=" +
+                        FormatNumber(perfect_bounds[q]));
+                }
+            }
 
             // Checkpoint to flush WAL before child opens DB
             con.Query("CHECKPOINT;");
@@ -773,17 +1048,43 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                 // PAC run (recorded)
                 // ----------------------------------------------------------
                 {
-                    worker.SendSetupPAC(setup_stmts);
-
-                    auto res = worker.SubmitQuery(query, timeout_s);
+                    string utility_path = "/tmp/clickbench_utility_pac_q" + std::to_string(qnum) + "_r" +
+                                          std::to_string(run) + "_" + std::to_string(getpid()) + ".csv";
+                    std::remove(utility_path.c_str());
+                    int64_t seed = static_cast<int64_t>(run * 997 + qnum);
+                    vector<string> pac_setup = setup_stmts;
+                    pac_setup.push_back("SET privacy_mode='pac';");
+                    pac_setup.push_back("SET privacy_seed=" + std::to_string(seed) + ";");
+                    pac_setup.push_back("SET pac_mi=" + pac_mi_default + ";");
+                    pac_setup.push_back("SET privacy_diffcols=NULL;");
+                    bool setup_ok = worker.SendSetupStatements(pac_setup);
+                    ForkWorker::SubmitResult res = ForkWorker::SR_OK;
+                    if (setup_ok) {
+                        res = worker.SubmitQuery(query, timeout_s);
+                    }
 
                     BenchmarkQueryResult result;
                     result.query_num = qnum;
                     result.mode = "PAC";
                     result.run = run;
-                    result.time_ms = worker.result_time_ms;
-                    result.success = (res == ForkWorker::SR_OK && worker.result_ok);
-                    result.error_msg = worker.result_error;
+                    result.time_ms = setup_ok ? worker.result_time_ms : 0;
+                    result.success = setup_ok && (res == ForkWorker::SR_OK && worker.result_ok);
+                    result.error_msg = setup_ok ? worker.result_error : worker.setup_error;
+                    result.pac_mi = pac_mi_default;
+                    result.seed = seed;
+                    if (result.success && worker.child_pid > 0) {
+                        vector<string> pac_diff_setup = pac_setup;
+                        pac_diff_setup.push_back("SET privacy_seed=" + std::to_string(seed) + ";");
+                        pac_diff_setup.push_back("SET privacy_diffcols=" +
+                                                 SqlQuote(std::to_string(diff_key_cols[q]) + ":" + utility_path) + ";");
+                        bool diff_setup_ok = worker.SendSetupStatements(pac_diff_setup);
+                        if (diff_setup_ok) {
+                            auto diff_res = worker.SubmitQuery(query, timeout_s);
+                            if (diff_res == ForkWorker::SR_OK && worker.result_ok) {
+                                ReadLastUtilityLine(utility_path, result.utility, result.recall, result.precision);
+                            }
+                        }
+                    }
 
                     all_results.push_back(result);
 
@@ -799,7 +1100,10 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                         Log(string("Q") + std::to_string(qnum) + " PAC run " + std::to_string(run) +
                             " time: " + FormatNumber(result.time_ms) + " ms");
                     } else {
-                        if (result.error_msg.find("PAC") != string::npos ||
+                        if (!setup_ok) {
+                            Log(string("Q") + std::to_string(qnum) + " PAC run " + std::to_string(run) +
+                                " SETUP ERROR: " + result.error_msg);
+                        } else if (result.error_msg.find("PAC") != string::npos ||
                             result.error_msg.find("privacy") != string::npos ||
                             result.error_msg.find("aggregat") != string::npos ||
                             result.error_msg.find("protected") != string::npos) {
@@ -814,6 +1118,96 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                     // Disable PAC after the run
                     if (worker.child_pid > 0) {
                         worker.SendUnsetPAC();
+                    }
+                }
+
+                for (auto epsilon : dp_epsilons) {
+                    for (auto &scenario : dp_bound_scenarios) {
+                        if (worker.child_pid <= 0) {
+                            worker.Start();
+                        }
+
+                        string utility_path = "/tmp/clickbench_utility_dp_q" + std::to_string(qnum) + "_r" +
+                                              std::to_string(run) + "_e" + FormatNumber(epsilon) + "_" +
+                                              scenario.first + "_" + std::to_string(getpid()) + ".csv";
+                        std::replace(utility_path.begin(), utility_path.end(), '.', '_');
+                        std::remove(utility_path.c_str());
+
+                        int64_t seed = static_cast<int64_t>(run * 997 + qnum);
+                        double dp_bound = 0.0;
+                        vector<string> dp_setup = setup_stmts;
+                        dp_setup.push_back("SET privacy_mode='dp_elastic';");
+                        dp_setup.push_back("SET privacy_seed=" + std::to_string(seed) + ";");
+                        dp_setup.push_back("SET dp_epsilon=" + FormatNumber(epsilon) + ";");
+                        if (query_has_sum_avg[q]) {
+                            double base_bound = perfect_bounds[q] > 0 ? perfect_bounds[q] : 1e-9;
+                            dp_bound = base_bound * scenario.second;
+                            dp_setup.push_back("SET dp_sum_bound=" + FormatNumber(dp_bound) + ";");
+                        } else {
+                            dp_setup.push_back("RESET dp_sum_bound;");
+                        }
+                        dp_setup.push_back("SET privacy_diffcols=NULL;");
+                        bool setup_ok = worker.SendSetupStatements(dp_setup);
+                        ForkWorker::SubmitResult res = ForkWorker::SR_OK;
+                        if (setup_ok) {
+                            res = worker.SubmitQuery(query, timeout_s);
+                        }
+
+                        BenchmarkQueryResult result;
+                        result.query_num = qnum;
+                        result.mode = "dp_elastic";
+                        result.run = run;
+                        result.time_ms = setup_ok ? worker.result_time_ms : 0;
+                        result.success = setup_ok && (res == ForkWorker::SR_OK && worker.result_ok);
+                        result.error_msg = setup_ok ? worker.result_error : worker.setup_error;
+                        result.epsilon = FormatNumber(epsilon);
+                        result.bound_scenario = scenario.first;
+                        result.dp_sum_bound = query_has_sum_avg[q] ? FormatNumber(dp_bound) : "";
+                        result.seed = seed;
+                        if (result.success && worker.child_pid > 0) {
+                            vector<string> dp_diff_setup = dp_setup;
+                            dp_diff_setup.push_back("SET privacy_seed=" + std::to_string(seed) + ";");
+                            dp_diff_setup.push_back("SET privacy_diffcols=" +
+                                                    SqlQuote(std::to_string(diff_key_cols[q]) + ":" + utility_path) +
+                                                    ";");
+                            bool diff_setup_ok = worker.SendSetupStatements(dp_diff_setup);
+                            if (diff_setup_ok) {
+                                auto diff_res = worker.SubmitQuery(query, timeout_s);
+                                if (diff_res == ForkWorker::SR_OK && worker.result_ok) {
+                                    ReadLastUtilityLine(utility_path, result.utility, result.recall, result.precision);
+                                }
+                            }
+                        }
+
+                        all_results.push_back(result);
+
+                        if (!setup_ok) {
+                            Log(string("Q") + std::to_string(qnum) + " dp_elastic run " + std::to_string(run) +
+                                " epsilon=" + FormatNumber(epsilon) + " " + scenario.first +
+                                " SETUP ERROR: " + result.error_msg);
+                        } else if (res == ForkWorker::SR_CHILD_DIED) {
+                            Log(string("Q") + std::to_string(qnum) + " dp_elastic run " + std::to_string(run) +
+                                " epsilon=" + FormatNumber(epsilon) + " " + scenario.first +
+                                " CRASHED: " + worker.result_error);
+                            worker.Start();
+                        } else if (res == ForkWorker::SR_TIMEOUT) {
+                            Log(string("Q") + std::to_string(qnum) + " dp_elastic run " + std::to_string(run) +
+                                " epsilon=" + FormatNumber(epsilon) + " " + scenario.first +
+                                " TIMEOUT: " + worker.result_error);
+                            worker.Start();
+                        } else if (result.success) {
+                            Log(string("Q") + std::to_string(qnum) + " dp_elastic run " + std::to_string(run) +
+                                " epsilon=" + FormatNumber(epsilon) + " " + scenario.first +
+                                " time: " + FormatNumber(result.time_ms) + " ms");
+                        } else {
+                            Log(string("Q") + std::to_string(qnum) + " dp_elastic run " + std::to_string(run) +
+                                " epsilon=" + FormatNumber(epsilon) + " " + scenario.first +
+                                " ERROR: " + result.error_msg);
+                        }
+
+                        if (worker.child_pid > 0) {
+                            worker.SendUnsetPAC();
+                        }
                     }
                 }
             }
@@ -850,12 +1244,20 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
         // =====================================================================
         // Write CSV
         // =====================================================================
-        csv << "query,mode,run,time_ms,success,error\n";
+        csv << "query,mode,run,time_ms,success,error,utility,recall,precision,epsilon,bound_scenario,dp_sum_bound,pac_mi,seed\n";
         for (const auto &r : all_results) {
             csv << r.query_num << "," << r.mode << "," << r.run << ","
                 << FormatNumber(r.time_ms) << ","
-                << (r.success ? "true" : "false") << ",\""
-                << (r.error_msg.empty() ? "" : r.error_msg) << "\"\n";
+                << (r.success ? "true" : "false") << ","
+                << CsvQuote(r.error_msg) << ","
+                << r.utility << ","
+                << r.recall << ","
+                << r.precision << ","
+                << r.epsilon << ","
+                << r.bound_scenario << ","
+                << r.dp_sum_bound << ","
+                << r.pac_mi << ","
+                << r.seed << "\n";
         }
         csv.close();
         Log(string("Results written to: ") + actual_out);

@@ -1,3 +1,4 @@
-PRAGMA clear_pac_metadata;
+PRAGMA clear_privacy_metadata;
+ALTER TABLE hits ADD PRIVACY_KEY (UserID);
 ALTER TABLE hits SET PU;
-ALTER PU TABLE hits ADD PROTECTED (UserID, ClientIP);
+ALTER PU TABLE hits ADD PROTECTED (ClientIP);
