@@ -351,31 +351,29 @@ static double ComputeSmoothElasticSensitivity(const vector<double> &mf_values, d
 }
 
 // Compute ES as the noise multiplier (divide by epsilon in the caller to get Laplace scale).
-//   Global (no dp_delta): ES = product(mf_i), pure ε-DP
-//   Smooth (dp_delta > 0): ES = 2·SES_β with β = ε/(2·ln(2/δ)), achieves (ε,δ)-DP
+// Smooth elastic sensitivity: ES = 2·SES_β with β = ε/(2·ln(2/δ)), achieves (ε,δ)-DP.
 static double ComputeElasticSensitivity(ClientContext &context, const DPFKChain &chain, double epsilon) {
 	auto mf_values = CollectMfKValues(context, chain);
 
 	double delta = 0.0;
-	if (TryGetDpDelta(context, delta) && delta > 0.0 && delta < 1.0) {
-		if (delta > 0.5) {
-			throw InvalidInputException("dp_elastic: dp_delta must be < 0.5 for meaningful (ε,δ)-DP (got " +
-			                            std::to_string(delta) + ")");
-		}
-		double beta = epsilon / (2.0 * std::log(2.0 / delta));
-		double ses = ComputeSmoothElasticSensitivity(mf_values, beta);
-		PRIVACY_DEBUG_PRINT("[DP_ELASTIC] smooth sensitivity: beta=" + std::to_string(beta) +
-		                    " SES=" + std::to_string(ses));
-		return 2.0 * ses;
+	if (!TryGetDpDelta(context, delta)) {
+		throw InvalidInputException(
+		    "dp_elastic: dp_delta must be set. Use SET dp_delta=<value> or PRAGMA refresh_dp_stats(<epsilon>).");
+	}
+	if (delta <= 0.0 || !std::isfinite(delta)) {
+		throw InvalidInputException("dp_elastic: dp_delta must be a positive finite number (got " +
+		                            std::to_string(delta) + ")");
+	}
+	if (delta >= 0.5) {
+		throw InvalidInputException("dp_elastic: dp_delta must be < 0.5 for meaningful (ε,δ)-DP (got " +
+		                            std::to_string(delta) + ")");
 	}
 
-	// Global elastic sensitivity: product of all mf_K values
-	double es = 1.0;
-	for (auto m : mf_values) {
-		es *= m;
-	}
-	PRIVACY_DEBUG_PRINT("[DP_ELASTIC] global elastic sensitivity = " + std::to_string(es));
-	return es;
+	double beta = epsilon / (2.0 * std::log(2.0 / delta));
+	double ses = ComputeSmoothElasticSensitivity(mf_values, beta);
+	PRIVACY_DEBUG_PRINT("[DP_ELASTIC] smooth sensitivity: beta=" + std::to_string(beta) +
+	                    " SES=" + std::to_string(ses));
+	return 2.0 * ses;
 }
 
 // ----------------------------------------------------------------------------
@@ -683,7 +681,7 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 		ClipSumInputs(input, agg, sum_bound);
 	}
 
-	// Compute elastic sensitivity (global or smooth depending on dp_delta setting)
+	// Compute smooth elastic sensitivity using the required dp_delta setting
 	double es = ComputeElasticSensitivity(input.context, eligibility.fk_chain, epsilon);
 
 	// When privacy_noise=false the compilation pipeline still runs (clipping, FK chain)

@@ -6,6 +6,7 @@
 #include "duckdb/function/scalar_function.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 
+#include <cmath>
 #include <fstream>
 #include <unordered_set>
 
@@ -70,6 +71,109 @@ static void ClearPrivacyMetadataPragma(ClientContext &context, const FunctionPar
 		// Ignore other exceptions (e.g., can't determine file path for in-memory DB)
 		// This is fine - just clear in-memory metadata
 	}
+}
+
+static string QuoteIdentifier(const string &identifier) {
+	string result = "\"";
+	for (auto c : identifier) {
+		if (c == '"') {
+			result += "\"\"";
+		} else {
+			result += c;
+		}
+	}
+	result += "\"";
+	return result;
+}
+
+static void SetExtensionSetting(ClientContext &context, const string &name, Value value) {
+	auto &config = DBConfig::GetConfig(context);
+	ExtensionOption extension_option;
+	if (!config.TryGetExtensionOption(name, extension_option)) {
+		throw InternalException("refresh_dp_stats: extension setting '" + name + "' was not registered");
+	}
+	auto target_value = value.CastAs(context, extension_option.type);
+	if (extension_option.set_function) {
+		extension_option.set_function(context, SetScope::SESSION, target_value);
+	}
+	auto &client_config = ClientConfig::GetConfig(context);
+	client_config.user_settings.SetUserSetting(extension_option.setting_index.GetIndex(), std::move(target_value));
+}
+
+static double ComputePrivacyUnitCardinality(ClientContext &context) {
+	auto table_names = PrivacyMetadataManager::Get().GetAllTableNames();
+	vector<std::pair<string, PrivacyTableMetadata>> pu_tables;
+	for (auto &table_name : table_names) {
+		auto *metadata = PrivacyMetadataManager::Get().GetTableMetadata(table_name);
+		if (metadata && metadata->is_privacy_unit) {
+			pu_tables.emplace_back(table_name, *metadata);
+		}
+	}
+	if (pu_tables.empty()) {
+		throw InvalidInputException("refresh_dp_stats: no privacy unit table is declared");
+	}
+	if (pu_tables.size() > 1) {
+		throw InvalidInputException("refresh_dp_stats: multiple privacy unit tables are declared; "
+		                            "automatic DP stats currently require exactly one privacy unit table");
+	}
+
+	const auto &table_name = pu_tables[0].first;
+	const auto &metadata = pu_tables[0].second;
+	if (metadata.primary_key_columns.empty()) {
+		throw InvalidInputException("refresh_dp_stats: privacy unit table '" + table_name +
+		                            "' has no PRIVACY_KEY columns");
+	}
+
+	string key_list;
+	for (idx_t i = 0; i < metadata.primary_key_columns.size(); i++) {
+		if (i > 0) {
+			key_list += ", ";
+		}
+		key_list += QuoteIdentifier(metadata.primary_key_columns[i]);
+	}
+
+	auto &db = DatabaseInstance::GetDatabase(context);
+	Connection conn(db);
+	auto disable_rewrite = conn.Query("SET pac_rewrite=false");
+	if (!disable_rewrite || disable_rewrite->HasError()) {
+		throw InvalidInputException("refresh_dp_stats: failed to disable privacy rewrite while computing stats" +
+		                            (disable_rewrite ? (": " + disable_rewrite->GetError()) : ""));
+	}
+
+	string query = "SELECT COUNT(*) FROM (SELECT " + key_list + " FROM " + QuoteIdentifier(table_name) +
+	               " GROUP BY " + key_list + ")";
+	auto result = conn.Query(query);
+	if (!result || result->HasError()) {
+		throw InvalidInputException("refresh_dp_stats: failed to compute privacy unit cardinality for '" + table_name +
+		                            "'" + (result ? (": " + result->GetError()) : ""));
+	}
+	auto chunk = result->Fetch();
+	if (!chunk || chunk->size() == 0) {
+		return 0.0;
+	}
+	auto value = chunk->GetValue(0, 0);
+	return value.IsNull() ? 0.0 : value.DefaultCastAs(LogicalType::DOUBLE).GetValue<double>();
+}
+
+static void RefreshDPStatsPragma(ClientContext &context, const FunctionParameters &parameters) {
+	double epsilon = parameters.values[0].GetValue<double>();
+	if (epsilon <= 0.0 || !std::isfinite(epsilon)) {
+		throw InvalidInputException("refresh_dp_stats: epsilon must be a positive finite number");
+	}
+
+	double n = ComputePrivacyUnitCardinality(context);
+	if (n <= 1.0 || !std::isfinite(n)) {
+		throw InvalidInputException("refresh_dp_stats: privacy unit cardinality must be greater than 1");
+	}
+
+	double log_n = std::log(n);
+	double delta = std::exp(-epsilon * log_n * log_n);
+	if (delta <= 0.0 || !std::isfinite(delta) || delta >= 0.5) {
+		throw InvalidInputException("refresh_dp_stats: computed dp_delta is outside (0, 0.5)");
+	}
+
+	SetExtensionSetting(context, "dp_epsilon", Value::DOUBLE(epsilon));
+	SetExtensionSetting(context, "dp_delta", Value::DOUBLE(delta));
 }
 
 static void LoadInternal(ExtensionLoader &loader) {
@@ -213,11 +317,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "Per-tuple clipping bound for SUM/AVG in dp_elastic mode (required when such an aggregate is present)",
 	    LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
 	// Privacy failure probability δ for (ε, δ)-DP smooth sensitivity in dp_elastic mode.
-	// If unset or 0, global elastic sensitivity is used (pure ε-DP).
+	// Required when privacy_mode = 'dp_elastic'; PRAGMA refresh_dp_stats(epsilon) can set it.
 	db.config.AddExtensionOption(
 	    "dp_delta",
 	    "Privacy failure probability δ for (ε,δ)-DP smooth elastic sensitivity (dp_elastic mode). "
-	    "If unset, global elastic sensitivity is used instead (pure ε-DP).",
+	    "Required for dp_elastic. Use SET dp_delta=<value> or PRAGMA refresh_dp_stats(<epsilon>).",
 	    LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
 	// Set deterministic RNG seed for PAC functions (useful for tests)
 	db.config.AddExtensionOption("privacy_seed", "RNG seed for reproducible noised results", LogicalType::BIGINT);
@@ -358,6 +462,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto clear_privacy_metadata_pragma =
 	    PragmaFunction::PragmaCall("clear_privacy_metadata", ClearPrivacyMetadataPragma, {});
 	loader.RegisterFunction(clear_privacy_metadata_pragma);
+
+	auto refresh_dp_stats_pragma =
+	    PragmaFunction::PragmaCall("refresh_dp_stats", RefreshDPStatsPragma, {LogicalType::DOUBLE});
+	loader.RegisterFunction(refresh_dp_stats_pragma);
 }
 
 void PrivacyExtension::Load(ExtensionLoader &loader) {

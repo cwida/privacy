@@ -1003,3 +1003,66 @@ Cannot create PAC LINK from PAC table 'multi_link_test' to PAC table 'pu_users'.
 
 # Test 64: After removing PU status from target, link should be allowed
 
+# ============================================================================
+# DP stats pragma tests
+# ============================================================================
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement error
+PRAGMA refresh_dp_stats(1.0);
+----
+no privacy unit table
+
+statement ok
+CREATE TABLE dp_stats_users (
+    id INTEGER,
+    name VARCHAR
+);
+
+statement ok
+INSERT INTO dp_stats_users SELECT i, 'u' || i FROM range(100) t(i);
+
+statement ok
+ALTER TABLE dp_stats_users ADD PRIVACY_KEY (id);
+
+statement ok
+ALTER TABLE dp_stats_users SET PU;
+
+statement error
+PRAGMA refresh_dp_stats(0.0);
+----
+epsilon must be a positive finite number
+
+statement ok
+PRAGMA refresh_dp_stats(0.1);
+
+query I
+SELECT current_setting('dp_epsilon') = 0.1;
+----
+true
+
+query I
+SELECT current_setting('dp_delta')::DOUBLE > 0.11 AND current_setting('dp_delta')::DOUBLE < 0.13;
+----
+true
+
+statement ok
+CREATE TABLE dp_stats_other (
+    id INTEGER
+);
+
+statement ok
+INSERT INTO dp_stats_other SELECT i FROM range(100) t(i);
+
+statement ok
+ALTER TABLE dp_stats_other ADD PRIVACY_KEY (id);
+
+statement ok
+ALTER TABLE dp_stats_other SET PU;
+
+statement error
+PRAGMA refresh_dp_stats(1.0);
+----
+multiple privacy unit tables

@@ -80,16 +80,35 @@ statement ok
 ALTER TABLE u SET PU;
 
 statement ok
+ALTER PU TABLE u ADD PROTECTED (region);
+
+statement ok
 SET privacy_mode = 'dp_elastic';
 
 statement ok
 SET dp_epsilon = 1.0;
 
+statement ok
+PRAGMA refresh_dp_stats(1.0);
+
+query I
+SELECT current_setting('dp_epsilon');
+----
+1.0
+
+query I
+SELECT current_setting('dp_delta')::DOUBLE > 0 AND current_setting('dp_delta')::DOUBLE < 0.5;
+----
+true
+
+statement ok
+SET dp_delta = 0.49;
+
 # ---------------------------------------------------------------------------
 # Phase B: COUNT(*) on a single PU table, no joins
 # ---------------------------------------------------------------------------
 
-# Laplace scale for COUNT = 1/ε = 1; noise std-dev = √2 ≈ 1.41.
+# Smooth elastic sensitivity with no joins gives ES=2, so scale = 2/ε.
 # 100 samples → P(|noise| > 50) is astronomically small.
 query I
 SELECT abs(COUNT(*) - 100) < 50 FROM u;
@@ -126,6 +145,17 @@ INSERT INTO orders SELECT i % 100, (i % 7)*1.0 FROM range(500) t(i);
 
 statement ok
 ALTER TABLE orders ADD PRIVACY_LINK (uid) REFERENCES u(id);
+
+statement ok
+RESET dp_delta;
+
+statement error
+SELECT COUNT(*) FROM u JOIN orders ON u.id = orders.uid;
+----
+dp_delta must be set
+
+statement ok
+SET dp_delta = 0.49;
 
 # ---------------------------------------------------------------------------
 # Phase C: SUM with dp_sum_bound clipping on a single PU table
@@ -324,7 +354,7 @@ SELECT COUNT(*) IS NOT NULL AND COUNT(*) < 100000 FROM u JOIN orders ON u.id = o
 true
 
 statement ok
-RESET dp_delta;
+SET dp_delta = 1e-6;
 
 # ---------------------------------------------------------------------------
 # Utility comparison: privacy_diffcols with dp_elastic
@@ -812,4 +842,3 @@ SELECT CAST(amount AS INTEGER), COUNT(*) IS NOT NULL FROM orders GROUP BY CAST(a
 
 statement ok
 RESET privacy_min_group_count;
-

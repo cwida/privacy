@@ -5,6 +5,7 @@
 #include "core/privacy_optimizer.hpp"
 #include "aggregates/pac_aggregate.hpp"
 #include "privacy_debug.hpp"
+#include <cmath>
 #include <string>
 #include <algorithm>
 
@@ -39,6 +40,52 @@
 #include <stack>
 
 namespace duckdb {
+
+static bool ContainsAggregateOperator(LogicalOperator *op) {
+	if (!op) {
+		return false;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return true;
+	}
+	for (auto &child : op->children) {
+		if (ContainsAggregateOperator(child.get())) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool ContainsGetOperator(LogicalOperator *op) {
+	if (!op) {
+		return false;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		return true;
+	}
+	for (auto &child : op->children) {
+		if (ContainsGetOperator(child.get())) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void ValidateDPElasticDelta(ClientContext &context) {
+	double delta = 0.0;
+	if (!TryGetDpDelta(context, delta)) {
+		throw InvalidInputException(
+		    "dp_elastic: dp_delta must be set. Use SET dp_delta=<value> or PRAGMA refresh_dp_stats(<epsilon>).");
+	}
+	if (delta <= 0.0 || !std::isfinite(delta)) {
+		throw InvalidInputException("dp_elastic: dp_delta must be a positive finite number (got " +
+		                            std::to_string(delta) + ")");
+	}
+	if (delta >= 0.5) {
+		throw InvalidInputException("dp_elastic: dp_delta must be < 0.5 for meaningful (ε,δ)-DP (got " +
+		                            std::to_string(delta) + ")");
+	}
+}
 
 // ============================================================================
 // PACDropTableRule - Separate optimizer rule for DROP TABLE operations
@@ -342,6 +389,10 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	bool pac_rewrite_enabled = GetBooleanSetting(input.context, "pac_rewrite", true);
 	if (!pac_rewrite_enabled) {
 		return;
+	}
+	if (GetPrivacyMode(input.context) == "dp_elastic" &&
+	    (ContainsAggregateOperator(plan.get()) || ContainsGetOperator(plan.get()))) {
+		ValidateDPElasticDelta(input.context);
 	}
 	// Register type patcher to fix stale statement types after optimizer changes output types.
 	// Read path (pac_finalize injection) is handled by PACDerivedReadRule (post-optimizer)

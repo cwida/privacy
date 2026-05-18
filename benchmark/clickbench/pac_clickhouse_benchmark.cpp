@@ -808,6 +808,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
             {"bad", 1000.0}
         };
         const string pac_mi_default = "0.0078125";
+        double privacy_unit_count = 0.0;
         vector<bool> query_has_sum_avg(queries.size(), false);
         vector<double> perfect_bounds(queries.size(), 0.0);
         for (idx_t q = 0; q < queries.size(); q++) {
@@ -910,6 +911,23 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 
             // Ensure privacy metadata is disabled before bound inference and baseline runs.
             con.Query("PRAGMA clear_privacy_metadata;");
+
+            auto pu_count_result = con.Query("SELECT COUNT(DISTINCT UserID) FROM hits");
+            if (!pu_count_result || pu_count_result->HasError()) {
+                throw std::runtime_error("Failed to compute ClickBench privacy unit count: " +
+                                         (pu_count_result ? pu_count_result->GetError() : "unknown error"));
+            }
+            auto pu_count_chunk = pu_count_result->Fetch();
+            if (pu_count_chunk && pu_count_chunk->size() > 0) {
+                auto value = pu_count_chunk->GetValue(0, 0);
+                if (!value.IsNull()) {
+                    privacy_unit_count = value.DefaultCastAs(LogicalType::DOUBLE).GetValue<double>();
+                }
+            }
+            if (privacy_unit_count <= 1.0 || !std::isfinite(privacy_unit_count)) {
+                throw std::runtime_error("Invalid ClickBench privacy unit count");
+            }
+            Log("ClickBench privacy units (distinct UserID): " + FormatNumber(privacy_unit_count));
 
             Log("Inferring per-query perfect dp_sum_bound values...");
             for (idx_t q = 0; q < queries.size(); q++) {
@@ -1139,6 +1157,8 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                         dp_setup.push_back("SET privacy_mode='dp_elastic';");
                         dp_setup.push_back("SET privacy_seed=" + std::to_string(seed) + ";");
                         dp_setup.push_back("SET dp_epsilon=" + FormatNumber(epsilon) + ";");
+                        double dp_delta = std::exp(-epsilon * std::pow(std::log(privacy_unit_count), 2.0));
+                        dp_setup.push_back("SET dp_delta=" + FormatNumber(dp_delta) + ";");
                         if (query_has_sum_avg[q]) {
                             double base_bound = perfect_bounds[q] > 0 ? perfect_bounds[q] : 1e-9;
                             dp_bound = base_bound * scenario.second;
