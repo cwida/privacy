@@ -1,0 +1,12 @@
+SELECT COUNT(*) FROM cast_info;
+SELECT role_id, COUNT(*) AS c FROM cast_info GROUP BY role_id ORDER BY c DESC LIMIT 20;
+SELECT COALESCE(nr_order, 0) AS billing_order, COUNT(*) AS c FROM cast_info GROUP BY billing_order ORDER BY c DESC LIMIT 20;
+SELECT COUNT(*) FROM cast_info WHERE nr_order IS NOT NULL AND nr_order <= 3;
+SELECT SUM(COALESCE(nr_order, 0)) FROM cast_info;
+SELECT AVG(COALESCE(nr_order, 0)) FROM cast_info WHERE nr_order IS NOT NULL;
+SELECT COUNT(*) FROM aka_name;
+SELECT imdb_index, COUNT(*) AS c FROM aka_name WHERE imdb_index IS NOT NULL GROUP BY imdb_index ORDER BY c DESC LIMIT 20;
+SELECT info_type_id, COUNT(*) AS c FROM person_info GROUP BY info_type_id ORDER BY c DESC LIMIT 20;
+SELECT COUNT(*) FROM person_info WHERE note IS NOT NULL;
+SELECT c.role_id, COUNT(*) AS c FROM cast_info AS c JOIN name AS n ON c.person_id = n.id GROUP BY c.role_id ORDER BY c DESC LIMIT 20;
+SELECT a.imdb_index, COUNT(*) AS c FROM aka_name AS a JOIN name AS n ON a.person_id = n.id WHERE a.imdb_index IS NOT NULL GROUP BY a.imdb_index ORDER BY c DESC LIMIT 20;

@@ -109,6 +109,10 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
     add_executable(pac_clickhouse_benchmark benchmark/clickbench/pac_clickhouse_benchmark.cpp)
     target_link_libraries(pac_clickhouse_benchmark ${PRIVACY_LINK_LIBS})
 
+    # IMDb/JOB benchmark runner
+    add_executable(imdb_benchmark benchmark/imdb/imdb_benchmark.cpp)
+    target_link_libraries(imdb_benchmark ${PRIVACY_LINK_LIBS})
+
     # SQLStorm benchmark runner
     add_executable(pac_sqlstorm_benchmark benchmark/sqlstorm/pac_sqlstorm_benchmark.cpp)
     target_link_libraries(pac_sqlstorm_benchmark ${PRIVACY_LINK_LIBS})

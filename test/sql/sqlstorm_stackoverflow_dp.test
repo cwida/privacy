@@ -1,0 +1,180 @@
+# name: test/sql/sqlstorm_stackoverflow_dp.test
+# description: SQLStorm StackOverflow PAC/DP metadata smoke test
+# group: [sql]
+
+require privacy
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET privacy_seed = 42;
+
+statement ok
+CREATE TABLE Users (
+    Id INTEGER NOT NULL,
+    DisplayName VARCHAR,
+    Reputation INTEGER,
+    UpVotes INTEGER,
+    DownVotes INTEGER
+);
+
+statement ok
+CREATE TABLE Posts (
+    Id INTEGER NOT NULL,
+    OwnerUserId INTEGER,
+    Score INTEGER,
+    ViewCount INTEGER
+);
+
+statement ok
+CREATE TABLE Comments (
+    Id INTEGER NOT NULL,
+    PostId INTEGER NOT NULL,
+    UserId INTEGER,
+    Score INTEGER
+);
+
+statement ok
+CREATE TABLE Votes (
+    Id INTEGER NOT NULL,
+    PostId INTEGER NOT NULL,
+    UserId INTEGER,
+    VoteTypeId INTEGER,
+    BountyAmount INTEGER
+);
+
+statement ok
+CREATE TABLE Badges (
+    Id INTEGER NOT NULL,
+    UserId INTEGER NOT NULL,
+    Name VARCHAR,
+    Class INTEGER
+);
+
+statement ok
+CREATE TABLE PostHistory (
+    Id INTEGER NOT NULL,
+    PostId INTEGER,
+    UserId INTEGER
+);
+
+statement ok
+CREATE TABLE PostLinks (
+    Id INTEGER NOT NULL,
+    PostId INTEGER NOT NULL,
+    RelatedPostId INTEGER
+);
+
+statement ok
+INSERT INTO Users VALUES
+    (1, 'Skewed User', 1000, 10, 1),
+    (2, 'Occasional User', 100, 3, 0),
+    (3, 'Rare User', 10, 0, 0),
+    (4, 'Badge User', 250, 5, 2);
+
+statement ok
+INSERT INTO Posts VALUES
+    (10, 1, 5, 100),
+    (11, 1, 6, 200),
+    (12, 1, 7, 300),
+    (13, 2, 1, 10),
+    (14, 4, 3, 50);
+
+statement ok
+INSERT INTO Comments VALUES
+    (100, 10, 1, 1),
+    (101, 10, 2, 0),
+    (102, 11, 1, 2),
+    (103, 14, 4, 1);
+
+statement ok
+INSERT INTO Votes VALUES
+    (200, 10, 1, 2, NULL),
+    (201, 10, 2, 3, NULL),
+    (202, 11, 1, 8, 50),
+    (203, 14, 4, 2, NULL);
+
+statement ok
+INSERT INTO Badges VALUES
+    (300, 1, 'Gold', 1),
+    (301, 1, 'Silver', 2),
+    (302, 4, 'Bronze', 3);
+
+statement ok
+INSERT INTO PostHistory VALUES
+    (400, 10, 1),
+    (401, 11, 1),
+    (402, 14, 4);
+
+statement ok
+INSERT INTO PostLinks VALUES
+    (500, 10, 11),
+    (501, 11, 14);
+
+statement ok
+ALTER TABLE Users ADD PRIVACY_KEY (Id);
+
+statement ok
+ALTER TABLE Users SET PU;
+
+statement ok
+ALTER PU TABLE Users ADD PROTECTED (DisplayName);
+
+statement ok
+ALTER TABLE Badges ADD PRIVACY_LINK (UserId) REFERENCES Users(Id);
+
+statement ok
+ALTER TABLE Posts ADD PRIVACY_LINK (OwnerUserId) REFERENCES Users(Id);
+
+statement ok
+ALTER TABLE Comments ADD PRIVACY_LINK (UserId) REFERENCES Users(Id);
+
+statement ok
+ALTER TABLE PostHistory ADD PRIVACY_LINK (UserId) REFERENCES Users(Id);
+
+statement ok
+ALTER TABLE Votes ADD PRIVACY_LINK (UserId) REFERENCES Users(Id);
+
+statement ok
+ALTER TABLE PostLinks ADD PRIVACY_LINK (PostId) REFERENCES Posts(Id);
+
+statement ok
+SET privacy_mode = 'dp_elastic';
+
+statement ok
+SET dp_sum_bound = 1000;
+
+statement ok
+PRAGMA refresh_dp_stats(1.0);
+
+query I
+SELECT abs(current_setting('dp_delta')::DOUBLE - exp(-1.0 * pow(ln(4), 2))) < 1e-12;
+----
+true
+
+query I
+SELECT COUNT(*) IS NOT NULL FROM Posts p JOIN Users u ON p.OwnerUserId = u.Id;
+----
+true
+
+query I
+SELECT SUM(Score) IS NOT NULL FROM Posts p JOIN Users u ON p.OwnerUserId = u.Id;
+----
+true
+
+statement error
+SELECT COUNT(*) FROM Posts p JOIN Comments c ON p.Id = c.PostId;
+----
+star/diamond joins are not yet supported
+
+statement ok
+SET privacy_mode = 'pac';
+
+query I
+SELECT COUNT(*) IS NOT NULL FROM Users;
+----
+true

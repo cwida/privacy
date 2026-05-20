@@ -91,6 +91,12 @@ benchmark/
 │   ├── pac_clickhouse_benchmark.cpp
 │   ├── clickbench_queries/            # Query suite (create, load, queries, utility)
 │   └── plot_clickbench_results.R      # R plotting script
+├── imdb/                              # IMDb/JOB benchmark
+│   ├── imdb_benchmark.cpp
+│   ├── schema.sql
+│   ├── load.sql
+│   ├── setup.sql
+│   └── queries.sql
 ├── sqlstorm/                          # SQLStorm benchmark
 │   ├── pac_sqlstorm_benchmark.cpp
 │   ├── pac_stackoverflow_schema.sql
@@ -108,6 +114,7 @@ benchmark/
 - [TPC-H Benchmark](tpch.md)
 - [TPC-H Compiler Benchmark](tpch_compiler.md)
 - [ClickBench Benchmark](clickbench.md)
+- [IMDb/JOB Benchmark](imdb.md)
 - [SQLStorm Benchmark](sqlstorm.md)
 - [Utility Scripts](utility.md)
 - [Microbenchmarks](microbenchmarks.md)

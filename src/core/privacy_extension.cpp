@@ -86,7 +86,7 @@ static string QuoteIdentifier(const string &identifier) {
 	return result;
 }
 
-static void SetExtensionSetting(ClientContext &context, const string &name, Value value) {
+static void SetExtensionSetting(ClientContext &context, const string &name, const Value &value) {
 	auto &config = DBConfig::GetConfig(context);
 	ExtensionOption extension_option;
 	if (!config.TryGetExtensionOption(name, extension_option)) {
@@ -140,8 +140,8 @@ static double ComputePrivacyUnitCardinality(ClientContext &context) {
 		                            (disable_rewrite ? (": " + disable_rewrite->GetError()) : ""));
 	}
 
-	string query = "SELECT COUNT(*) FROM (SELECT " + key_list + " FROM " + QuoteIdentifier(table_name) +
-	               " GROUP BY " + key_list + ")";
+	string query = "SELECT COUNT(*) FROM (SELECT " + key_list + " FROM " + QuoteIdentifier(table_name) + " GROUP BY " +
+	               key_list + ")";
 	auto result = conn.Query(query);
 	if (!result || result->HasError()) {
 		throw InvalidInputException("refresh_dp_stats: failed to compute privacy unit cardinality for '" + table_name +

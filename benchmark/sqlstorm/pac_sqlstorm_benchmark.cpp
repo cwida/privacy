@@ -446,7 +446,9 @@ static bool ReadAllBytes(int fd, void *buf, size_t n) {
 [[noreturn]] static void ChildWorkerMain(int read_fd, int write_fd,
                                           const string &db_path,
                                           const string &pac_schema,
-                                          bool check_pac) {
+                                          bool check_pac,
+                                          bool clear_before_schema,
+                                          const vector<string> &startup_statements) {
 	try {
 		DuckDB db(db_path);
 		Connection con(db);
@@ -461,8 +463,17 @@ static bool ReadAllBytes(int fd, void *buf, size_t n) {
 		if (r->HasError()) {
 			_exit(2);
 		}
+		if (clear_before_schema) {
+			con.Query("PRAGMA clear_privacy_metadata");
+		}
 		if (!pac_schema.empty()) {
 			LoadPACSchema(con, pac_schema);
+		}
+		for (auto &stmt : startup_statements) {
+			auto setup_result = con.Query(stmt);
+			if (setup_result && setup_result->HasError()) {
+				_exit(2);
+			}
 		}
 
 		int count = 0;
@@ -566,7 +577,9 @@ struct ForkWorker {
 
 	string db_path;
 	string pac_schema;
+	vector<string> startup_statements;
 	bool check_pac = false;
+	bool clear_before_schema = false;
 	bool memory_killed = false;
 
 	// Result of last Submit
@@ -596,7 +609,8 @@ struct ForkWorker {
 			// Child process
 			close(to_child[1]);
 			close(from_child[0]);
-			ChildWorkerMain(to_child[0], from_child[1], db_path, pac_schema, check_pac);
+			ChildWorkerMain(to_child[0], from_child[1], db_path, pac_schema, check_pac, clear_before_schema,
+			                startup_statements);
 			_exit(0); // unreachable
 		}
 
@@ -848,7 +862,9 @@ static void TrackQueryErrors(PassStats &stats, const BenchmarkQueryResult &qr) {
 static vector<QuerySummary> RunPass(const string &label, vector<string> &query_files,
                                     const string &db_path, double timeout_s,
                                     PassStats &stats, bool check_pac = false,
-                                    const string &pac_schema = "") {
+                                    const string &pac_schema = "",
+                                    bool clear_before_schema = false,
+                                    const vector<string> &startup_statements = {}) {
 	int total = static_cast<int>(query_files.size());
 	int log_interval = std::max(1, total / 10);
 	vector<QuerySummary> summaries;
@@ -857,7 +873,9 @@ static vector<QuerySummary> RunPass(const string &label, vector<string> &query_f
 	ForkWorker worker;
 	worker.db_path = db_path;
 	worker.pac_schema = pac_schema;
+	worker.startup_statements = startup_statements;
 	worker.check_pac = check_pac;
+	worker.clear_before_schema = clear_before_schema;
 	worker.Start();
 
 	Log("=== " + label + " pass: running " + std::to_string(total) + " queries ===");
@@ -1111,25 +1129,39 @@ static string StateIntToString(uint8_t s) {
 static string WriteDegradationCSV(const vector<string> &query_files,
                                   const vector<QuerySummary> &baseline_summaries,
                                   const vector<QuerySummary> &pac_summaries,
-                                  const string &csv_path) {
+                                  const string &csv_path,
+                                  const vector<QuerySummary> *dp_summaries = nullptr,
+                                  const string &dp_epsilon = "",
+                                  const string &dp_delta = "",
+                                  const string &dp_sum_bound = "") {
 	std::ofstream out(csv_path);
 	if (!out.is_open()) {
 		Log("ERROR: Cannot open CSV for writing: " + csv_path);
 		return "";
 	}
-	out << "query_index,query,mode,time_ms,state,pac_applied\n";
+	out << "query_index,query,mode,time_ms,state,pac_applied,epsilon,dp_delta,dp_sum_bound\n";
 	size_t n = std::min({query_files.size(), baseline_summaries.size(), pac_summaries.size()});
+	if (dp_summaries) {
+		n = std::min(n, dp_summaries->size());
+	}
 	for (size_t i = 0; i < n; ++i) {
 		string name = QueryName(query_files[i]);
 		int idx = static_cast<int>(i) + 1;
 		out << idx << "," << name << ",DuckDB,"
 		    << std::fixed << std::setprecision(3) << baseline_summaries[i].time_ms << ","
 		    << StateIntToString(baseline_summaries[i].state) << ","
-		    << (baseline_summaries[i].pac_applied ? "true" : "false") << "\n";
+		    << (baseline_summaries[i].pac_applied ? "true" : "false") << ",,,\n";
 		out << idx << "," << name << ",SIMD-PAC,"
 		    << std::fixed << std::setprecision(3) << pac_summaries[i].time_ms << ","
 		    << StateIntToString(pac_summaries[i].state) << ","
-		    << (pac_summaries[i].pac_applied ? "true" : "false") << "\n";
+		    << (pac_summaries[i].pac_applied ? "true" : "false") << ",,,\n";
+		if (dp_summaries) {
+			const auto &dp = (*dp_summaries)[i];
+			out << idx << "," << name << ",dp_elastic,"
+			    << std::fixed << std::setprecision(3) << dp.time_ms << ","
+			    << StateIntToString(dp.state) << ",false,"
+			    << dp_epsilon << "," << dp_delta << "," << dp_sum_bound << "\n";
+		}
 	}
 	out.close();
 	Log("Degradation CSV written to: " + csv_path);
@@ -1298,13 +1330,25 @@ static string FormatSF(double sf) {
 	return s;
 }
 
+static double QueryScalarDouble(Connection &con, const string &sql, const string &context) {
+	auto result = con.Query(sql);
+	if (!result || result->HasError()) {
+		throw std::runtime_error(context + ": " + (result ? result->GetError() : "unknown error"));
+	}
+	auto chunk = result->Fetch();
+	if (!chunk || chunk->size() == 0 || chunk->GetValue(0, 0).IsNull()) {
+		throw std::runtime_error(context + ": no value returned");
+	}
+	return chunk->GetValue(0, 0).DefaultCastAs(LogicalType::DOUBLE).GetValue<double>();
+}
+
 int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, double timeout_s,
-                         double tpch_sf, const string &benchmark) {
+                         double tpch_sf, const string &benchmark, double dp_epsilon, double dp_sum_bound) {
 	try {
 		bool run_tpch = (benchmark == "tpch" || benchmark == "both");
 		bool run_stackoverflow = (benchmark == "stackoverflow" || benchmark == "both");
 
-		Log("SQLStorm benchmark (two-pass: baseline + PAC)");
+		Log("SQLStorm benchmark (baseline + PAC + DP)");
 		Log("Benchmark: " + benchmark);
 		Log("Timeout: " + FormatNumber(timeout_s) + "s");
 
@@ -1403,7 +1447,49 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 			// ===== PASS 2: PAC =====
 			PassStats pac_stats;
 			auto pac_summaries = RunPass("PAC", query_files, db_path, timeout_s, pac_stats, true,
-			                             "pac_tpch_schema.sql");
+			                             "pac_tpch_schema.sql", true);
+
+			string tpch_dp_delta;
+			{
+				DuckDB setup_db(db_path);
+				Connection setup_con(setup_db);
+				setup_con.Query("PRAGMA threads=16");
+				setup_con.Query("PRAGMA memory_limit='16GB'");
+				setup_con.Query("SET temp_directory='/tmp/duckdb_temp'");
+				setup_con.Query("INSTALL icu");
+				setup_con.Query("LOAD icu");
+				setup_con.Query("INSTALL tpch");
+				setup_con.Query("LOAD tpch");
+				auto r = setup_con.Query("LOAD privacy");
+				if (r->HasError()) {
+					throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
+				}
+				auto r_clear = setup_con.Query("PRAGMA clear_privacy_metadata;");
+				if (r_clear->HasError()) {
+					Log("clear_privacy_metadata error: " + r_clear->GetError());
+				}
+				LoadPACSchema(setup_con, "pac_tpch_schema.sql");
+				setup_con.Query("SET privacy_mode='dp_elastic'");
+				setup_con.Query("SET dp_sum_bound=" + FormatNumber(dp_sum_bound));
+				auto refresh = setup_con.Query("PRAGMA refresh_dp_stats(" + FormatNumber(dp_epsilon) + ")");
+				if (refresh && refresh->HasError()) {
+					throw std::runtime_error("Failed to refresh TPC-H DP stats: " + refresh->GetError());
+				}
+				tpch_dp_delta = FormatNumber(QueryScalarDouble(setup_con, "SELECT current_setting('dp_delta')",
+				                                               "read TPC-H dp_delta"));
+				setup_con.Query("CHECKPOINT");
+			}
+
+			vector<string> tpch_dp_startup = {
+			    "SET privacy_mode='dp_elastic'",
+			    "SET dp_sum_bound=" + FormatNumber(dp_sum_bound),
+			    "PRAGMA refresh_dp_stats(" + FormatNumber(dp_epsilon) + ")"
+			};
+
+			// ===== PASS 3: DP-elastic =====
+			PassStats dp_stats;
+			auto dp_summaries = RunPass("DP", query_files, db_path, timeout_s, dp_stats, false,
+			                            "pac_tpch_schema.sql", true, tpch_dp_startup);
 
 			// ===== Print statistics =====
 			int total = static_cast<int>(query_files.size());
@@ -1412,27 +1498,39 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 			Log("========================================");
 			PrintPassStats("baseline", baseline_stats, total);
 			PrintPassStats("PAC", pac_stats, total);
+			PrintPassStats("DP", dp_stats, total);
+			Log("DP epsilon: " + FormatNumber(dp_epsilon));
+			Log("DP delta:   " + tpch_dp_delta);
+			Log("DP sum bound: " + FormatNumber(dp_sum_bound));
 
 			// Comparison: queries that changed state between passes
-			int baseline_only_success = 0, pac_only_success = 0, both_success = 0;
-			for (size_t i = 0; i < baseline_summaries.size() && i < pac_summaries.size(); ++i) {
+			int baseline_only_success = 0, pac_only_success = 0, dp_only_success = 0, both_success = 0, all_three_success = 0;
+			size_t compare_n = std::min({baseline_summaries.size(), pac_summaries.size(), dp_summaries.size()});
+			for (size_t i = 0; i < compare_n; ++i) {
 				bool b_ok = baseline_summaries[i].IsSuccess();
 				bool p_ok = pac_summaries[i].IsSuccess();
+				bool d_ok = dp_summaries[i].IsSuccess();
 				if (b_ok && p_ok) both_success++;
-				else if (b_ok && !p_ok) baseline_only_success++;
-				else if (!b_ok && p_ok) pac_only_success++;
+				if (b_ok && p_ok && d_ok) all_three_success++;
+				if (b_ok && !p_ok && !d_ok) baseline_only_success++;
+				else if (!b_ok && p_ok && !d_ok) pac_only_success++;
+				else if (!b_ok && !p_ok && d_ok) dp_only_success++;
 			}
 			Log("--- Comparison ---");
-			Log("  Both succeeded: " + std::to_string(both_success));
-			Log("  baseline only:  " + std::to_string(baseline_only_success));
-			Log("  PAC only:       " + std::to_string(pac_only_success));
+			Log("  baseline+PAC succeeded: " + std::to_string(both_success));
+			Log("  all three succeeded:    " + std::to_string(all_three_success));
+			Log("  baseline only:          " + std::to_string(baseline_only_success));
+			Log("  PAC only:               " + std::to_string(pac_only_success));
+			Log("  DP only:                " + std::to_string(dp_only_success));
 
 			// Timing comparison for queries that succeeded in both passes
 			if (both_success > 0) {
-				double sum_baseline = 0, sum_pac = 0;
+				double sum_baseline = 0, sum_pac = 0, sum_dp = 0;
+				double sum_baseline_dp = 0, sum_dp_shared = 0;
+				double sum_pac_dp = 0, sum_dp_pac_shared = 0;
 				double sum_pac_applied_baseline = 0, sum_pac_applied_pac = 0;
-				int pac_applied_both = 0;
-				for (size_t i = 0; i < baseline_summaries.size() && i < pac_summaries.size(); ++i) {
+				int pac_applied_both = 0, baseline_dp_both = 0, pac_dp_both = 0;
+				for (size_t i = 0; i < compare_n; ++i) {
 					if (baseline_summaries[i].IsSuccess() && pac_summaries[i].IsSuccess()) {
 						sum_baseline += baseline_summaries[i].time_ms;
 						sum_pac += pac_summaries[i].time_ms;
@@ -1441,6 +1539,20 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 							sum_pac_applied_pac += pac_summaries[i].time_ms;
 							pac_applied_both++;
 						}
+					}
+					if (baseline_summaries[i].IsSuccess() && dp_summaries[i].IsSuccess()) {
+						sum_baseline_dp += baseline_summaries[i].time_ms;
+						sum_dp_shared += dp_summaries[i].time_ms;
+						baseline_dp_both++;
+					}
+					if (pac_summaries[i].IsSuccess() && dp_summaries[i].IsSuccess()) {
+						sum_pac_dp += pac_summaries[i].time_ms;
+						sum_dp_pac_shared += dp_summaries[i].time_ms;
+						pac_dp_both++;
+					}
+					if (baseline_summaries[i].IsSuccess() && pac_summaries[i].IsSuccess() &&
+					    dp_summaries[i].IsSuccess()) {
+						sum_dp += dp_summaries[i].time_ms;
 					}
 				}
 				Log("--- Timing (queries succeeding in both passes) ---");
@@ -1464,11 +1576,38 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 						Log("    PAC is " + FormatNumber(-overhead_applied) + "% faster than DuckDB");
 					}
 				}
+				if (baseline_dp_both > 0 && sum_baseline_dp > 0) {
+					double overhead_dp = 100.0 * (sum_dp_shared - sum_baseline_dp) / sum_baseline_dp;
+					Log("  DP vs baseline (" + std::to_string(baseline_dp_both) + " shared successes):");
+					Log("    baseline: " + FormatNumber(sum_baseline_dp) + " ms, DP: " +
+					    FormatNumber(sum_dp_shared) + " ms");
+					if (overhead_dp >= 0) {
+						Log("    DP is " + FormatNumber(overhead_dp) + "% slower than DuckDB");
+					} else {
+						Log("    DP is " + FormatNumber(-overhead_dp) + "% faster than DuckDB");
+					}
+				}
+				if (pac_dp_both > 0 && sum_pac_dp > 0) {
+					double overhead_dp_vs_pac = 100.0 * (sum_dp_pac_shared - sum_pac_dp) / sum_pac_dp;
+					Log("  DP vs PAC (" + std::to_string(pac_dp_both) + " shared successes):");
+					Log("    PAC: " + FormatNumber(sum_pac_dp) + " ms, DP: " +
+					    FormatNumber(sum_dp_pac_shared) + " ms");
+					if (overhead_dp_vs_pac >= 0) {
+						Log("    DP is " + FormatNumber(overhead_dp_vs_pac) + "% slower than PAC");
+					} else {
+						Log("    DP is " + FormatNumber(-overhead_dp_vs_pac) + "% faster than PAC");
+					}
+				}
+				if (all_three_success > 0) {
+					Log("  DP total on all-three successes: " + FormatNumber(sum_dp) + " ms");
+				}
 			}
 
 			PrintErrorBreakdown("baseline", baseline_stats, total);
 			PrintErrorBreakdown("PAC", pac_stats, total);
+			PrintErrorBreakdown("DP", dp_stats, total);
 			PrintUnsupportedAggregateBreakdown("PAC", pac_stats, total);
+			PrintUnsupportedAggregateBreakdown("DP", dp_stats, total);
 
 			// Write degradation CSV
 			string tpch_csv = out_csv;
@@ -1480,7 +1619,9 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 					tpch_csv = "sqlstorm_degradation_tpch_sf" + sf_str + ".csv";
 				}
 			}
-			string tpch_abs_csv = WriteDegradationCSV(query_files, baseline_summaries, pac_summaries, tpch_csv);
+			string tpch_abs_csv = WriteDegradationCSV(query_files, baseline_summaries, pac_summaries, tpch_csv,
+			                                          &dp_summaries, FormatNumber(dp_epsilon), tpch_dp_delta,
+			                                          FormatNumber(dp_sum_bound));
 			if (!tpch_abs_csv.empty()) {
 				InvokeDegradationPlotScript(tpch_abs_csv);
 			}
@@ -1675,7 +1816,48 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 			PassStats so_pac_stats;
 			auto so_pac_summaries = RunPass("SO-PAC", so_query_files,
 			                                so_db_path, timeout_s, so_pac_stats, true,
-			                                "pac_stackoverflow_schema.sql");
+			                                "pac_stackoverflow_schema.sql", true);
+
+			string so_dp_delta;
+			{
+				DuckDB so_db(so_db_path);
+				Connection so_con(so_db);
+				so_con.Query("PRAGMA threads=16");
+				so_con.Query("PRAGMA memory_limit='16GB'");
+				so_con.Query("SET temp_directory='/tmp/duckdb_temp'");
+				so_con.Query("INSTALL icu");
+				so_con.Query("LOAD icu");
+				auto r = so_con.Query("LOAD privacy");
+				if (r->HasError()) {
+					throw std::runtime_error("Failed to load PAC extension: " + r->GetError());
+				}
+				auto r_clear = so_con.Query("PRAGMA clear_privacy_metadata;");
+				if (r_clear->HasError()) {
+					Log("clear_privacy_metadata error: " + r_clear->GetError());
+				}
+				LoadPACSchema(so_con, "pac_stackoverflow_schema.sql");
+				so_con.Query("SET privacy_mode='dp_elastic'");
+				so_con.Query("SET dp_sum_bound=" + FormatNumber(dp_sum_bound));
+				auto refresh = so_con.Query("PRAGMA refresh_dp_stats(" + FormatNumber(dp_epsilon) + ")");
+				if (refresh && refresh->HasError()) {
+					throw std::runtime_error("Failed to refresh StackOverflow DP stats: " + refresh->GetError());
+				}
+				so_dp_delta = FormatNumber(QueryScalarDouble(so_con, "SELECT current_setting('dp_delta')",
+				                                             "read StackOverflow dp_delta"));
+				so_con.Query("CHECKPOINT");
+			}
+
+			vector<string> so_dp_startup = {
+			    "SET privacy_mode='dp_elastic'",
+			    "SET dp_sum_bound=" + FormatNumber(dp_sum_bound),
+			    "PRAGMA refresh_dp_stats(" + FormatNumber(dp_epsilon) + ")"
+			};
+
+			// ===== PASS 3: DP-elastic =====
+			PassStats so_dp_stats;
+			auto so_dp_summaries = RunPass("SO-DP", so_query_files,
+			                               so_db_path, timeout_s, so_dp_stats, false,
+			                               "pac_stackoverflow_schema.sql", true, so_dp_startup);
 
 			// ===== Print statistics =====
 			int so_total = static_cast<int>(so_query_files.size());
@@ -1684,25 +1866,37 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 			Log("========================================");
 			PrintPassStats("SO-baseline", so_baseline_stats, so_total);
 			PrintPassStats("SO-PAC", so_pac_stats, so_total);
+			PrintPassStats("SO-DP", so_dp_stats, so_total);
+			Log("SO-DP epsilon: " + FormatNumber(dp_epsilon));
+			Log("SO-DP delta:   " + so_dp_delta);
+			Log("SO-DP sum bound: " + FormatNumber(dp_sum_bound));
 
-			int so_baseline_only = 0, so_pac_only = 0, so_both = 0;
-			for (size_t i = 0; i < so_baseline_summaries.size() && i < so_pac_summaries.size(); ++i) {
+			int so_baseline_only = 0, so_pac_only = 0, so_dp_only = 0, so_both = 0, so_all_three = 0;
+			size_t so_n = std::min({so_baseline_summaries.size(), so_pac_summaries.size(), so_dp_summaries.size()});
+			for (size_t i = 0; i < so_n; ++i) {
 				bool b_ok = so_baseline_summaries[i].IsSuccess();
 				bool p_ok = so_pac_summaries[i].IsSuccess();
+				bool d_ok = so_dp_summaries[i].IsSuccess();
 				if (b_ok && p_ok) so_both++;
-				else if (b_ok && !p_ok) so_baseline_only++;
-				else if (!b_ok && p_ok) so_pac_only++;
+				if (b_ok && p_ok && d_ok) so_all_three++;
+				if (b_ok && !p_ok && !d_ok) so_baseline_only++;
+				else if (!b_ok && p_ok && !d_ok) so_pac_only++;
+				else if (!b_ok && !p_ok && d_ok) so_dp_only++;
 			}
 			Log("--- Comparison ---");
-			Log("  Both succeeded: " + std::to_string(so_both));
-			Log("  baseline only:  " + std::to_string(so_baseline_only));
-			Log("  PAC only:       " + std::to_string(so_pac_only));
+			Log("  baseline+PAC succeeded: " + std::to_string(so_both));
+			Log("  all three succeeded:    " + std::to_string(so_all_three));
+			Log("  baseline only:          " + std::to_string(so_baseline_only));
+			Log("  PAC only:               " + std::to_string(so_pac_only));
+			Log("  DP only:                " + std::to_string(so_dp_only));
 
 			if (so_both > 0) {
-				double sum_baseline = 0, sum_pac = 0;
+				double sum_baseline = 0, sum_pac = 0, sum_dp = 0;
+				double sum_baseline_dp = 0, sum_dp_shared = 0;
+				double sum_pac_dp = 0, sum_dp_pac_shared = 0;
 				double sum_pac_applied_baseline = 0, sum_pac_applied_pac = 0;
-				int pac_applied_both = 0;
-				for (size_t i = 0; i < so_baseline_summaries.size() && i < so_pac_summaries.size(); ++i) {
+				int pac_applied_both = 0, baseline_dp_both = 0, pac_dp_both = 0;
+				for (size_t i = 0; i < so_n; ++i) {
 					if (so_baseline_summaries[i].IsSuccess() && so_pac_summaries[i].IsSuccess()) {
 						sum_baseline += so_baseline_summaries[i].time_ms;
 						sum_pac += so_pac_summaries[i].time_ms;
@@ -1711,6 +1905,20 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 							sum_pac_applied_pac += so_pac_summaries[i].time_ms;
 							pac_applied_both++;
 						}
+					}
+					if (so_baseline_summaries[i].IsSuccess() && so_dp_summaries[i].IsSuccess()) {
+						sum_baseline_dp += so_baseline_summaries[i].time_ms;
+						sum_dp_shared += so_dp_summaries[i].time_ms;
+						baseline_dp_both++;
+					}
+					if (so_pac_summaries[i].IsSuccess() && so_dp_summaries[i].IsSuccess()) {
+						sum_pac_dp += so_pac_summaries[i].time_ms;
+						sum_dp_pac_shared += so_dp_summaries[i].time_ms;
+						pac_dp_both++;
+					}
+					if (so_baseline_summaries[i].IsSuccess() && so_pac_summaries[i].IsSuccess() &&
+					    so_dp_summaries[i].IsSuccess()) {
+						sum_dp += so_dp_summaries[i].time_ms;
 					}
 				}
 				Log("--- Timing (queries succeeding in both passes) ---");
@@ -1734,11 +1942,38 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 						Log("    PAC is " + FormatNumber(-overhead_applied) + "% faster than DuckDB");
 					}
 				}
+				if (baseline_dp_both > 0 && sum_baseline_dp > 0) {
+					double overhead_dp = 100.0 * (sum_dp_shared - sum_baseline_dp) / sum_baseline_dp;
+					Log("  DP vs baseline (" + std::to_string(baseline_dp_both) + " shared successes):");
+					Log("    baseline: " + FormatNumber(sum_baseline_dp) + " ms, DP: " +
+					    FormatNumber(sum_dp_shared) + " ms");
+					if (overhead_dp >= 0) {
+						Log("    DP is " + FormatNumber(overhead_dp) + "% slower than DuckDB");
+					} else {
+						Log("    DP is " + FormatNumber(-overhead_dp) + "% faster than DuckDB");
+					}
+				}
+				if (pac_dp_both > 0 && sum_pac_dp > 0) {
+					double overhead_dp_vs_pac = 100.0 * (sum_dp_pac_shared - sum_pac_dp) / sum_pac_dp;
+					Log("  DP vs PAC (" + std::to_string(pac_dp_both) + " shared successes):");
+					Log("    PAC: " + FormatNumber(sum_pac_dp) + " ms, DP: " +
+					    FormatNumber(sum_dp_pac_shared) + " ms");
+					if (overhead_dp_vs_pac >= 0) {
+						Log("    DP is " + FormatNumber(overhead_dp_vs_pac) + "% slower than PAC");
+					} else {
+						Log("    DP is " + FormatNumber(-overhead_dp_vs_pac) + "% faster than PAC");
+					}
+				}
+				if (so_all_three > 0) {
+					Log("  DP total on all-three successes: " + FormatNumber(sum_dp) + " ms");
+				}
 			}
 
 			PrintErrorBreakdown("SO-baseline", so_baseline_stats, so_total);
 			PrintErrorBreakdown("SO-PAC", so_pac_stats, so_total);
+			PrintErrorBreakdown("SO-DP", so_dp_stats, so_total);
 			PrintUnsupportedAggregateBreakdown("SO-PAC", so_pac_stats, so_total);
+			PrintUnsupportedAggregateBreakdown("SO-DP", so_dp_stats, so_total);
 
 			// Write degradation CSV
 			string so_csv = out_csv;
@@ -1750,7 +1985,9 @@ int RunSQLStormBenchmark(const string &queries_dir, const string &out_csv, doubl
 					so_csv = "sqlstorm_degradation_stackoverflow.csv";
 				}
 			}
-			string so_abs_csv = WriteDegradationCSV(so_query_files, so_baseline_summaries, so_pac_summaries, so_csv);
+			string so_abs_csv = WriteDegradationCSV(so_query_files, so_baseline_summaries, so_pac_summaries, so_csv,
+			                                        &so_dp_summaries, FormatNumber(dp_epsilon), so_dp_delta,
+			                                        FormatNumber(dp_sum_bound));
 			if (!so_abs_csv.empty()) {
 				InvokeDegradationPlotScript(so_abs_csv);
 			}
@@ -1772,9 +2009,11 @@ static void PrintUsage() {
 	          << "  --queries <dir>       SQLStorm queries directory\n"
 	          << "                        (default: auto-detect benchmark/SQLStorm/v1.0/tpch/queries)\n"
 	          << "  --out <csv>           Output CSV path (default: benchmark/sqlstorm/sqlstorm_benchmark_results_*.csv)\n"
-	          << "  --timeout <sec>       Per-query timeout in seconds (default: 10)\n"
+	          << "  --timeout <sec>       Per-query timeout in seconds (default: 0.1)\n"
 	          << "  --tpch_sf <float>     TPC-H scale factor (default: 1.00)\n"
 	          << "  --benchmark <name>    Benchmark to run: tpch, stackoverflow, or both (default: both)\n"
+	          << "  --dp_epsilon <float>  StackOverflow dp_elastic epsilon (default: 1.0)\n"
+	          << "  --dp_sum_bound <num>  StackOverflow dp_elastic SUM/AVG input bound (default: 1000000)\n"
 	          << "  -h, --help            Show this help message\n";
 }
 
@@ -1786,6 +2025,8 @@ int main(int argc, char **argv) {
 	std::string out_csv;
 	double timeout_s = 0.1;
 	double tpch_sf = 1.0;
+	double dp_epsilon = 1.0;
+	double dp_sum_bound = 1000000.0;
 	std::string benchmark = "both";
 
 	for (int i = 1; i < argc; ++i) {
@@ -1801,6 +2042,10 @@ int main(int argc, char **argv) {
 			timeout_s = std::stod(argv[++i]);
 		} else if (arg == "--tpch_sf" && i + 1 < argc) {
 			tpch_sf = std::stod(argv[++i]);
+		} else if (arg == "--dp_epsilon" && i + 1 < argc) {
+			dp_epsilon = std::stod(argv[++i]);
+		} else if (arg == "--dp_sum_bound" && i + 1 < argc) {
+			dp_sum_bound = std::stod(argv[++i]);
 		} else if (arg == "--benchmark" && i + 1 < argc) {
 			benchmark = argv[++i];
 			if (benchmark != "tpch" && benchmark != "stackoverflow" && benchmark != "both") {
@@ -1815,5 +2060,5 @@ int main(int argc, char **argv) {
 		}
 	}
 
-	return duckdb::RunSQLStormBenchmark(queries_dir, out_csv, timeout_s, tpch_sf, benchmark);
+	return duckdb::RunSQLStormBenchmark(queries_dir, out_csv, timeout_s, tpch_sf, benchmark, dp_epsilon, dp_sum_bound);
 }

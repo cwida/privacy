@@ -1,0 +1,155 @@
+# name: test/sql/imdb_benchmark.test
+# description: IMDb/JOB benchmark privacy metadata and query smoke tests
+# group: [sql]
+
+require privacy
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET privacy_seed = 42;
+
+statement ok
+CREATE TABLE name (
+    id INTEGER NOT NULL,
+    name VARCHAR NOT NULL,
+    gender VARCHAR
+);
+
+statement ok
+CREATE TABLE cast_info (
+    id INTEGER NOT NULL,
+    person_id INTEGER NOT NULL,
+    movie_id INTEGER NOT NULL,
+    nr_order INTEGER,
+    role_id INTEGER NOT NULL
+);
+
+statement ok
+CREATE TABLE aka_name (
+    id INTEGER NOT NULL,
+    person_id INTEGER NOT NULL,
+    name VARCHAR NOT NULL,
+    imdb_index VARCHAR
+);
+
+statement ok
+CREATE TABLE person_info (
+    id INTEGER NOT NULL,
+    person_id INTEGER NOT NULL,
+    info_type_id INTEGER NOT NULL,
+    info VARCHAR NOT NULL,
+    note VARCHAR
+);
+
+statement ok
+CREATE TABLE title (
+    id INTEGER NOT NULL,
+    title VARCHAR NOT NULL,
+    kind_id INTEGER NOT NULL
+);
+
+statement ok
+INSERT INTO name VALUES
+    (1, 'Skewed Person', 'm'),
+    (2, 'Occasional Person', 'f'),
+    (3, 'Rare Person', NULL),
+    (4, 'Alias Heavy Person', 'f');
+
+statement ok
+INSERT INTO cast_info VALUES
+    (1, 1, 10, 1, 1),
+    (2, 1, 11, 2, 1),
+    (3, 1, 12, 3, 1),
+    (4, 1, 13, 4, 2),
+    (5, 1, 14, 5, 2),
+    (6, 1, 15, 6, 2),
+    (7, 2, 11, 1, 1),
+    (8, 2, 12, NULL, 3),
+    (9, 3, 12, 2, 1),
+    (10, 4, 13, 1, 4);
+
+statement ok
+INSERT INTO aka_name VALUES
+    (1, 1, 'S. Person', 'I'),
+    (2, 1, 'Skew Person', 'II'),
+    (3, 4, 'Alias A', 'I'),
+    (4, 4, 'Alias B', 'I'),
+    (5, 4, 'Alias C', NULL);
+
+statement ok
+INSERT INTO person_info VALUES
+    (1, 1, 10, 'birth date', NULL),
+    (2, 1, 11, 'height', 'verified'),
+    (3, 2, 10, 'birth date', NULL),
+    (4, 4, 12, 'trivia', 'public note');
+
+statement ok
+INSERT INTO title VALUES
+    (10, 'T1', 1),
+    (11, 'T2', 1),
+    (12, 'T3', 2),
+    (13, 'T4', 2),
+    (14, 'T5', 3),
+    (15, 'T6', 3);
+
+statement ok
+ALTER TABLE name ADD PRIVACY_KEY (id);
+
+statement ok
+ALTER TABLE name SET PU;
+
+statement ok
+ALTER PU TABLE name ADD PROTECTED (name, gender);
+
+statement ok
+ALTER TABLE cast_info ADD PRIVACY_LINK (person_id) REFERENCES name (id);
+
+statement ok
+ALTER TABLE aka_name ADD PRIVACY_LINK (person_id) REFERENCES name (id);
+
+statement ok
+ALTER TABLE person_info ADD PRIVACY_LINK (person_id) REFERENCES name (id);
+
+statement ok
+SET privacy_mode = 'dp_elastic';
+
+statement ok
+PRAGMA refresh_dp_stats(1.0);
+
+query I
+SELECT abs(current_setting('dp_delta')::DOUBLE - exp(-1.0 * pow(ln(4), 2))) < 1e-12;
+----
+true
+
+query I
+SELECT COUNT(*) IS NOT NULL FROM cast_info;
+----
+true
+
+query I
+SELECT COUNT(*) IS NOT NULL FROM cast_info AS c JOIN name AS n ON c.person_id = n.id;
+----
+true
+
+statement error
+SELECT COUNT(*) FROM cast_info AS c JOIN title AS t ON c.movie_id = t.id;
+----
+has no PRIVACY_LINK path
+
+statement ok
+SET privacy_mode = 'pac';
+
+query I
+SELECT COUNT(*) IS NOT NULL FROM cast_info;
+----
+true
+
+query II
+SELECT role_id, COUNT(*) IS NOT NULL FROM cast_info GROUP BY role_id ORDER BY role_id LIMIT 1;
+----
+1	true

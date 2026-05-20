@@ -93,11 +93,10 @@ Some queries may be rejected by PAC due to privacy constraints:
 Results are saved to `benchmark/clickbench_micro_results.csv` (or `benchmark/clickbench_results.csv` for full mode):
 
 ```csv
-query,mode,run,time_ms,success,error
-1,baseline,1,12.34,true,""
-1,PAC,1,18.56,true,""
-2,baseline,1,8.12,true,""
-2,PAC,1,0,false,"privacy violation"
+query,mode,run,time_ms,success,error,utility,recall,precision,epsilon,delta_scenario,dp_delta,bound_scenario,dp_sum_bound,pac_mi,seed
+1,baseline,1,12.34,true,"",,,,,,,,,,
+1,PAC,1,18.56,true,"",0.1,1,1,,,,,0.0078125,998
+2,dp_elastic,1,21.09,true,"",0.2,1,1,0.1,auto_flex,1e-9,perfect,,,999
 ...
 ```
 
@@ -148,4 +147,3 @@ benchmark/clickbench/
 
 - [TPC-H Benchmark](tpch.md) - Decision support benchmark
 - [Microbenchmarks](microbenchmarks.md) - Individual aggregate tests
-

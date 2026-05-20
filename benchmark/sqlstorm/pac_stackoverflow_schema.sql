@@ -1,6 +1,6 @@
 -- StackOverflow PAC Links Configuration
 -- Execute this after the tables are created and loaded with data
--- PAC_LINKs define foreign key relationships for PAC compilation
+-- PRIVACY_LINKs define foreign key relationships for privacy compilation
 --
 -- Link graph (no cycles):
 --   Users (PU)
@@ -12,6 +12,7 @@
 --     └── Votes.UserId -> Users.Id
 
 -- Mark Users as the privacy unit
+ALTER TABLE Users ADD PRIVACY_KEY (Id);
 ALTER TABLE Users SET PU;
 
 -- Protected columns in Users table
@@ -24,19 +25,19 @@ ALTER PU TABLE Users ADD PROTECTED (ProfileImageUrl);
 ALTER PU TABLE Users ADD PROTECTED (AccountId);
 
 -- Badges -> Users link
-ALTER PU TABLE Badges ADD PAC_LINK (UserId) REFERENCES Users(Id);
+ALTER TABLE Badges ADD PRIVACY_LINK (UserId) REFERENCES Users(Id);
 
 -- Posts -> Users link
-ALTER PU TABLE Posts ADD PAC_LINK (OwnerUserId) REFERENCES Users(Id);
+ALTER TABLE Posts ADD PRIVACY_LINK (OwnerUserId) REFERENCES Users(Id);
 
 -- Comments -> Users link
-ALTER PU TABLE Comments ADD PAC_LINK (UserId) REFERENCES Users(Id);
+ALTER TABLE Comments ADD PRIVACY_LINK (UserId) REFERENCES Users(Id);
 
 -- PostHistory -> Users link
-ALTER PU TABLE PostHistory ADD PAC_LINK (UserId) REFERENCES Users(Id);
+ALTER TABLE PostHistory ADD PRIVACY_LINK (UserId) REFERENCES Users(Id);
 
 -- Votes -> Users link
-ALTER PU TABLE Votes ADD PAC_LINK (UserId) REFERENCES Users(Id);
+ALTER TABLE Votes ADD PRIVACY_LINK (UserId) REFERENCES Users(Id);
 
 -- PostLinks -> Posts link (transitive: PostLinks -> Posts -> Users)
-ALTER PU TABLE PostLinks ADD PAC_LINK (PostId) REFERENCES Posts(Id);
+ALTER TABLE PostLinks ADD PRIVACY_LINK (PostId) REFERENCES Posts(Id);

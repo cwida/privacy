@@ -1,0 +1,130 @@
+# name: test/sql/sqlstorm_tpch_dp.test
+# description: SQLStorm TPC-H PAC/DP metadata smoke test
+# group: [sql]
+
+require privacy
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET privacy_seed = 42;
+
+statement ok
+CREATE TABLE customer (
+    c_custkey BIGINT NOT NULL,
+    c_name VARCHAR,
+    c_acctbal DOUBLE,
+    c_comment VARCHAR
+);
+
+statement ok
+CREATE TABLE orders (
+    o_orderkey BIGINT NOT NULL,
+    o_custkey BIGINT NOT NULL,
+    o_comment VARCHAR
+);
+
+statement ok
+CREATE TABLE lineitem (
+    l_orderkey BIGINT NOT NULL,
+    l_linenumber BIGINT NOT NULL,
+    l_extendedprice DOUBLE,
+    l_comment VARCHAR
+);
+
+statement ok
+CREATE TABLE part (
+    p_partkey BIGINT NOT NULL,
+    p_name VARCHAR
+);
+
+statement ok
+INSERT INTO customer VALUES
+    (1, 'c1', 10.0, 'private'),
+    (2, 'c2', 20.0, 'private'),
+    (3, 'c3', 30.0, 'private'),
+    (4, 'c4', 40.0, 'private');
+
+statement ok
+INSERT INTO orders VALUES
+    (10, 1, 'o1'),
+    (11, 1, 'o2'),
+    (12, 2, 'o3'),
+    (13, 4, 'o4');
+
+statement ok
+INSERT INTO lineitem VALUES
+    (10, 1, 100.0, 'l1'),
+    (10, 2, 200.0, 'l2'),
+    (11, 1, 50.0, 'l3'),
+    (12, 1, 25.0, 'l4'),
+    (13, 1, 75.0, 'l5');
+
+statement ok
+INSERT INTO part VALUES
+    (100, 'p1');
+
+statement ok
+ALTER TABLE customer ADD PRIVACY_KEY (c_custkey);
+
+statement ok
+ALTER TABLE customer SET PU;
+
+statement ok
+ALTER PU TABLE customer ADD PROTECTED (c_name);
+
+statement ok
+ALTER PU TABLE customer ADD PROTECTED (c_acctbal);
+
+statement ok
+ALTER TABLE orders ADD PRIVACY_LINK (o_custkey) REFERENCES customer(c_custkey);
+
+statement ok
+ALTER TABLE lineitem ADD PRIVACY_LINK (l_orderkey) REFERENCES orders(o_orderkey);
+
+statement ok
+ALTER TABLE orders ADD PROTECTED (o_comment);
+
+statement ok
+ALTER TABLE lineitem ADD PROTECTED (l_comment);
+
+statement ok
+SET privacy_mode = 'dp_elastic';
+
+statement ok
+SET dp_sum_bound = 1000;
+
+statement ok
+PRAGMA refresh_dp_stats(1.0);
+
+query I
+SELECT abs(current_setting('dp_delta')::DOUBLE - exp(-1.0 * pow(ln(4), 2))) < 1e-12;
+----
+true
+
+query I
+SELECT COUNT(*) IS NOT NULL FROM lineitem l JOIN orders o ON l.l_orderkey = o.o_orderkey JOIN customer c ON o.o_custkey = c.c_custkey;
+----
+true
+
+query I
+SELECT SUM(l_extendedprice) IS NOT NULL FROM lineitem l JOIN orders o ON l.l_orderkey = o.o_orderkey JOIN customer c ON o.o_custkey = c.c_custkey;
+----
+true
+
+statement error
+SELECT COUNT(*) FROM lineitem l JOIN part p ON l.l_orderkey = p.p_partkey;
+----
+has no PRIVACY_LINK path
+
+statement ok
+SET privacy_mode = 'pac';
+
+query I
+SELECT COUNT(*) IS NOT NULL FROM customer;
+----
+true

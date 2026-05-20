@@ -365,6 +365,8 @@ struct BenchmarkQueryResult {
     string recall;
     string precision;
     string epsilon;
+    string delta_scenario;
+    string dp_delta;
     string bound_scenario;
     string dp_sum_bound;
     string pac_mi;
@@ -807,6 +809,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
             {"near", 10.0},
             {"bad", 1000.0}
         };
+        vector<string> dp_delta_scenarios = {"auto_flex"};
         const string pac_mi_default = "0.0078125";
         double privacy_unit_count = 0.0;
         vector<bool> query_has_sum_avg(queries.size(), false);
@@ -1140,93 +1143,104 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                 }
 
                 for (auto epsilon : dp_epsilons) {
-                    for (auto &scenario : dp_bound_scenarios) {
-                        if (worker.child_pid <= 0) {
-                            worker.Start();
-                        }
+                    for (const auto &delta_scenario : dp_delta_scenarios) {
+                        for (auto &scenario : dp_bound_scenarios) {
+                            if (worker.child_pid <= 0) {
+                                worker.Start();
+                            }
 
-                        string utility_path = "/tmp/clickbench_utility_dp_q" + std::to_string(qnum) + "_r" +
-                                              std::to_string(run) + "_e" + FormatNumber(epsilon) + "_" +
-                                              scenario.first + "_" + std::to_string(getpid()) + ".csv";
-                        std::replace(utility_path.begin(), utility_path.end(), '.', '_');
-                        std::remove(utility_path.c_str());
+                            string utility_path = "/tmp/clickbench_utility_dp_q" + std::to_string(qnum) + "_r" +
+                                                  std::to_string(run) + "_e" + FormatNumber(epsilon) + "_" +
+                                                  delta_scenario + "_" + scenario.first + "_" +
+                                                  std::to_string(getpid()) + ".csv";
+                            std::replace(utility_path.begin(), utility_path.end(), '.', '_');
+                            std::remove(utility_path.c_str());
 
-                        int64_t seed = static_cast<int64_t>(run * 997 + qnum);
-                        double dp_bound = 0.0;
-                        vector<string> dp_setup = setup_stmts;
-                        dp_setup.push_back("SET privacy_mode='dp_elastic';");
-                        dp_setup.push_back("SET privacy_seed=" + std::to_string(seed) + ";");
-                        dp_setup.push_back("SET dp_epsilon=" + FormatNumber(epsilon) + ";");
-                        double dp_delta = std::exp(-epsilon * std::pow(std::log(privacy_unit_count), 2.0));
-                        dp_setup.push_back("SET dp_delta=" + FormatNumber(dp_delta) + ";");
-                        if (query_has_sum_avg[q]) {
-                            double base_bound = perfect_bounds[q] > 0 ? perfect_bounds[q] : 1e-9;
-                            dp_bound = base_bound * scenario.second;
-                            dp_setup.push_back("SET dp_sum_bound=" + FormatNumber(dp_bound) + ";");
-                        } else {
-                            dp_setup.push_back("RESET dp_sum_bound;");
-                        }
-                        dp_setup.push_back("SET privacy_diffcols=NULL;");
-                        bool setup_ok = worker.SendSetupStatements(dp_setup);
-                        ForkWorker::SubmitResult res = ForkWorker::SR_OK;
-                        if (setup_ok) {
-                            res = worker.SubmitQuery(query, timeout_s);
-                        }
+                            int64_t seed = static_cast<int64_t>(run * 997 + qnum);
+                            double dp_bound = 0.0;
+                            double dp_delta = 0.0;
+                            vector<string> dp_setup = setup_stmts;
+                            dp_setup.push_back("SET privacy_mode='dp_elastic';");
+                            dp_setup.push_back("SET privacy_seed=" + std::to_string(seed) + ";");
+                            dp_setup.push_back("SET dp_epsilon=" + FormatNumber(epsilon) + ";");
+                            if (delta_scenario == "auto_flex") {
+                                dp_delta = std::exp(-epsilon * std::pow(std::log(privacy_unit_count), 2.0));
+                            } else {
+                                throw std::runtime_error("Unknown dp_delta scenario: " + delta_scenario);
+                            }
+                            dp_setup.push_back("SET dp_delta=" + FormatNumber(dp_delta) + ";");
+                            if (query_has_sum_avg[q]) {
+                                double base_bound = perfect_bounds[q] > 0 ? perfect_bounds[q] : 1e-9;
+                                dp_bound = base_bound * scenario.second;
+                                dp_setup.push_back("SET dp_sum_bound=" + FormatNumber(dp_bound) + ";");
+                            } else {
+                                dp_setup.push_back("RESET dp_sum_bound;");
+                            }
+                            dp_setup.push_back("SET privacy_diffcols=NULL;");
+                            bool setup_ok = worker.SendSetupStatements(dp_setup);
+                            ForkWorker::SubmitResult res = ForkWorker::SR_OK;
+                            if (setup_ok) {
+                                res = worker.SubmitQuery(query, timeout_s);
+                            }
 
-                        BenchmarkQueryResult result;
-                        result.query_num = qnum;
-                        result.mode = "dp_elastic";
-                        result.run = run;
-                        result.time_ms = setup_ok ? worker.result_time_ms : 0;
-                        result.success = setup_ok && (res == ForkWorker::SR_OK && worker.result_ok);
-                        result.error_msg = setup_ok ? worker.result_error : worker.setup_error;
-                        result.epsilon = FormatNumber(epsilon);
-                        result.bound_scenario = scenario.first;
-                        result.dp_sum_bound = query_has_sum_avg[q] ? FormatNumber(dp_bound) : "";
-                        result.seed = seed;
-                        if (result.success && worker.child_pid > 0) {
-                            vector<string> dp_diff_setup = dp_setup;
-                            dp_diff_setup.push_back("SET privacy_seed=" + std::to_string(seed) + ";");
-                            dp_diff_setup.push_back("SET privacy_diffcols=" +
-                                                    SqlQuote(std::to_string(diff_key_cols[q]) + ":" + utility_path) +
-                                                    ";");
-                            bool diff_setup_ok = worker.SendSetupStatements(dp_diff_setup);
-                            if (diff_setup_ok) {
-                                auto diff_res = worker.SubmitQuery(query, timeout_s);
-                                if (diff_res == ForkWorker::SR_OK && worker.result_ok) {
-                                    ReadLastUtilityLine(utility_path, result.utility, result.recall, result.precision);
+                            BenchmarkQueryResult result;
+                            result.query_num = qnum;
+                            result.mode = "dp_elastic";
+                            result.run = run;
+                            result.time_ms = setup_ok ? worker.result_time_ms : 0;
+                            result.success = setup_ok && (res == ForkWorker::SR_OK && worker.result_ok);
+                            result.error_msg = setup_ok ? worker.result_error : worker.setup_error;
+                            result.epsilon = FormatNumber(epsilon);
+                            result.delta_scenario = delta_scenario;
+                            result.dp_delta = FormatNumber(dp_delta);
+                            result.bound_scenario = scenario.first;
+                            result.dp_sum_bound = query_has_sum_avg[q] ? FormatNumber(dp_bound) : "";
+                            result.seed = seed;
+                            if (result.success && worker.child_pid > 0) {
+                                vector<string> dp_diff_setup = dp_setup;
+                                dp_diff_setup.push_back("SET privacy_seed=" + std::to_string(seed) + ";");
+                                dp_diff_setup.push_back(
+                                    "SET privacy_diffcols=" +
+                                    SqlQuote(std::to_string(diff_key_cols[q]) + ":" + utility_path) + ";");
+                                bool diff_setup_ok = worker.SendSetupStatements(dp_diff_setup);
+                                if (diff_setup_ok) {
+                                    auto diff_res = worker.SubmitQuery(query, timeout_s);
+                                    if (diff_res == ForkWorker::SR_OK && worker.result_ok) {
+                                        ReadLastUtilityLine(utility_path, result.utility, result.recall,
+                                                            result.precision);
+                                    }
                                 }
                             }
-                        }
 
-                        all_results.push_back(result);
+                            all_results.push_back(result);
 
-                        if (!setup_ok) {
-                            Log(string("Q") + std::to_string(qnum) + " dp_elastic run " + std::to_string(run) +
-                                " epsilon=" + FormatNumber(epsilon) + " " + scenario.first +
-                                " SETUP ERROR: " + result.error_msg);
-                        } else if (res == ForkWorker::SR_CHILD_DIED) {
-                            Log(string("Q") + std::to_string(qnum) + " dp_elastic run " + std::to_string(run) +
-                                " epsilon=" + FormatNumber(epsilon) + " " + scenario.first +
-                                " CRASHED: " + worker.result_error);
-                            worker.Start();
-                        } else if (res == ForkWorker::SR_TIMEOUT) {
-                            Log(string("Q") + std::to_string(qnum) + " dp_elastic run " + std::to_string(run) +
-                                " epsilon=" + FormatNumber(epsilon) + " " + scenario.first +
-                                " TIMEOUT: " + worker.result_error);
-                            worker.Start();
-                        } else if (result.success) {
-                            Log(string("Q") + std::to_string(qnum) + " dp_elastic run " + std::to_string(run) +
-                                " epsilon=" + FormatNumber(epsilon) + " " + scenario.first +
-                                " time: " + FormatNumber(result.time_ms) + " ms");
-                        } else {
-                            Log(string("Q") + std::to_string(qnum) + " dp_elastic run " + std::to_string(run) +
-                                " epsilon=" + FormatNumber(epsilon) + " " + scenario.first +
-                                " ERROR: " + result.error_msg);
-                        }
+                            if (!setup_ok) {
+                                Log(string("Q") + std::to_string(qnum) + " dp_elastic run " + std::to_string(run) +
+                                    " epsilon=" + FormatNumber(epsilon) + " " + delta_scenario + " " +
+                                    scenario.first + " SETUP ERROR: " + result.error_msg);
+                            } else if (res == ForkWorker::SR_CHILD_DIED) {
+                                Log(string("Q") + std::to_string(qnum) + " dp_elastic run " + std::to_string(run) +
+                                    " epsilon=" + FormatNumber(epsilon) + " " + delta_scenario + " " +
+                                    scenario.first + " CRASHED: " + worker.result_error);
+                                worker.Start();
+                            } else if (res == ForkWorker::SR_TIMEOUT) {
+                                Log(string("Q") + std::to_string(qnum) + " dp_elastic run " + std::to_string(run) +
+                                    " epsilon=" + FormatNumber(epsilon) + " " + delta_scenario + " " +
+                                    scenario.first + " TIMEOUT: " + worker.result_error);
+                                worker.Start();
+                            } else if (result.success) {
+                                Log(string("Q") + std::to_string(qnum) + " dp_elastic run " + std::to_string(run) +
+                                    " epsilon=" + FormatNumber(epsilon) + " " + delta_scenario + " " +
+                                    scenario.first + " time: " + FormatNumber(result.time_ms) + " ms");
+                            } else {
+                                Log(string("Q") + std::to_string(qnum) + " dp_elastic run " + std::to_string(run) +
+                                    " epsilon=" + FormatNumber(epsilon) + " " + delta_scenario + " " +
+                                    scenario.first + " ERROR: " + result.error_msg);
+                            }
 
-                        if (worker.child_pid > 0) {
-                            worker.SendUnsetPAC();
+                            if (worker.child_pid > 0) {
+                                worker.SendUnsetPAC();
+                            }
                         }
                     }
                 }
@@ -1264,7 +1278,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
         // =====================================================================
         // Write CSV
         // =====================================================================
-        csv << "query,mode,run,time_ms,success,error,utility,recall,precision,epsilon,bound_scenario,dp_sum_bound,pac_mi,seed\n";
+        csv << "query,mode,run,time_ms,success,error,utility,recall,precision,epsilon,delta_scenario,dp_delta,bound_scenario,dp_sum_bound,pac_mi,seed\n";
         for (const auto &r : all_results) {
             csv << r.query_num << "," << r.mode << "," << r.run << ","
                 << FormatNumber(r.time_ms) << ","
@@ -1274,6 +1288,8 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                 << r.recall << ","
                 << r.precision << ","
                 << r.epsilon << ","
+                << r.delta_scenario << ","
+                << r.dp_delta << ","
                 << r.bound_scenario << ","
                 << r.dp_sum_bound << ","
                 << r.pac_mi << ","

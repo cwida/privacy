@@ -1,14 +1,15 @@
 # SQLStorm Benchmark
 
-This document describes the SQLStorm benchmark for measuring PAC overhead on LLM-generated analytical workloads.
+This document describes the SQLStorm benchmark for measuring PAC and DP coverage/performance on LLM-generated analytical workloads.
 
 ## Overview
 
 [SQLStorm](https://db.in.tum.de/~schmidt/papers/sqlstorm.pdf) is an LLM-generated analytical benchmark from TU Munich. Unlike hand-written benchmarks (TPC-H, ClickBench), SQLStorm uses large language models to produce thousands of diverse SQL queries, stress-testing query engines with realistic but unpredictable workloads.
 
-The PAC SQLStorm benchmark uses a **two-pass design**:
-1. **Baseline**: Clear PAC metadata, run all queries with standard DuckDB
-2. **PAC**: Load PAC schema, run all queries again with privacy-preserving aggregation
+The SQLStorm benchmark uses a pass-based design:
+1. **Baseline**: Clear privacy metadata and run all queries with standard DuckDB
+2. **PAC**: Load privacy metadata and run all queries with PAC aggregation
+3. **DP**: Run all queries again with `dp_elastic`
 
 Two datasets are supported:
 - **TPC-H**: Generated via `dbgen` at a configurable scale factor
@@ -29,11 +30,11 @@ cmake --build build/release --target pac_sqlstorm_benchmark
 # Run both TPC-H and StackOverflow benchmarks (default)
 ./build/release/extension/pac/pac_sqlstorm_benchmark
 
-# Run only TPC-H at scale factor 10
-./build/release/extension/pac/pac_sqlstorm_benchmark --benchmark tpch --tpch_sf 10
+# Run only TPC-H at scale factor 10 with PAC and DP
+./build/release/extension/pac/pac_sqlstorm_benchmark --benchmark tpch --tpch_sf 10 --dp_epsilon 1.0
 
-# Run only StackOverflow
-./build/release/extension/pac/pac_sqlstorm_benchmark --benchmark stackoverflow
+# Run only StackOverflow with PAC and DP
+./build/release/extension/pac/pac_sqlstorm_benchmark --benchmark stackoverflow --dp_epsilon 1.0
 
 # Custom timeout and output path
 ./build/release/extension/pac/pac_sqlstorm_benchmark --timeout 30 --out results.csv
@@ -54,6 +55,8 @@ cmake --build build/release --target pac_sqlstorm_benchmark
 | `--timeout <sec>` | Per-query timeout in seconds | `0.1` |
 | `--tpch_sf <float>` | TPC-H scale factor (can be fractional) | `1.0` |
 | `--benchmark <name>` | Benchmark to run: `tpch`, `stackoverflow`, or `both` | `both` |
+| `--dp_epsilon <float>` | `dp_elastic` epsilon | `1.0` |
+| `--dp_sum_bound <num>` | `dp_elastic` SUM/AVG input bound | `1000000` |
 | `-h, --help` | Show help message | |
 
 When running `both` benchmarks, the `--queries` option is ignored and queries directories are auto-detected for each dataset. When running a single benchmark, `--queries` overrides the auto-detected directory for that dataset.
@@ -69,7 +72,7 @@ If the database file does not exist, the benchmark will:
 
 If the database already exists, data generation is skipped.
 
-**PAC schema**: `pac_tpch_schema.sql` (shared with the TPC-H benchmark). Creates the privacy unit chain `lineitem -> orders -> customer`.
+**Privacy schema**: `pac_tpch_schema.sql` (shared with the TPC-H benchmark). Creates the privacy unit chain `lineitem -> orders -> customer` with `customer.c_custkey` as the privacy unit key.
 
 ### StackOverflow
 
@@ -82,7 +85,7 @@ If the database file does not exist, the benchmark will:
 
 If the database already exists, setup is skipped. If setup fails partway through, the database file is removed so the next run starts fresh.
 
-**PAC schema**: `benchmark/sqlstorm/pac_stackoverflow_schema.sql`. Defines `Users` as the privacy unit with the following link graph:
+**Privacy schema**: `benchmark/sqlstorm/pac_stackoverflow_schema.sql`. Defines `Users.Id` as the privacy unit key with the following link graph:
 
 ```
 Users (PU)
@@ -101,20 +104,20 @@ Users (PU)
 Results are written to CSV files with columns:
 
 ```
-query,baseline_state,baseline_time_ms,baseline_rows,pac_state,pac_time_ms,pac_rows,pac_applied,pac_error
+query_index,query,mode,time_ms,state,pac_applied,epsilon,dp_delta,dp_sum_bound
 ```
 
 | Column | Description |
 |--------|-------------|
-| `query` | Query name (derived from filename, e.g. `10001`) |
-| `baseline_state` | Baseline result: `success`, `error`, `timeout`, or `crash` |
-| `baseline_time_ms` | Baseline execution time in milliseconds |
-| `baseline_rows` | Number of result rows (baseline) |
-| `pac_state` | PAC result: `success`, `error`, `timeout`, or `crash` |
-| `pac_time_ms` | PAC execution time in milliseconds |
-| `pac_rows` | Number of result rows (PAC) |
-| `pac_applied` | `yes` if EXPLAIN shows `pac_` functions, `no` otherwise |
-| `pac_error` | Error message for failed PAC queries |
+| `query_index` | Sorted query position |
+| `query` | Query name derived from filename |
+| `mode` | `DuckDB`, `SIMD-PAC`, or `dp_elastic` |
+| `time_ms` | Execution time in milliseconds |
+| `state` | `success`, `error`, `timeout`, or `crash` |
+| `pac_applied` | `true` if EXPLAIN shows `pac_` functions in PAC mode |
+| `epsilon` | DP epsilon for `dp_elastic` rows |
+| `dp_delta` | DP delta computed by `PRAGMA refresh_dp_stats(epsilon)` |
+| `dp_sum_bound` | DP SUM/AVG input bound |
 
 Default output paths:
 - TPC-H: `benchmark/sqlstorm/sqlstorm_benchmark_results_tpch_sf{SF}.csv`
@@ -125,7 +128,7 @@ Default output paths:
 The benchmark prints timestamped progress and summary statistics:
 
 ```
-[2026-02-18 14:30:00] SQLStorm benchmark (two-pass: baseline + PAC)
+[2026-02-18 14:30:00] SQLStorm benchmark (baseline + PAC + DP)
 [2026-02-18 14:30:00] Benchmark: both
 [2026-02-18 14:30:00] Timeout: 0.1s
 [2026-02-18 14:30:00] TPC-H scale factor: 1
