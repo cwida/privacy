@@ -18,7 +18,7 @@ jobs:
     with:
       duckdb_version: v1.5.0
       ci_tools_version: v1.5.0
-      extension_name: pac
+      extension_name: privacy
 
   code-quality-check:
     name: Code Quality Check
@@ -26,5 +26,5 @@ jobs:
     with:
       duckdb_version: v1.5.0
       ci_tools_version: v1.5.0
-      extension_name: pac
+      extension_name: privacy
       format_checks: 'format;tidy'
