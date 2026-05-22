@@ -487,7 +487,7 @@ string PrivacyExtension::Version() const {
 
 extern "C" {
 
-DUCKDB_CPP_EXTENSION_ENTRY(pac, loader) {
+DUCKDB_CPP_EXTENSION_ENTRY(privacy, loader) {
 	duckdb::LoadInternal(loader);
 }
 }
