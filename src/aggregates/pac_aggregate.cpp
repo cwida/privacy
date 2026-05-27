@@ -328,6 +328,34 @@ static uint64_t hash32_32(uint64_t num) {
 	return 0xAAAAAAAAAAAAAAAAULL; // 1010...10 pattern: exactly 32 bits set
 }
 
+static uint64_t hash_k_bits(uint64_t num, int target_bits) {
+	if (target_bits <= 0 || target_bits > 64) {
+		throw InvalidInputException("pac_hash: repair bit count must be between 1 and 64");
+	}
+	if (target_bits == 32) {
+		return hash32_32(num);
+	}
+	uint64_t out = 0;
+	uint64_t state = num ^ PAC_HASH_PRIME;
+	int pop = 0;
+	for (int round = 0; pop < target_bits && round < 256; round++) {
+		state = PAC_HASH_PRIME * (state ^ (PAC_HASH_PRIME + static_cast<uint64_t>(round)));
+		uint64_t mask = 1ULL << (state & 63);
+		if ((out & mask) == 0) {
+			out |= mask;
+			pop++;
+		}
+	}
+	for (int bit = 0; pop < target_bits && bit < 64; bit++) {
+		uint64_t mask = 1ULL << bit;
+		if ((out & mask) == 0) {
+			out |= mask;
+			pop++;
+		}
+	}
+	return out;
+}
+
 static unique_ptr<FunctionData> PacHashBind(ClientContext &ctx, ScalarFunction &, vector<unique_ptr<Expression>> &) {
 	double mi = GetPacMiFromSetting(ctx);
 	bool hash_repair = true;
@@ -338,26 +366,46 @@ static unique_ptr<FunctionData> PacHashBind(ClientContext &ctx, ScalarFunction &
 	return make_uniq<PacBindData>(ctx, mi, 1.0, 1.0, hash_repair);
 }
 
+static unique_ptr<FunctionData> PacHashRepairBind(ClientContext &ctx, ScalarFunction &,
+                                                  vector<unique_ptr<Expression>> &args) {
+	if (!args[1]->IsFoldable()) {
+		throw InvalidInputException("pac_hash: repair bit count must be a constant");
+	}
+	auto val = ExpressionExecutor::EvaluateScalar(ctx, *args[1]);
+	int bits = val.GetValue<int32_t>();
+	if (bits <= 0 || bits > 64) {
+		throw InvalidInputException("pac_hash: repair bit count must be between 1 and 64");
+	}
+	return make_uniq<PacBindData>(ctx, 0.0, 1.0, 1.0, true, bits);
+}
+
 static void PacHashFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &input = args.data[0];
 	auto count = args.size();
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
 	uint64_t query_hash = 0;
 	bool hash_repair = true;
+	int hash_repair_bits = 32;
 	if (function.bind_info) {
 		auto &bind_data = function.bind_info->Cast<PacBindData>();
 		query_hash = bind_data.query_hash;
 		hash_repair = bind_data.hash_repair;
+		hash_repair_bits = bind_data.hash_repair_bits;
 	}
-	UnaryExecutor::Execute<uint64_t, uint64_t>(input, result, count, [query_hash, hash_repair](uint64_t val) {
-		uint64_t xored = val ^ query_hash;
-		return hash_repair ? hash32_32(xored) : xored;
-	});
+	UnaryExecutor::Execute<uint64_t, uint64_t>(input, result, count,
+	                                           [query_hash, hash_repair, hash_repair_bits](uint64_t val) {
+		                                           uint64_t xored = val ^ query_hash;
+		                                           return hash_repair ? hash_k_bits(xored, hash_repair_bits) : xored;
+	                                           });
 }
 
 void RegisterPacHashFunction(ExtensionLoader &loader) {
-	ScalarFunction pac_hash("pac_hash", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacHashFunction, PacHashBind);
-	CreateScalarFunctionInfo info(pac_hash);
+	ScalarFunctionSet set("pac_hash");
+	set.AddFunction(
+	    ScalarFunction("pac_hash", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacHashFunction, PacHashBind));
+	set.AddFunction(ScalarFunction("pac_hash", {LogicalType::UBIGINT, LogicalType::INTEGER}, LogicalType::UBIGINT,
+	                               PacHashFunction, PacHashRepairBind));
+	CreateScalarFunctionInfo info(set);
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Hashes a privacy unit key for PAC subsample assignment.";
 	info.descriptions.push_back(std::move(desc));

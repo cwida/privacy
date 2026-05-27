@@ -8,7 +8,6 @@
 
 #include <cmath>
 #include <fstream>
-#include <unordered_set>
 
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/vector.hpp"
@@ -28,6 +27,7 @@
 #include "diff/pac_utility_diff.hpp"
 #include "query_processing/pac_topk_rewriter.hpp"
 #include "query_processing/pac_avg_rewriter.hpp"
+#include "utils/privacy_helpers.hpp"
 #include "privacy_debug.hpp"
 
 namespace duckdb {
@@ -73,19 +73,6 @@ static void ClearPrivacyMetadataPragma(ClientContext &context, const FunctionPar
 	}
 }
 
-static string QuoteIdentifier(const string &identifier) {
-	string result = "\"";
-	for (auto c : identifier) {
-		if (c == '"') {
-			result += "\"\"";
-		} else {
-			result += c;
-		}
-	}
-	result += "\"";
-	return result;
-}
-
 static void SetExtensionSetting(ClientContext &context, const string &name, const Value &value) {
 	auto &config = DBConfig::GetConfig(context);
 	ExtensionOption extension_option;
@@ -100,68 +87,13 @@ static void SetExtensionSetting(ClientContext &context, const string &name, cons
 	client_config.user_settings.SetUserSetting(extension_option.setting_index.GetIndex(), std::move(target_value));
 }
 
-static double ComputePrivacyUnitCardinality(ClientContext &context) {
-	auto table_names = PrivacyMetadataManager::Get().GetAllTableNames();
-	vector<std::pair<string, PrivacyTableMetadata>> pu_tables;
-	for (auto &table_name : table_names) {
-		auto *metadata = PrivacyMetadataManager::Get().GetTableMetadata(table_name);
-		if (metadata && metadata->is_privacy_unit) {
-			pu_tables.emplace_back(table_name, *metadata);
-		}
-	}
-	if (pu_tables.empty()) {
-		throw InvalidInputException("refresh_dp_stats: no privacy unit table is declared");
-	}
-	if (pu_tables.size() > 1) {
-		throw InvalidInputException("refresh_dp_stats: multiple privacy unit tables are declared; "
-		                            "automatic DP stats currently require exactly one privacy unit table");
-	}
-
-	const auto &table_name = pu_tables[0].first;
-	const auto &metadata = pu_tables[0].second;
-	if (metadata.primary_key_columns.empty()) {
-		throw InvalidInputException("refresh_dp_stats: privacy unit table '" + table_name +
-		                            "' has no PRIVACY_KEY columns");
-	}
-
-	string key_list;
-	for (idx_t i = 0; i < metadata.primary_key_columns.size(); i++) {
-		if (i > 0) {
-			key_list += ", ";
-		}
-		key_list += QuoteIdentifier(metadata.primary_key_columns[i]);
-	}
-
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
-	auto disable_rewrite = conn.Query("SET pac_rewrite=false");
-	if (!disable_rewrite || disable_rewrite->HasError()) {
-		throw InvalidInputException("refresh_dp_stats: failed to disable privacy rewrite while computing stats" +
-		                            (disable_rewrite ? (": " + disable_rewrite->GetError()) : ""));
-	}
-
-	string query = "SELECT COUNT(*) FROM (SELECT " + key_list + " FROM " + QuoteIdentifier(table_name) + " GROUP BY " +
-	               key_list + ")";
-	auto result = conn.Query(query);
-	if (!result || result->HasError()) {
-		throw InvalidInputException("refresh_dp_stats: failed to compute privacy unit cardinality for '" + table_name +
-		                            "'" + (result ? (": " + result->GetError()) : ""));
-	}
-	auto chunk = result->Fetch();
-	if (!chunk || chunk->size() == 0) {
-		return 0.0;
-	}
-	auto value = chunk->GetValue(0, 0);
-	return value.IsNull() ? 0.0 : value.DefaultCastAs(LogicalType::DOUBLE).GetValue<double>();
-}
-
 static void RefreshDPStatsPragma(ClientContext &context, const FunctionParameters &parameters) {
 	double epsilon = parameters.values[0].GetValue<double>();
 	if (epsilon <= 0.0 || !std::isfinite(epsilon)) {
 		throw InvalidInputException("refresh_dp_stats: epsilon must be a positive finite number");
 	}
 
-	double n = ComputePrivacyUnitCardinality(context);
+	double n = ComputePrivacyUnitCardinality(context, "refresh_dp_stats");
 	if (n <= 1.0 || !std::isfinite(n)) {
 		throw InvalidInputException("refresh_dp_stats: privacy unit cardinality must be greater than 1");
 	}
@@ -308,6 +240,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("privacy_mode",
 	                             "Privacy mechanism: 'pac' (default) or 'dp_elastic' for elastic-sensitivity DP",
 	                             LogicalType::VARCHAR, Value("pac"));
+	db.config.AddExtensionOption("dp_strategy",
+	                             "DP strategy when privacy_mode='dp_elastic': 'elastic' (default) or 'sample_median'",
+	                             LogicalType::VARCHAR, Value("elastic"));
 	// Differential privacy budget (ε), used only when privacy_mode = 'dp_elastic'
 	db.config.AddExtensionOption("dp_epsilon", "Differential privacy budget (used when privacy_mode = 'dp_elastic')",
 	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));

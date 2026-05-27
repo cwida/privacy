@@ -1,0 +1,158 @@
+# name: test/sql/dp_sample_median.test
+# description: Smooth sample-median DP strategy over PAC counter machinery
+# group: [sql]
+
+require privacy
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET privacy_seed = 42;
+
+statement ok
+SET threads = 1;
+
+query I
+SELECT current_setting('dp_strategy');
+----
+elastic
+
+statement ok
+SET dp_strategy = 'sample_median';
+
+query I
+SELECT current_setting('dp_strategy');
+----
+sample_median
+
+# The DP strategy uses the generalized pac_hash repair path: exactly 8 of 64 bits.
+query I
+SELECT bit_count(pac_hash(hash(123), 8));
+----
+8
+
+# The existing PAC repair behavior remains available.
+statement ok
+SET pac_hash_repair = true;
+
+query I
+SELECT bit_count(pac_hash(hash(123)));
+----
+32
+
+statement ok
+CREATE TABLE users(id INTEGER, v INTEGER);
+
+statement ok
+INSERT INTO users SELECT i, i FROM range(1, 101) t(i);
+
+statement ok
+ALTER TABLE users ADD PRIVACY_KEY (id);
+
+statement ok
+ALTER TABLE users SET PU;
+
+statement ok
+SET privacy_mode = 'dp_elastic';
+
+statement ok
+SET dp_epsilon = 1.0;
+
+statement ok
+SET dp_delta = 1e-6;
+
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET pac_rewrite = false;
+
+query I
+SELECT CAST(dp_smooth_median_noise(pac_count(pac_hash(hash(id), 8)), 1.0, 1e-6, 8, 0.0, 800.0) AS BIGINT) AS v
+FROM users;
+----
+96
+
+statement ok
+SET pac_rewrite = true;
+
+query I
+SELECT COUNT(*) FROM users;
+----
+96
+
+statement error
+SELECT SUM(v) FROM users;
+----
+dp_sum_bound must be set
+
+statement ok
+SET dp_sum_bound = 10.0;
+
+statement ok
+SET pac_rewrite = false;
+
+query I
+SELECT CAST(dp_smooth_median_noise(pac_sum(pac_hash(hash(id), 8), greatest(least(v::DOUBLE, 10.0), -10.0)::INTEGER),
+                                   1.0, 1e-6, 8, -8000.0, 8000.0) AS HUGEINT) AS v
+FROM users;
+----
+904
+
+statement ok
+SET pac_rewrite = true;
+
+query I
+SELECT SUM(v) FROM users;
+----
+904
+
+statement ok
+SET privacy_noise = true;
+
+query I
+SELECT COUNT(*) IS NOT NULL FROM users;
+----
+true
+
+statement error
+SELECT AVG(v) FROM users;
+----
+AVG is not supported
+
+# One-hop PRIVACY_LINK chains use the FK as the PU sample key.
+statement ok
+SET privacy_noise = false;
+
+statement ok
+CREATE TABLE orders(oid INTEGER, uid INTEGER, amount INTEGER);
+
+statement ok
+INSERT INTO orders SELECT i, 1 + (i % 100), i % 7 FROM range(1, 501) t(i);
+
+statement ok
+ALTER TABLE orders ADD PRIVACY_KEY (oid);
+
+statement ok
+ALTER TABLE orders ADD PRIVACY_LINK (uid) REFERENCES users(id);
+
+statement ok
+SET pac_rewrite = false;
+
+query I
+SELECT CAST(dp_smooth_median_noise(pac_count(pac_hash(hash(uid), 8)), 1.0, 1e-6, 8, 0.0, 4000.0) AS BIGINT) AS v
+FROM orders;
+----
+480
+
+statement ok
+SET pac_rewrite = true;
+
+query I
+SELECT COUNT(*) FROM orders;
+----
+480
+
+statement ok
+SET dp_strategy = 'elastic';
