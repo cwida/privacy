@@ -582,15 +582,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 			// set replan flag for duration of compilation
 			ReplanGuard scoped2(pac_info);
 			if (privacy_mode == "dp_elastic") {
-				string dp_strategy = GetDpStrategy(input.context);
-				if (dp_strategy == "elastic") {
-					CompileDPElasticQuery(check, input, target_plan, privacy_units, query_hash);
-				} else if (dp_strategy == "sample_median") {
-					CompileDPSampleMedianQuery(check, input, target_plan, privacy_units, query_hash);
-				} else {
-					throw InvalidInputException("dp_elastic: unsupported dp_strategy '" + dp_strategy +
-					                            "' (expected 'elastic' or 'sample_median')");
-				}
+				CompileDPElasticQuery(check, input, target_plan, privacy_units, query_hash);
 			} else {
 				CompilePacBitsliceQuery(check, input, target_plan, privacy_units, normalized, query_hash);
 			}

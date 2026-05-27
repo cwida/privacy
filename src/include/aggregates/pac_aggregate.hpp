@@ -187,7 +187,6 @@ struct PacBindData : public FunctionData {
 	uint64_t query_hash;      // derived from seed: used inside pac_hash() for XOR and as counter selector
 	double scale_divisor;     // for DECIMAL pac_avg: divide result by 10^scale (default 1.0)
 	bool hash_repair;         // if true, pac_hash() repairs hash to exactly 32 bits set
-	int hash_repair_bits;     // target popcount for pac_hash repair (32 for PAC, 8 for sample-median DP)
 	double utility_threshold; // z-score threshold for utility NULLing (NaN = disabled, any value = enabled)
 
 	// Persistent secret p-tracking: shared across all aggregates in the same query (same query_hash).
@@ -203,10 +202,10 @@ struct PacBindData : public FunctionData {
 	// Primary constructor - reads seed from privacy_seed setting, or uses query-id if not set.
 	// All aggregates in the same query get the same seed and query_hash.
 	explicit PacBindData(ClientContext &ctx, double mi_val, double correction_val = 1.0, double scale_div = 1.0,
-	                     bool hash_repair_val = false, int hash_repair_bits_val = 32)
+	                     bool hash_repair_val = false)
 	    : mi(mi_val), correction(correction_val), scale_divisor(scale_div), hash_repair(hash_repair_val),
-	      hash_repair_bits(hash_repair_bits_val), utility_threshold(std::numeric_limits<double>::quiet_NaN()),
-	      total_update_count(0), suspicious_count(0), nonsuspicious_count(0) {
+	      utility_threshold(std::numeric_limits<double>::quiet_NaN()), total_update_count(0), suspicious_count(0),
+	      nonsuspicious_count(0) {
 		// Read utility threshold: if set (non-null), enables probabilistic NULLing of low-SNR cells
 		Value ut_val;
 		if (ctx.TryGetCurrentSetting("privacy_min_group_count", ut_val) && !ut_val.IsNull()) {
@@ -247,7 +246,7 @@ struct PacBindData : public FunctionData {
 		auto &o = other.Cast<PacBindData>();
 		return mi == o.mi && correction == o.correction && seed == o.seed && query_hash == o.query_hash &&
 		       scale_divisor == o.scale_divisor && hash_repair == o.hash_repair &&
-		       hash_repair_bits == o.hash_repair_bits && utility_threshold == o.utility_threshold;
+		       utility_threshold == o.utility_threshold;
 	}
 };
 

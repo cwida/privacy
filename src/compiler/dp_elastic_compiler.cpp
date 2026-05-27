@@ -6,7 +6,6 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
-#include "duckdb/catalog/catalog_entry/scalar_function_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/exception.hpp"
@@ -34,9 +33,6 @@
 
 namespace duckdb {
 
-static constexpr int DP_SAMPLE_MEDIAN_COUNTERS = 64;
-static constexpr int DP_SAMPLE_MEDIAN_INCLUSIONS = 8;
-
 // ----------------------------------------------------------------------------
 // FK chain structure — ordered from most-distant non-PU table to PU
 // ----------------------------------------------------------------------------
@@ -59,15 +55,17 @@ struct AvgInfo {
 	idx_t count_pos; // position of the appended COUNT(*) in the rewritten aggregate
 };
 
-static unique_ptr<Expression> BindAggregateWithChildren(OptimizerExtensionInput &input, const string &func_name,
-                                                        vector<unique_ptr<Expression>> children,
-                                                        AggregateType aggr_type = AggregateType::NON_DISTINCT) {
+// Bind a plain aggregate function (sum, count_star, etc.) by name.
+static unique_ptr<Expression> BindAggregateLocal(OptimizerExtensionInput &input, const string &func_name,
+                                                 unique_ptr<Expression> arg,
+                                                 AggregateType aggr_type = AggregateType::NON_DISTINCT) {
 	FunctionBinder function_binder(input.context);
 	ErrorData error;
+	vector<unique_ptr<Expression>> children;
 	vector<LogicalType> arg_types;
-	arg_types.reserve(children.size());
-	for (auto &child : children) {
-		arg_types.push_back(child->return_type);
+	if (arg) {
+		arg_types.push_back(arg->return_type);
+		children.push_back(std::move(arg));
 	}
 	auto &entry = Catalog::GetSystemCatalog(input.context)
 	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, func_name);
@@ -77,17 +75,6 @@ static unique_ptr<Expression> BindAggregateWithChildren(OptimizerExtensionInput 
 	}
 	auto func = entry.functions.GetFunctionByOffset(best.GetIndex());
 	return function_binder.BindAggregateFunction(func, std::move(children), nullptr, aggr_type);
-}
-
-// Bind a plain aggregate function (sum, count_star, etc.) by name.
-static unique_ptr<Expression> BindAggregateLocal(OptimizerExtensionInput &input, const string &func_name,
-                                                 unique_ptr<Expression> arg,
-                                                 AggregateType aggr_type = AggregateType::NON_DISTINCT) {
-	vector<unique_ptr<Expression>> children;
-	if (arg) {
-		children.push_back(std::move(arg));
-	}
-	return BindAggregateWithChildren(input, func_name, std::move(children), aggr_type);
 }
 
 // Replace each AVG(x) with SUM(x) in-place and append a COUNT(*) at the end.
@@ -439,16 +426,6 @@ static double Sensitivity(const BoundAggregateExpression &aggr, double sum_bound
 	throw InternalException("dp_elastic: Sensitivity received unsupported '" + name + "'");
 }
 
-static double FullOutputCountBound(ClientContext &context, const DPFKChain &chain) {
-	double pu_count = ComputePrivacyUnitCardinality(context, "dp_elastic sample_median");
-	auto mf_values = CollectMfKValues(context, chain);
-	double multiplier = 1.0;
-	for (auto mf : mf_values) {
-		multiplier *= mf;
-	}
-	return pu_count * multiplier;
-}
-
 static LogicalGet *FindGetForTable(unique_ptr<LogicalOperator> &plan, const string &table_name) {
 	vector<LogicalGet *> gets;
 	CollectGetNodes(plan.get(), gets);
@@ -604,186 +581,6 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 	return {proj_idx, proj_ptr, std::move(proj_types)};
 }
 
-static unique_ptr<Expression> BindScalarWithChildren(OptimizerExtensionInput &input, const string &func_name,
-                                                     vector<unique_ptr<Expression>> children) {
-	vector<LogicalType> arg_types;
-	arg_types.reserve(children.size());
-	for (auto &child : children) {
-		arg_types.push_back(child->return_type);
-	}
-	auto &entry = Catalog::GetSystemCatalog(input.context)
-	                  .GetEntry<ScalarFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, func_name);
-	ErrorData error;
-	FunctionBinder function_binder(input.context);
-	auto best = function_binder.BindFunction(func_name, entry.functions, arg_types, error);
-	if (!best.IsValid()) {
-		throw InternalException("dp_elastic: failed to bind scalar function '" + func_name + "'");
-	}
-	auto func = entry.functions.GetFunctionByOffset(best.GetIndex());
-	auto bind_info = func.bind ? func.bind(input.context, func, children) : nullptr;
-	return make_uniq<BoundFunctionExpression>(func.return_type, func, std::move(children), std::move(bind_info));
-}
-
-static ColumnBinding InsertSampleMaskProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                                const PrivacyCompatibilityResult &check, const DPFKChain &chain) {
-	if (chain.tables.size() > 2) {
-		throw InvalidInputException("dp_elastic sample_median: only single-table PU queries and one-hop "
-		                            "PRIVACY_LINK chains are supported in v1");
-	}
-
-	auto *get = FindGetForTable(plan, chain.tables[0]);
-	if (!get) {
-		throw InternalException("dp_elastic sample_median: could not find table '" + chain.tables[0] + "'");
-	}
-
-	unique_ptr<Expression> hash_expr;
-	if (chain.tables.size() == 1) {
-		auto meta_it = check.table_metadata.find(chain.tables[0]);
-		if (meta_it == check.table_metadata.end() || meta_it->second.pks.empty()) {
-			throw InvalidInputException("dp_elastic sample_median: privacy unit table '" + chain.tables[0] +
-			                            "' has no PRIVACY_KEY columns");
-		}
-		hash_expr = BuildXorHashFromPKs(input, *get, meta_it->second.pks);
-	} else {
-		idx_t proj_idx = EnsureProjectedColumn(*get, chain.fk_cols[0]);
-		if (proj_idx == DConstants::INVALID_INDEX) {
-			throw InternalException("dp_elastic sample_median: failed to project FK column '" + chain.fk_cols[0] + "'");
-		}
-		auto col_index = get->GetColumnIds()[proj_idx];
-		auto col_type = get->GetColumnType(col_index);
-		auto fk_ref = make_uniq<BoundColumnRefExpression>(col_type, ColumnBinding(get->table_index, proj_idx));
-		hash_expr = input.optimizer.BindScalarFunction("hash", std::move(fk_ref));
-	}
-
-	auto bits_expr = make_uniq<BoundConstantExpression>(Value::INTEGER(DP_SAMPLE_MEDIAN_INCLUSIONS));
-	hash_expr = input.optimizer.BindScalarFunction("pac_hash", std::move(hash_expr), std::move(bits_expr));
-	hash_expr->alias = "dp_sample_pu";
-
-	vector<unique_ptr<LogicalOperator> *> get_nodes;
-	FindAllNodesByTableIndex(&plan, get->table_index, get_nodes);
-	if (get_nodes.empty()) {
-		throw InternalException("dp_elastic sample_median: could not locate source scan");
-	}
-	auto &get_slot = *get_nodes[0];
-	auto old_bindings = get_slot->GetColumnBindings();
-	idx_t num_get_cols = old_bindings.size();
-
-	idx_t proj_table_index = input.optimizer.binder.GenerateTableIndex();
-	vector<unique_ptr<Expression>> proj_expressions;
-	proj_expressions.reserve(num_get_cols + 1);
-	for (idx_t i = 0; i < num_get_cols; i++) {
-		proj_expressions.push_back(make_uniq<BoundColumnRefExpression>(get_slot->types[i], old_bindings[i]));
-	}
-	proj_expressions.push_back(std::move(hash_expr));
-
-	auto projection = make_uniq<LogicalProjection>(proj_table_index, std::move(proj_expressions));
-	projection->children.push_back(std::move(get_slot));
-	projection->ResolveOperatorTypes();
-	auto *proj_ptr = projection.get();
-	get_slot = std::move(projection);
-
-	ColumnBindingReplacer replacer;
-	for (idx_t i = 0; i < num_get_cols; i++) {
-		replacer.replacement_bindings.emplace_back(old_bindings[i], ColumnBinding(proj_table_index, i));
-	}
-	replacer.stop_operator = proj_ptr;
-	replacer.VisitOperator(*plan);
-
-	return ColumnBinding(proj_table_index, num_get_cols);
-}
-
-static void RewriteAggregatesToSampleCounters(OptimizerExtensionInput &input, LogicalAggregate *agg,
-                                              const ColumnBinding &sample_mask_binding, idx_t n_dp_aggs) {
-	for (idx_t ai = 0; ai < n_dp_aggs; ai++) {
-		auto &old_aggr = agg->expressions[ai]->Cast<BoundAggregateExpression>();
-		string name = old_aggr.function.name;
-		auto filter = std::move(old_aggr.filter);
-		vector<unique_ptr<Expression>> children;
-		children.push_back(make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, sample_mask_binding));
-		if (name == "count_star") {
-			agg->expressions[ai] = BindAggregateWithChildren(input, "pac_count", std::move(children));
-		} else if (name == "count") {
-			if (!old_aggr.children.empty()) {
-				children.push_back(std::move(old_aggr.children[0]));
-			}
-			agg->expressions[ai] = BindAggregateWithChildren(input, "pac_count", std::move(children));
-		} else if (name == "sum") {
-			children.push_back(std::move(old_aggr.children[0]));
-			agg->expressions[ai] = BindAggregateWithChildren(input, "pac_sum", std::move(children));
-		} else {
-			throw InvalidInputException("dp_elastic sample_median: only COUNT and SUM are supported (got '" + name +
-			                            "')");
-		}
-		agg->expressions[ai]->Cast<BoundAggregateExpression>().filter = std::move(filter);
-	}
-	agg->ResolveOperatorTypes();
-}
-
-static NoiseProjection WrapAggregateWithSmoothMedian(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                                     LogicalAggregate *agg, LogicalOperator *insert_above,
-                                                     const vector<LogicalType> &original_types,
-                                                     const vector<double> &epsilons, double delta,
-                                                     const vector<std::pair<double, double>> &ranges) {
-	idx_t n_groups = agg->groups.size();
-	idx_t n_aggs = original_types.size();
-	idx_t group_idx = agg->group_index;
-	idx_t agg_idx = agg->aggregate_index;
-	auto agg_types = agg->types;
-
-	vector<unique_ptr<Expression>> proj_exprs;
-	proj_exprs.reserve(n_groups + n_aggs);
-	for (idx_t gi = 0; gi < n_groups; gi++) {
-		proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(agg_types[gi], ColumnBinding(group_idx, gi)));
-	}
-
-	for (idx_t ai = 0; ai < n_aggs; ai++) {
-		auto counters_ref = make_uniq<BoundColumnRefExpression>(agg_types[n_groups + ai], ColumnBinding(agg_idx, ai));
-		auto epsilon_expr = make_uniq<BoundConstantExpression>(Value::DOUBLE(epsilons[ai]));
-		auto delta_expr = make_uniq<BoundConstantExpression>(Value::DOUBLE(delta));
-		auto affected_expr = make_uniq<BoundConstantExpression>(Value::INTEGER(DP_SAMPLE_MEDIAN_INCLUSIONS));
-		auto lower_expr = make_uniq<BoundConstantExpression>(Value::DOUBLE(ranges[ai].first));
-		auto upper_expr = make_uniq<BoundConstantExpression>(Value::DOUBLE(ranges[ai].second));
-		vector<unique_ptr<Expression>> finalizer_args;
-		finalizer_args.push_back(std::move(counters_ref));
-		finalizer_args.push_back(std::move(epsilon_expr));
-		finalizer_args.push_back(std::move(delta_expr));
-		finalizer_args.push_back(std::move(affected_expr));
-		finalizer_args.push_back(std::move(lower_expr));
-		finalizer_args.push_back(std::move(upper_expr));
-		unique_ptr<Expression> finalized =
-		    BindScalarWithChildren(input, "dp_smooth_median_noise", std::move(finalizer_args));
-		if (original_types[ai] != LogicalType::DOUBLE) {
-			finalized = BoundCastExpression::AddCastToType(input.context, std::move(finalized), original_types[ai]);
-		}
-		proj_exprs.push_back(std::move(finalized));
-	}
-
-	idx_t proj_idx = input.optimizer.binder.GenerateTableIndex();
-	auto projection = make_uniq<LogicalProjection>(proj_idx, std::move(proj_exprs));
-	auto *slot = FindSlotForOperator(plan, insert_above);
-	if (!slot) {
-		throw InternalException("dp_elastic sample_median: could not locate median insertion slot");
-	}
-	auto old_node = std::move(*slot);
-	projection->children.push_back(std::move(old_node));
-	projection->ResolveOperatorTypes();
-	auto *proj_ptr = projection.get();
-	auto proj_types = projection->types;
-	*slot = std::move(projection);
-
-	ColumnBindingReplacer replacer;
-	for (idx_t gi = 0; gi < n_groups; gi++) {
-		replacer.replacement_bindings.emplace_back(ColumnBinding(group_idx, gi), ColumnBinding(proj_idx, gi));
-	}
-	for (idx_t ai = 0; ai < n_aggs; ai++) {
-		replacer.replacement_bindings.emplace_back(ColumnBinding(agg_idx, ai), ColumnBinding(proj_idx, n_groups + ai));
-	}
-	replacer.stop_operator = proj_ptr;
-	replacer.VisitOperator(*plan);
-
-	return {proj_idx, proj_ptr, std::move(proj_types)};
-}
-
 // ----------------------------------------------------------------------------
 // AVG ratio projection — inserts a LogicalProjection above `insert_above` that
 // computes noised_SUM / max(1, noised_COUNT) for each AVG-rewritten position.
@@ -872,106 +669,6 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 // ----------------------------------------------------------------------------
 // Entry point
 // ----------------------------------------------------------------------------
-
-void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
-                                unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                                const string &query_hash) {
-	(void)query_hash;
-	PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] CompileDPSampleMedianQuery: start");
-
-	double epsilon = GetDpEpsilon(input.context, 1.0);
-	if (epsilon <= 0.0 || !std::isfinite(epsilon)) {
-		throw InvalidInputException("dp_elastic sample_median: dp_epsilon must be a positive finite number (got " +
-		                            std::to_string(epsilon) + ")");
-	}
-	double delta = 0.0;
-	if (!TryGetDpDelta(input.context, delta) || delta <= 0.0 || !std::isfinite(delta) || delta >= 0.5) {
-		throw InvalidInputException("dp_elastic sample_median: dp_delta must be set to a finite value in (0, 0.5)");
-	}
-
-	plan->ResolveOperatorTypes();
-	auto eligibility = CheckDPEligibility(plan, privacy_units, check);
-	auto *agg = eligibility.top_agg;
-
-	for (auto &expr : agg->expressions) {
-		auto &a = expr->Cast<BoundAggregateExpression>();
-		if (a.function.name == "avg") {
-			throw InvalidInputException("dp_elastic sample_median: AVG is not supported in v1");
-		}
-	}
-
-	idx_t n_groups = agg->groups.size();
-	(void)n_groups;
-
-	Value threshold_val;
-	double support_threshold = 0.0;
-	bool apply_support_filter =
-	    input.context.TryGetCurrentSetting("privacy_min_group_count", threshold_val) && !threshold_val.IsNull() &&
-	    (support_threshold = threshold_val.GetValue<double>()) > 0.0 && std::isfinite(support_threshold);
-	auto support_pos = AddSupportAggregate(input, plan, agg, eligibility.fk_chain, support_threshold);
-	idx_t n_dp_aggs = support_pos.IsValid() ? support_pos.GetIndex() : agg->expressions.size();
-	LogicalOperator *noise_anchor = agg;
-	if (apply_support_filter) {
-		noise_anchor = ApplySupportFilter(input, plan, agg, support_pos.GetIndex(), support_threshold);
-	}
-
-	vector<LogicalType> original_types;
-	vector<string> original_names;
-	original_types.reserve(n_dp_aggs);
-	original_names.reserve(n_dp_aggs);
-	for (idx_t ai = 0; ai < n_dp_aggs; ai++) {
-		auto &a = agg->expressions[ai]->Cast<BoundAggregateExpression>();
-		original_types.push_back(a.return_type);
-		original_names.push_back(a.function.name);
-	}
-
-	double sum_bound = 0.0;
-	bool has_sum = AggregateContainsSum(agg);
-	if (has_sum) {
-		if (!TryGetDpSumBound(input.context, sum_bound)) {
-			throw InvalidInputException(
-			    "dp_elastic sample_median: dp_sum_bound must be set for SUM aggregates (SET dp_sum_bound = <C>)");
-		}
-		if (sum_bound <= 0.0 || !std::isfinite(sum_bound)) {
-			throw InvalidInputException(
-			    "dp_elastic sample_median: dp_sum_bound must be a positive finite number (got " +
-			    std::to_string(sum_bound) + ")");
-		}
-		ClipSumInputs(input, agg, sum_bound);
-	}
-
-	double count_bound = FullOutputCountBound(input.context, eligibility.fk_chain);
-	double sample_scale =
-	    static_cast<double>(DP_SAMPLE_MEDIAN_COUNTERS) / static_cast<double>(DP_SAMPLE_MEDIAN_INCLUSIONS);
-	double scaled_count_bound = count_bound * sample_scale;
-
-	vector<std::pair<double, double>> ranges;
-	ranges.reserve(n_dp_aggs);
-	for (idx_t ai = 0; ai < n_dp_aggs; ai++) {
-		if (original_names[ai] == "sum") {
-			double bound = scaled_count_bound * sum_bound;
-			ranges.emplace_back(-bound, bound);
-		} else {
-			ranges.emplace_back(0.0, scaled_count_bound);
-		}
-	}
-
-	double k = static_cast<double>(n_dp_aggs);
-	vector<double> epsilons;
-	epsilons.reserve(n_dp_aggs);
-	for (idx_t ai = 0; ai < n_dp_aggs; ai++) {
-		epsilons.push_back(epsilon / k);
-	}
-
-	auto sample_mask_binding = InsertSampleMaskProjection(input, plan, check, eligibility.fk_chain);
-	RewriteAggregatesToSampleCounters(input, agg, sample_mask_binding, n_dp_aggs);
-	WrapAggregateWithSmoothMedian(input, plan, agg, noise_anchor, original_types, epsilons, delta, ranges);
-
-#if PRIVACY_DEBUG
-	PRIVACY_DEBUG_PRINT("=== PLAN AFTER DP_SAMPLE_MEDIAN TRANSFORMATION ===");
-	plan->Print();
-#endif
-}
 
 void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
                            unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,

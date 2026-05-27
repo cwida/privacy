@@ -31,9 +31,7 @@
 #include <queue>
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
-#include "duckdb/main/connection.hpp"
 #include "core/privacy_optimizer.hpp"
-#include "metadata/privacy_metadata_manager.hpp"
 #include "parser/privacy_parser.hpp"
 #include "duckdb/planner/binder.hpp"
 
@@ -576,40 +574,19 @@ bool IsPacNoiseEnabled(ClientContext &context, bool default_value) {
 	}
 }
 
-string QuoteIdentifier(const string &identifier) {
-	string result = "\"";
-	for (auto c : identifier) {
-		if (c == '"') {
-			result += "\"\"";
-		} else {
-			result += c;
-		}
-	}
-	result += "\"";
-	return result;
-}
-
-string GetStringSettingNormalized(ClientContext &context, const string &setting_name, const string &default_value) {
+string GetPrivacyMode(ClientContext &context) {
 	Value v;
-	if (!context.TryGetCurrentSetting(setting_name, v) || v.IsNull()) {
-		return default_value;
+	if (!context.TryGetCurrentSetting("privacy_mode", v) || v.IsNull()) {
+		return "pac";
 	}
 	string s = v.ToString();
 	std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
 	auto begin = s.find_first_not_of(" \t\n\r");
 	auto end = s.find_last_not_of(" \t\n\r");
 	if (begin == string::npos) {
-		return default_value;
+		return "pac";
 	}
 	return s.substr(begin, end - begin + 1);
-}
-
-string GetPrivacyMode(ClientContext &context) {
-	return GetStringSettingNormalized(context, "privacy_mode", "pac");
-}
-
-string GetDpStrategy(ClientContext &context) {
-	return GetStringSettingNormalized(context, "dp_strategy", "elastic");
 }
 
 double GetDpEpsilon(ClientContext &context, double default_value) {
@@ -650,69 +627,24 @@ bool TryGetDpDelta(ClientContext &context, double &out) {
 	}
 }
 
-double ComputePrivacyUnitCardinality(ClientContext &context, const string &error_prefix) {
-	auto table_names = PrivacyMetadataManager::Get().GetAllTableNames();
-	vector<std::pair<string, PrivacyTableMetadata>> pu_tables;
-	for (auto &table_name : table_names) {
-		auto *metadata = PrivacyMetadataManager::Get().GetTableMetadata(table_name);
-		if (metadata && metadata->is_privacy_unit) {
-			pu_tables.emplace_back(table_name, *metadata);
-		}
-	}
-	if (pu_tables.empty()) {
-		throw InvalidInputException(error_prefix + ": no privacy unit table is declared");
-	}
-	if (pu_tables.size() > 1) {
-		throw InvalidInputException(error_prefix +
-		                            ": multiple privacy unit tables are declared; "
-		                            "automatic DP stats currently require exactly one privacy unit table");
-	}
-
-	const auto &table_name = pu_tables[0].first;
-	const auto &metadata = pu_tables[0].second;
-	if (metadata.primary_key_columns.empty()) {
-		throw InvalidInputException(error_prefix + ": privacy unit table '" + table_name +
-		                            "' has no PRIVACY_KEY columns");
-	}
-
-	string key_list;
-	for (idx_t i = 0; i < metadata.primary_key_columns.size(); i++) {
-		if (i > 0) {
-			key_list += ", ";
-		}
-		key_list += QuoteIdentifier(metadata.primary_key_columns[i]);
-	}
-
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
-	auto disable_rewrite = conn.Query("SET pac_rewrite=false");
-	if (!disable_rewrite || disable_rewrite->HasError()) {
-		throw InvalidInputException(error_prefix + ": failed to disable privacy rewrite while computing stats" +
-		                            (disable_rewrite ? (": " + disable_rewrite->GetError()) : ""));
-	}
-
-	string query = "SELECT COUNT(*) FROM (SELECT " + key_list + " FROM " + QuoteIdentifier(table_name) + " GROUP BY " +
-	               key_list + ")";
-	auto result = conn.Query(query);
-	if (!result || result->HasError()) {
-		throw InvalidInputException(error_prefix + ": failed to compute privacy unit cardinality for '" + table_name +
-		                            "'" + (result ? (": " + result->GetError()) : ""));
-	}
-	auto chunk = result->Fetch();
-	if (!chunk || chunk->size() == 0) {
-		return 0.0;
-	}
-	auto value = chunk->GetValue(0, 0);
-	return value.IsNull() ? 0.0 : value.DefaultCastAs(LogicalType::DOUBLE).GetValue<double>();
-}
-
 // Add implementation for GetPacCompileMethod
 string GetPacCompileMethod(ClientContext &context, const string &default_method) {
-	string s = GetStringSettingNormalized(context, "pac_compile_method", default_method);
-	if (s == "standard" || s == "bitslice") {
-		return s;
+	Value v;
+	context.TryGetCurrentSetting("pac_compile_method", v);
+	if (v.IsNull()) {
+		return default_method;
 	}
-	return default_method;
+	try {
+		string s = v.ToString();
+		std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
+		if (s == "standard" || s == "bitslice") {
+			return s;
+		}
+		// fallback
+		return default_method;
+	} catch (...) {
+		return default_method;
+	}
 }
 
 // Helper to safely retrieve boolean settings with defaults
