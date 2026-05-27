@@ -7,6 +7,18 @@
 #include <atomic>
 
 namespace duckdb {
+struct PacIdentityHash {
+	static inline uint64_t Transform(uint64_t key_hash) {
+		return key_hash;
+	}
+};
+
+struct PacDpSampleHash {
+	static inline uint64_t Transform(uint64_t key_hash) {
+		return DpSampleHash(key_hash);
+	}
+};
+
 // ============================================================================
 // State type selection for scatter updates
 // ============================================================================
@@ -231,7 +243,7 @@ inline void PacSumUpdateOne(PacSumIntStateWrapper<SIGNED> &agg, uint64_t key_has
 #endif // PAC_NOBUFFERING
 
 // PacSumUpdate - unified for both int and double states
-template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
+template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE, class HASH_TRANSFORM = PacIdentityHash>
 static void PacSumUpdate(Vector inputs[], State &state, idx_t count, ArenaAllocator &allocator) {
 	UnifiedVectorFormat hash_data, value_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
@@ -243,7 +255,8 @@ static void PacSumUpdate(Vector inputs[], State &state, idx_t count, ArenaAlloca
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
-			PacSumUpdateOne<SIGNED>(state, hashes[h_idx], ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
+			PacSumUpdateOne<SIGNED>(state, HASH_TRANSFORM::Transform(hashes[h_idx]),
+			                        ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 		}
 	} else {
 		for (idx_t i = 0; i < count; i++) {
@@ -252,12 +265,13 @@ static void PacSumUpdate(Vector inputs[], State &state, idx_t count, ArenaAlloca
 			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 				continue;
 			}
-			PacSumUpdateOne<SIGNED>(state, hashes[h_idx], ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
+			PacSumUpdateOne<SIGNED>(state, HASH_TRANSFORM::Transform(hashes[h_idx]),
+			                        ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 		}
 	}
 }
 
-template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
+template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE, class HASH_TRANSFORM = PacIdentityHash>
 static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator) {
 	UnifiedVectorFormat hash_data, value_data, sdata;
 	inputs[0].ToUnifiedFormat(count, hash_data);
@@ -275,7 +289,8 @@ static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, Ar
 		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 			continue; // ignore NULLs
 		}
-		PacSumUpdateOne<SIGNED>(*state, hashes[h_idx], ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
+		PacSumUpdateOne<SIGNED>(*state, HASH_TRANSFORM::Transform(hashes[h_idx]),
+		                        ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 	}
 }
 
@@ -539,6 +554,19 @@ void PacSumScatterUpdateDouble(Vector inputs[], AggregateInputData &aggr_input_d
 	PacSumScatterUpdate<ScatterDoubleState, true, double, double>(inputs, states, count, aggr_input_data.allocator);
 }
 
+static void DpSampleSumUpdateDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, data_ptr_t state_p,
+                                    idx_t count) {
+	auto &state = *reinterpret_cast<ScatterDoubleState *>(state_p);
+	PacSumUpdate<ScatterDoubleState, true, double, double, PacDpSampleHash>(inputs, state, count,
+	                                                                        aggr_input_data.allocator);
+}
+
+static void DpSampleSumScatterUpdateDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,
+                                           idx_t count) {
+	PacSumScatterUpdate<ScatterDoubleState, true, double, double, PacDpSampleHash>(inputs, states, count,
+	                                                                               aggr_input_data.allocator);
+}
+
 // instantiate Combine methods
 void PacSumCombineSigned(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
 	PacSumCombineInt<true>(src, dst, count, aggr.allocator);
@@ -574,6 +602,11 @@ static unique_ptr<FunctionData> PacBindWithScaleDivisor(ClientContext &ctx, vect
 unique_ptr<FunctionData> // Bind function for pac_sum with optional mi parameter (must be constant)
 PacSumBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expression>> &args) {
 	return PacBindWithScaleDivisor(ctx, args, 1.0); // scale_divisor=1.0 for sum
+}
+
+static unique_ptr<FunctionData> DpSampleSumBind(ClientContext &ctx, AggregateFunction &,
+                                                vector<unique_ptr<Expression>> &) {
+	return make_uniq<PacBindData>(ctx, 0.0, 1.0, 1.0, false);
 }
 
 idx_t PacSumIntStateSize(const AggregateFunction &) {
@@ -729,11 +762,14 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 // it returns all 64 counters so the outer query can evaluate the comparison
 // against all subsamples and produce a mask.
 
+enum class PacSumCountersFinalizeMode : uint8_t { PAC, DP_SAMPLE };
+
 // FinalizeCounters for pac_sum_counters.
 // Returns LIST<DOUBLE> with exactly 64 elements (no NULLs).
 // Position j is 0 if key_hash bit j is 0, otherwise value * 2 (to compensate for 50% sampling).
-template <class State, bool SIGNED>
-void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
+template <class State, bool SIGNED, PacSumCountersFinalizeMode MODE>
+static void PacSumAvgFinalizeCountersInternal(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                              idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<State *>(states);
 
 	// Result is LIST<DOUBLE>
@@ -749,6 +785,7 @@ void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector
 
 	// correction factor for value scaling
 	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
+	bool dp_sample = MODE == PacSumCountersFinalizeMode::DP_SAMPLE;
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -782,19 +819,29 @@ void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector
 #endif
 		}
 
-		CheckPacSampleDiversity(key_hash, buf, update_count, "pac_noised_sum", input.bind_data->Cast<PacBindData>());
+		if (!dp_sample) {
+			CheckPacSampleDiversity(key_hash, buf, update_count, "pac_noised_sum",
+			                        input.bind_data->Cast<PacBindData>());
+		}
 
-		// Copy counters to list: 0 where key_hash bit is 0, value * 2 otherwise
-		// pac_sum_counters needs 2x compensation to account for ~50% of values in each counter
+		// PAC counters need 2x compensation for 50% sampling; DP sample counters use their own lane probability.
 		idx_t base = i * 64;
 		for (int j = 0; j < 64; j++) {
-			if ((key_hash >> j) & 1ULL) {
+			if (dp_sample) {
+				child_data[base + j] = static_cast<PAC_FLOAT>(buf[j] * DP_SAMPLE_RESCALE);
+			} else if ((key_hash >> j) & 1ULL) {
 				child_data[base + j] = static_cast<PAC_FLOAT>(buf[j] * 2.0 * correction);
 			} else {
 				child_data[base + j] = 0.0; // 0 for positions not sampled
 			}
 		}
 	}
+}
+
+template <class State, bool SIGNED>
+void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
+	PacSumAvgFinalizeCountersInternal<State, SIGNED, PacSumCountersFinalizeMode::PAC>(states, input, result, count,
+	                                                                                  offset);
 }
 
 // Instantiate counter finalize methods for pac_sum_counters
@@ -809,6 +856,11 @@ static void PacSumFinalizeCountersUnsigned(Vector &states, AggregateInputData &i
 static void PacSumFinalizeCountersDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
                                          idx_t offset) {
 	PacSumAvgFinalizeCounters<ScatterDoubleState, true>(states, input, result, count, offset);
+}
+static void DpSampleSumFinalizeCountersDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                              idx_t offset) {
+	PacSumAvgFinalizeCountersInternal<ScatterDoubleState, true, PacSumCountersFinalizeMode::DP_SAMPLE>(
+	    states, input, result, count, offset);
 }
 
 // Helper to register both 2-param and 3-param versions for pac_sum_counters
@@ -884,6 +936,21 @@ void RegisterPacSumCountersFunctions(ExtensionLoader &loader) {
 	counters_desc.description = "[INTERNAL] Returns 64 PAC subsample counters as LIST for categorical queries.";
 	counters_info.descriptions.push_back(std::move(counters_desc));
 	loader.RegisterFunction(std::move(counters_info));
+}
+
+void RegisterDpSampleSumFunctions(ExtensionLoader &loader) {
+	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+	AggregateFunctionSet set("dp_sample_sum");
+	set.AddFunction(AggregateFunction("dp_sample_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE}, list_type,
+	                                  PacSumDoubleStateSize, PacSumDoubleInitialize, DpSampleSumScatterUpdateDouble,
+	                                  PacSumCombineDoubleWrapper, DpSampleSumFinalizeCountersDouble,
+	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, DpSampleSumUpdateDouble,
+	                                  DpSampleSumBind));
+	CreateAggregateFunctionInfo info(set);
+	FunctionDescription desc;
+	desc.description = "[INTERNAL] Returns 64 sample-median DP counters for SUM-like values.";
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
 }
 
 } // namespace duckdb

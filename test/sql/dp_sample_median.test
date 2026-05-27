@@ -1,0 +1,152 @@
+# name: test/sql/dp_sample_median.test
+# description: DP sample-median strategy using PAC-style sample counters and smooth clipping
+# group: [sql]
+
+require privacy
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET privacy_seed = 42;
+
+statement ok
+SET privacy_mode = 'dp_elastic';
+
+statement ok
+SET dp_strategy = 'sample_median';
+
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET dp_epsilon = 1.0;
+
+statement ok
+SET dp_delta = 1e-6;
+
+query I
+SELECT current_setting('dp_strategy');
+----
+sample_median
+
+statement ok
+CREATE TABLE users AS SELECT i AS uid FROM range(1, 1001) t(i);
+
+statement ok
+CREATE TABLE events AS
+SELECT uid,
+       CASE WHEN uid % 2 = 0 THEN 'even' ELSE 'odd' END AS segment,
+       1.0::DOUBLE AS v
+FROM users;
+
+statement ok
+ALTER TABLE users ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE users SET PU;
+
+statement ok
+ALTER TABLE events ADD PRIVACY_LINK (uid) REFERENCES users(uid);
+
+# COUNT uses the 8-of-64 sample mask and median release. With noise disabled,
+# it is deterministic but still an estimator, not the exact count.
+query I
+SELECT COUNT(*) BETWEEN 900 AND 1100 FROM events;
+----
+true
+
+query II
+SELECT segment, COUNT(*) BETWEEN 450 AND 550
+FROM events
+GROUP BY segment
+ORDER BY segment;
+----
+even	true
+odd	true
+
+query I
+SELECT typeof(COUNT(*)) FROM events;
+----
+BIGINT
+
+# SUM requires both the per-tuple DP bound and the smooth clipping support threshold.
+statement ok
+RESET dp_sum_bound;
+
+statement error
+SELECT SUM(v) FROM events;
+----
+dp_sum_bound
+
+statement ok
+SET dp_sum_bound = 1.0;
+
+statement ok
+SET pac_clip_support = 0;
+
+statement error
+SELECT SUM(v) FROM events;
+----
+pac_clip_support
+
+statement ok
+SET pac_clip_support = 1;
+
+query I
+SELECT SUM(v) BETWEEN 900.0 AND 1100.0 FROM events;
+----
+true
+
+# Parallel execution exercises aggregate combine/finalize with buffered sample hashes.
+statement ok
+SET threads = 4;
+
+query I
+SELECT COUNT(*) BETWEEN 900 AND 1100 FROM events;
+----
+true
+
+query I
+SELECT SUM(v) BETWEEN 900.0 AND 1100.0 FROM events;
+----
+true
+
+statement ok
+SET threads = 1;
+
+query II
+SELECT segment, SUM(v) BETWEEN 450.0 AND 550.0
+FROM events
+GROUP BY segment
+ORDER BY segment;
+----
+even	true
+odd	true
+
+query I
+SELECT typeof(SUM(v)) FROM events;
+----
+DOUBLE
+
+# Group suppression uses the lower aggregate's one-row-per-PU shape, not per-lane support counts.
+statement ok
+SET privacy_min_group_count = 600;
+
+query II
+SELECT segment, COUNT(*) FROM events GROUP BY segment ORDER BY segment;
+----
+
+statement ok
+SET privacy_min_group_count = NULL;
+
+statement error
+SELECT AVG(v) FROM events;
+----
+AVG is not supported
+
+statement ok
+SET dp_strategy = 'elastic';
