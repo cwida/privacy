@@ -336,14 +336,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "privacy_diffcols",
 	    "Measure utility: specify number of key columns and optional output path (e.g. '2:out.csv')",
 	    LogicalType::VARCHAR);
-	// Utility threshold: probabilistically NULL cells where |noised_value| / noise_std_dev < threshold.
-	// Z-score threshold for utility NULLing: NULLs cells whose signal-to-noise ratio is below threshold.
-	// Uses a sigmoid P(keep) = 1/(1+exp(-3*(z - threshold))) for smooth probabilistic NULLing.
-	// This is safe post-processing of the already-noised output (data processing inequality).
-	// Default: NULL (disabled). Set to e.g. 4.0 to enable (~20% expected relative error cutoff).
+	// Minimum support threshold. In dp_elastic mode this suppresses groups before value noise
+	// unless they have at least this many contributing privacy units.
+	// PAC aggregate functions still interpret this as their low-SNR utility NULLing threshold.
 	db.config.AddExtensionOption("privacy_min_group_count",
-	                             "Z-score threshold for utility NULLing: NULL cells with |value|/noise_std < threshold "
-	                             "(default: NULL = disabled, set to e.g. 4 to enable)",
+	                             "Minimum privacy-unit support threshold for dp_elastic groups. "
+	                             "PAC uses this setting as its low-SNR utility NULLing threshold. NULL disables.",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
 
 	// ---- Internal settings ----

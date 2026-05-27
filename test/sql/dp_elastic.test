@@ -805,40 +805,88 @@ statement ok
 SET privacy_noise = true;
 
 # ---------------------------------------------------------------------------
-# Phase F: GROUP BY + τ-thresholding (privacy_min_group_count)
+# Phase F: GROUP BY + pre-noise support threshold (privacy_min_group_count)
 # ---------------------------------------------------------------------------
-# orders: amount=(i%7)*1.0 → 7 groups (0..6), ~71-72 rows each.
-# ES = mf_K(orders→u) = 5; scale = 5/ε = 5.
-# suppress_bound = threshold · √2 · scale.
-# A group survives iff |noised_count| ≥ suppress_bound.
+# orders: amount=(i%7)*1.0 → 7 groups (0..6). Support is distinct uid
+# per group, computed before value noise. The internal support column is not
+# returned to the user.
 # ---------------------------------------------------------------------------
 
 statement ok
 SET dp_epsilon = 1.0;
+
+statement ok
 RESET dp_sum_bound;
 
-# Very high threshold: suppress_bound = 1000000·√2·5 >> ~72 → all 7 groups dropped
 statement ok
-SET privacy_min_group_count = 1000000;
+SET privacy_noise = false;
+
+# Scalar aggregate: 100 PUs, so threshold 101 suppresses the single row
+statement ok
+SET privacy_min_group_count = 101;
+
+query I
+SELECT COUNT(*) FROM u;
+----
+
+# Threshold 100 keeps the scalar aggregate
+statement ok
+SET privacy_min_group_count = 100;
+
+query I
+SELECT COUNT(*) FROM u;
+----
+100
+
+# Grouped FK query: each amount group has fewer than 101 distinct users, so all groups drop
+statement ok
+SET privacy_min_group_count = 101;
 
 query II rowsort
 SELECT CAST(amount AS INTEGER), COUNT(*) FROM orders GROUP BY CAST(amount AS INTEGER);
 ----
 
-# Very low threshold: suppress_bound ≈ 0.007 << ~72 → all 7 groups survive
+# SUM/AVG also use the same pre-noise support gate
 statement ok
-SET privacy_min_group_count = 0.001;
+SET dp_sum_bound = 10.0;
+
+query III rowsort
+SELECT CAST(amount AS INTEGER), SUM(amount), AVG(amount)
+FROM orders GROUP BY CAST(amount AS INTEGER);
+----
+
+# Low threshold keeps all 7 groups and does not expose the support column
+statement ok
+SET privacy_min_group_count = 1;
 
 query II rowsort
-SELECT CAST(amount AS INTEGER), COUNT(*) IS NOT NULL FROM orders GROUP BY CAST(amount AS INTEGER);
+SELECT CAST(amount AS INTEGER), COUNT(*) FROM orders GROUP BY CAST(amount AS INTEGER);
 ----
-0	true
-1	true
-2	true
-3	true
-4	true
-5	true
-6	true
+0	72
+1	72
+2	72
+3	71
+4	71
+5	71
+6	71
+
+query III rowsort
+SELECT CAST(amount AS INTEGER), SUM(amount), AVG(amount)
+FROM orders GROUP BY CAST(amount AS INTEGER);
+----
+0	0.0	0.0
+1	72.0	1.0
+2	144.0	2.0
+3	213.0	3.0
+4	284.0	4.0
+5	355.0	5.0
+6	426.0	6.0
 
 statement ok
 RESET privacy_min_group_count;
+
+statement ok
+RESET dp_sum_bound;
+
+statement ok
+SET privacy_noise = true;
