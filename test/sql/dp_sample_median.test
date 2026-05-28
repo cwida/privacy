@@ -33,6 +33,27 @@ SELECT current_setting('dp_strategy');
 ----
 sample_median
 
+# Smooth sensitivity treats affected as a sample-aggregate step size. One PU can
+# affect eight sample lanes, so an eight-lane median jump must be charged at
+# distance 0, not exponentially decayed as eight separate PU changes.
+statement ok
+SET privacy_noise = true;
+
+query I
+WITH vals AS (
+    SELECT CASE WHEN i < 39 THEN 0.0::FLOAT ELSE 100000.0::FLOAT END AS v
+    FROM range(64) t(i)
+), counters AS (
+    SELECT list(v ORDER BY v) AS l FROM vals
+)
+SELECT abs(dp_smooth_median_noise(l, 10.0, 1e-6, 8, 0.0, 100000.0)) > 10000.0
+FROM counters;
+----
+true
+
+statement ok
+SET privacy_noise = false;
+
 statement ok
 CREATE TABLE users AS SELECT i AS uid FROM range(1, 1001) t(i);
 

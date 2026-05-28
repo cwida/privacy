@@ -63,17 +63,27 @@ static double LaplaceNoise(double scale, uint64_t seed) {
 	return -scale * sign * std::log(std::max(1e-300, 1.0 - 2.0 * std::abs(u)));
 }
 
-static double SmoothMedianSensitivity(const std::array<double, 64> &values, double lower, double upper, int affected,
-                                      double beta) {
-	int median_idx = 31;
+static double MedianLocalSensitivity(const std::array<double, 64> &values, double lower, double upper,
+                                     int changed_lanes) {
+	const int median_idx = 31;
+	int lo_idx = median_idx - changed_lanes + 1;
+	int hi_idx = median_idx + changed_lanes;
+	double lo = lo_idx >= 0 ? values[lo_idx] : lower;
+	double hi = hi_idx < static_cast<int>(values.size()) ? values[hi_idx] : upper;
+	return std::max(0.0, hi - lo);
+}
+
+static double SmoothMedianSensitivity(const std::array<double, 64> &values, double lower, double upper,
+                                      int affected_lanes_per_pu, double beta) {
+	int step_size = std::max(1, affected_lanes_per_pu);
 	double smooth = 0.0;
-	for (int k = 0; k <= affected; k++) {
-		int lo_idx = median_idx - k;
-		int hi_idx = median_idx + 1 + k;
-		double lo = lo_idx >= 0 ? values[lo_idx] : lower;
-		double hi = hi_idx < static_cast<int>(values.size()) ? values[hi_idx] : upper;
-		double local = std::max(0.0, hi - lo);
-		smooth = std::max(smooth, local * std::exp(-beta * static_cast<double>(k)));
+	for (int distance = 0;; distance++) {
+		int changed_lanes = step_size * (distance + 1);
+		double local = MedianLocalSensitivity(values, lower, upper, changed_lanes);
+		smooth = std::max(smooth, local * std::exp(-beta * static_cast<double>(distance)));
+		if (changed_lanes >= static_cast<int>(values.size())) {
+			break;
+		}
 	}
 	return smooth;
 }
