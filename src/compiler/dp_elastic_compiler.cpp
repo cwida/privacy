@@ -811,13 +811,8 @@ static LogicalProjection *WrapSampleMedianProjection(OptimizerExtensionInput &in
 	return proj_ptr;
 }
 
-static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                           LogicalAggregate *agg, unique_ptr<Expression> pu_hash_expr) {
-	auto &binder = input.optimizer.binder;
-	idx_t lower_group_index = binder.GenerateTableIndex();
-	idx_t lower_agg_index = binder.GenerateTableIndex();
-	idx_t num_original_groups = agg->groups.size();
-
+static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, LogicalAggregate *agg,
+                                           unique_ptr<Expression> pu_hash_expr) {
 	vector<unique_ptr<Expression>> lower_expressions;
 	lower_expressions.reserve(agg->expressions.size());
 	for (auto &expr : agg->expressions) {
@@ -839,30 +834,17 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, uniqu
 		lower_expressions.back()->Cast<BoundAggregateExpression>().filter = aggr.filter ? aggr.filter->Copy() : nullptr;
 	}
 
-	auto lower_agg = make_uniq<LogicalAggregate>(lower_group_index, lower_agg_index, std::move(lower_expressions));
-	for (auto &g : agg->groups) {
-		lower_agg->groups.push_back(g->Copy());
-	}
-	lower_agg->groups.push_back(pu_hash_expr->Copy());
-	lower_agg->children.push_back(std::move(agg->children[0]));
-	lower_agg->ResolveOperatorTypes();
-
-	for (idx_t gi = 0; gi < num_original_groups; gi++) {
-		agg->groups[gi] =
-		    make_uniq<BoundColumnRefExpression>(lower_agg->types[gi], ColumnBinding(lower_group_index, gi));
-	}
-	auto pu_hash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT,
-	                                                       ColumnBinding(lower_group_index, num_original_groups));
+	auto pre_agg = InsertPuPreAggregation(input, agg, std::move(lower_expressions), std::move(pu_hash_expr));
 
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
 		auto &original = agg->expressions[ai]->Cast<BoundAggregateExpression>();
-		auto lower_type = lower_agg->types[num_original_groups + 1 + ai];
+		auto lower_type = pre_agg.lower_agg->types[pre_agg.num_original_groups + 1 + ai];
 		unique_ptr<Expression> lower_ref =
-		    make_uniq<BoundColumnRefExpression>(lower_type, ColumnBinding(lower_agg_index, ai));
+		    make_uniq<BoundColumnRefExpression>(lower_type, ColumnBinding(pre_agg.lower_agg_index, ai));
 		lower_ref = BoundCastExpression::AddCastToType(input.context, std::move(lower_ref), LogicalType::DOUBLE);
 
 		vector<unique_ptr<Expression>> children;
-		children.push_back(pu_hash_ref->Copy());
+		children.push_back(pre_agg.pu_hash_ref->Copy());
 		children.push_back(std::move(lower_ref));
 		if (original.function.name == "sum") {
 			agg->expressions[ai] = BindAggregateLocal(input, "dp_sample_clip_sum", std::move(children));
@@ -870,7 +852,6 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, uniqu
 			agg->expressions[ai] = BindAggregateLocal(input, "dp_sample_sum", std::move(children));
 		}
 	}
-	agg->children[0] = std::move(lower_agg);
 	agg->ResolveOperatorTypes();
 }
 
@@ -1050,7 +1031,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	}
 
 	auto pu_hash_expr = BuildSamplePuHashExpression(input, plan, eligibility.fk_chain, check);
-	RewriteAggregateToSampleMedian(input, plan, agg, std::move(pu_hash_expr));
+	RewriteAggregateToSampleMedian(input, agg, std::move(pu_hash_expr));
 
 	LogicalOperator *projection_anchor = agg;
 	Value threshold_val;
