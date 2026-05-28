@@ -776,7 +776,6 @@ static LogicalProjection *WrapSampleMedianProjection(OptimizerExtensionInput &in
 		    make_uniq<BoundColumnRefExpression>(agg->types[n_groups + ai], ColumnBinding(agg->aggregate_index, ai)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(epsilon / k)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(delta)));
-		children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(DP_SAMPLE_DRAWS)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(lowers[ai])));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(uppers[ai])));
 		unique_ptr<Expression> noised = BindScalarLocal(input, "dp_smooth_median_noise", std::move(children));

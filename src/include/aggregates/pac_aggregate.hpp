@@ -35,17 +35,26 @@
 #define PAC_MAGIC_HASH 2983746509182734091ULL
 
 constexpr int DP_SAMPLE_DRAWS = 8;
-constexpr int DP_SAMPLE_MAX_SHIFT = 42;
 constexpr double DP_SAMPLE_LANE_PROBABILITY = 0.11837573434899539; // 1 - (63/64)^8
 constexpr double DP_SAMPLE_RESCALE = 1.0 / DP_SAMPLE_LANE_PROBABILITY;
 
 static inline uint64_t DpSampleHash(uint64_t key_hash) {
-	uint64_t sample_hash = 0;
-	for (int shift = 0; shift <= DP_SAMPLE_MAX_SHIFT; shift += 6) {
-		sample_hash |= 1ULL << ((key_hash >> shift) & 63);
-	}
-	return sample_hash;
+	return (1ULL << ((key_hash >> 0) & 63)) | (1ULL << ((key_hash >> 6) & 63)) | (1ULL << ((key_hash >> 12) & 63)) |
+	       (1ULL << ((key_hash >> 18) & 63)) | (1ULL << ((key_hash >> 24) & 63)) | (1ULL << ((key_hash >> 30) & 63)) |
+	       (1ULL << ((key_hash >> 36) & 63)) | (1ULL << ((key_hash >> 42) & 63));
 }
+
+struct PacIdentityHash {
+	static inline uint64_t Transform(uint64_t key_hash) {
+		return key_hash;
+	}
+};
+
+struct PacDpSampleHash {
+	static inline uint64_t Transform(uint64_t key_hash) {
+		return DpSampleHash(key_hash);
+	}
+};
 
 // Cross-platform popcount for 64-bit integers
 // MSVC doesn't have __builtin_popcountll, so we need to handle it differently

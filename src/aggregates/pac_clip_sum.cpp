@@ -5,17 +5,6 @@
 #include <cmath>
 
 namespace duckdb {
-struct PacIdentityHash {
-	static inline uint64_t Transform(uint64_t key_hash) {
-		return key_hash;
-	}
-};
-
-struct PacDpSampleHash {
-	static inline uint64_t Transform(uint64_t key_hash) {
-		return DpSampleHash(key_hash);
-	}
-};
 
 // ============================================================================
 // Inner state update: add one unsigned value to the state

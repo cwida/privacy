@@ -105,13 +105,12 @@ static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state,
 
 	idx_t count = args.size();
 	auto &list_vec = args.data[0];
-	UnifiedVectorFormat list_data, epsilon_data, delta_data, affected_data, lower_data, upper_data;
+	UnifiedVectorFormat list_data, epsilon_data, delta_data, lower_data, upper_data;
 	list_vec.ToUnifiedFormat(count, list_data);
 	args.data[1].ToUnifiedFormat(count, epsilon_data);
 	args.data[2].ToUnifiedFormat(count, delta_data);
-	args.data[3].ToUnifiedFormat(count, affected_data);
-	args.data[4].ToUnifiedFormat(count, lower_data);
-	args.data[5].ToUnifiedFormat(count, upper_data);
+	args.data[3].ToUnifiedFormat(count, lower_data);
+	args.data[4].ToUnifiedFormat(count, upper_data);
 
 	auto &child_vec = ListVector::GetEntry(list_vec);
 	UnifiedVectorFormat child_data;
@@ -120,7 +119,6 @@ static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state,
 	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
 	auto epsilons = UnifiedVectorFormat::GetData<double>(epsilon_data);
 	auto deltas = UnifiedVectorFormat::GetData<double>(delta_data);
-	auto affected_values = UnifiedVectorFormat::GetData<int32_t>(affected_data);
 	auto lowers = UnifiedVectorFormat::GetData<double>(lower_data);
 	auto uppers = UnifiedVectorFormat::GetData<double>(upper_data);
 	auto result_data = FlatVector::GetData<double>(result);
@@ -130,12 +128,11 @@ static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state,
 		auto list_idx = list_data.sel->get_index(i);
 		auto eps_idx = epsilon_data.sel->get_index(i);
 		auto delta_idx = delta_data.sel->get_index(i);
-		auto affected_idx = affected_data.sel->get_index(i);
 		auto lower_idx = lower_data.sel->get_index(i);
 		auto upper_idx = upper_data.sel->get_index(i);
 		if (!list_data.validity.RowIsValid(list_idx) || !epsilon_data.validity.RowIsValid(eps_idx) ||
-		    !delta_data.validity.RowIsValid(delta_idx) || !affected_data.validity.RowIsValid(affected_idx) ||
-		    !lower_data.validity.RowIsValid(lower_idx) || !upper_data.validity.RowIsValid(upper_idx)) {
+		    !delta_data.validity.RowIsValid(delta_idx) || !lower_data.validity.RowIsValid(lower_idx) ||
+		    !upper_data.validity.RowIsValid(upper_idx)) {
 			result_validity.SetInvalid(i);
 			continue;
 		}
@@ -146,11 +143,10 @@ static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state,
 		}
 		double epsilon = epsilons[eps_idx];
 		double delta = deltas[delta_idx];
-		int affected = affected_values[affected_idx];
 		double lower = lowers[lower_idx];
 		double upper = uppers[upper_idx];
-		if (epsilon <= 0.0 || delta <= 0.0 || delta >= 0.5 || affected <= 0 || !std::isfinite(epsilon) ||
-		    !std::isfinite(delta) || !std::isfinite(lower) || !std::isfinite(upper) || lower > upper) {
+		if (epsilon <= 0.0 || delta <= 0.0 || delta >= 0.5 || !std::isfinite(epsilon) || !std::isfinite(delta) ||
+		    !std::isfinite(lower) || !std::isfinite(upper) || lower > upper) {
 			result_validity.SetInvalid(i);
 			continue;
 		}
@@ -168,7 +164,7 @@ static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state,
 			continue;
 		}
 		double beta = epsilon / (2.0 * std::log(2.0 / delta));
-		double smooth = SmoothMedianSensitivity(values, lower, upper, std::min(affected, 63), beta);
+		double smooth = SmoothMedianSensitivity(values, lower, upper, DP_SAMPLE_DRAWS, beta);
 		result_data[i] = median + LaplaceNoise((2.0 * smooth) / epsilon, seed ^ (entry.offset * PAC_MAGIC_HASH));
 	}
 }
@@ -176,8 +172,7 @@ static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state,
 void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
 	ScalarFunction fn("dp_smooth_median_noise",
-	                  {list_type, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::DOUBLE,
-	                   LogicalType::DOUBLE},
+	                  {list_type, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE},
 	                  LogicalType::DOUBLE, DpSmoothMedianNoiseFunction);
 	CreateScalarFunctionInfo info(fn);
 	FunctionDescription desc;
