@@ -446,41 +446,6 @@ static double Sensitivity(const BoundAggregateExpression &aggr, double sum_bound
 	throw InternalException("dp_elastic: Sensitivity received unsupported '" + name + "'");
 }
 
-static string QuoteIdentifierDP(const string &identifier) {
-	string result = "\"";
-	for (auto c : identifier) {
-		if (c == '"') {
-			result += "\"\"";
-		} else {
-			result += c;
-		}
-	}
-	result += "\"";
-	return result;
-}
-
-static double ComputeTableCardinality(ClientContext &context, const string &table_name) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
-	auto disable_rewrite = conn.Query("SET pac_rewrite=false");
-	if (!disable_rewrite || disable_rewrite->HasError()) {
-		throw InvalidInputException("dp_sample_median: failed to disable privacy rewrite while computing bounds" +
-		                            (disable_rewrite ? (": " + disable_rewrite->GetError()) : ""));
-	}
-	string query = "SELECT COUNT(*) FROM " + QuoteIdentifierDP(table_name);
-	auto result = conn.Query(query);
-	if (!result || result->HasError()) {
-		throw InvalidInputException("dp_sample_median: failed to compute table cardinality for '" + table_name + "'" +
-		                            (result ? (": " + result->GetError()) : ""));
-	}
-	auto chunk = result->Fetch();
-	if (!chunk || chunk->size() == 0) {
-		return 0.0;
-	}
-	auto value = chunk->GetValue(0, 0);
-	return value.IsNull() ? 0.0 : value.DefaultCastAs(LogicalType::DOUBLE).GetValue<double>();
-}
-
 static LogicalGet *FindGetForTable(unique_ptr<LogicalOperator> &plan, const string &table_name) {
 	vector<LogicalGet *> gets;
 	CollectGetNodes(plan.get(), gets);
@@ -757,7 +722,6 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 
 static LogicalProjection *WrapSampleMedianProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                                      LogicalAggregate *agg, double epsilon, double delta,
-                                                     const vector<double> &lowers, const vector<double> &uppers,
                                                      const vector<LogicalType> &output_types,
                                                      LogicalOperator *insert_above) {
 	idx_t n_groups = agg->groups.size();
@@ -776,8 +740,6 @@ static LogicalProjection *WrapSampleMedianProjection(OptimizerExtensionInput &in
 		    make_uniq<BoundColumnRefExpression>(agg->types[n_groups + ai], ColumnBinding(agg->aggregate_index, ai)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(epsilon / k)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(delta)));
-		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(lowers[ai])));
-		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(uppers[ai])));
 		unique_ptr<Expression> noised = BindScalarLocal(input, "dp_smooth_median_noise", std::move(children));
 		if (output_types[ai] != LogicalType::DOUBLE) {
 			noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), output_types[ai]);
@@ -1011,22 +973,10 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	}
 
 	vector<LogicalType> output_types;
-	vector<double> lowers;
-	vector<double> uppers;
-	double row_bound = std::max(1.0, ComputeTableCardinality(input.context, eligibility.fk_chain.tables[0]));
 	output_types.reserve(agg->expressions.size());
-	lowers.reserve(agg->expressions.size());
-	uppers.reserve(agg->expressions.size());
 	for (auto &expr : agg->expressions) {
 		auto &aggr = expr->Cast<BoundAggregateExpression>();
 		output_types.push_back(aggr.return_type);
-		if (aggr.function.name == "sum") {
-			lowers.push_back(-row_bound * sum_bound);
-			uppers.push_back(row_bound * sum_bound);
-		} else {
-			lowers.push_back(0.0);
-			uppers.push_back(row_bound);
-		}
 	}
 
 	auto pu_hash_expr = BuildSamplePuHashExpression(input, plan, eligibility.fk_chain, check);
@@ -1045,7 +995,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		projection_anchor = ApplySupportFilter(input, plan, agg, support_pos, support_threshold);
 	}
 
-	WrapSampleMedianProjection(input, plan, agg, epsilon, delta, lowers, uppers, output_types, projection_anchor);
+	WrapSampleMedianProjection(input, plan, agg, epsilon, delta, output_types, projection_anchor);
 
 #if PRIVACY_DEBUG
 	PRIVACY_DEBUG_PRINT("=== PLAN AFTER DP_SAMPLE_MEDIAN TRANSFORMATION ===");

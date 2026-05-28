@@ -46,7 +46,7 @@ WITH vals AS (
 ), counters AS (
     SELECT list(v ORDER BY v) AS l FROM vals
 )
-SELECT abs(dp_smooth_median_noise(l, 10.0, 1e-6, 0.0, 100000.0)) > 10000.0
+SELECT abs(dp_smooth_median_noise(l, 10.0, 1e-6)) > 10000.0
 FROM counters;
 ----
 true
