@@ -39,9 +39,11 @@ constexpr double DP_SAMPLE_LANE_PROBABILITY = 0.11837573434899539; // 1 - (63/64
 constexpr double DP_SAMPLE_RESCALE = 1.0 / DP_SAMPLE_LANE_PROBABILITY;
 
 static inline uint64_t DpSampleHash(uint64_t key_hash) {
-	return (1ULL << ((key_hash >> 0) & 63)) | (1ULL << ((key_hash >> 6) & 63)) | (1ULL << ((key_hash >> 12) & 63)) |
-	       (1ULL << ((key_hash >> 18) & 63)) | (1ULL << ((key_hash >> 24) & 63)) | (1ULL << ((key_hash >> 30) & 63)) |
-	       (1ULL << ((key_hash >> 36) & 63)) | (1ULL << ((key_hash >> 42) & 63));
+	uint64_t sample_hash = 0;
+	for (int i = 0; i < DP_SAMPLE_DRAWS; i++) {
+		sample_hash |= 1ULL << ((key_hash >> (i * 6)) & 63);
+	}
+	return sample_hash;
 }
 
 struct PacIdentityHash {
