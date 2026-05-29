@@ -161,13 +161,165 @@ query II
 SELECT segment, COUNT(*) FROM events GROUP BY segment ORDER BY segment;
 ----
 
+query II
+SELECT segment, AVG(v) FROM events GROUP BY segment ORDER BY segment;
+----
+
 statement ok
 SET privacy_min_group_count = NULL;
+
+query III
+SELECT COUNT(*) BETWEEN 900 AND 1100, SUM(v) BETWEEN 900.0 AND 1100.0, AVG(v) BETWEEN 0.9 AND 1.1
+FROM events;
+----
+true	true	true
+
+query II
+SELECT segment, AVG(v) BETWEEN 0.9 AND 1.1
+FROM events
+GROUP BY segment
+HAVING AVG(v) > 0.5
+ORDER BY segment;
+----
+even	true
+odd	true
+
+query I
+SELECT AVG(v) FILTER (WHERE uid <= 500) BETWEEN 0.9 AND 1.1 FROM events;
+----
+true
+
+statement ok
+SET privacy_noise = true;
+
+query II
+SELECT AVG(v) IS NOT NULL, isfinite(AVG(v)) FROM events;
+----
+true	true
+
+statement ok
+SET privacy_noise = false;
+
+statement error
+SELECT COUNT(DISTINCT uid) FROM events;
+----
+DISTINCT
+
+statement error
+SELECT MIN(v) FROM events;
+----
+only COUNT, SUM, and AVG
+
+statement ok
+RESET dp_sum_bound;
 
 statement error
 SELECT AVG(v) FROM events;
 ----
-AVG is not supported
+dp_sum_bound
+
+statement ok
+SET dp_sum_bound = 1.0;
+
+statement ok
+SET pac_clip_support = 0;
+
+statement error
+SELECT AVG(v) FROM events;
+----
+pac_clip_support
+
+statement ok
+SET pac_clip_support = 1;
+
+statement ok
+CREATE TABLE clicks AS
+SELECT i AS uid, i % 3 AS clicks
+FROM range(1, 1001) t(i);
+
+statement ok
+ALTER TABLE clicks ADD PRIVACY_LINK (uid) REFERENCES users(uid);
+
+statement error
+SELECT COUNT(*)
+FROM users
+JOIN events ON users.uid = events.uid
+JOIN clicks ON users.uid = clicks.uid;
+----
+star/diamond
+
+statement error
+SELECT COUNT(*)
+FROM events e1
+JOIN events e2 ON e1.uid = e2.uid;
+----
+self-joins
+
+# Multi-hop chain: users2 <- orders2 <- lines2. Sample-median must reuse PAC's
+# FK join insertion and PU hash propagation rather than hashing the leaf key.
+statement ok
+CREATE TABLE users2 AS SELECT i AS uid FROM range(1, 1001) t(i);
+
+statement ok
+CREATE TABLE orders2 AS
+SELECT i AS oid, ((i - 1) % 1000) + 1 AS uid
+FROM range(1, 5001) t(i);
+
+statement ok
+CREATE TABLE lines2 AS
+SELECT i AS lid,
+       ((i - 1) % 5000) + 1 AS oid,
+       CASE WHEN i % 2 = 0 THEN 'even' ELSE 'odd' END AS segment,
+       2.0::DOUBLE AS price
+FROM range(1, 15001) t(i);
+
+statement ok
+ALTER TABLE users2 ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE users2 SET PU;
+
+statement ok
+ALTER TABLE orders2 ADD PRIVACY_KEY (oid);
+
+statement ok
+ALTER TABLE orders2 ADD PRIVACY_LINK (uid) REFERENCES users2(uid);
+
+statement ok
+ALTER TABLE lines2 ADD PRIVACY_LINK (oid) REFERENCES orders2(oid);
+
+statement ok
+SET dp_sum_bound = 2.0;
+
+statement ok
+SET pac_clip_support = 1;
+
+query III
+SELECT COUNT(*) BETWEEN 13000 AND 17000,
+       SUM(price) BETWEEN 26000.0 AND 34000.0,
+       AVG(price) BETWEEN 1.8 AND 2.2
+FROM users2
+JOIN orders2 ON users2.uid = orders2.uid
+JOIN lines2 ON orders2.oid = lines2.oid;
+----
+true	true	true
+
+query III
+SELECT COUNT(*) BETWEEN 13000 AND 17000,
+       SUM(price) BETWEEN 26000.0 AND 34000.0,
+       AVG(price) BETWEEN 1.8 AND 2.2
+FROM lines2;
+----
+true	true	true
+
+query II
+SELECT segment, AVG(price) BETWEEN 1.8 AND 2.2
+FROM lines2
+GROUP BY segment
+ORDER BY segment;
+----
+even	true
+odd	true
 
 statement ok
 SET dp_strategy = 'elastic';
