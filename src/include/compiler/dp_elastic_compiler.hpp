@@ -14,6 +14,10 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
                            unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
                            const string &query_hash);
 
+void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
+                                unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
+                                const string &query_hash);
+
 } // namespace duckdb
 
 #endif // DP_ELASTIC_COMPILER_HPP

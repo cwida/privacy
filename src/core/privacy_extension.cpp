@@ -308,6 +308,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("privacy_mode",
 	                             "Privacy mechanism: 'pac' (default) or 'dp_elastic' for elastic-sensitivity DP",
 	                             LogicalType::VARCHAR, Value("pac"));
+	db.config.AddExtensionOption("dp_strategy",
+	                             "DP strategy for privacy_mode='dp_elastic': 'elastic' or 'sample_median'",
+	                             LogicalType::VARCHAR, Value("elastic"));
 	// Differential privacy budget (ε), used only when privacy_mode = 'dp_elastic'
 	db.config.AddExtensionOption("dp_epsilon", "Differential privacy budget (used when privacy_mode = 'dp_elastic')",
 	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));
@@ -408,9 +411,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register pac_sum aggregate functions
 	RegisterPacSumFunctions(loader);
 	RegisterPacSumCountersFunctions(loader);
+	RegisterDpSampleSumFunctions(loader);
 	RegisterPacClipSumFunctions(loader);
 	RegisterPacNoisedClipSumFunctions(loader);
 	RegisterPacNoisedClipSumCountFunctions(loader);
+	RegisterDpSampleClipSumFunctions(loader);
 	RegisterPacCountFunctions(loader);
 	RegisterPacCountCountersFunctions(loader);
 	RegisterPacClipCountFunctions(loader);
@@ -444,6 +449,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register dp_laplace_noise scalar function (value, scale) -> value + Lap(scale)
 	RegisterDpLaplaceNoiseFunction(loader);
+	RegisterDpSmoothMedianNoiseFunction(loader);
 
 	// Register PAC parser extension
 	ParserExtension::Register(db.config, PrivacyParserExtension());

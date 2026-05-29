@@ -82,6 +82,8 @@ string GetPacCompileMethod(ClientContext &context, const string &default_method 
 
 // Return the selected privacy mechanism: "pac" (default) or "dp_elastic". Lowercased, trimmed.
 string GetPrivacyMode(ClientContext &context);
+// Return the selected DP strategy: "elastic" (default) or "sample_median". Lowercased, trimmed.
+string GetDPStrategy(ClientContext &context);
 // Return the DP budget (ε) from `dp_epsilon`; falls back to default if unset.
 double GetDpEpsilon(ClientContext &context, double default_value = 1.0);
 // Read `dp_sum_bound` into `out`. Returns false if the setting is unset/NULL.

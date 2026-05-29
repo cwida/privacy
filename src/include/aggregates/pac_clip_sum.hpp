@@ -14,6 +14,7 @@ namespace duckdb {
 void RegisterPacClipSumFunctions(ExtensionLoader &loader);
 void RegisterPacNoisedClipSumFunctions(ExtensionLoader &loader);
 void RegisterPacNoisedClipSumCountFunctions(ExtensionLoader &loader);
+void RegisterDpSampleClipSumFunctions(ExtensionLoader &loader);
 
 // ============================================================================
 // Sum-specific constants (shared constants in pac_clip_aggr.hpp)
@@ -187,12 +188,13 @@ struct PacClipSumIntState {
 	// clip_scale: false=omit unsupported prefix/suffix, true=scale to nearest supported
 	// Interior unsupported levels (between first and last supported) always contribute.
 	// ========================================================================
-	void GetTotals(PAC_FLOAT *dst, int clip_support_threshold = 0, bool clip_scale = false) const {
+	void GetTotals(PAC_FLOAT *dst, int clip_support_threshold = 0, bool clip_scale = false,
+	               bool smooth_clip = false) const {
 		memset(dst, 0, 64 * sizeof(PAC_FLOAT));
 
 		// Pass 1: find first and last supported levels
 		int first_supported = -1, last_supported = -1;
-		if (clip_support_threshold > 0) {
+		if (clip_support_threshold > 0 && !smooth_clip) {
 			ClipFindSupportedRange(levels, max_level_used, 17, clip_support_threshold, first_supported, last_supported);
 		}
 
@@ -202,13 +204,19 @@ struct PacClipSumIntState {
 				continue;
 			}
 
-			int eff =
-			    (clip_support_threshold > 0) ? ClipEffectiveLevel(k, first_supported, last_supported, clip_scale) : k;
+			int eff = (clip_support_threshold > 0 && !smooth_clip)
+			              ? ClipEffectiveLevel(k, first_supported, last_supported, clip_scale)
+			              : k;
 			if (eff < 0) {
 				continue;
 			}
 
 			PAC_FLOAT scale = std::exp2(static_cast<PAC_FLOAT>(CLIP_LEVEL_SHIFT * eff));
+			if (clip_support_threshold > 0 && smooth_clip) {
+				int support = ClipEstimateDistinct(levels[k][17]);
+				scale *= std::min<PAC_FLOAT>(
+				    static_cast<PAC_FLOAT>(support) / static_cast<PAC_FLOAT>(clip_support_threshold), 1.0);
+			}
 
 			// Adjust scale by avg shifted value per PU when rescaling outlier levels
 			if (clip_scale && eff != k) {

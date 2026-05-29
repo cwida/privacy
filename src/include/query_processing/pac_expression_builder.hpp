@@ -57,6 +57,20 @@ unique_ptr<Expression> BindPacAggregate(OptimizerExtensionInput &input, const st
                                         unique_ptr<Expression> hash_expr, unique_ptr<Expression> value_expr,
                                         unique_ptr<Expression> correction_expr = nullptr);
 
+struct PuPreAggregationInfo {
+	LogicalAggregate *lower_agg;
+	idx_t num_original_groups;
+	idx_t lower_agg_index;
+	unique_ptr<Expression> pu_hash_ref;
+};
+
+// Insert a lower aggregate grouped by [original groups..., PU hash], move the current aggregate child below it,
+// and rewrite the top aggregate's groups to reference the lower group output. The caller owns aggregate-specific
+// lower expressions and must rewrite the top aggregate expressions after this helper returns.
+PuPreAggregationInfo InsertPuPreAggregation(OptimizerExtensionInput &input, LogicalAggregate *agg,
+                                            vector<unique_ptr<Expression>> lower_expressions,
+                                            unique_ptr<Expression> pu_hash_expr);
+
 // Bind bit_or(hash_expr) with an IS NOT NULL filter on filter_col_expr.
 // Returns the bound aggregate expression.
 unique_ptr<Expression> BindBitOrAggregate(OptimizerExtensionInput &input, unique_ptr<Expression> hash_expr,

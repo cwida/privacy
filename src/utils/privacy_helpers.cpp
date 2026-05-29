@@ -574,19 +574,28 @@ bool IsPacNoiseEnabled(ClientContext &context, bool default_value) {
 	}
 }
 
-string GetPrivacyMode(ClientContext &context) {
+static string GetNormalizedStringSetting(ClientContext &context, const string &setting_name,
+                                         const string &default_value) {
 	Value v;
-	if (!context.TryGetCurrentSetting("privacy_mode", v) || v.IsNull()) {
-		return "pac";
+	if (!context.TryGetCurrentSetting(setting_name, v) || v.IsNull()) {
+		return default_value;
 	}
 	string s = v.ToString();
 	std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
 	auto begin = s.find_first_not_of(" \t\n\r");
 	auto end = s.find_last_not_of(" \t\n\r");
 	if (begin == string::npos) {
-		return "pac";
+		return default_value;
 	}
 	return s.substr(begin, end - begin + 1);
+}
+
+string GetPrivacyMode(ClientContext &context) {
+	return GetNormalizedStringSetting(context, "privacy_mode", "pac");
+}
+
+string GetDPStrategy(ClientContext &context) {
+	return GetNormalizedStringSetting(context, "dp_strategy", "elastic");
 }
 
 double GetDpEpsilon(ClientContext &context, double default_value) {

@@ -416,6 +416,34 @@ unique_ptr<Expression> BindPacAggregate(OptimizerExtensionInput &input, const st
 	return function_binder.BindAggregateFunction(func, std::move(children), nullptr, AggregateType::NON_DISTINCT);
 }
 
+PuPreAggregationInfo InsertPuPreAggregation(OptimizerExtensionInput &input, LogicalAggregate *agg,
+                                            vector<unique_ptr<Expression>> lower_expressions,
+                                            unique_ptr<Expression> pu_hash_expr) {
+	auto &binder = input.optimizer.binder;
+	idx_t lower_group_index = binder.GenerateTableIndex();
+	idx_t lower_agg_index = binder.GenerateTableIndex();
+	idx_t num_original_groups = agg->groups.size();
+
+	auto lower_agg = make_uniq<LogicalAggregate>(lower_group_index, lower_agg_index, std::move(lower_expressions));
+	for (auto &g : agg->groups) {
+		lower_agg->groups.push_back(g->Copy());
+	}
+	lower_agg->groups.push_back(std::move(pu_hash_expr));
+	lower_agg->children.push_back(std::move(agg->children[0]));
+	lower_agg->ResolveOperatorTypes();
+
+	for (idx_t i = 0; i < num_original_groups; i++) {
+		agg->groups[i] = make_uniq<BoundColumnRefExpression>(lower_agg->types[i], ColumnBinding(lower_group_index, i));
+	}
+
+	auto pu_hash_ref = make_uniq<BoundColumnRefExpression>(lower_agg->types[num_original_groups],
+	                                                       ColumnBinding(lower_group_index, num_original_groups));
+	auto *lower_agg_ptr = lower_agg.get();
+	agg->children[0] = std::move(lower_agg);
+
+	return {lower_agg_ptr, num_original_groups, lower_agg_index, std::move(pu_hash_ref)};
+}
+
 // Bind bit_or(hash_expr) with IS NOT NULL filter on filter_col_expr.
 unique_ptr<Expression> BindBitOrAggregate(OptimizerExtensionInput &input, unique_ptr<Expression> hash_expr,
                                           unique_ptr<Expression> filter_col_expr) {
@@ -1232,11 +1260,6 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 			continue;
 		}
 
-		// Normal path: insert lower aggregate
-		auto &binder = input.optimizer.binder;
-		idx_t lower_group_index = binder.GenerateTableIndex();
-		idx_t lower_agg_index = binder.GenerateTableIndex();
-
 		// Identify the PU hash expression from the first pac aggregate's first child (hash arg)
 		unique_ptr<Expression> pu_hash_expr;
 		for (auto &expr : agg->expressions) {
@@ -1253,7 +1276,6 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 			continue; // shouldn't happen
 		}
 		// Build lower aggregate expressions (plain DuckDB aggregates)
-		idx_t num_original_groups = agg->groups.size();
 		vector<unique_ptr<Expression>> lower_expressions;
 		for (idx_t i = 0; i < agg->expressions.size(); i++) {
 			auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
@@ -1294,27 +1316,7 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 			}
 		}
 
-		// Create lower aggregate node
-		auto lower_agg = make_uniq<LogicalAggregate>(lower_group_index, lower_agg_index, std::move(lower_expressions));
-
-		// Copy original groups + add PU hash as extra group
-		for (auto &g : agg->groups) {
-			lower_agg->groups.push_back(g->Copy());
-		}
-		lower_agg->groups.push_back(pu_hash_expr->Copy());
-
-		// Steal top's child → lower's child
-		lower_agg->children.push_back(std::move(agg->children[0]));
-		lower_agg->ResolveOperatorTypes();
-
-		// Rewrite top aggregate's groups to reference lower's group output
-		for (idx_t i = 0; i < num_original_groups; i++) {
-			auto gtype = agg->groups[i]->return_type;
-			agg->groups[i] = make_uniq<BoundColumnRefExpression>(gtype, ColumnBinding(lower_group_index, i));
-		}
-		// PU hash ref from lower's group output
-		auto pu_hash_ref = make_uniq<BoundColumnRefExpression>(pu_hash_expr->return_type,
-		                                                       ColumnBinding(lower_group_index, num_original_groups));
+		auto pre_agg = InsertPuPreAggregation(input, agg, std::move(lower_expressions), std::move(pu_hash_expr));
 
 		// Rewrite top aggregate's expressions to clip variants
 		for (idx_t i = 0; i < agg->expressions.size(); i++) {
@@ -1324,9 +1326,9 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 			string orig = GetOriginalAggregate(pac_name);
 
 			// Reference to lower aggregate's result
-			auto lower_type = lower_agg->types[num_original_groups + 1 + i];
+			auto lower_type = pre_agg.lower_agg->types[pre_agg.num_original_groups + 1 + i];
 			unique_ptr<Expression> lower_ref =
-			    make_uniq<BoundColumnRefExpression>(lower_type, ColumnBinding(lower_agg_index, i));
+			    make_uniq<BoundColumnRefExpression>(lower_type, ColumnBinding(pre_agg.lower_agg_index, i));
 
 			// pac_clip_sum has integer + DECIMAL overloads but no FLOAT/DOUBLE.
 			// Cast FLOAT/DOUBLE to BIGINT so binding succeeds.
@@ -1343,10 +1345,8 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 				clip_func = GetClipVariant(pac_name);
 			}
 			agg->expressions[i] =
-			    BindPacAggregate(input, clip_func, pu_hash_ref->Copy(), std::move(lower_ref), nullptr);
+			    BindPacAggregate(input, clip_func, pre_agg.pu_hash_ref->Copy(), std::move(lower_ref), nullptr);
 		}
-		// Set lower as top's child
-		agg->children[0] = std::move(lower_agg);
 		agg->ResolveOperatorTypes();
 	}
 }
