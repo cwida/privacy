@@ -162,7 +162,7 @@ static unique_ptr<LogicalOperator> *FindSlotForOperator(unique_ptr<LogicalOperat
 // ----------------------------------------------------------------------------
 
 static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const vector<LogicalGet *> &gets,
-                                const vector<string> &privacy_units) {
+                                const vector<string> &privacy_units, bool include_fk_cols) {
 	(void)privacy_units;
 
 	// Self-join check: no table name may appear more than once in the plan
@@ -234,6 +234,9 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 	// Build fk_cols: for each consecutive pair in the chain, find the FK column
 	DPFKChain chain;
 	chain.tables = *longest_path;
+	if (!include_fk_cols) {
+		return chain;
+	}
 	chain.fk_cols.reserve(chain.tables.size() - 1);
 
 	for (idx_t i = 0; i + 1 < chain.tables.size(); i++) {
@@ -268,19 +271,7 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 // Eligibility check (Phase D: allows linear FK join chains)
 // ----------------------------------------------------------------------------
 
-struct DPEligibility {
-	LogicalAggregate *top_agg;
-	DPFKChain fk_chain;
-};
-
-static DPEligibility CheckDPEligibility(unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                                        const PrivacyCompatibilityResult &check) {
-	vector<LogicalGet *> gets;
-	CollectGetNodes(plan.get(), gets);
-
-	// Validates self-joins, PU count, and linear chain structure; returns the chain
-	DPFKChain fk_chain = ExtractFKChain(check, gets, privacy_units);
-
+static LogicalAggregate *CheckDPAggregates(unique_ptr<LogicalOperator> &plan) {
 	vector<LogicalAggregate *> aggs;
 	FindAllAggregates(plan, aggs);
 	if (aggs.size() != 1) {
@@ -307,7 +298,21 @@ static DPEligibility CheckDPEligibility(unique_ptr<LogicalOperator> &plan, const
 			                            a.children[0]->return_type.ToString() + "')");
 		}
 	}
-	return {agg, std::move(fk_chain)};
+	return agg;
+}
+
+static DPFKChain ExtractDPElasticFKChain(unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
+                                         const PrivacyCompatibilityResult &check) {
+	vector<LogicalGet *> gets;
+	CollectGetNodes(plan.get(), gets);
+	return ExtractFKChain(check, gets, privacy_units, true);
+}
+
+static void ValidateDPFKChainShape(unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
+                                   const PrivacyCompatibilityResult &check) {
+	vector<LogicalGet *> gets;
+	CollectGetNodes(plan.get(), gets);
+	ExtractFKChain(check, gets, privacy_units, false);
 }
 
 // ----------------------------------------------------------------------------
@@ -537,6 +542,45 @@ struct NoiseProjection {
 	}
 };
 
+static std::unordered_set<idx_t> BuildAvgComponentSet(const vector<AvgInfo> &avg_infos) {
+	std::unordered_set<idx_t> avg_components;
+	for (auto &info : avg_infos) {
+		avg_components.insert(info.sum_pos);
+		avg_components.insert(info.count_pos);
+	}
+	return avg_components;
+}
+
+static NoiseProjection InsertProjectionAndRemap(unique_ptr<LogicalOperator> &plan,
+                                                unique_ptr<LogicalProjection> projection, LogicalOperator *insert_above,
+                                                idx_t proj_idx, idx_t source_group_idx, idx_t source_agg_idx,
+                                                idx_t n_groups, idx_t n_aggs, idx_t source_agg_offset,
+                                                const string &error_message) {
+	auto *slot = FindSlotForOperator(plan, insert_above);
+	if (!slot) {
+		throw InternalException(error_message);
+	}
+	auto old_node = std::move(*slot);
+	projection->children.push_back(std::move(old_node));
+	projection->ResolveOperatorTypes();
+	auto *proj_ptr = projection.get();
+	auto proj_types = projection->types;
+	*slot = std::move(projection);
+
+	ColumnBindingReplacer replacer;
+	for (idx_t gi = 0; gi < n_groups; gi++) {
+		replacer.replacement_bindings.emplace_back(ColumnBinding(source_group_idx, gi), ColumnBinding(proj_idx, gi));
+	}
+	for (idx_t ai = 0; ai < n_aggs; ai++) {
+		replacer.replacement_bindings.emplace_back(ColumnBinding(source_agg_idx, source_agg_offset + ai),
+		                                           ColumnBinding(proj_idx, n_groups + ai));
+	}
+	replacer.stop_operator = proj_ptr;
+	replacer.VisitOperator(*plan);
+
+	return {proj_idx, proj_ptr, std::move(proj_types)};
+}
+
 static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                                 LogicalAggregate *agg, LogicalOperator *insert_above,
                                                 const vector<double> &agg_scales) {
@@ -576,30 +620,8 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 
 	idx_t proj_idx = input.optimizer.binder.GenerateTableIndex();
 	auto projection = make_uniq<LogicalProjection>(proj_idx, std::move(proj_exprs));
-
-	auto *slot = FindSlotForOperator(plan, insert_above);
-	if (!slot) {
-		throw InternalException("dp_elastic: could not locate noise insertion slot in plan");
-	}
-	auto old_node = std::move(*slot);
-	projection->children.push_back(std::move(old_node));
-	projection->ResolveOperatorTypes();
-	LogicalProjection *proj_ptr = projection.get();
-	auto proj_types = projection->types;
-	*slot = std::move(projection);
-
-	// Remap bindings above the inserted projection
-	ColumnBindingReplacer replacer;
-	for (idx_t gi = 0; gi < n_groups; gi++) {
-		replacer.replacement_bindings.emplace_back(ColumnBinding(group_idx, gi), ColumnBinding(proj_idx, gi));
-	}
-	for (idx_t ai = 0; ai < n_aggs; ai++) {
-		replacer.replacement_bindings.emplace_back(ColumnBinding(agg_idx, ai), ColumnBinding(proj_idx, n_groups + ai));
-	}
-	replacer.stop_operator = proj_ptr;
-	replacer.VisitOperator(*plan);
-
-	return {proj_idx, proj_ptr, std::move(proj_types)};
+	return InsertProjectionAndRemap(plan, std::move(projection), insert_above, proj_idx, group_idx, agg_idx, n_groups,
+	                                n_aggs, 0, "dp_elastic: could not locate noise insertion slot in plan");
 }
 
 // ----------------------------------------------------------------------------
@@ -616,8 +638,9 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 	D_ASSERT(!avg_infos.empty());
 
 	// Build lookup: original-agg-position → AvgInfo
-	std::unordered_map<idx_t, const AvgInfo *> avg_lookup;
+	vector<const AvgInfo *> avg_lookup(n_original_aggs, nullptr);
 	for (auto &info : avg_infos) {
+		D_ASSERT(info.sum_pos < n_original_aggs);
 		avg_lookup[info.sum_pos] = &info;
 	}
 
@@ -632,15 +655,15 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 
 	// For each original agg position: pass-through or compute AVG ratio
 	for (idx_t ai = 0; ai < n_original_aggs; ai++) {
-		auto it = avg_lookup.find(ai);
-		if (it == avg_lookup.end()) {
+		auto *avg_info = avg_lookup[ai];
+		if (!avg_info) {
 			// Non-AVG: pass the noised value through
 			auto col_type = noise_proj.proj_types[n_groups + ai];
 			proj_exprs.push_back(
 			    make_uniq<BoundColumnRefExpression>(col_type, ColumnBinding(noise_proj.proj_idx, n_groups + ai)));
 		} else {
 			// AVG: compute CAST(noised_sum AS DOUBLE) / greatest(CAST(noised_count AS DOUBLE), 1.0)
-			const AvgInfo &info = *it->second;
+			const AvgInfo &info = *avg_info;
 			auto sum_type = noise_proj.proj_types[n_groups + info.sum_pos];
 			auto cnt_type = noise_proj.proj_types[n_groups + info.count_pos];
 			auto sum_ref = make_uniq<BoundColumnRefExpression>(
@@ -659,32 +682,10 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 
 	idx_t ratio_idx = input.optimizer.binder.GenerateTableIndex();
 	auto ratio_proj = make_uniq<LogicalProjection>(ratio_idx, std::move(proj_exprs));
-
-	auto *slot = FindSlotForOperator(plan, insert_above);
-	if (!slot) {
-		throw InternalException("dp_elastic: could not locate insert point for AVG ratio projection");
-	}
-	auto old_node = std::move(*slot);
-	ratio_proj->children.push_back(std::move(old_node));
-	ratio_proj->ResolveOperatorTypes();
-	auto *ratio_ptr = ratio_proj.get();
-	*slot = std::move(ratio_proj);
-
-	// Remap upstream references: noise_proj group/agg cols → ratio_proj cols
-	ColumnBindingReplacer replacer;
-	for (idx_t gi = 0; gi < n_groups; gi++) {
-		replacer.replacement_bindings.emplace_back(ColumnBinding(noise_proj.proj_idx, gi),
-		                                           ColumnBinding(ratio_idx, gi));
-	}
-	for (idx_t ai = 0; ai < n_original_aggs; ai++) {
-		replacer.replacement_bindings.emplace_back(ColumnBinding(noise_proj.proj_idx, n_groups + ai),
-		                                           ColumnBinding(ratio_idx, n_groups + ai));
-	}
-	// Extra COUNT(*) positions are consumed inside ratio_proj — no upstream references
-	replacer.stop_operator = ratio_ptr;
-	replacer.VisitOperator(*plan);
-
-	return {ratio_idx, ratio_ptr};
+	auto inserted = InsertProjectionAndRemap(plan, std::move(ratio_proj), insert_above, ratio_idx, noise_proj.proj_idx,
+	                                         noise_proj.proj_idx, n_groups, n_original_aggs, n_groups,
+	                                         "dp_elastic: could not locate insert point for AVG ratio projection");
+	return {inserted.proj_idx, inserted.proj_ptr};
 }
 
 static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
@@ -717,28 +718,9 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 
 	idx_t proj_idx = input.optimizer.binder.GenerateTableIndex();
 	auto projection = make_uniq<LogicalProjection>(proj_idx, std::move(proj_exprs));
-	auto *slot = FindSlotForOperator(plan, insert_above);
-	if (!slot) {
-		throw InternalException("dp_sample_median: could not locate aggregate slot for median projection");
-	}
-	auto old_node = std::move(*slot);
-	projection->children.push_back(std::move(old_node));
-	projection->ResolveOperatorTypes();
-	auto *proj_ptr = projection.get();
-	auto proj_types = projection->types;
-	*slot = std::move(projection);
-
-	ColumnBindingReplacer replacer;
-	for (idx_t gi = 0; gi < n_groups; gi++) {
-		replacer.replacement_bindings.emplace_back(ColumnBinding(agg->group_index, gi), ColumnBinding(proj_idx, gi));
-	}
-	for (idx_t ai = 0; ai < n_aggs; ai++) {
-		replacer.replacement_bindings.emplace_back(ColumnBinding(agg->aggregate_index, ai),
-		                                           ColumnBinding(proj_idx, n_groups + ai));
-	}
-	replacer.stop_operator = proj_ptr;
-	replacer.VisitOperator(*plan);
-	return {proj_idx, proj_ptr, std::move(proj_types)};
+	return InsertProjectionAndRemap(plan, std::move(projection), insert_above, proj_idx, agg->group_index,
+	                                agg->aggregate_index, n_groups, n_aggs, 0,
+	                                "dp_sample_median: could not locate aggregate slot for median projection");
 }
 
 static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, LogicalAggregate *agg,
@@ -803,8 +785,8 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 
 	plan->ResolveOperatorTypes();
 
-	auto eligibility = CheckDPEligibility(plan, privacy_units, check);
-	auto *agg = eligibility.top_agg;
+	auto fk_chain = ExtractDPElasticFKChain(plan, privacy_units, check);
+	auto *agg = CheckDPAggregates(plan);
 
 	// Rewrite AVG(x) → SUM(x) + COUNT(*) before bound/clipping checks.
 	// Each AVG uses ε/2 per component so the combined cost is still ε-DP.
@@ -817,19 +799,14 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 	bool apply_support_filter =
 	    input.context.TryGetCurrentSetting("privacy_min_group_count", threshold_val) && !threshold_val.IsNull() &&
 	    (support_threshold = threshold_val.GetValue<double>()) > 0.0 && std::isfinite(support_threshold);
-	auto support_pos = AddSupportAggregate(input, plan, agg, eligibility.fk_chain, support_threshold);
+	auto support_pos = AddSupportAggregate(input, plan, agg, fk_chain, support_threshold);
 	idx_t n_dp_aggs = support_pos.IsValid() ? support_pos.GetIndex() : agg->expressions.size();
 	LogicalOperator *noise_anchor = agg;
 	if (apply_support_filter) {
 		noise_anchor = ApplySupportFilter(input, plan, agg, support_pos.GetIndex(), support_threshold);
 	}
 
-	// Build fast lookup: which positions are AVG-derived (need budget split)?
-	std::unordered_set<idx_t> avg_positions;
-	for (auto &info : avg_infos) {
-		avg_positions.insert(info.sum_pos);
-		avg_positions.insert(info.count_pos);
-	}
+	auto avg_components = BuildAvgComponentSet(avg_infos);
 
 	double sum_bound = 0.0;
 	bool has_sum = AggregateContainsSum(agg); // SUM or AVG→SUM
@@ -846,7 +823,7 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 	}
 
 	// Compute smooth elastic sensitivity using the required dp_delta setting
-	double es = ComputeElasticSensitivity(input.context, eligibility.fk_chain, epsilon);
+	double es = ComputeElasticSensitivity(input.context, fk_chain, epsilon);
 
 	// When privacy_noise=false the compilation pipeline still runs (clipping, FK chain)
 	// but Laplace scale is zeroed → dp_laplace_noise returns the value unchanged.
@@ -868,7 +845,7 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 		if (k > 1.0) {
 			scale *= k; // budget split across user-visible aggregates
 		}
-		if (avg_positions.count(ai)) {
+		if (avg_components.count(ai)) {
 			scale *= 2.0; // additional split: each AVG component uses half its allocation
 		}
 		agg_scales.push_back(scale);
@@ -911,8 +888,8 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	}
 
 	plan->ResolveOperatorTypes();
-	auto eligibility = CheckDPEligibility(plan, privacy_units, check);
-	auto *agg = eligibility.top_agg;
+	ValidateDPFKChainShape(plan, privacy_units, check);
+	auto *agg = CheckDPAggregates(plan);
 
 	auto avg_infos = RewriteAvgAggregates(input, agg);
 	idx_t n_original_aggs = agg->expressions.size() - avg_infos.size();
@@ -937,11 +914,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 
 	vector<LogicalType> output_types;
 	output_types.reserve(agg->expressions.size());
-	std::unordered_set<idx_t> avg_positions;
-	for (auto &info : avg_infos) {
-		avg_positions.insert(info.sum_pos);
-		avg_positions.insert(info.count_pos);
-	}
+	auto avg_components = BuildAvgComponentSet(avg_infos);
 	double k = static_cast<double>(n_original_aggs);
 	vector<double> epsilons;
 	vector<double> deltas;
@@ -949,10 +922,8 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	deltas.reserve(agg->expressions.size());
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
 		auto &aggr = agg->expressions[ai]->Cast<BoundAggregateExpression>();
-		output_types.push_back(avg_positions.count(ai) ? LogicalType::DOUBLE : aggr.return_type);
-	}
-	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
-		double split = avg_positions.count(ai) ? (2.0 * k) : k;
+		output_types.push_back(avg_components.count(ai) ? LogicalType::DOUBLE : aggr.return_type);
+		double split = avg_components.count(ai) ? (2.0 * k) : k;
 		epsilons.push_back(epsilon / split);
 		deltas.push_back(delta / split);
 	}
