@@ -448,9 +448,11 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 	return CTEHashMatch();
 }
 
-void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                      const vector<string> &pu_table_names, const PrivacyCompatibilityResult &check,
-                      const CTETableMap &cte_map, PacAggregateInfoMap &pac_agg_info) {
+vector<PacAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExtensionInput &input,
+                                                                 unique_ptr<LogicalOperator> &plan,
+                                                                 const vector<string> &pu_table_names,
+                                                                 const PrivacyCompatibilityResult &check,
+                                                                 const CTETableMap &cte_map) {
 	// Find ALL aggregate nodes in the plan first
 	vector<LogicalAggregate *> all_aggregates;
 	FindAllAggregates(plan, all_aggregates);
@@ -511,6 +513,7 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	std::unordered_map<idx_t, ColumnBinding> cte_hash_cache;
 
 	// For each target aggregate, build hash expressions and modify it
+	vector<PacAggregateHashInfo> result;
 	for (auto *target_agg : target_aggregates) {
 		// Build hash expressions for each privacy unit
 		vector<unique_ptr<Expression>> hash_exprs;
@@ -744,18 +747,85 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 			hash_binding = combined_hash_expr->Cast<BoundColumnRefExpression>().binding;
 		}
 
+		result.push_back({target_agg, std::move(combined_hash_expr), hash_binding, correction});
+	}
+	return result;
+}
+
+void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                      const vector<string> &pu_table_names, const PrivacyCompatibilityResult &check,
+                      const CTETableMap &cte_map, PacAggregateInfoMap &pac_agg_info) {
+	auto hash_infos = BuildPUHashExpressionsForAggregates(input, plan, pu_table_names, check, cte_map);
+	for (auto &hash_info : hash_infos) {
 		// Modify this aggregate with PAC functions
-		ModifyAggregatesWithPacFunctions(input, target_agg, combined_hash_expr, plan, correction);
+		ModifyAggregatesWithPacFunctions(input, hash_info.aggregate, hash_info.hash_expr, plan, hash_info.correction);
 
 		// Record metadata for the categorical rewriter
-		if (hash_binding.table_index != DConstants::INVALID_INDEX) {
+		if (hash_info.hash_binding.table_index != DConstants::INVALID_INDEX) {
 			PacAggregateInfo info;
-			info.aggregate_index = target_agg->aggregate_index;
-			info.group_index = target_agg->group_index;
-			info.hash_binding = hash_binding;
-			pac_agg_info[target_agg->aggregate_index] = info;
+			info.aggregate_index = hash_info.aggregate->aggregate_index;
+			info.group_index = hash_info.aggregate->group_index;
+			info.hash_binding = hash_info.hash_binding;
+			pac_agg_info[hash_info.aggregate->aggregate_index] = info;
 		}
 	}
+}
+
+PacPUHashingSetup PreparePlanForPUHashing(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
+                                          unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units) {
+	// Build the CTE table map once — used for both routing and aggregate filtering
+	auto cte_map = BuildAndResolveCTETableMap(plan.get());
+
+	// Determine if a PU table is reachable from the plan (directly scanned, via CTE, or via FK+CTE)
+	bool pu_present_in_tree = !check.scanned_pu_tables.empty();
+	bool pu_via_cte = false;
+
+	if (!pu_present_in_tree) {
+		for (auto &cte_kv : cte_map) {
+			auto &cte_tables = cte_kv.second;
+			for (auto &pu : privacy_units) {
+				if (cte_tables.count(pu) > 0) {
+					pu_via_cte = true;
+					break;
+				}
+			}
+			if (!pu_via_cte) {
+				for (auto &fk_kv : check.fk_paths) {
+					if (cte_tables.count(fk_kv.first) > 0) {
+						pu_via_cte = true;
+						break;
+					}
+				}
+			}
+			if (pu_via_cte) {
+				break;
+			}
+		}
+		pu_present_in_tree = pu_via_cte;
+	}
+
+	if (!pu_present_in_tree && !check.fk_paths.empty()) {
+		// PU not reachable — add FK joins so plan has all tables needed
+		string start_table;
+		vector<string> target_pus;
+		vector<string> gets_present, gets_missing;
+		PopulateGetsFromFKPath(check, gets_present, gets_missing, start_table, target_pus);
+
+		auto it = check.fk_paths.find(start_table);
+		if (it == check.fk_paths.end() || it->second.empty()) {
+			throw InvalidInputException("PAC compiler: expected fk_path for start table " + start_table);
+		}
+
+		// Deduplicate missing tables
+		std::unordered_set<string> missing_set(gets_missing.begin(), gets_missing.end());
+		vector<string> unique_gets_missing(missing_set.begin(), missing_set.end());
+		std::sort(unique_gets_missing.begin(), unique_gets_missing.end());
+
+		AddMissingFKJoins(check, input, plan, unique_gets_missing, gets_present, it->second, privacy_units, cte_map);
+	}
+
+	auto pu_names = (pu_present_in_tree && !pu_via_cte) ? check.scanned_pu_tables : privacy_units;
+	return {std::move(cte_map), std::move(pu_names)};
 }
 
 void CompilePacBitsliceQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
@@ -801,65 +871,14 @@ void CompilePacBitsliceQuery(const PrivacyCompatibilityResult &check, OptimizerE
 	// b.2) we join the chain of tables from the scanned table to each PU table (deduplicating)
 	// b.3) we hash the PK(s) as in a) and AND them together
 
-	// Build the CTE table map once — used for both routing and aggregate filtering
-	auto cte_map = BuildAndResolveCTETableMap(plan.get());
-
-	// Determine if a PU table is reachable from the plan (directly scanned, via CTE, or via FK+CTE)
-	bool pu_present_in_tree = !check.scanned_pu_tables.empty();
-	bool pu_via_cte = false;
-
-	if (!pu_present_in_tree) {
-		for (auto &cte_kv : cte_map) {
-			auto &cte_tables = cte_kv.second;
-			for (auto &pu : privacy_units) {
-				if (cte_tables.count(pu) > 0) {
-					pu_via_cte = true;
-					break;
-				}
-			}
-			if (!pu_via_cte) {
-				for (auto &fk_kv : check.fk_paths) {
-					if (cte_tables.count(fk_kv.first) > 0) {
-						pu_via_cte = true;
-						break;
-					}
-				}
-			}
-			if (pu_via_cte) {
-				break;
-			}
-		}
-		pu_present_in_tree = pu_via_cte;
-	}
 #if PRIVACY_DEBUG
 	PRIVACY_DEBUG_PRINT("=== PLAN BEFORE PAC TRANSFORMATION ===");
 	plan->Print();
 #endif
-	if (!pu_present_in_tree && !check.fk_paths.empty()) {
-		// Phase 1: PU not reachable — add FK joins so plan has all tables needed
-		string start_table;
-		vector<string> target_pus;
-		vector<string> gets_present, gets_missing;
-		PopulateGetsFromFKPath(check, gets_present, gets_missing, start_table, target_pus);
-
-		auto it = check.fk_paths.find(start_table);
-		if (it == check.fk_paths.end() || it->second.empty()) {
-			throw InvalidInputException("PAC compiler: expected fk_path for start table " + start_table);
-		}
-
-		// Deduplicate missing tables
-		std::unordered_set<string> missing_set(gets_missing.begin(), gets_missing.end());
-		vector<string> unique_gets_missing(missing_set.begin(), missing_set.end());
-		std::sort(unique_gets_missing.begin(), unique_gets_missing.end());
-
-		AddMissingFKJoins(check, input, plan, unique_gets_missing, gets_present, it->second, privacy_units, cte_map);
-	}
+	auto pu_setup = PreparePlanForPUHashing(check, input, plan, privacy_units);
 	// Phase 2: always transform aggregates via unified path
 	PacAggregateInfoMap pac_agg_info;
-	{
-		auto &pu_names = (pu_present_in_tree && !pu_via_cte) ? check.scanned_pu_tables : privacy_units;
-		ModifyPlanWithPU(input, plan, pu_names, check, cte_map, pac_agg_info);
-	}
+	ModifyPlanWithPU(input, plan, pu_setup.pu_names, check, pu_setup.cte_map, pac_agg_info);
 
 	// ============================================================================
 	// CATEGORICAL QUERY HANDLING
@@ -886,8 +905,7 @@ void CompilePacBitsliceQuery(const PrivacyCompatibilityResult &check, OptimizerE
 	{
 		Value clip_val;
 		if (input.context.TryGetCurrentSetting("pac_clip_support", clip_val) && !clip_val.IsNull()) {
-			auto &pu_names = (pu_present_in_tree && !pu_via_cte) ? check.scanned_pu_tables : privacy_units;
-			RewriteClipAggregates(input, plan, check, pu_names);
+			RewriteClipAggregates(input, plan, check, pu_setup.pu_names);
 		}
 	}
 
