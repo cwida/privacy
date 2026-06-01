@@ -7,11 +7,11 @@
 // Rewriting:
 // - Replaces pac_* aggregates with pac_*_counters variants (return LIST<DOUBLE>)
 // - Wraps comparisons with pac_gt/pac_lt/etc. functions (return UBIGINT mask)
-// - Adds pac_filter at the outermost filter to make final probabilistic decision
+// - Adds priv_filter at the outermost filter to make final probabilistic decision
 //
 // Example transformation for TPC-H Q20:
-//   BEFORE: ps_availqty > (SELECT 0.5 * pac_sum(hash, l_quantity) FROM ...)
-//   AFTER:  pac_filter(pac_gt(ps_availqty, (SELECT 0.5 * pac_sum_counters(hash, l_quantity) FROM ...)))
+//   BEFORE: ps_availqty > (SELECT 0.5 * priv_sum(hash, l_quantity) FROM ...)
+//   AFTER:  priv_filter(pac_gt(ps_availqty, (SELECT 0.5 * priv_sum(hash, l_quantity) FROM ...)))
 //
 // Created by ila on 1/23/26.
 //
@@ -33,9 +33,9 @@ namespace duckdb {
 
 // The kind of wrapping to apply after BuildCounterListTransform
 enum class PacWrapKind {
-	PAC_NOISED, // Projection: list_transform -> pac_noised -> optional cast
-	PAC_FILTER, // Filter/Join: list_transform -> pac_filter
-	PAC_SELECT  // Filter/Join with outer PAC aggregate: pac_select_<cmp> or pac_select(hash, list<bool>)
+	PAC_NOISED, // Projection: list_transform -> priv_noised -> optional cast
+	PAC_FILTER, // Filter/Join: list_transform -> priv_filter
+	PAC_SELECT  // Filter/Join with outer PAC aggregate: priv_select_<cmp> or priv_select(hash, list<bool>)
 };
 
 // Detect and rewrite categorical query patterns to use counters and mask-based selection.
@@ -63,47 +63,47 @@ static inline string GetStructFieldName(idx_t index) {
 }
 
 // ============================================================================
-// Algebraic simplification: try to emit pac_filter_<cmp> instead of lambda
+// Algebraic simplification: try to emit priv_filter_<cmp> instead of lambda
 // ============================================================================
 // Given a comparison expression with one PAC binding, try to algebraically
 // move arithmetic from the list side to the scalar side, then emit a single
-// pac_filter_<cmp>(scalar, counters) call instead of list_transform + pac_filter.
+// priv_filter_<cmp>(scalar, counters) call instead of list_transform + priv_filter.
 
-// Map ExpressionType comparison to pac_filter_<cmp> function name
+// Map ExpressionType comparison to priv_filter_<cmp> function name
 static inline const char *GetPacFilterCmpName(ExpressionType cmp_type) {
 	switch (cmp_type) {
 	case ExpressionType::COMPARE_GREATERTHAN:
-		return "pac_filter_gt";
+		return "priv_filter_gt";
 	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-		return "pac_filter_gte";
+		return "priv_filter_gte";
 	case ExpressionType::COMPARE_LESSTHAN:
-		return "pac_filter_lt";
+		return "priv_filter_lt";
 	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-		return "pac_filter_lte";
+		return "priv_filter_lte";
 	case ExpressionType::COMPARE_EQUAL:
-		return "pac_filter_eq";
+		return "priv_filter_eq";
 	case ExpressionType::COMPARE_NOTEQUAL:
-		return "pac_filter_neq";
+		return "priv_filter_neq";
 	default:
 		return nullptr;
 	}
 }
 
-// Map ExpressionType comparison to pac_select_<cmp> function name
+// Map ExpressionType comparison to priv_select_<cmp> function name
 static inline const char *GetPacSelectCmpName(ExpressionType cmp_type) {
 	switch (cmp_type) {
 	case ExpressionType::COMPARE_GREATERTHAN:
-		return "pac_select_gt";
+		return "priv_select_gt";
 	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-		return "pac_select_gte";
+		return "priv_select_gte";
 	case ExpressionType::COMPARE_LESSTHAN:
-		return "pac_select_lt";
+		return "priv_select_lt";
 	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-		return "pac_select_lte";
+		return "priv_select_lte";
 	case ExpressionType::COMPARE_EQUAL:
-		return "pac_select_eq";
+		return "priv_select_eq";
 	case ExpressionType::COMPARE_NOTEQUAL:
-		return "pac_select_neq";
+		return "priv_select_neq";
 	default:
 		return nullptr;
 	}

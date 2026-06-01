@@ -29,7 +29,7 @@
 namespace duckdb {
 
 // ============================================================================
-// pac_mean(LIST<PAC_FLOAT>) -> PAC_FLOAT
+// priv_mean(LIST<PAC_FLOAT>) -> PAC_FLOAT
 // Computes the mean of non-NULL elements in a list of 64 counters.
 // Used for ordering in TopN: gives the true aggregate value before noise.
 // ============================================================================
@@ -86,8 +86,8 @@ static void PacMeanFunction(DataChunk &args, ExpressionState &state, Vector &res
 
 void RegisterPacMeanFunction(ExtensionLoader &loader) {
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
-	ScalarFunction pac_mean("pac_mean", {list_type}, PacFloatLogicalType(), PacMeanFunction);
-	CreateScalarFunctionInfo info(pac_mean);
+	ScalarFunction priv_mean("priv_mean", {list_type}, PacFloatLogicalType(), PacMeanFunction);
+	CreateScalarFunctionInfo info(priv_mean);
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Computes the mean of 64 PAC subsample counters (true aggregate before noise).";
 	info.descriptions.push_back(std::move(desc));
@@ -101,7 +101,7 @@ void RegisterPacMeanFunction(ExtensionLoader &loader) {
 // Information about a PAC aggregate expression that was rewritten to _counters
 struct PacTopKAggInfo {
 	idx_t agg_index;           // Index in LogicalAggregate::expressions
-	string original_name;      // e.g., "pac_noised_sum"
+	string original_name;      // e.g., "priv_noised_sum"
 	LogicalType original_type; // Return type before converting to LIST
 	ColumnBinding agg_binding; // Binding in the aggregate's output (aggregate_index, agg_index)
 };
@@ -320,7 +320,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	// parent sees its child's updated GetColumnBindings() result.
 	//
 	// IMPORTANT: For materialized CTEs, skip the CTE definition child (children[0]).
-	// TopK rewrites aggregate types (e.g., pac_noised_sum → pac_sum counters), which changes
+	// TopK rewrites aggregate types (e.g., priv_noised_sum → priv_sum counters), which changes
 	// the CTE's output type. Any CTE_SCAN referencing this CTE would then receive
 	// FLOAT[] instead of the expected scalar type, causing execution crashes.
 	// Only recurse into the consumer child (children[1]).
@@ -478,7 +478,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	// ==========================================================================
 	// Step 2: Build the "mean projection" between Aggregate and TopN.
 	//         This projection passes through all existing columns and adds
-	//         pac_mean(counters) columns for ordering.
+	//         priv_mean(counters) columns for ordering.
 	// ==========================================================================
 #if PRIVACY_DEBUG
 	PRIVACY_DEBUG_PRINT("PACTopKRule: Step 2 - Building mean projection");
@@ -496,14 +496,14 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		mean_proj_exprs.push_back(std::move(col_ref));
 	}
 
-	// Map from pac aggregate binding -> index of the pac_mean column in the mean projection
+	// Map from pac aggregate binding -> index of the priv_mean column in the mean projection
 	unordered_map<uint64_t, idx_t> pac_mean_column_map;
 
-	// Add pac_mean(counters) for each PAC aggregate
+	// Add priv_mean(counters) for each PAC aggregate
 	for (auto &info : pac_aggs) {
 		idx_t mean_col_idx = mean_proj_exprs.size();
 		auto counters_ref = make_uniq<BoundColumnRefExpression>(list_type, info.agg_binding);
-		auto mean_expr = input.optimizer.BindScalarFunction("pac_mean", std::move(counters_ref));
+		auto mean_expr = input.optimizer.BindScalarFunction("priv_mean", std::move(counters_ref));
 		mean_proj_exprs.push_back(std::move(mean_expr));
 		pac_mean_column_map[HashBinding(info.agg_binding)] = mean_col_idx;
 	}
@@ -513,7 +513,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	if (ctx.has_intermediate_projection) {
 		// ==================================================================
 		// PATH A: Intermediate projections exist (e.g. string decompress).
-		// Keep them in place. Insert MeanProj below them, add pac_mean
+		// Keep them in place. Insert MeanProj below them, add priv_mean
 		// passthrough columns, rewrite only PAC ORDER BY refs.
 		//
 		// Before: TopN -> Proj_outer -> ... -> Proj_inner -> Aggregate
@@ -578,7 +578,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		// Step A2: Insert MeanProj between innermost projection and aggregate.
 		// The innermost projection previously referenced the aggregate directly;
 		// now it references MeanProj (which passes through all aggregate columns
-		// at the same positions, plus pac_mean columns at the end).
+		// at the same positions, plus priv_mean columns at the end).
 		// ------------------------------------------------------------------
 		mean_proj->children.push_back(std::move(innermost->children[0]));
 		mean_proj->ResolveOperatorTypes();
@@ -604,9 +604,9 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		}
 
 		// ------------------------------------------------------------------
-		// Step A3: Add pac_mean passthrough columns to each intermediate
+		// Step A3: Add priv_mean passthrough columns to each intermediate
 		// projection (bottom-up: innermost first). Each projection gets a
-		// new column that references the pac_mean column from the projection
+		// new column that references the priv_mean column from the projection
 		// below it, forming a chain: MeanProj -> innermost -> ... -> outermost.
 		// ------------------------------------------------------------------
 		vector<vector<idx_t>> pac_mean_col_indices(ctx.intermediate_projections.size());
@@ -618,12 +618,12 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 				pac_mean_col_indices[pi].push_back(new_col_idx);
 
 				if (pi == static_cast<int>(ctx.intermediate_projections.size()) - 1) {
-					// Innermost: reference MeanProj's pac_mean column directly
+					// Innermost: reference MeanProj's priv_mean column directly
 					idx_t mean_col = pac_mean_column_map[HashBinding(pac_aggs[j].agg_binding)];
 					proj->expressions.push_back(make_uniq<BoundColumnRefExpression>(
 					    PacFloatLogicalType(), ColumnBinding(mean_proj_idx, mean_col)));
 				} else {
-					// Reference the projection below's pac_mean passthrough column
+					// Reference the projection below's priv_mean passthrough column
 					auto *below = ctx.intermediate_projections[pi + 1];
 					idx_t below_col = pac_mean_col_indices[pi + 1][j];
 					proj->expressions.push_back(make_uniq<BoundColumnRefExpression>(
@@ -660,7 +660,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 
 		// ------------------------------------------------------------------
 		// Step A3b: Wrap LIST-typed column refs inside compound expressions
-		// with pac_mean(). After _counters conversion, PAC aggregate
+		// with priv_mean(). After _counters conversion, PAC aggregate
 		// columns are LIST<FLOAT>. Simple column refs are handled later by
 		// NoisedProj, but compound expressions (e.g. CONCAT using aggregate
 		// results) need scalar values at evaluation time.
@@ -686,7 +686,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 #if PRIVACY_DEBUG
 						PRIVACY_DEBUG_PRINT("PACTopKRule:     A3b WRAPPING LIST colref: " + e->ToString());
 #endif
-						e = input.optimizer.BindScalarFunction("pac_noised", std::move(e));
+						e = input.optimizer.BindScalarFunction("priv_noised", std::move(e));
 						// Cast back to original aggregate type (e.g. FLOAT→DOUBLE for AVG).
 						// Trace the binding through remaining projections to identify which
 						// PAC aggregate this colref came from, then cast if types differ.
@@ -716,7 +716,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 					}
 					// If this is a CAST whose child is a LIST colref, replace the
 					// entire CAST so the bound cast function matches the new source
-					// type (FLOAT from pac_noised instead of original INT64/DECIMAL).
+					// type (FLOAT from priv_noised instead of original INT64/DECIMAL).
 					if (e->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
 						auto &cast_expr = e->Cast<BoundCastExpression>();
 						if (cast_expr.child->type == ExpressionType::BOUND_COLUMN_REF &&
@@ -724,9 +724,9 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 							auto target_type = cast_expr.return_type;
 #if PRIVACY_DEBUG
 							PRIVACY_DEBUG_PRINT("PACTopKRule:     A3b REPLACING CAST(LIST->" + target_type.ToString() +
-							                    ") with CAST(pac_noised()->" + target_type.ToString() + ")");
+							                    ") with CAST(priv_noised()->" + target_type.ToString() + ")");
 #endif
-							auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(cast_expr.child));
+							auto noised = input.optimizer.BindScalarFunction("priv_noised", std::move(cast_expr.child));
 							e = BoundCastExpression::AddCastToType(input.context, std::move(noised), target_type);
 							return;
 						}
@@ -740,7 +740,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 
 		// ------------------------------------------------------------------
 		// Step A4: Rewrite TopN ORDER BY — only PAC aggregate references
-		// are rewritten to point to the pac_mean passthrough column in the
+		// are rewritten to point to the priv_mean passthrough column in the
 		// outermost projection. Non-PAC refs (e.g. o_orderpriority through
 		// __internal_decompress_string) are left unchanged since the
 		// intermediate projections are preserved in the plan.
@@ -761,9 +761,9 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 
 		// ------------------------------------------------------------------
 		// Step A5: Build NoisedProj above TopN. Only covers the ORIGINAL
-		// columns of the outermost projection (not the pac_mean passthrough
+		// columns of the outermost projection (not the priv_mean passthrough
 		// columns, which were just for sorting). PAC aggregate columns get
-		// pac_mean() applied then cast back to the original return type.
+		// priv_mean() applied then cast back to the original return type.
 		// Non-PAC columns are passed through unchanged.
 		// ------------------------------------------------------------------
 		idx_t noised_proj_idx = binder.GenerateTableIndex();
@@ -772,10 +772,10 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		for (idx_t i = 0; i < original_outermost_col_count; i++) {
 			auto it_pac = outermost_pac_col_map.find(i);
 			if (it_pac != outermost_pac_col_map.end()) {
-				// PAC aggregate column: apply pac_noised to counter LIST, cast back to original type
+				// PAC aggregate column: apply priv_noised to counter LIST, cast back to original type
 				auto counters_ref =
 				    make_uniq<BoundColumnRefExpression>(list_type, ColumnBinding(outermost->table_index, i));
-				auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(counters_ref));
+				auto noised = input.optimizer.BindScalarFunction("priv_noised", std::move(counters_ref));
 				auto &orig_type = pac_aggs[it_pac->second].original_type;
 				if (orig_type != noised->return_type) {
 					noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), orig_type);
@@ -856,7 +856,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 			auto it = pac_mean_column_map.find(HashBinding(binding));
 			if (it != pac_mean_column_map.end()) {
 				auto counters_ref = make_uniq<BoundColumnRefExpression>(list_type, ColumnBinding(mean_proj_idx, i));
-				auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(counters_ref));
+				auto noised = input.optimizer.BindScalarFunction("priv_noised", std::move(counters_ref));
 				// Cast back to the original aggregate return type (e.g. BIGINT for count)
 				for (auto &info : pac_aggs) {
 					if (info.agg_binding == binding && info.original_type != noised->return_type) {

@@ -538,7 +538,7 @@ ReplanGuard::~ReplanGuard() {
 // Configuration helpers
 string GetPacCompiledPath(ClientContext &context, const string &default_path) {
 	Value v;
-	context.TryGetCurrentSetting("pac_compiled_path", v);
+	context.TryGetCurrentSetting("priv_compiled_path", v);
 	string path = v.IsNull() ? default_path : v.ToString();
 	if (!path.empty() && path.back() != '/') {
 		path.push_back('/');

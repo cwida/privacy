@@ -43,7 +43,7 @@ static void DpLaplaceNoiseFunction(DataChunk &args, ExpressionState &state, Vect
 }
 
 void RegisterDpLaplaceNoiseFunction(ExtensionLoader &loader) {
-	ScalarFunction fn("dp_laplace_noise", {LogicalType::DOUBLE, LogicalType::DOUBLE}, LogicalType::DOUBLE,
+	ScalarFunction fn("priv_laplace_noise", {LogicalType::DOUBLE, LogicalType::DOUBLE}, LogicalType::DOUBLE,
 	                  DpLaplaceNoiseFunction);
 	CreateScalarFunctionInfo info(fn);
 	FunctionDescription desc;
@@ -159,7 +159,7 @@ static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state,
 
 void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
-	ScalarFunction fn("dp_smooth_median_noise", {list_type, LogicalType::DOUBLE, LogicalType::DOUBLE},
+	ScalarFunction fn("priv_smooth_median_noise", {list_type, LogicalType::DOUBLE, LogicalType::DOUBLE},
 	                  LogicalType::DOUBLE, DpSmoothMedianNoiseFunction);
 	CreateScalarFunctionInfo info(fn);
 	FunctionDescription desc;

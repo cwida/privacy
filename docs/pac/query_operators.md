@@ -37,7 +37,7 @@ When the query does not scan the PU table directly (e.g., `SELECT SUM(l_quantity
 
 1. **Follow FK path** from scanned tables to PU (e.g., `lineitem -> orders -> customer`)
 2. **Identify missing tables** in the path that need to be joined
-3. **Join elimination**: if `pac_join_elimination=true`, skip joining the PU table itself when only FK columns are needed (e.g., join only `orders`, not `customer`, because `orders.o_custkey` is the FK)
+3. **Join elimination**: if `priv_join_elimination=true`, skip joining the PU table itself when only FK columns are needed (e.g., join only `orders`, not `customer`, because `orders.o_custkey` is the FK)
 4. **For each instance** of the connecting table:
    - Create fresh `LogicalGet` nodes for missing tables
    - Build join chain with appropriate FK conditions
@@ -49,22 +49,22 @@ Once the PU (or its FK proxy) is reachable from every aggregate:
 
 1. **Find all aggregates** that have the PU table (or FK-linked table) in their subtree
 2. **For each PU table**, compute a hash from the PU's key columns or FK columns:
-   - Single PRIVACY_KEY: `pac_hash(hash(key_col))`
-   - Composite PRIVACY_KEY: `pac_hash(hash(key1) XOR hash(key2) XOR ...)` — XOR combines multiple column hashes into one, then pac_hash repairs it to 32 bits
-   - FK proxy: `pac_hash(hash(fk_col))` (e.g., `pac_hash(hash(o_custkey))`)
+   - Single PRIVACY_KEY: `priv_hash(hash(key_col))`
+   - Composite PRIVACY_KEY: `priv_hash(hash(key1) XOR hash(key2) XOR ...)` — XOR combines multiple column hashes into one, then priv_hash repairs it to 32 bits
+   - FK proxy: `priv_hash(hash(fk_col))` (e.g., `priv_hash(hash(o_custkey))`)
 3. **Insert a projection** above the hash source scan that computes the hash as an extra column
 4. **Propagate** the hash column through all intermediate operators (projections, joins, filters) between the hash source and the aggregate
-5. **Replace** each standard aggregate with its PAC equivalent: `SUM(x)` becomes `pac_noised_sum(hash, x)`, `COUNT(*)` becomes `pac_noised_count(hash)`, etc.
+5. **Replace** each standard aggregate with its PAC equivalent: `SUM(x)` becomes `priv_noised_sum(hash, x)`, `COUNT(*)` becomes `priv_noised_count(hash)`, etc.
 6. For **multiple PUs**, AND all hashes together: `hash1 AND hash2` — a tuple is in sub-sample j only if ALL its PUs have bit j set
 
-> **PAC aggregate naming:** base functions (`pac_count`, `pac_sum`, ...) return `LIST<T>` — 64 per-sample counters. `pac_noised(list<T>):T` applies noise and returns a scalar. The `pac_noised_<aggr>()` variants (e.g., `pac_noised_count`) are fused shortcuts: `pac_noised_count(hash)` = `pac_noised(pac_count(hash))`. Similarly, `pac_select` and `pac_filter` consume counter lists for categorical queries.
+> **PAC aggregate naming:** base functions (`priv_count`, `priv_sum`, ...) return `LIST<T>` — 64 per-sample counters. `priv_noised(list<T>):T` applies noise and returns a scalar. The `priv_noised_<aggr>()` variants (e.g., `priv_noised_count`) are fused shortcuts: `priv_noised_count(hash)` = `priv_noised(priv_count(hash))`. Similarly, `priv_select` and `priv_filter` consume counter lists for categorical queries.
 
 ### Example: Direct PU scan
 ```sql
 -- Original
 SELECT COUNT(*) FROM customer WHERE c_mktsegment = 'BUILDING'
 -- Rewritten (conceptual)
-SELECT pac_noised_count(pac_hash(hash(c_custkey)))
+SELECT priv_noised_count(priv_hash(hash(c_custkey)))
 FROM customer WHERE c_mktsegment = 'BUILDING'
 ```
 
@@ -74,8 +74,8 @@ FROM customer WHERE c_mktsegment = 'BUILDING'
 SELECT l_returnflag, SUM(l_quantity) FROM lineitem
 WHERE l_shipdate <= '1998-09-02' GROUP BY l_returnflag
 -- Step 1: join orders to reach PU FK column
--- Step 2: hash o_custkey, replace SUM with pac_noised_sum
-SELECT l_returnflag, pac_noised_sum(pac_hash(hash(o_custkey)), l_quantity)
+-- Step 2: hash o_custkey, replace SUM with priv_noised_sum
+SELECT l_returnflag, priv_noised_sum(priv_hash(hash(o_custkey)), l_quantity)
 FROM lineitem JOIN orders ON l_orderkey = o_orderkey
 WHERE l_shipdate <= '1998-09-02' GROUP BY l_returnflag
 ```
@@ -145,12 +145,12 @@ Top-K queries (`ORDER BY agg LIMIT k`) get special treatment via a dedicated pos
 
 **Solution** (`pac_pushdown_topk=true`):
 1. Convert PAC aggregates to `_counters` variants (return all 64 counter values as `LIST<FLOAT>`)
-2. Insert a **mean projection** (`pac_mean(counters)`) for ordering — gives the true aggregate mean
+2. Insert a **mean projection** (`priv_mean(counters)`) for ordering — gives the true aggregate mean
 3. **TopN** selects top-k groups based on the true mean
-4. Insert a **noised projection** (`pac_noised(counters)`) above TopN — applies noise only to selected rows, cast back to original type
+4. Insert a **noised projection** (`priv_noised(counters)`) above TopN — applies noise only to selected rows, cast back to original type
 
 Two paths depending on plan structure:
-- **Path A** (intermediate projections, e.g., string decompress): preserves intermediate projections, adds `pac_mean` passthrough columns
+- **Path A** (intermediate projections, e.g., string decompress): preserves intermediate projections, adds `priv_mean` passthrough columns
 - **Path B** (TopN directly above Aggregate): simpler insertion of MeanProj and NoisedProj
 
 **Superset expansion** (`pac_topk_expansion`): select `ceil(c * K)` candidates with the inner TopN, then a final TopN limits to the original K after noising.
@@ -159,8 +159,8 @@ Two paths depending on plan structure:
 
 **Aggregate DISTINCT** (e.g., `COUNT(DISTINCT col)`) is rewritten:
 
-- `COUNT(DISTINCT x)` is handled via pre-aggregation: the compiler inserts a `GROUP BY x` with `bit_or(key_hash)` before the standard `pac_noised_count` aggregate
-- `SUM(DISTINCT x)` similarly uses `GROUP BY x` with `bit_or(key_hash)` before `pac_noised_sum`
+- `COUNT(DISTINCT x)` is handled via pre-aggregation: the compiler inserts a `GROUP BY x` with `bit_or(key_hash)` before the standard `priv_noised_count` aggregate
+- `SUM(DISTINCT x)` similarly uses `GROUP BY x` with `bit_or(key_hash)` before `priv_noised_sum`
 
 The compiler detects when an aggregate expression is marked as distinct and inserts the pre-aggregation step automatically.
 
@@ -168,73 +168,73 @@ The compiler detects when an aggregate expression is marked as distinct and inse
 
 Categorical queries arise when a (scalar or correlated) subquery produces a PAC aggregate result that is used outside of a direct aggregation context — typically in projection expressions or filter predicates. The categorical rewriter (Phase 2) handles these by converting the inner PAC aggregate to its `_counters` variant (returning all 64 per-sample values as `LIST<DOUBLE>`) and then applying one of three terminal wrappers depending on how the result is consumed.
 
-### Case 1: `pac_noised` — Projection Expressions
+### Case 1: `priv_noised` — Projection Expressions
 
-When a PAC aggregate result appears in a **projection expression** (arithmetic over one or more aggregates), the rewriter builds a `list_transform` lambda that evaluates the expression across all 64 possible worlds, then reduces to a scalar with `pac_noised`.
+When a PAC aggregate result appears in a **projection expression** (arithmetic over one or more aggregates), the rewriter builds a `list_transform` lambda that evaluates the expression across all 64 possible worlds, then reduces to a scalar with `priv_noised`.
 
 For expressions involving multiple aggregates, `list_zip` combines the counter lists so the lambda can access all values per world.
 
 **TPC-H Q08** illustrates this: the query computes `SUM(CASE nation='BRAZIL' THEN volume ELSE 0 END) / SUM(volume)` — a ratio of two aggregates:
 
 ```sql
--- Q08: pac_noised wraps a projection expression over two aggregates
+-- Q08: priv_noised wraps a projection expression over two aggregates
 SELECT o_year,
-       CAST(pac_noised(
+       CAST(priv_noised(
               list_transform(
                 list_zip(
-                  list_transform(pac_sum(pac_pu, brazil_volume),
+                  list_transform(priv_sum(pac_pu, brazil_volume),
                                  lambda y: CAST(y AS DECIMAL(18,2))),
-                  list_transform(pac_sum(pac_pu, volume),
+                  list_transform(priv_sum(pac_pu, volume),
                                  lambda y: CAST(y AS DECIMAL(18,2)))),
                 lambda x: CAST(x[1] / x[2] AS FLOAT))) AS FLOAT) AS mkt_share
 FROM ...
 GROUP BY o_year
 ```
 
-The inner `list_transform` calls cast counters back to their original types; the outer lambda computes the division for each of the 64 worlds; `pac_noised` then reduces the 64-element list to a single noised scalar.
+The inner `list_transform` calls cast counters back to their original types; the outer lambda computes the division for each of the 64 worlds; `priv_noised` then reduces the 64-element list to a single noised scalar.
 
-### Case 2: `pac_filter` — Filters on Non-Sensitive Tuples
+### Case 2: `priv_filter` — Filters on Non-Sensitive Tuples
 
-When a PAC aggregate result appears in a **filter predicate** and the tuples being filtered are **not themselves subject to a PAC aggregate** (i.e., no sensitive aggregation sits above the filter), the rewriter uses `pac_filter`. This evaluates the comparison across all 64 worlds and makes a probabilistic filtering decision (returns true with probability `popcount(mask)/64`).
+When a PAC aggregate result appears in a **filter predicate** and the tuples being filtered are **not themselves subject to a PAC aggregate** (i.e., no sensitive aggregation sits above the filter), the rewriter uses `priv_filter`. This evaluates the comparison across all 64 worlds and makes a probabilistic filtering decision (returns true with probability `popcount(mask)/64`).
 
-The rewriter attempts algebraic simplification to emit specialized variants (`pac_filter_gt`, `pac_filter_lt`, etc.) that avoid the lambda overhead.
+The rewriter attempts algebraic simplification to emit specialized variants (`priv_filter_gt`, `priv_filter_lt`, etc.) that avoid the lambda overhead.
 
 **TPC-H Q20** illustrates this: the query filters `partsupp` rows where `ps_availqty > 2 * (SELECT SUM(l_quantity) ...)` — the filtered tuples (suppliers) are not themselves aggregated by PAC:
 
 ```sql
--- Q20: pac_filter wraps a comparison against a subquery aggregate
+-- Q20: priv_filter wraps a comparison against a subquery aggregate
 SELECT s_name, s_address
   FROM supplier JOIN nation ON ...
  WHERE s_suppkey IN (
     SELECT ps_suppkey FROM partsupp
      WHERE ps_partkey IN (SELECT p_partkey FROM part WHERE p_name LIKE 'forest%')
-       AND pac_filter_gt(ps_availqty * 2,
-             (SELECT pac_sum(pac_hash(hash(o_custkey)), l_quantity)
+       AND priv_filter_gt(ps_availqty * 2,
+             (SELECT priv_sum(priv_hash(hash(o_custkey)), l_quantity)
                 FROM lineitem JOIN orders ON l_orderkey = o_orderkey
                WHERE l_partkey = ps_partkey AND l_suppkey = ps_suppkey
                  AND l_shipdate >= DATE '1994-01-01'
                  AND l_shipdate < DATE '1995-01-01')))
 ```
 
-`pac_filter_gt` compares the non-sensitive value `ps_availqty * 2` against each of the 64 counter values of `pac_sum` and returns a UBIGINT mask; the row passes if the mask is non-zero (majority vote).
+`priv_filter_gt` compares the non-sensitive value `ps_availqty * 2` against each of the 64 counter values of `priv_sum` and returns a UBIGINT mask; the row passes if the mask is non-zero (majority vote).
 
-### Case 3: `pac_select` — Filters With a Sensitive Aggregation Above
+### Case 3: `priv_select` — Filters With a Sensitive Aggregation Above
 
-When a PAC aggregate result appears in a **filter predicate** and a **PAC aggregate sits above** the filter (i.e., the filtered tuples feed into a sensitive aggregation), `pac_filter` is insufficient — the outer aggregate must know *which* of the 64 worlds each tuple belongs to. The rewriter uses `pac_select`, which AND's the 64-bit filter mask with the outer hash, creating a new hash that encodes both the sub-sampling and the categorical decision.
+When a PAC aggregate result appears in a **filter predicate** and a **PAC aggregate sits above** the filter (i.e., the filtered tuples feed into a sensitive aggregation), `priv_filter` is insufficient — the outer aggregate must know *which* of the 64 worlds each tuple belongs to. The rewriter uses `priv_select`, which AND's the 64-bit filter mask with the outer hash, creating a new hash that encodes both the sub-sampling and the categorical decision.
 
-The rewriter emits specialized variants (`pac_select_lt`, `pac_select_gt`, etc.) when possible.
+The rewriter emits specialized variants (`priv_select_lt`, `priv_select_gt`, etc.) when possible.
 
 **TPC-H Q17** illustrates this: the query computes `SUM(l_extendedprice) / 7.0` over lineitems where `l_quantity < 0.2 * AVG(l_quantity)` — the filter depends on a PAC aggregate (inner AVG), and the filtered result feeds into another PAC aggregate (outer SUM):
 
 ```sql
--- Q17: pac_select wraps a filter that feeds into an outer PAC aggregate
-SELECT pac_noised_sum(pac_pu, l_extendedprice) / 7.0 AS avg_yearly
-  FROM (SELECT pac_select_lt(
-                 pac_hash(hash(o_custkey)),
+-- Q17: priv_select wraps a filter that feeds into an outer PAC aggregate
+SELECT priv_noised_sum(pac_pu, l_extendedprice) / 7.0 AS avg_yearly
+  FROM (SELECT priv_select_lt(
+                 priv_hash(hash(o_custkey)),
                  lineitem.l_quantity * 5,
-                 (SELECT pac_div(
-                           pac_sum(pac_hash(hash(o_sub.o_custkey)), l_sub.l_quantity),
-                           pac_count(pac_hash(hash(o_sub.o_custkey)), l_sub.l_quantity))
+                 (SELECT priv_div(
+                           priv_sum(priv_hash(hash(o_sub.o_custkey)), l_sub.l_quantity),
+                           priv_count(priv_hash(hash(o_sub.o_custkey)), l_sub.l_quantity))
                     FROM lineitem AS l_sub JOIN orders AS o_sub ON ...
                    WHERE l_sub.l_partkey = part.p_partkey)) AS pac_pu,
                l_extendedprice
@@ -243,4 +243,4 @@ SELECT pac_noised_sum(pac_pu, l_extendedprice) / 7.0 AS avg_yearly
  WHERE pac_pu <> 0
 ```
 
-`pac_select_lt` takes the outer hash, the non-sensitive comparand (`l_quantity * 5`), and the inner aggregate's counter list. It returns a new UBIGINT hash where bit j is set only if both the original sub-sample includes the tuple AND the comparison holds in world j. The outer `pac_noised_sum` then aggregates using this combined hash. The `WHERE pac_pu <> 0` applies majority-vote filtering.
+`priv_select_lt` takes the outer hash, the non-sensitive comparand (`l_quantity * 5`), and the inner aggregate's counter list. It returns a new UBIGINT hash where bit j is set only if both the original sub-sample includes the tuple AND the comparison holds in world j. The outer `priv_noised_sum` then aggregates using this combined hash. The `WHERE pac_pu <> 0` applies majority-vote filtering.

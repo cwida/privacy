@@ -528,7 +528,7 @@ static LogicalFilter *ApplySupportFilter(OptimizerExtensionInput &input, unique_
 
 // ----------------------------------------------------------------------------
 // Wrap aggregate output — inserts LogicalProjection above `agg` with
-// dp_laplace_noise applied to each DP-target column, cast back to original type.
+// priv_laplace_noise applied to each DP-target column, cast back to original type.
 // Returns the inserted projection so the caller can layer additional rewrites.
 // ----------------------------------------------------------------------------
 
@@ -611,7 +611,7 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 		    BoundCastExpression::AddCastToType(input.context, std::move(col_ref), LogicalType::DOUBLE);
 		auto scale_expr = make_uniq<BoundConstantExpression>(Value::DOUBLE(scale));
 		unique_ptr<Expression> noised =
-		    input.optimizer.BindScalarFunction("dp_laplace_noise", std::move(value_expr), std::move(scale_expr));
+		    input.optimizer.BindScalarFunction("priv_laplace_noise", std::move(value_expr), std::move(scale_expr));
 		if (agg_col_type != LogicalType::DOUBLE) {
 			noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), agg_col_type);
 		}
@@ -709,7 +709,7 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 		    make_uniq<BoundColumnRefExpression>(agg->types[n_groups + ai], ColumnBinding(agg->aggregate_index, ai)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(epsilons[ai])));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(deltas[ai])));
-		unique_ptr<Expression> noised = BindScalarLocal(input, "dp_smooth_median_noise", std::move(children));
+		unique_ptr<Expression> noised = BindScalarLocal(input, "priv_smooth_median_noise", std::move(children));
 		if (output_types[ai] != LogicalType::DOUBLE) {
 			noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), output_types[ai]);
 		}
@@ -759,9 +759,9 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 		children.push_back(pre_agg.pu_hash_ref->Copy());
 		children.push_back(std::move(lower_ref));
 		if (original.function.name == "sum") {
-			agg->expressions[ai] = BindAggregateLocal(input, "dp_sample_clip_sum", std::move(children));
+			agg->expressions[ai] = BindAggregateLocal(input, "priv_sample_clip_sum", std::move(children));
 		} else {
-			agg->expressions[ai] = BindAggregateLocal(input, "dp_sample_sum", std::move(children));
+			agg->expressions[ai] = BindAggregateLocal(input, "priv_sample_sum", std::move(children));
 		}
 	}
 	agg->ResolveOperatorTypes();
@@ -826,7 +826,7 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 	double es = ComputeElasticSensitivity(input.context, fk_chain, epsilon);
 
 	// When privacy_noise=false the compilation pipeline still runs (clipping, FK chain)
-	// but Laplace scale is zeroed → dp_laplace_noise returns the value unchanged.
+	// but Laplace scale is zeroed → priv_laplace_noise returns the value unchanged.
 	// This mirrors pac_mi=0 for PAC and enables deterministic testing.
 	bool noise_enabled = IsPacNoiseEnabled(input.context, true);
 
@@ -905,9 +905,9 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 			throw InvalidInputException("dp_sample_median: dp_sum_bound must be a positive finite number");
 		}
 		Value clip_support_val;
-		if (!input.context.TryGetCurrentSetting("pac_clip_support", clip_support_val) || clip_support_val.IsNull() ||
+		if (!input.context.TryGetCurrentSetting("priv_clip_support", clip_support_val) || clip_support_val.IsNull() ||
 		    clip_support_val.GetValue<int64_t>() <= 0) {
-			throw InvalidInputException("dp_sample_median: pac_clip_support must be set for SUM and AVG aggregates");
+			throw InvalidInputException("dp_sample_median: priv_clip_support must be set for SUM and AVG aggregates");
 		}
 		ClipSumInputs(input, agg, sum_bound);
 	}

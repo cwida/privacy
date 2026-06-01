@@ -10,9 +10,9 @@
 namespace duckdb {
 
 // ============================================================================
-// pac_finalize(LIST<FLOAT>) -> FLOAT
+// priv_finalize(LIST<FLOAT>) -> FLOAT
 // Takes 64 subsample counters and returns a noised scalar value.
-// Counters already include 2x correction from pac_sum/pac_count finalize.
+// Counters already include 2x correction from priv_sum/priv_count finalize.
 // ============================================================================
 static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &context = state.GetContext();
@@ -73,12 +73,12 @@ static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector 
 void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
 	auto scalar_type = PacFloatLogicalType();
-	ScalarFunction pac_finalize("pac_finalize", {list_type}, scalar_type, PacFinalizeFunction);
-	loader.RegisterFunction(pac_finalize);
+	ScalarFunction priv_finalize("priv_finalize", {list_type}, scalar_type, PacFinalizeFunction);
+	loader.RegisterFunction(priv_finalize);
 
 	// Register implicit casts LIST<FLOAT> → FLOAT and LIST<FLOAT> → DOUBLE so the binder
 	// can resolve comparisons (WHERE total > 100) and function calls (SUM(total)) on
-	// derived_pu counter columns. The cast performs pac_finalize at execution time.
+	// derived_pu counter columns. The cast performs priv_finalize at execution time.
 	auto pac_finalize_cast = [](Vector &source, Vector &result, idx_t count, CastParameters &parameters) -> bool {
 		double mi = 0.0;
 		uint64_t seed = 42;
@@ -137,7 +137,7 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 	// Register reverse casts (scalar → FLOAT[]) so the binder can resolve comparisons
 	// on counter columns at bind time. With old_implicit_casting=true, ForceMaxLogicalType
 	// picks FLOAT[] as the common type and needs this cast to convert the scalar side.
-	// The post-optimizer rewrites these comparisons to pac_filter_<cmp> calls before
+	// The post-optimizer rewrites these comparisons to priv_filter_<cmp> calls before
 	// execution, so the cast is never actually run in comparison contexts.
 	auto scalar_to_list_cast = [](Vector &source, Vector &result, idx_t count, CastParameters &parameters) -> bool {
 		auto &child_vec = ListVector::GetEntry(result);

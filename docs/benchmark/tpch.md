@@ -47,10 +47,10 @@ Manual PAC queries replace standard aggregates with PAC versions and explicitly 
 **Q1 (Pricing Summary Report)**:
 ```sql
 SELECT l_returnflag, l_linestatus,
-       pac_sum(hash(orders.o_custkey), l_quantity) AS sum_qty,
-       pac_sum(hash(orders.o_custkey), l_extendedprice) AS sum_base_price,
-       pac_avg(hash(orders.o_custkey), l_quantity) AS avg_qty,
-       pac_count(hash(orders.o_custkey), 1) AS count_order
+       priv_sum(hash(orders.o_custkey), l_quantity) AS sum_qty,
+       priv_sum(hash(orders.o_custkey), l_extendedprice) AS sum_base_price,
+       priv_avg(hash(orders.o_custkey), l_quantity) AS avg_qty,
+       priv_count(hash(orders.o_custkey), 1) AS count_order
 FROM lineitem JOIN orders ON lineitem.l_orderkey = orders.o_orderkey
 WHERE l_shipdate <= DATE '1998-09-02'
 GROUP BY l_returnflag, l_linestatus
@@ -60,12 +60,12 @@ ORDER BY l_returnflag, l_linestatus;
 Note how the query:
 - Joins `lineitem` to `orders` to access `o_custkey` (the privacy unit FK)
 - Uses `hash(orders.o_custkey)` as the first argument to each PAC aggregate
-- Replaces `SUM` → `pac_sum`, `AVG` → `pac_avg`, `COUNT` → `pac_count`
+- Replaces `SUM` → `priv_sum`, `AVG` → `priv_avg`, `COUNT` → `priv_count`
 
 **Q3 (Shipping Priority)**:
 ```sql
 SELECT l_orderkey, 
-       pac_sum(hash(customer.c_custkey), l_extendedprice * (1 - l_discount)) AS revenue, 
+       priv_sum(hash(customer.c_custkey), l_extendedprice * (1 - l_discount)) AS revenue,
        o_orderdate, o_shippriority
 FROM customer JOIN orders ON c_custkey = o_custkey 
               JOIN lineitem ON l_orderkey = o_orderkey

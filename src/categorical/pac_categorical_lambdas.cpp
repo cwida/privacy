@@ -281,7 +281,7 @@ static unique_ptr<Expression> BuildListZipCall(OptimizerExtensionInput &input,
 }
 
 // Check whether an expression tree contains any null-handling operators
-// (COALESCE, IS NULL, IS NOT NULL). When absent, pac_coalesce is unnecessary
+// (COALESCE, IS NULL, IS NOT NULL). When absent, priv_coalesce is unnecessary
 // because NULL propagates identically through arithmetic.
 static bool ExpressionContainsNullHandling(Expression *expr) {
 	if (expr->type == ExpressionType::OPERATOR_COALESCE || expr->type == ExpressionType::OPERATOR_IS_NULL ||
@@ -330,7 +330,7 @@ unique_ptr<Expression> BuildCategoricalLambdas(OptimizerExtensionInput &input,
 		    make_uniq<BoundColumnRefExpression>("pac_var", LogicalType::LIST(PacFloatLogicalType()), pac_binding);
 		unique_ptr<Expression> input_list;
 		if (ExpressionContainsNullHandling(expr_to_transform)) {
-			input_list = input.optimizer.BindScalarFunction("pac_coalesce", std::move(counters_ref));
+			input_list = input.optimizer.BindScalarFunction("priv_coalesce", std::move(counters_ref));
 		} else {
 			input_list = std::move(counters_ref);
 		}
@@ -355,7 +355,7 @@ unique_ptr<Expression> BuildCategoricalLambdas(OptimizerExtensionInput &input,
 			auto ref =
 			    make_uniq<BoundColumnRefExpression>("pac_var", LogicalType::LIST(PacFloatLogicalType()), bi.binding);
 			if (needs_coalesce) {
-				counter_lists.push_back(input.optimizer.BindScalarFunction("pac_coalesce", std::move(ref)));
+				counter_lists.push_back(input.optimizer.BindScalarFunction("priv_coalesce", std::move(ref)));
 			} else {
 				counter_lists.push_back(std::move(ref));
 			}
@@ -381,7 +381,7 @@ unique_ptr<Expression> BuildCategoricalLambdas(OptimizerExtensionInput &input,
 unique_ptr<Expression> TryRewriteFilterComparison(OptimizerExtensionInput &input,
                                                   const vector<PacBindingInfo> &pac_bindings, Expression *expr,
                                                   const unordered_map<uint64_t, ColumnBinding> &counter_bindings,
-                                                  PacWrapKind wrap_kind, ColumnBinding pac_hash) {
+                                                  PacWrapKind wrap_kind, ColumnBinding priv_hash) {
 	if (pac_bindings.size() != 1 || expr->GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) {
 		return nullptr; // Only works with a comparison against a single PAC binding
 	}
@@ -442,7 +442,7 @@ unique_ptr<Expression> TryRewriteFilterComparison(OptimizerExtensionInput &input
 	// After simplification, list_side should be a bare column ref (possibly through casts)
 	Expression *stripped = StripCasts(list_side.get());
 	if (stripped->type != ExpressionType::BOUND_COLUMN_REF) {
-		// Can't emit pac_filter_<cmp>, but return the simplified comparison
+		// Can't emit priv_filter_<cmp>, but return the simplified comparison
 		// so the lambda path benefits from the algebraic rewriting
 		return make_uniq<BoundComparisonExpression>(cmp_type, std::move(scalar_side), std::move(list_side));
 	}
@@ -451,7 +451,7 @@ unique_ptr<Expression> TryRewriteFilterComparison(OptimizerExtensionInput &input
 	if (!counter_bindings.count(HashBinding(col_ref.binding))) {
 		return make_uniq<BoundComparisonExpression>(cmp_type, std::move(scalar_side), std::move(list_side));
 	}
-	// Build pac_{filter,select}_<cmp>(scalar_side, counters) or pac_select_<cmp>(hash, scalar, counters)
+	// Build priv_{filter,select}_<cmp>(scalar_side, counters) or priv_select_<cmp>(hash, scalar, counters)
 	const char *func_name =
 	    (wrap_kind == PacWrapKind::PAC_SELECT) ? GetPacSelectCmpName(cmp_type) : GetPacFilterCmpName(cmp_type);
 	if (!func_name) {
@@ -464,8 +464,8 @@ unique_ptr<Expression> TryRewriteFilterComparison(OptimizerExtensionInput &input
 	    make_uniq<BoundColumnRefExpression>("pac_var", LogicalType::LIST(PacFloatLogicalType()), col_ref.binding);
 
 	if (wrap_kind == PacWrapKind::PAC_SELECT) {
-		// pac_select_<cmp>(hash, scalar, counters) — 3 args, need manual binding
-		auto hash_ref = make_uniq<BoundColumnRefExpression>("pac_pu", LogicalType::UBIGINT, pac_hash);
+		// priv_select_<cmp>(hash, scalar, counters) — 3 args, need manual binding
+		auto hash_ref = make_uniq<BoundColumnRefExpression>("pac_pu", LogicalType::UBIGINT, priv_hash);
 		vector<unique_ptr<Expression>> args;
 		args.push_back(std::move(hash_ref));
 		args.push_back(std::move(scalar_side));

@@ -133,8 +133,8 @@ static string FindPacAggregateInExpression(Expression *expr, LogicalOperator *pl
 }
 
 // Check if a binding in a FILTER traces to the filter's own child aggregate (HAVING clause).
-// HAVING predicates should use scalar pac_noised comparison, not categorical pac_filter,
-// because pac_filter's majority-vote decision can disagree with the pac_noised aggregate
+// HAVING predicates should use scalar priv_noised comparison, not categorical priv_filter,
+// because priv_filter's majority-vote decision can disagree with the priv_noised aggregate
 // values that appear alongside it in the output.
 static bool IsHavingBinding(LogicalOperator *filter_op, const ColumnBinding &binding) {
 	if (!filter_op || filter_op->children.empty()) {
@@ -219,9 +219,9 @@ void DetectCategoricalPatterns(LogicalOperator *op, LogicalOperator *plan_root,
 				continue;
 			}
 			// Skip HAVING predicates: if ALL bindings trace to the filter's own child
-			// aggregate, this is a HAVING clause. HAVING should use scalar pac_noised
-			// comparison, not categorical pac_filter, because pac_filter's majority-vote
-			// can disagree with pac_noised values shown in the same row.
+			// aggregate, this is a HAVING clause. HAVING should use scalar priv_noised
+			// comparison, not categorical priv_filter, because priv_filter's majority-vote
+			// can disagree with priv_noised values shown in the same row.
 			bool all_having = true;
 			for (auto &bi : pac_bindings) {
 				if (!IsHavingBinding(op, bi.binding)) {
@@ -280,8 +280,8 @@ void DetectCategoricalPatterns(LogicalOperator *op, LogicalOperator *plan_root,
 				continue;
 			}
 			// Check if this expression has arithmetic with PAC aggregates
-			// - Multiple PAC bindings (e.g., pac_sum(...) / pac_sum(...))
-			// - Or single PAC binding with arithmetic (e.g., pac_sum(...) * 0.5)
+			// - Multiple PAC bindings (e.g., priv_sum(...) / priv_sum(...))
+			// - Or single PAC binding with arithmetic (e.g., priv_sum(...) * 0.5)
 			bool is_arithmetic_with_pac = false;
 			if (pac_bindings.size() >= 2) { // Multiple PAC aggregates - definitely needs lambda rewrite
 				is_arithmetic_with_pac = true;
@@ -299,7 +299,7 @@ void DetectCategoricalPatterns(LogicalOperator *op, LogicalOperator *plan_root,
 			}
 			if (is_arithmetic_with_pac) {
 				if (!IsNumericalType(expr->return_type)) {
-					continue; // Only create pattern if result is numerical (pac_noised only works on numbers)
+					continue; // Only create pattern if result is numerical (priv_noised only works on numbers)
 				}
 				CategoricalPatternInfo info;
 				info.parent_op = op;

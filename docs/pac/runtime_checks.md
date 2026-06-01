@@ -57,9 +57,9 @@ During aggregation, the 64-bit accumulator (`key_hash |= row_key_hash`) tracks w
 
 This naturally scales with data sparsity: sparse groups (few contributing PUs) have more NULL counters, wider variance, and higher NULL probability.
 
-### pac_coalesce
+### priv_coalesce
 
-**Signature**: `pac_coalesce(LIST<FLOAT>) -> LIST<FLOAT>`
+**Signature**: `priv_coalesce(LIST<FLOAT>) -> LIST<FLOAT>`
 
 If the input list is NULL (e.g., from a LEFT JOIN where no matching rows exist), returns a list of 64 NULLs instead. This prevents downstream operations from crashing on NULL list inputs.
 
@@ -86,9 +86,9 @@ with `steepness = 3`. At the threshold z-score, P(keep) ≈ 50%. Well above thre
 **Privacy safety**: This is safe post-processing of the already-noised output. By the data processing inequality, any function of a differentially private output is at least as private. The sigmoid decision uses independent random coins (from the same seeded RNG stream), not the underlying data.
 
 **Scope**: Utility NULLing applies to all PAC aggregate finalize paths:
-- `pac_noised_sum`, `pac_noised_count`, `pac_noised_min`, `pac_noised_max`
-- `pac_noised_clip_sum`, `pac_noised_clip_min`, `pac_noised_clip_max` (when `pac_clip_support` is also active)
-- Categorical terminals: `pac_noised`, `pac_noised_div`
+- `priv_noised_sum`, `priv_noised_count`, `priv_noised_min`, `priv_noised_max`
+- `priv_noised_clip_sum`, `priv_noised_clip_min`, `priv_noised_clip_max` (when `priv_clip_support` is also active)
+- Categorical terminals: `priv_noised`, `priv_noised_div`
 
 **Configuration**:
 ```sql
@@ -102,7 +102,7 @@ SET privacy_min_group_count = NULL;  -- disable (default)
 
 ### Hash Repair (pac_hash_repair)
 
-When `pac_hash_repair=true` (default), `pac_hash` repairs its output to have **exactly 32 bits set**. Without repair, DuckDB's internal hash function produces hashes with approximately but not exactly 32 bits. The repair ensures:
+When `pac_hash_repair=true` (default), `priv_hash` repairs its output to have **exactly 32 bits set**. Without repair, DuckDB's internal hash function produces hashes with approximately but not exactly 32 bits. The repair ensures:
 
 1. **Uniform MIA prior**: every PU appears in exactly half the sub-samples
 2. **Stable noise calibration**: the variance across counters is well-behaved (no outlier counters from PUs that appear in too many or too few sub-samples)
@@ -110,7 +110,7 @@ When `pac_hash_repair=true` (default), `pac_hash` repairs its output to have **e
 
 ### Bound Pruning Stability (MIN/MAX)
 
-`pac_min` and `pac_max` maintain a global bound `g` (worst extreme across all 64 counters):
+`priv_min` and `priv_max` maintain a global bound `g` (worst extreme across all 64 counters):
 - For MAX: `g = min_j(max_value[j])` — the minimum of all maximums
 - For MIN: `g = max_j(min_value[j])` — the maximum of all minimums
 
@@ -120,7 +120,7 @@ This optimization works on all distributions **except** monotonically increasing
 
 ### Two-Sided Sum Stability
 
-`pac_sum` keeps separate positive and negative counter arrays. This prevents cancellation when summing mixed-sign data:
+`priv_sum` keeps separate positive and negative counter arrays. This prevents cancellation when summing mixed-sign data:
 
 - Without two-sided: positive and negative values cancel within each counter, collapsing totals to near-zero, destroying variance, and inflating `z^2` to ~210 (unusable)
 - With two-sided: `result[j] = 2 * (pos[j] - neg[j])`, the counter hierarchy preserves natural spread. `z^2` normalizes to ~0.004, `var_ratio` to ~1.0

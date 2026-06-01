@@ -130,7 +130,7 @@ SET pac_mi = 0;
 # ============================================================================
 # Test 1: Simple ratio of two sums (Q08-like pattern)
 # sum(CASE WHEN nation='BRAZIL' THEN volume ELSE 0 END) / sum(volume)
-# Verify the rewriter uses pac_sum, list_zip, list_transform, and pac_noised
+# Verify the rewriter uses priv_sum, list_zip, list_transform, and priv_noised
 # ============================================================================
 
 query I nosort explain_test1
@@ -146,10 +146,10 @@ WHERE l.l_orderkey = o.o_orderkey
 GROUP BY s.s_nationkey
 ORDER BY s.s_nationkey;
 ----
-pac_sum
+priv_sum
 list_zip
 list_transform
-pac_noised
+priv_noised
 
 # Test 1 query execution - verify it runs without error
 statement ok
@@ -181,10 +181,10 @@ WHERE l.l_orderkey = o.o_orderkey
 GROUP BY order_month
 ORDER BY order_month;
 ----
-pac_sum
+priv_sum
 list_zip
 list_transform
-pac_noised
+priv_noised
 
 # Test 2 query execution
 statement ok
@@ -213,10 +213,10 @@ WHERE l.l_orderkey = o.o_orderkey
 GROUP BY l.l_suppkey
 ORDER BY l.l_suppkey;
 ----
-pac_sum
+priv_sum
 list_zip
 list_transform
-pac_noised
+priv_noised
 
 # Test 3 query execution
 statement ok
@@ -244,9 +244,9 @@ WHERE l.l_orderkey = o.o_orderkey
 GROUP BY l.l_suppkey
 ORDER BY l.l_suppkey;
 ----
-pac_sum
+priv_sum
 list_transform
-pac_noised
+priv_noised
 
 # Test 4 query execution
 statement ok
@@ -274,10 +274,10 @@ WHERE l.l_orderkey = o.o_orderkey
 GROUP BY l.l_suppkey
 ORDER BY l.l_suppkey;
 ----
-pac_sum
+priv_sum
 list_zip
 list_transform
-pac_noised
+priv_noised
 
 # Test 5 query execution
 statement ok

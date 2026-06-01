@@ -237,7 +237,7 @@ void AddMissingFKJoins(const PrivacyCompatibilityResult &check, OptimizerExtensi
                        unique_ptr<LogicalOperator> &plan, const vector<string> &gets_missing,
                        const vector<string> &gets_present, const vector<string> &fk_path,
                        const vector<string> &privacy_units, const CTETableMap &cte_map) {
-	bool join_elimination = GetBooleanSetting(input.context, "pac_join_elimination", false);
+	bool join_elimination = GetBooleanSetting(input.context, "priv_join_elimination", false);
 
 	std::unordered_set<string> missing_set(gets_missing.begin(), gets_missing.end());
 

@@ -119,7 +119,7 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		} else {
 			memset(buf, 0, sizeof(buf));
 		}
-		CheckPacSampleDiversity(key_hash, buf, s ? s->update_count : 0, IS_MAX ? "pac_noised_max" : "pac_noised_min",
+		CheckPacSampleDiversity(key_hash, buf, s ? s->update_count : 0, IS_MAX ? "priv_noised_max" : "priv_noised_min",
 		                        input.bind_data->Cast<PacBindData>());
 		// Pass mi for noise, 1.0 as correction (no value scaling for min/max)
 		double noise_var = 0.0;
@@ -191,7 +191,7 @@ static unique_ptr<FunctionData> PacMinMaxBind(ClientContext &ctx, AggregateFunct
 	}
 #undef BIND_TYPE
 
-	return MakePacBindData(ctx, args, 2, IS_MAX ? "pac_noised_max" : "pac_noised_min");
+	return MakePacBindData(ctx, args, 2, IS_MAX ? "priv_noised_max" : "priv_noised_min");
 }
 
 // ============================================================================
@@ -249,12 +249,12 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 				dst[j] = 0.0;
 			}
 		}
-		CheckPacSampleDiversity(key_hash, dst, s->update_count, IS_MAX ? "pac_noised_max" : "pac_noised_min",
+		CheckPacSampleDiversity(key_hash, dst, s->update_count, IS_MAX ? "priv_noised_max" : "priv_noised_min",
 		                        input.bind_data->Cast<PacBindData>());
 	}
 }
 
-// Bind function for pac_min/max_counters - similar to PacMinMaxBind but returns LIST<DOUBLE>
+// Bind function for priv_min/max_counters - similar to PacMinMaxBind but returns LIST<DOUBLE>
 template <bool IS_MAX>
 static unique_ptr<FunctionData> PacMinMaxCountersBind(ClientContext &ctx, AggregateFunction &function,
                                                       vector<unique_ptr<Expression>> &args) {
@@ -294,7 +294,7 @@ static unique_ptr<FunctionData> PacMinMaxCountersBind(ClientContext &ctx, Aggreg
 	}
 #undef BIND_COUNTERS_TYPE
 
-	return MakePacBindData(ctx, args, 2, IS_MAX ? "pac_max" : "pac_min");
+	return MakePacBindData(ctx, args, 2, IS_MAX ? "priv_max" : "priv_min");
 }
 
 // ============================================================================
@@ -302,13 +302,13 @@ static unique_ptr<FunctionData> PacMinMaxCountersBind(ClientContext &ctx, Aggreg
 // ============================================================================
 
 void RegisterPacMinFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("pac_noised_min");
+	AggregateFunctionSet fcn_set("priv_noised_min");
 
-	fcn_set.AddFunction(AggregateFunction("pac_noised_min", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::ANY,
+	fcn_set.AddFunction(AggregateFunction("priv_noised_min", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::ANY,
 	                                      nullptr, nullptr, nullptr, nullptr, nullptr,
 	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<false>));
 
-	fcn_set.AddFunction(AggregateFunction("pac_noised_min",
+	fcn_set.AddFunction(AggregateFunction("priv_noised_min",
 	                                      {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE},
 	                                      LogicalType::ANY, nullptr, nullptr, nullptr, nullptr, nullptr,
 	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<false>));
@@ -316,38 +316,40 @@ void RegisterPacMinFunctions(ExtensionLoader &loader) {
 	CreateAggregateFunctionInfo info(fcn_set);
 	FunctionDescription desc;
 	desc.description = "Privacy-preserving MIN. Automatically injected by PAC for protected columns.";
-	desc.examples = {"SELECT c_mktsegment, pac_noised_min(pac_hash(hash(c_custkey)), c_acctbal) FROM customer GROUP BY "
-	                 "c_mktsegment"};
+	desc.examples = {
+	    "SELECT c_mktsegment, priv_noised_min(priv_hash(hash(c_custkey)), c_acctbal) FROM customer GROUP BY "
+	    "c_mktsegment"};
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 }
 
 void RegisterPacMaxFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("pac_noised_max");
+	AggregateFunctionSet fcn_set("priv_noised_max");
 
-	fcn_set.AddFunction(AggregateFunction("pac_noised_max", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::ANY,
+	fcn_set.AddFunction(AggregateFunction("priv_noised_max", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::ANY,
 	                                      nullptr, nullptr, nullptr, nullptr, nullptr,
 	                                      FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<true>));
 
 	fcn_set.AddFunction(AggregateFunction(
-	    "pac_noised_max", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::ANY, nullptr,
+	    "priv_noised_max", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::ANY, nullptr,
 	    nullptr, nullptr, nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxBind<true>));
 
 	CreateAggregateFunctionInfo info(fcn_set);
 	FunctionDescription desc;
 	desc.description = "Privacy-preserving MAX. Automatically injected by PAC for protected columns.";
-	desc.examples = {"SELECT c_mktsegment, pac_noised_max(pac_hash(hash(c_custkey)), c_acctbal) FROM customer GROUP BY "
-	                 "c_mktsegment"};
+	desc.examples = {
+	    "SELECT c_mktsegment, priv_noised_max(priv_hash(hash(c_custkey)), c_acctbal) FROM customer GROUP BY "
+	    "c_mktsegment"};
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 }
 
 void RegisterPacMinCountersFunctions(ExtensionLoader &loader) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	AggregateFunctionSet fcn_set("pac_min");
+	AggregateFunctionSet fcn_set("priv_min");
 
 	fcn_set.AddFunction(AggregateFunction(
-	    "pac_min", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, nullptr, nullptr, nullptr, nullptr,
+	    "priv_min", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, nullptr, nullptr, nullptr, nullptr,
 	    nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxCountersBind<false>));
 
 	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts
@@ -362,10 +364,10 @@ void RegisterPacMinCountersFunctions(ExtensionLoader &loader) {
 
 void RegisterPacMaxCountersFunctions(ExtensionLoader &loader) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	AggregateFunctionSet fcn_set("pac_max");
+	AggregateFunctionSet fcn_set("priv_max");
 
 	fcn_set.AddFunction(AggregateFunction(
-	    "pac_max", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, nullptr, nullptr, nullptr, nullptr,
+	    "priv_max", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, nullptr, nullptr, nullptr, nullptr,
 	    nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxCountersBind<true>));
 
 	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts

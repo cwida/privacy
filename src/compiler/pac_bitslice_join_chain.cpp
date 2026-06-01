@@ -176,7 +176,7 @@ ConnectingTableMap EnsureFKTablesInPlan(const PrivacyCompatibilityResult &check,
 	// Note: all PU tables must have PRIVACY_KEY defined
 
 	// Check if join elimination is enabled
-	bool join_elimination = GetBooleanSetting(input.context, "pac_join_elimination", false);
+	bool join_elimination = GetBooleanSetting(input.context, "priv_join_elimination", false);
 
 	// Create the necessary LogicalGets for missing tables
 	// IMPORTANT: We need to preserve the FK path ordering when creating joins

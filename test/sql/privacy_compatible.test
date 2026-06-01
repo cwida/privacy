@@ -20,6 +20,29 @@ SET threads = 1
 statement ok
 SET pac_mi = 0
 
+statement error
+SET pac_check = false
+----
+pac_check
+
+statement error
+SET pac_rewrite = false
+----
+pac_rewrite
+
+statement error
+SET pac_join_elimination = false
+----
+pac_join_elimination
+
+statement error
+SET pac_compiled_path = '/tmp/privacy.sql'
+----
+pac_compiled_path
+
+statement ok
+SET priv_compiled_path = '/tmp/privacy.sql'
+
 # Create a test table
 statement ok
 CREATE TABLE t1(a INTEGER, b INTEGER);
@@ -134,7 +157,7 @@ SELECT SUM(t1a.b + t1b.b) FROM t1 t1a JOIN t1 t1b ON t1a.a = t1b.a;
 640
 
 # Test same table in main query and subquery (different scopes)
-# Categorical rewrite: pac_select_gt filters rows, pac_noised_sum aggregates survivors
+# Categorical rewrite: priv_select_gt filters rows, priv_noised_sum aggregates survivors
 query I
 SELECT SUM(b) FROM t1 WHERE a > (SELECT AVG(b) FROM t1);
 ----

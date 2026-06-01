@@ -6,8 +6,8 @@
 
 namespace duckdb {
 
-// Post-processing: replace pac_noised_avg/pac_avg with sum/count + division.
-// Runs as a standalone optimizer so it works for both compiler-generated and user-written pac_avg() SQL.
+// Post-processing: replace priv_noised_avg/priv_avg with sum/count + division.
+// Runs as a standalone optimizer so it works for both compiler-generated and user-written priv_avg() SQL.
 void RewritePacAvgToDiv(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);
 
 } // namespace duckdb

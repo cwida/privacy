@@ -51,7 +51,7 @@ ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, un
 // Build AND expression from multiple hash expressions (for multiple PUs)
 unique_ptr<Expression> BuildAndFromHashes(OptimizerExtensionInput &input, vector<unique_ptr<Expression>> &hash_exprs);
 
-// Bind a PAC aggregate function (pac_sum, pac_count, etc.) with hash + value arguments,
+// Bind a PAC aggregate function (priv_sum, priv_count, etc.) with hash + value arguments,
 // and an optional correction factor.
 unique_ptr<Expression> BindPacAggregate(OptimizerExtensionInput &input, const string &pac_func_name,
                                         unique_ptr<Expression> hash_expr, unique_ptr<Expression> value_expr,
@@ -82,9 +82,9 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
                                       unique_ptr<Expression> &hash_input_expr, unique_ptr<LogicalOperator> &plan,
                                       double correction = 1.0);
 
-// Rewrite PAC aggregates to use clipping variants when pac_clip_support is set.
+// Rewrite PAC aggregates to use clipping variants when priv_clip_support is set.
 // Inserts a lower aggregate with plain DuckDB aggregates (GROUP BY groups + PU hash),
-// and rewrites the top aggregate to use pac_noised_clip_* / pac_clip_* functions.
+// and rewrites the top aggregate to use priv_noised_clip_* / priv_clip_* functions.
 // Skips insertion if child already groups by PU key (Q13 exception).
 void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                            const PrivacyCompatibilityResult &check, const vector<string> &privacy_units);

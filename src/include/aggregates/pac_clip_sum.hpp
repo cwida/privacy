@@ -1,5 +1,5 @@
 //
-// pac_clip_sum: Approximate sum with per-level overflow + distinct bitmaps
+// priv_clip_sum: Approximate sum with per-level overflow + distinct bitmaps
 // Always: buffered, approximate, two-sided (unsigned pos/neg), 31 levels covering 128-bit
 //
 #ifndef PAC_CLIP_SUM_HPP
@@ -43,7 +43,7 @@ static inline void Pac2SetOverflowPtr(uint64_t &packed, uint64_t *ptr) {
 }
 
 // ============================================================================
-// SWAR kernel — identical to pac_sum's AddToTotalsSWAR for uint16_t
+// SWAR kernel — identical to priv_sum's AddToTotalsSWAR for uint16_t
 // ============================================================================
 AUTOVECTORIZE static inline void Pac2AddToTotalsSWAR16(uint64_t *PAC_RESTRICT total, uint64_t value,
                                                        uint64_t key_hash) {

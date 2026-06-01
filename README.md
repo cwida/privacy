@@ -96,14 +96,14 @@ SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY A
 │ R            │ F            │       57318996705.28 │
 └──────────────┴──────────────┴──────────────────────┘
 
--- The rewritten plan — note pac_noised_sum and the injected join to orders
+-- The rewritten plan — note priv_noised_sum and the injected join to orders
 EXPLAIN SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY ALL;
 ┌───────────────────────────┐
 │   PERFECT_HASH_GROUP_BY   │
 │    ────────────────────   │
 │      Groups: #0 #1        │
 │        Aggregates:        │
-│   pac_noised_sum(#2, #3)  │
+│   priv_noised_sum(#2, #3)  │
 └─────────────┬─────────────┘
 ┌─────────────┴─────────────┐
 │         HASH_JOIN         │
@@ -115,7 +115,7 @@ EXPLAIN SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GR
 ┌─────────────┴─────────────┐┌─────────────┴─────────────┐
 │          SEQ_SCAN         ││         PROJECTION        │
 │    ────────────────────   ││    ────────────────────   │
-│    memory.main.lineitem   ││ pac_pu=pac_hash(hash(#1)) │
+│    memory.main.lineitem   ││ pac_pu=priv_hash(hash(#1)) │
 │        l_returnflag       ││             #0            │
 │        l_linestatus       ││                           │
 │      l_extendedprice      ││                           │

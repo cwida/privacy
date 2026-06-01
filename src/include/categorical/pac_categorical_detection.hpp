@@ -83,11 +83,11 @@ struct CategoricalPatternInfo {
 // Shared inline helpers — used by both detection and rewriting
 // ============================================================================
 
-// Check if name matches pac_noised_<aggr> (noised scalar aggregates).
-// Default: matches pac_noised_sum, pac_noised_count, pac_noised_min, pac_noised_max.
-// With prefix/suffix overrides: matches other PAC aggregate families (counters/list = pac_<aggr>, bare).
+// Check if name matches priv_noised_<aggr> (noised scalar aggregates).
+// Default: matches priv_noised_sum, priv_noised_count, priv_noised_min, priv_noised_max.
+// With prefix/suffix overrides: matches other private aggregate families (counters/list = priv_<aggr>, bare).
 static inline bool IsPacAggregate(const string &pattern, const string &suffix = "",
-                                  const string &prefix = "pac_noised_") {
+                                  const string &prefix = "priv_noised_") {
 	const string name = StringUtil::Lower(pattern);
 	for (auto &aggr_name : {"sum", "count", "min", "max", "avg"}) {
 		if (name == prefix + aggr_name + suffix) {
@@ -97,63 +97,63 @@ static inline bool IsPacAggregate(const string &pattern, const string &suffix = 
 	return false;
 }
 
-// pac_sum, pac_count, pac_min, pac_max (counters and list variants share this name)
+// priv_sum, priv_count, priv_min, priv_max (counters and list variants share this name)
 static inline bool IsPacCountersAggregate(const string &name) {
-	return IsPacAggregate(name, "", "pac_");
+	return IsPacAggregate(name, "", "priv_");
 }
 
-// pac_sum, pac_count, pac_min, pac_max (same name for list variant)
+// priv_sum, priv_count, priv_min, priv_max (same name for list variant)
 static inline bool IsPacListAggregate(const string &name) {
-	return IsPacAggregate(name, "", "pac_");
+	return IsPacAggregate(name, "", "priv_");
 }
 
 static inline bool IsAnyPacAggregate(const string &name) {
 	return IsPacAggregate(name) || IsPacCountersAggregate(name);
 }
 
-// pac_noised_sum → pac_sum (counters/list variant name)
+// priv_noised_sum → priv_sum (counters/list variant name)
 string inline GetCountersVariant(const string &aggregate_name) {
 	if (IsPacCountersAggregate(aggregate_name)) {
 		return aggregate_name;
 	}
 	for (auto &aggr : {"sum", "count", "min", "max", "avg"}) {
-		if (aggregate_name == string("pac_noised_") + aggr) {
-			return string("pac_") + aggr;
+		if (aggregate_name == string("priv_noised_") + aggr) {
+			return string("priv_") + aggr;
 		}
 	}
 	return "";
 }
 
-// pac_sum → pac_noised_sum
+// priv_sum → priv_noised_sum
 static inline string GetBasePacAggregateName(const string &name) {
 	for (auto &aggr : {"sum", "count", "min", "max", "avg"}) {
-		if (name == string("pac_") + aggr) {
-			return string("pac_noised_") + aggr;
+		if (name == string("priv_") + aggr) {
+			return string("priv_noised_") + aggr;
 		}
 	}
 	return name;
 }
 
-// Any variant → pac_sum (list aggregate name, same as counters name now)
+// Any variant → priv_sum (list aggregate name, same as counters name now)
 static inline string GetListAggregateVariant(const string &name) {
 	for (auto &aggr : {"sum", "count", "min", "max", "avg"}) {
-		// Match bare names: sum → pac_sum
+		// Match bare names: sum → priv_sum
 		if (name == string(aggr)) {
-			return string("pac_") + aggr;
+			return string("priv_") + aggr;
 		}
-		// Match noised names: pac_noised_sum → pac_sum
-		if (name == string("pac_noised_") + aggr) {
-			return string("pac_") + aggr;
+		// Match noised names: priv_noised_sum → priv_sum
+		if (name == string("priv_noised_") + aggr) {
+			return string("priv_") + aggr;
 		}
-		// Match already-correct names: pac_sum → pac_sum
-		if (name == string("pac_") + aggr) {
-			return string("pac_") + aggr;
+		// Match already-correct names: priv_sum → priv_sum
+		if (name == string("priv_") + aggr) {
+			return string("priv_") + aggr;
 		}
 	}
 	return "";
 }
 
-// Check if a type is numerical (can be used with pac_noised)
+// Check if a type is numerical (can be used with priv_noised)
 inline bool IsNumericalType(const LogicalType &type) {
 	switch (type.id()) {
 	case LogicalTypeId::TINYINT:
@@ -211,7 +211,7 @@ static inline Expression *StripCasts(Expression *expr) {
 }
 
 // Check if an expression is already wrapped in a categorical rewrite terminal function
-// This includes pac_noised, pac_filter, list_transform, and list_zip
+// This includes priv_noised, priv_filter, list_transform, and list_zip
 // These functions indicate that the expression has already been processed by categorical rewriting
 static inline bool IsAlreadyWrappedInPacNoised(Expression *expr) {
 	if (!expr) {
@@ -220,9 +220,9 @@ static inline bool IsAlreadyWrappedInPacNoised(Expression *expr) {
 	if (expr->type == ExpressionType::BOUND_FUNCTION) {
 		auto &func = expr->Cast<BoundFunctionExpression>();
 		// Check for all categorical rewrite terminal functions
-		if (StringUtil::StartsWith(func.function.name, "pac_noised") ||
-		    StringUtil::StartsWith(func.function.name, "pac_filter") ||
-		    StringUtil::StartsWith(func.function.name, "pac_select") || func.function.name == "pac_coalesce" ||
+		if (StringUtil::StartsWith(func.function.name, "priv_noised") ||
+		    StringUtil::StartsWith(func.function.name, "priv_filter") ||
+		    StringUtil::StartsWith(func.function.name, "priv_select") || func.function.name == "priv_coalesce" ||
 		    func.function.name == "list_transform" || func.function.name == "list_zip") {
 			return true;
 		}

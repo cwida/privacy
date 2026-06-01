@@ -30,16 +30,16 @@ CREATE PU TABLE ctas_source (id INT, grp INT, value INT, PRIVACY_KEY(id), PROTEC
 statement ok
 INSERT INTO ctas_source VALUES (1, 1, 10), (2, 2, 20);
 
-# Disable pac_check so the schema-copy CTAS can project protected columns
+# Disable priv_check so the schema-copy CTAS can project protected columns
 statement ok
-SET pac_check = false;
+SET priv_check = false;
 
 # CTAS should propagate protected(value) and PRIVACY_KEY(id) from ctas_source
 statement ok
 CREATE TABLE ctas_copy AS SELECT * FROM ctas_source LIMIT 0;
 
 statement ok
-SET pac_check = true;
+SET priv_check = true;
 
 # Projecting a protected column from the CTAS-derived table should error
 statement error
@@ -72,13 +72,13 @@ INSERT INTO ctas_rename_src VALUES (1, 1, 10), (2, 2, 20);
 
 # CTAS with column renames: 'amount' is renamed from 'value' (protected)
 statement ok
-SET pac_check = false;
+SET priv_check = false;
 
 statement ok
 CREATE TABLE ctas_renamed AS SELECT id AS uid, grp AS category, value AS amount FROM ctas_rename_src LIMIT 0;
 
 statement ok
-SET pac_check = true;
+SET priv_check = true;
 
 # 'amount' (renamed from protected 'value') should be protected
 statement error
@@ -130,7 +130,7 @@ DROP TABLE ctas_agg_src;
 # ============================================================================
 # Test 4: INSERT with aggregate into derived_pu table gets PAC noise
 # Tests: INSERT INTO derived_table SELECT ... GROUP BY reads from the source
-# PU table — the aggregate should be noised (pac_noised_sum).
+# PU table — the aggregate should be noised (priv_noised_sum).
 # ============================================================================
 
 statement ok
@@ -163,7 +163,7 @@ DROP TABLE scores;
 
 # ============================================================================
 # Test 5: SELECT from derived_pu table finalizes counters on the fly
-# Tests: Reading a derived_pu table applies pac_finalize to counter columns,
+# Tests: Reading a derived_pu table applies priv_finalize to counter columns,
 # returning noised scalars (not raw counter lists). Exact sums would be 300/300.
 # ============================================================================
 
@@ -192,7 +192,7 @@ DROP TABLE items;
 # ============================================================================
 # Test 6: WHERE filter on counter column (inequality comparisons)
 # Tests: The registered implicit cast LIST<FLOAT> → FLOAT enables >, <, >=, <=
-# comparisons on counter columns. The cast performs pac_finalize at execution.
+# comparisons on counter columns. The cast performs priv_finalize at execution.
 # ============================================================================
 
 statement ok
@@ -218,7 +218,7 @@ DROP TABLE flt_src;
 
 # ============================================================================
 # Test 7: ORDER BY on counter column
-# Tests: pac_finalize is injected into ORDER BY expressions.
+# Tests: priv_finalize is injected into ORDER BY expressions.
 # ============================================================================
 
 statement ok
@@ -371,7 +371,7 @@ DROP TABLE arith_src;
 # ============================================================================
 # Test 12: CTAS from derived_pu table preserves counter columns
 # Tests: Creating a table from a derived_pu table copies raw counter lists
-# and marks the new table as derived_pu (no pac_finalize during copy).
+# and marks the new table as derived_pu (no priv_finalize during copy).
 # ============================================================================
 
 statement ok
@@ -388,7 +388,7 @@ CREATE TABLE mv_copy AS SELECT grp, total FROM mv_chain;
 
 # The copy should have counter lists (64-element FLOAT[]), not finalized scalars
 statement ok
-SET pac_rewrite = false;
+SET priv_rewrite = false;
 
 query I
 SELECT length(total) FROM mv_copy LIMIT 1;
@@ -396,9 +396,9 @@ SELECT length(total) FROM mv_copy LIMIT 1;
 64
 
 statement ok
-SET pac_rewrite = true;
+SET priv_rewrite = true;
 
-# Reading the copy with pac_rewrite=true should finalize (same as reading mv_chain)
+# Reading the copy with priv_rewrite=true should finalize (same as reading mv_chain)
 query I
 SELECT COUNT(*) FROM mv_copy;
 ----
@@ -575,7 +575,7 @@ SELECT COUNT(*) FROM mv_a JOIN mv_b ON mv_a.grp = mv_b.grp;
 3
 
 # Both counter columns should be finalized to scalars.
-# All 3 groups have positive true sums (30, 300, 50). pac_filter_lt(0, counters)
+# All 3 groups have positive true sums (30, 300, 50). priv_filter_lt(0, counters)
 # uses majority voting: grp=3 (single PU, 32/64 subsamples positive) passes at threshold.
 query I
 SELECT COUNT(*) FROM mv_a JOIN mv_b ON mv_a.grp = mv_b.grp WHERE total_a > 0 AND total_b > 0;
@@ -761,7 +761,7 @@ INSERT INTO neq_src VALUES (1,1,10),(2,1,20),(3,2,100),(4,2,200),(5,3,5);
 statement ok
 CREATE TABLE mv_neq AS SELECT grp, SUM(val) AS total FROM neq_src GROUP BY grp;
 
-# All noised totals should be != 0. pac_filter_neq uses majority voting:
+# All noised totals should be != 0. priv_filter_neq uses majority voting:
 # even grp=3 (single PU, exact sum=5) has 32/64 subsamples with non-zero counters.
 query I
 SELECT COUNT(*) FROM mv_neq WHERE total != 0;

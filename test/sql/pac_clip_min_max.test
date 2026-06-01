@@ -1,5 +1,5 @@
 # name: test/sql/pac_clip_min_max.test
-# description: Test pac_clip_min/max with level-based clipping
+# description: Test priv_clip_min/max with level-based clipping
 # group: [sql]
 
 require privacy
@@ -21,32 +21,32 @@ SET pac_mi = 0
 # ============================================================================
 
 query I
-SELECT typeof(pac_clip_max(hash(i)::UBIGINT, i::INTEGER)) FROM range(1, 101) t(i)
+SELECT typeof(priv_clip_max(hash(i)::UBIGINT, i::INTEGER)) FROM range(1, 101) t(i)
 ----
 FLOAT[]
 
 query I
-SELECT typeof(pac_noised_clip_max(hash(i)::UBIGINT, i::INTEGER)) FROM range(1, 101) t(i)
+SELECT typeof(priv_noised_clip_max(hash(i)::UBIGINT, i::INTEGER)) FROM range(1, 101) t(i)
 ----
 BIGINT
 
 query I
-SELECT typeof(pac_clip_min(hash(i)::UBIGINT, i::INTEGER)) FROM range(1, 101) t(i)
+SELECT typeof(priv_clip_min(hash(i)::UBIGINT, i::INTEGER)) FROM range(1, 101) t(i)
 ----
 FLOAT[]
 
 query I
-SELECT typeof(pac_noised_clip_min(hash(i)::UBIGINT, i::INTEGER)) FROM range(1, 101) t(i)
+SELECT typeof(priv_noised_clip_min(hash(i)::UBIGINT, i::INTEGER)) FROM range(1, 101) t(i)
 ----
 BIGINT
 
 query I
-SELECT typeof(pac_noised_clip_max(hash(i)::UBIGINT, (i*0.5)::FLOAT)) FROM range(1, 101) t(i)
+SELECT typeof(priv_noised_clip_max(hash(i)::UBIGINT, (i*0.5)::FLOAT)) FROM range(1, 101) t(i)
 ----
 FLOAT
 
 query I
-SELECT typeof(pac_noised_clip_min(hash(i)::UBIGINT, (i*0.5)::DOUBLE)) FROM range(1, 101) t(i)
+SELECT typeof(priv_noised_clip_min(hash(i)::UBIGINT, (i*0.5)::DOUBLE)) FROM range(1, 101) t(i)
 ----
 DOUBLE
 
@@ -65,18 +65,18 @@ SELECT i as id,
 FROM range(1, 1002) t(i)
 
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 query I
-SELECT pac_noised_clip_max(hash(id)::UBIGINT, value) FROM max_outlier
+SELECT priv_noised_clip_max(hash(id)::UBIGINT, value) FROM max_outlier
 ----
 999424
 
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 query I
-SELECT pac_noised_clip_max(hash(id)::UBIGINT, value) FROM max_outlier
+SELECT priv_noised_clip_max(hash(id)::UBIGINT, value) FROM max_outlier
 ----
 100
 
@@ -95,18 +95,18 @@ SELECT i as id,
 FROM range(1, 1002) t(i)
 
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 query I
-SELECT pac_noised_clip_min(hash(id)::UBIGINT, value) FROM min_outlier
+SELECT priv_noised_clip_min(hash(id)::UBIGINT, value) FROM min_outlier
 ----
 -999424
 
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 query I
-SELECT pac_noised_clip_min(hash(id)::UBIGINT, value) FROM min_outlier
+SELECT priv_noised_clip_min(hash(id)::UBIGINT, value) FROM min_outlier
 ----
 10
 
@@ -124,19 +124,19 @@ SELECT i as id,
 FROM range(1, 1002) t(i)
 
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 query I
-SELECT pac_noised_clip_max(hash(id)::UBIGINT, value) FROM same_level
+SELECT priv_noised_clip_max(hash(id)::UBIGINT, value) FROM same_level
 ----
 120
 
 # With clipping: 120 is same level as 50, NOT clipped
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 query I
-SELECT pac_noised_clip_max(hash(id)::UBIGINT, value) FROM same_level
+SELECT priv_noised_clip_max(hash(id)::UBIGINT, value) FROM same_level
 ----
 120
 
@@ -153,10 +153,10 @@ SELECT i as id,
 FROM range(1, 1002) t(i)
 
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 query I
-SELECT pac_noised_clip_max(hash(id)::UBIGINT, value) < 1000 FROM cross_level
+SELECT priv_noised_clip_max(hash(id)::UBIGINT, value) < 1000 FROM cross_level
 ----
 true
 
@@ -165,11 +165,11 @@ true
 # ============================================================================
 
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 query I
 SELECT count(*) FROM (
-  SELECT id % 3 AS grp, pac_noised_clip_max(hash(id)::UBIGINT, value) AS m
+  SELECT id % 3 AS grp, priv_noised_clip_max(hash(id)::UBIGINT, value) AS m
   FROM max_outlier GROUP BY grp
 ) t WHERE m IS NOT NULL
 ----
@@ -177,7 +177,7 @@ SELECT count(*) FROM (
 
 query I
 SELECT count(*) FROM (
-  SELECT id % 3 AS grp, pac_noised_clip_min(hash(id)::UBIGINT, value) AS m
+  SELECT id % 3 AS grp, priv_noised_clip_min(hash(id)::UBIGINT, value) AS m
   FROM min_outlier GROUP BY grp
 ) t WHERE m IS NOT NULL
 ----
@@ -196,18 +196,18 @@ SELECT i as id,
 FROM range(1, 1002) t(i)
 
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 query I
-SELECT pac_noised_clip_max(hash(id)::UBIGINT, value) > 10000.0 FROM float_mm
+SELECT priv_noised_clip_max(hash(id)::UBIGINT, value) > 10000.0 FROM float_mm
 ----
 true
 
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 query I
-SELECT pac_noised_clip_max(hash(id)::UBIGINT, value) < 200.0 FROM float_mm
+SELECT priv_noised_clip_max(hash(id)::UBIGINT, value) < 200.0 FROM float_mm
 ----
 true
 
@@ -224,18 +224,18 @@ SELECT i as id,
 FROM range(1, 1002) t(i)
 
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 query I
-SELECT pac_noised_clip_min(hash(id)::UBIGINT, value) < -50000.0 FROM double_mm
+SELECT priv_noised_clip_min(hash(id)::UBIGINT, value) < -50000.0 FROM double_mm
 ----
 true
 
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 query I
-SELECT pac_noised_clip_min(hash(id)::UBIGINT, value) BETWEEN 0.0 AND 5.0 FROM double_mm
+SELECT priv_noised_clip_min(hash(id)::UBIGINT, value) BETWEEN 0.0 AND 5.0 FROM double_mm
 ----
 true
 
@@ -244,10 +244,10 @@ true
 # ============================================================================
 
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 query I
-SELECT pac_noised_clip_max(hash(id)::UBIGINT, CASE WHEN id % 2 = 0 THEN value ELSE NULL END) IS NOT NULL
+SELECT priv_noised_clip_max(hash(id)::UBIGINT, CASE WHEN id % 2 = 0 THEN value ELSE NULL END) IS NOT NULL
 FROM max_outlier
 ----
 true
@@ -257,27 +257,27 @@ true
 # ============================================================================
 
 query I
-SELECT pac_noised_clip_max(hash(i)::UBIGINT, i::SMALLINT) BETWEEN 50 AND 128 FROM range(1, 100) t(i)
+SELECT priv_noised_clip_max(hash(i)::UBIGINT, i::SMALLINT) BETWEEN 50 AND 128 FROM range(1, 100) t(i)
 ----
 true
 
 query I
-SELECT pac_noised_clip_max(hash(i)::UBIGINT, i::BIGINT) BETWEEN 50 AND 128 FROM range(1, 100) t(i)
+SELECT priv_noised_clip_max(hash(i)::UBIGINT, i::BIGINT) BETWEEN 50 AND 128 FROM range(1, 100) t(i)
 ----
 true
 
 query I
-SELECT pac_noised_clip_min(hash(i)::UBIGINT, i::TINYINT) BETWEEN 1 AND 10 FROM range(1, 100) t(i)
+SELECT priv_noised_clip_min(hash(i)::UBIGINT, i::TINYINT) BETWEEN 1 AND 10 FROM range(1, 100) t(i)
 ----
 true
 
 query I
-SELECT pac_noised_clip_max(hash(i)::UBIGINT, i::UTINYINT) BETWEEN 50 AND 255 FROM range(1, 100) t(i)
+SELECT priv_noised_clip_max(hash(i)::UBIGINT, i::UTINYINT) BETWEEN 50 AND 255 FROM range(1, 100) t(i)
 ----
 true
 
 query I
-SELECT pac_noised_clip_min(hash(i)::UBIGINT, (i + 10)::UINTEGER) BETWEEN 1 AND 20 FROM range(1, 100) t(i)
+SELECT priv_noised_clip_min(hash(i)::UBIGINT, (i + 10)::UINTEGER) BETWEEN 1 AND 20 FROM range(1, 100) t(i)
 ----
 true
 
@@ -287,13 +287,13 @@ true
 
 # MAX of all-negative values: should be close to -1 (the largest)
 query I
-SELECT pac_noised_clip_max(hash(i)::UBIGINT, -i) BETWEEN -10 AND 0 FROM range(1, 1001) t(i)
+SELECT priv_noised_clip_max(hash(i)::UBIGINT, -i) BETWEEN -10 AND 0 FROM range(1, 1001) t(i)
 ----
 true
 
 # MIN of all-negative values: should be close to -1000 (the smallest)
 query I
-SELECT pac_noised_clip_min(hash(i)::UBIGINT, -i) BETWEEN -1100 AND -900 FROM range(1, 1001) t(i)
+SELECT priv_noised_clip_min(hash(i)::UBIGINT, -i) BETWEEN -1100 AND -900 FROM range(1, 1001) t(i)
 ----
 true
 
@@ -303,7 +303,7 @@ true
 
 # MAX of mixed: positives 1..500, negatives -1..-500 → max should be ~500
 query I
-SELECT pac_noised_clip_max(hash(i)::UBIGINT,
+SELECT priv_noised_clip_max(hash(i)::UBIGINT,
   CASE WHEN i <= 500 THEN i ELSE -(i - 500) END
 ) BETWEEN 400 AND 600 FROM range(1, 1001) t(i)
 ----
@@ -311,7 +311,7 @@ true
 
 # MIN of mixed: positives 1..500, negatives -1..-500 → min should be ~-500
 query I
-SELECT pac_noised_clip_min(hash(i)::UBIGINT,
+SELECT priv_noised_clip_min(hash(i)::UBIGINT,
   CASE WHEN i <= 500 THEN i ELSE -(i - 500) END
 ) BETWEEN -600 AND -400 FROM range(1, 1001) t(i)
 ----
@@ -322,12 +322,12 @@ true
 # ============================================================================
 
 query I
-SELECT pac_noised_clip_max(hash(i)::UBIGINT, i) BETWEEN 50 AND 128 FROM range(1, 100) t(i)
+SELECT priv_noised_clip_max(hash(i)::UBIGINT, i) BETWEEN 50 AND 128 FROM range(1, 100) t(i)
 ----
 true
 
 query I
-SELECT pac_noised_clip_min(hash(i)::UBIGINT, i) BETWEEN 1 AND 10 FROM range(1, 100) t(i)
+SELECT priv_noised_clip_min(hash(i)::UBIGINT, i) BETWEEN 1 AND 10 FROM range(1, 100) t(i)
 ----
 true
 
@@ -345,15 +345,15 @@ FROM range(1, 1002) t(i)
 
 # Without clip: min dominated by outlier
 query I
-SELECT pac_noised_clip_min(hash(id)::UBIGINT, value) < -500000 FROM neg_clip
+SELECT priv_noised_clip_min(hash(id)::UBIGINT, value) < -500000 FROM neg_clip
 ----
 true
 
 # With clip: outlier removed, min should be close to 50
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 query I
-SELECT pac_noised_clip_min(hash(id)::UBIGINT, value) BETWEEN 40 AND 70 FROM neg_clip
+SELECT priv_noised_clip_min(hash(id)::UBIGINT, value) BETWEEN 40 AND 70 FROM neg_clip
 ----
 true

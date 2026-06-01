@@ -45,7 +45,7 @@ statement ok
 SET dp_sum_bound = 100.0;
 
 # ---------------------------------------------------------------------------
-# dp_laplace_noise scalar UDF works standalone
+# priv_laplace_noise scalar UDF works standalone
 # ---------------------------------------------------------------------------
 
 statement ok
@@ -53,13 +53,19 @@ SET privacy_mode = 'pac';
 
 # Scale 0 returns value unchanged
 query I
-SELECT dp_laplace_noise(100.0, 0.0);
+SELECT priv_laplace_noise(100.0, 0.0);
 ----
 100.0
 
+# Old SQL-visible dp_* helper names are intentionally not registered.
+statement error
+SELECT dp_laplace_noise(100.0, 0.0);
+----
+dp_laplace_noise
+
 # Non-zero scale produces a noised value (exact value is seed-dependent, just check it's finite)
 query I
-SELECT abs(dp_laplace_noise(100.0, 5.0) - 100.0) < 1000;
+SELECT abs(priv_laplace_noise(100.0, 5.0) - 100.0) < 1000;
 ----
 true
 

@@ -1,6 +1,6 @@
 //
 // pac_clip_aggr.hpp: Shared constants, helpers, and bind data for clip aggregates
-// (pac_clip_sum, pac_clip_min, pac_clip_max)
+// (priv_clip_sum, priv_clip_min, priv_clip_max)
 //
 #ifndef PAC_CLIP_AGGR_HPP
 #define PAC_CLIP_AGGR_HPP
@@ -140,12 +140,12 @@ static unique_ptr<FunctionData> PacClipBindWithScale(ClientContext &ctx, vector<
 	}
 	int clip_support = 0;
 	Value dc_val;
-	if (ctx.TryGetCurrentSetting("pac_clip_support", dc_val) && !dc_val.IsNull()) {
+	if (ctx.TryGetCurrentSetting("priv_clip_support", dc_val) && !dc_val.IsNull()) {
 		clip_support = static_cast<int>(dc_val.GetValue<int64_t>());
 	}
 	bool clip_scale_val = false;
 	Value cs_val;
-	if (ctx.TryGetCurrentSetting("pac_clip_scale", cs_val) && !cs_val.IsNull()) {
+	if (ctx.TryGetCurrentSetting("priv_clip_scale", cs_val) && !cs_val.IsNull()) {
 		clip_scale_val = cs_val.GetValue<bool>();
 	}
 	return make_uniq<PacClipBindData>(ctx, mi, correction, clip_support, float_scale, clip_scale_val);
@@ -153,17 +153,17 @@ static unique_ptr<FunctionData> PacClipBindWithScale(ClientContext &ctx, vector<
 
 static unique_ptr<FunctionData> PacClipBind(ClientContext &ctx, AggregateFunction &,
                                             vector<unique_ptr<Expression>> &args) {
-	return PacClipBindWithScale(ctx, args, "pac_clip");
+	return PacClipBindWithScale(ctx, args, "priv_clip");
 }
 
 static unique_ptr<FunctionData> PacClipBindFloat(ClientContext &ctx, AggregateFunction &,
                                                  vector<unique_ptr<Expression>> &args) {
-	return PacClipBindWithScale(ctx, args, "pac_clip", CLIP_FLOAT_SCALE);
+	return PacClipBindWithScale(ctx, args, "priv_clip", CLIP_FLOAT_SCALE);
 }
 
 static unique_ptr<FunctionData> PacClipBindDouble(ClientContext &ctx, AggregateFunction &,
                                                   vector<unique_ptr<Expression>> &args) {
-	return PacClipBindWithScale(ctx, args, "pac_clip", CLIP_DOUBLE_SCALE);
+	return PacClipBindWithScale(ctx, args, "priv_clip", CLIP_DOUBLE_SCALE);
 }
 
 } // namespace duckdb

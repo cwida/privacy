@@ -562,7 +562,7 @@ static void PacClipSumFinalize(Vector &states, AggregateInputData &input, Vector
 			update_count += neg->update_count;
 		}
 
-		CheckPacSampleDiversity(key_hash, buf, update_count, "pac_clip_sum", bind);
+		CheckPacSampleDiversity(key_hash, buf, update_count, "priv_clip_sum", bind);
 		double noise_var = 0.0;
 		PAC_FLOAT result_val =
 		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash, query_hash, pstate, &noise_var);
@@ -578,7 +578,7 @@ static void PacClipSumFinalize(Vector &states, AggregateInputData &input, Vector
 	}
 }
 
-// Instantiate noised finalize (scalar output for pac_noised_clip_sum)
+// Instantiate noised finalize (scalar output for priv_noised_clip_sum)
 // 64-bit types
 static void PacClipSumNoisedFinalizeSigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
                                            idx_t offset) {
@@ -615,7 +615,7 @@ static void PacClipSumNoisedFinalizeDouble(Vector &states, AggregateInputData &i
 enum class ClipCountersFinalizeMode : uint8_t { PAC, DP_SAMPLE };
 
 // ============================================================================
-// Counters finalize (LIST<FLOAT> output for pac_clip_sum and dp_sample_clip_sum)
+// Counters finalize (LIST<FLOAT> output for priv_clip_sum and priv_sample_clip_sum)
 // ============================================================================
 template <int NL = CLIP_NUM_LEVELS_64, bool SIGNED = true,
           ClipCountersFinalizeMode MODE = ClipCountersFinalizeMode::PAC>
@@ -677,7 +677,7 @@ static void PacClipSumFinalizeCounters(Vector &states, AggregateInputData &input
 		}
 
 		if (!dp_sample) {
-			CheckPacSampleDiversity(key_hash, buf, update_count, "pac_clip_sum", bind);
+			CheckPacSampleDiversity(key_hash, buf, update_count, "priv_clip_sum", bind);
 		}
 
 		idx_t base = i * 64;
@@ -737,32 +737,32 @@ static void PacClipSumInitialize128(const AggregateFunction &, data_ptr_t state_
 // PacClipBind, PacClipBindFloat, PacClipBindDouble are defined in pac_clip_aggr.hpp
 
 // ============================================================================
-// DECIMAL support: dispatch by physical type, same pattern as pac_noised_sum
+// DECIMAL support: dispatch by physical type, same pattern as priv_noised_sum
 // ============================================================================
 static AggregateFunction GetPacClipSumNoisedAggregate(PhysicalType type) {
 	switch (type) {
 	case PhysicalType::INT16:
-		return AggregateFunction("pac_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::SMALLINT},
+		return AggregateFunction("priv_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::SMALLINT},
 		                         LogicalType::HUGEINT, PacClipSumStateSize, PacClipSumInitialize,
 		                         PacClipSumScatterUpdateSmallInt, PacClipSumCombine, PacClipSumNoisedFinalizeSigned,
 		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSmallInt);
 	case PhysicalType::INT32:
-		return AggregateFunction("pac_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::INTEGER},
+		return AggregateFunction("priv_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::INTEGER},
 		                         LogicalType::HUGEINT, PacClipSumStateSize, PacClipSumInitialize,
 		                         PacClipSumScatterUpdateInteger, PacClipSumCombine, PacClipSumNoisedFinalizeSigned,
 		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateInteger);
 	case PhysicalType::INT64:
-		return AggregateFunction("pac_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::BIGINT},
+		return AggregateFunction("priv_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::BIGINT},
 		                         LogicalType::HUGEINT, PacClipSumStateSize, PacClipSumInitialize,
 		                         PacClipSumScatterUpdateBigInt, PacClipSumCombine, PacClipSumNoisedFinalizeSigned,
 		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateBigInt);
 	case PhysicalType::INT128:
 		return AggregateFunction(
-		    "pac_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::HUGEINT,
+		    "priv_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::HUGEINT,
 		    PacClipSumStateSize128, PacClipSumInitialize128, PacClipSumScatterUpdateHugeInt, PacClipSumCombine128,
 		    PacClipSumNoisedFinalizeSigned128, FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateHugeInt);
 	default:
-		throw InternalException("pac_noised_clip_sum: unsupported decimal physical type");
+		throw InternalException("priv_noised_clip_sum: unsupported decimal physical type");
 	}
 }
 
@@ -770,27 +770,27 @@ static AggregateFunction GetPacClipSumCountersAggregate(PhysicalType type) {
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
 	switch (type) {
 	case PhysicalType::INT16:
-		return AggregateFunction("pac_clip_sum", {LogicalType::UBIGINT, LogicalType::SMALLINT}, list_type,
+		return AggregateFunction("priv_clip_sum", {LogicalType::UBIGINT, LogicalType::SMALLINT}, list_type,
 		                         PacClipSumStateSize, PacClipSumInitialize, PacClipSumScatterUpdateSmallInt,
 		                         PacClipSumCombine, PacClipSumFinalizeCountersSigned,
 		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSmallInt);
 	case PhysicalType::INT32:
-		return AggregateFunction("pac_clip_sum", {LogicalType::UBIGINT, LogicalType::INTEGER}, list_type,
+		return AggregateFunction("priv_clip_sum", {LogicalType::UBIGINT, LogicalType::INTEGER}, list_type,
 		                         PacClipSumStateSize, PacClipSumInitialize, PacClipSumScatterUpdateInteger,
 		                         PacClipSumCombine, PacClipSumFinalizeCountersSigned,
 		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateInteger);
 	case PhysicalType::INT64:
-		return AggregateFunction("pac_clip_sum", {LogicalType::UBIGINT, LogicalType::BIGINT}, list_type,
+		return AggregateFunction("priv_clip_sum", {LogicalType::UBIGINT, LogicalType::BIGINT}, list_type,
 		                         PacClipSumStateSize, PacClipSumInitialize, PacClipSumScatterUpdateBigInt,
 		                         PacClipSumCombine, PacClipSumFinalizeCountersSigned,
 		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateBigInt);
 	case PhysicalType::INT128:
-		return AggregateFunction("pac_clip_sum", {LogicalType::UBIGINT, LogicalType::HUGEINT}, list_type,
+		return AggregateFunction("priv_clip_sum", {LogicalType::UBIGINT, LogicalType::HUGEINT}, list_type,
 		                         PacClipSumStateSize128, PacClipSumInitialize128, PacClipSumScatterUpdateHugeInt,
 		                         PacClipSumCombine128, PacClipSumFinalizeCountersSigned128,
 		                         FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateHugeInt);
 	default:
-		throw InternalException("pac_clip_sum: unsupported decimal physical type");
+		throw InternalException("priv_clip_sum: unsupported decimal physical type");
 	}
 }
 
@@ -798,7 +798,7 @@ static unique_ptr<FunctionData> BindDecimalPacNoisedClipSum(ClientContext &ctx, 
                                                             vector<unique_ptr<Expression>> &args) {
 	auto decimal_type = args[1]->return_type;
 	function = GetPacClipSumNoisedAggregate(decimal_type.InternalType());
-	function.name = "pac_noised_clip_sum";
+	function.name = "priv_noised_clip_sum";
 	function.arguments[1] = decimal_type;
 	function.return_type = LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(decimal_type));
 	return PacClipBind(ctx, function, args);
@@ -808,7 +808,7 @@ static unique_ptr<FunctionData> BindDecimalPacClipSum(ClientContext &ctx, Aggreg
                                                       vector<unique_ptr<Expression>> &args) {
 	auto decimal_type = args[1]->return_type;
 	function = GetPacClipSumCountersAggregate(decimal_type.InternalType());
-	function.name = "pac_clip_sum";
+	function.name = "priv_clip_sum";
 	function.arguments[1] = decimal_type;
 	// counters always return LIST<FLOAT>, no DECIMAL return type needed
 	return PacClipBind(ctx, function, args);
@@ -818,11 +818,11 @@ static unique_ptr<FunctionData> DpSampleClipSumBind(ClientContext &ctx, Aggregat
                                                     vector<unique_ptr<Expression>> &) {
 	Value dc_val;
 	int clip_support = 0;
-	if (ctx.TryGetCurrentSetting("pac_clip_support", dc_val) && !dc_val.IsNull()) {
+	if (ctx.TryGetCurrentSetting("priv_clip_support", dc_val) && !dc_val.IsNull()) {
 		clip_support = static_cast<int>(dc_val.GetValue<int64_t>());
 	}
 	if (clip_support <= 0) {
-		throw InvalidInputException("dp_sample_clip_sum: pac_clip_support must be set to a positive value");
+		throw InvalidInputException("priv_sample_clip_sum: priv_clip_support must be set to a positive value");
 	}
 	return make_uniq<PacClipBindData>(ctx, 0.0, 1.0, clip_support, CLIP_DOUBLE_SCALE, false);
 }
@@ -923,11 +923,11 @@ static void RegisterClipSumTypeOverloads(AggregateFunctionSet &set, const string
 }
 
 // ============================================================================
-// Registration: pac_clip_sum (counters, LIST<FLOAT>)
+// Registration: priv_clip_sum (counters, LIST<FLOAT>)
 // ============================================================================
 void RegisterPacClipSumFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("pac_clip_sum");
-	RegisterClipSumTypeOverloads(fcn_set, "pac_clip_sum", true);
+	AggregateFunctionSet fcn_set("priv_clip_sum");
+	RegisterClipSumTypeOverloads(fcn_set, "priv_clip_sum", true);
 
 	// DECIMAL overloads
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
@@ -940,19 +940,20 @@ void RegisterPacClipSumFunctions(ExtensionLoader &loader) {
 
 	// FLOAT/DOUBLE overloads (scale to int64 internally)
 	fcn_set.AddFunction(AggregateFunction(
-	    "pac_clip_sum", {LogicalType::UBIGINT, LogicalType::FLOAT}, list_type, PacClipSumStateSize,
+	    "priv_clip_sum", {LogicalType::UBIGINT, LogicalType::FLOAT}, list_type, PacClipSumStateSize,
 	    PacClipSumInitialize, PacClipSumScatterUpdateSingleFloat, PacClipSumCombine, PacClipSumFinalizeCountersSigned,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleFloat, PacClipBindFloat));
+	fcn_set.AddFunction(
+	    AggregateFunction("priv_clip_sum", {LogicalType::UBIGINT, LogicalType::FLOAT, LogicalType::DOUBLE}, list_type,
+	                      PacClipSumStateSize, PacClipSumInitialize, PacClipSumScatterUpdateSingleFloat,
+	                      PacClipSumCombine, PacClipSumFinalizeCountersSigned,
+	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleFloat, PacClipBindFloat));
 	fcn_set.AddFunction(AggregateFunction(
-	    "pac_clip_sum", {LogicalType::UBIGINT, LogicalType::FLOAT, LogicalType::DOUBLE}, list_type, PacClipSumStateSize,
-	    PacClipSumInitialize, PacClipSumScatterUpdateSingleFloat, PacClipSumCombine, PacClipSumFinalizeCountersSigned,
-	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleFloat, PacClipBindFloat));
-	fcn_set.AddFunction(AggregateFunction(
-	    "pac_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE}, list_type, PacClipSumStateSize,
+	    "priv_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE}, list_type, PacClipSumStateSize,
 	    PacClipSumInitialize, PacClipSumScatterUpdateSingleDouble, PacClipSumCombine, PacClipSumFinalizeCountersSigned,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleDouble, PacClipBindDouble));
 	fcn_set.AddFunction(AggregateFunction(
-	    "pac_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE}, list_type,
+	    "priv_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE}, list_type,
 	    PacClipSumStateSize, PacClipSumInitialize, PacClipSumScatterUpdateSingleDouble, PacClipSumCombine,
 	    PacClipSumFinalizeCountersSigned, FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleDouble,
 	    PacClipBindDouble));
@@ -963,18 +964,18 @@ void RegisterPacClipSumFunctions(ExtensionLoader &loader) {
 	CreateAggregateFunctionInfo info(fcn_set);
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Returns 64 PAC subsample counters with per-level clipping as LIST.";
-	desc.examples = {"SELECT c_mktsegment, pac_clip_sum(pac_hash(hash(c_custkey)), c_acctbal) FROM customer GROUP BY "
+	desc.examples = {"SELECT c_mktsegment, priv_clip_sum(priv_hash(hash(c_custkey)), c_acctbal) FROM customer GROUP BY "
 	                 "c_mktsegment"};
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 }
 
 // ============================================================================
-// Registration: pac_noised_clip_sum (fused noised, scalar HUGEINT)
+// Registration: priv_noised_clip_sum (fused noised, scalar HUGEINT)
 // ============================================================================
 void RegisterPacNoisedClipSumFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("pac_noised_clip_sum");
-	RegisterClipSumTypeOverloads(fcn_set, "pac_noised_clip_sum", false);
+	AggregateFunctionSet fcn_set("priv_noised_clip_sum");
+	RegisterClipSumTypeOverloads(fcn_set, "priv_noised_clip_sum", false);
 
 	// DECIMAL overloads
 	fcn_set.AddFunction(AggregateFunction(
@@ -986,20 +987,20 @@ void RegisterPacNoisedClipSumFunctions(ExtensionLoader &loader) {
 
 	// FLOAT/DOUBLE overloads (return FLOAT/DOUBLE respectively)
 	fcn_set.AddFunction(AggregateFunction(
-	    "pac_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::FLOAT}, LogicalType::FLOAT, PacClipSumStateSize,
+	    "priv_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::FLOAT}, LogicalType::FLOAT, PacClipSumStateSize,
 	    PacClipSumInitialize, PacClipSumScatterUpdateSingleFloat, PacClipSumCombine, PacClipSumNoisedFinalizeFloat,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleFloat, PacClipBindFloat));
 	fcn_set.AddFunction(
-	    AggregateFunction("pac_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::FLOAT, LogicalType::DOUBLE},
+	    AggregateFunction("priv_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::FLOAT, LogicalType::DOUBLE},
 	                      LogicalType::FLOAT, PacClipSumStateSize, PacClipSumInitialize,
 	                      PacClipSumScatterUpdateSingleFloat, PacClipSumCombine, PacClipSumNoisedFinalizeFloat,
 	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleFloat, PacClipBindFloat));
 	fcn_set.AddFunction(AggregateFunction(
-	    "pac_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE}, LogicalType::DOUBLE, PacClipSumStateSize,
+	    "priv_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE}, LogicalType::DOUBLE, PacClipSumStateSize,
 	    PacClipSumInitialize, PacClipSumScatterUpdateSingleDouble, PacClipSumCombine, PacClipSumNoisedFinalizeDouble,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleDouble, PacClipBindDouble));
 	fcn_set.AddFunction(AggregateFunction(
-	    "pac_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE}, LogicalType::DOUBLE,
+	    "priv_noised_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE}, LogicalType::DOUBLE,
 	    PacClipSumStateSize, PacClipSumInitialize, PacClipSumScatterUpdateSingleDouble, PacClipSumCombine,
 	    PacClipSumNoisedFinalizeDouble, FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleDouble,
 	    PacClipBindDouble));
@@ -1007,20 +1008,20 @@ void RegisterPacNoisedClipSumFunctions(ExtensionLoader &loader) {
 	CreateAggregateFunctionInfo info(fcn_set);
 	FunctionDescription desc;
 	desc.description = "Privacy-preserving SUM with per-level clipping and noising. Supports 128-bit.";
-	desc.examples = {"SELECT c_mktsegment, pac_noised_clip_sum(pac_hash(hash(c_custkey)), c_acctbal) FROM customer "
+	desc.examples = {"SELECT c_mktsegment, priv_noised_clip_sum(priv_hash(hash(c_custkey)), c_acctbal) FROM customer "
 	                 "GROUP BY c_mktsegment"};
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 }
 
 // ============================================================================
-// Registration: pac_noised_clip_sumcount (sum-of-counts, BIGINT → BIGINT)
+// Registration: priv_noised_clip_sumcount (sum-of-counts, BIGINT → BIGINT)
 // Used when count→sum conversion needs to preserve BIGINT return type.
 // ============================================================================
 void RegisterPacNoisedClipSumCountFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("pac_noised_clip_sumcount");
+	AggregateFunctionSet fcn_set("priv_noised_clip_sumcount");
 	// Only BIGINT input → BIGINT output (counts are always BIGINT)
-	AddNoisedClipSumFcn(fcn_set, "pac_noised_clip_sumcount", LogicalType::BIGINT, LogicalType::BIGINT,
+	AddNoisedClipSumFcn(fcn_set, "priv_noised_clip_sumcount", LogicalType::BIGINT, LogicalType::BIGINT,
 	                    PacClipSumScatterUpdateBigInt, PacClipSumNoisedFinalizeBigInt, PacClipSumUpdateBigInt);
 	CreateAggregateFunctionInfo info(fcn_set);
 	loader.RegisterFunction(std::move(info));
@@ -1028,8 +1029,8 @@ void RegisterPacNoisedClipSumCountFunctions(ExtensionLoader &loader) {
 
 void RegisterDpSampleClipSumFunctions(ExtensionLoader &loader) {
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
-	AggregateFunctionSet set("dp_sample_clip_sum");
-	set.AddFunction(AggregateFunction("dp_sample_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE}, list_type,
+	AggregateFunctionSet set("priv_sample_clip_sum");
+	set.AddFunction(AggregateFunction("priv_sample_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE}, list_type,
 	                                  PacClipSumStateSize, PacClipSumInitialize, DpSampleClipSumScatterUpdateDouble,
 	                                  DpSampleClipSumCombine, DpSampleClipSumFinalizeCounters,
 	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, DpSampleClipSumUpdateDouble,

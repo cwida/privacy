@@ -160,10 +160,10 @@ static inline bool FilterFromMask(uint64_t mask, double mi, double correction, s
 // ============================================================================
 // PAC_SELECT: Convert list<bool> to UBIGINT mask, ANDed with hash subsampling
 // ============================================================================
-// pac_select(UBIGINT hash, list<bool>) -> UBIGINT
+// priv_select(UBIGINT hash, list<bool>) -> UBIGINT
 // Converts a list of booleans to a bitmask and ANDs it with the privacy-unit hash.
 // Counter j is active only when both the hash subsampling includes the row AND the
-// boolean filter passes for subsample j. The query_hash XOR is handled by pac_hash().
+// boolean filter passes for subsample j. The query_hash XOR is handled by priv_hash().
 static void PacSelectFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	idx_t count = args.size();
 
@@ -223,7 +223,7 @@ static PacFilterParams GetPacFilterParams(ExpressionState &state) {
 	return {mi, correction, local_state.gen};
 }
 
-// pac_filter(list<bool>) -> BOOLEAN
+// priv_filter(list<bool>) -> BOOLEAN
 // Converts list to mask, then applies filter logic
 static void PacFilterFromBoolListFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &list_vec = args.data[0];
@@ -263,15 +263,15 @@ static void PacFilterFromBoolListFunction(DataChunk &args, ExpressionState &stat
 	}
 }
 
-// Forward declarations for functions used by pac_filter_<cmp> registration
+// Forward declarations for functions used by priv_filter_<cmp> registration
 static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFunction &func,
                                                    vector<unique_ptr<Expression>> &args);
 
 // ============================================================================
 // PAC_FILTER_<CMP>: Compare scalar against counter list and filter in one pass
 // ============================================================================
-// pac_filter_gt(val, counters) -> BOOLEAN : true if majority of counters satisfy val > counter
-// pac_filter_gte, pac_filter_lt, pac_filter_lte, pac_filter_eq, pac_filter_neq similarly
+// priv_filter_gt(val, counters) -> BOOLEAN : true if majority of counters satisfy val > counter
+// priv_filter_gte, priv_filter_lt, priv_filter_lte, priv_filter_eq, priv_filter_neq similarly
 // Optional 3rd arg: correction factor
 
 enum class PacFilterCmpOp { GT, GTE, LT, LTE, EQ, NEQ };
@@ -382,8 +382,8 @@ static void RegisterPacFilterCmp(ExtensionLoader &loader, const string &name) {
 // ============================================================================
 // PAC_SELECT_<CMP>: Compare scalar against counter list, apply mask to hash
 // ============================================================================
-// pac_select_gt(hash, val, counters) -> UBIGINT : mask where val > counter, applied to hash
-// pac_select_gte, pac_select_lt, pac_select_lte, pac_select_eq, pac_select_neq similarly
+// priv_select_gt(hash, val, counters) -> UBIGINT : mask where val > counter, applied to hash
+// priv_select_gte, priv_select_lt, priv_select_lte, priv_select_eq, priv_select_neq similarly
 
 template <PacFilterCmpOp CMP>
 static void PacSelectCmpFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -449,10 +449,10 @@ static void RegisterPacSelectCmp(ExtensionLoader &loader, const string &name) {
 	loader.RegisterFunction(std::move(info));
 }
 
-// pac_coalesce(LIST<DOUBLE>) -> LIST<DOUBLE>
+// priv_coalesce(LIST<DOUBLE>) -> LIST<DOUBLE>
 // If the input list is NULL, returns a list of 64 NULL doubles.
 // Otherwise returns the input unchanged. This is needed because COALESCE
-// with a constant fallback list would have only 1 element, but pac_filter
+// with a constant fallback list would have only 1 element, but priv_filter
 // needs exactly 64 for majority voting.
 static void PacCoalesceFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &input = args.data[0];
@@ -555,10 +555,10 @@ static void PacCoalesceFunction(DataChunk &args, ExpressionState &state, Vector 
 // ============================================================================
 // PAC_NOISED: Apply noise to a list of 64 counter values
 // ============================================================================
-// pac_noised(list<double> counters) -> DOUBLE
+// priv_noised(list<double> counters) -> DOUBLE
 // Takes a list of 64 counter values, reconstructs key_hash from NULL/non-NULL pattern,
 // and returns a single noised value using PacNoisySampleFrom64Counters.
-// This is essentially what pac_sum/avg/count/min/max aggregates do in their finalize.
+// This is essentially what priv_sum/avg/count/min/max aggregates do in their finalize.
 static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &list_vec = args.data[0];
 	idx_t count = args.size();
@@ -621,7 +621,7 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 // ============================================================================
 // PAC_DIV: Element-wise division of two 64-element counter lists
 // ============================================================================
-// pac_div(list<PAC_FLOAT> numerator, list<PAC_FLOAT> denominator) -> list<PAC_FLOAT>
+// priv_div(list<PAC_FLOAT> numerator, list<PAC_FLOAT> denominator) -> list<PAC_FLOAT>
 // Returns a 64-element list where result[j] = numerator[j] / denominator[j].
 // If either element is NULL, the result element is NULL.
 static void PacDivFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -695,8 +695,8 @@ static void PacDivFunction(DataChunk &args, ExpressionState &state, Vector &resu
 // ============================================================================
 // PAC_NOISED_DIV: Fused sum/count division + noise in a single pass
 // ============================================================================
-// pac_noised_div(list<PAC_FLOAT> sum_counters, list<PAC_FLOAT> count_counters) -> DOUBLE
-// Equivalent to pac_noised(list_transform(list_zip(sum, cnt), x -> x.a / x.b))
+// priv_noised_div(list<PAC_FLOAT> sum_counters, list<PAC_FLOAT> count_counters) -> DOUBLE
+// Equivalent to priv_noised(list_transform(list_zip(sum, cnt), x -> x.a / x.b))
 // but avoids the lambda/list_zip/list_transform overhead.
 // Returns DOUBLE (not PAC_FLOAT) because avg() returns DOUBLE in SQL.
 static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -765,7 +765,7 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 }
 
 // ============================================================================
-// Bind function for pac_filter/pac_select (reads privacy_seed and pac_mi settings)
+// Bind function for priv_filter/priv_select (reads privacy_seed and pac_mi settings)
 // ============================================================================
 static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFunction &func,
                                                    vector<unique_ptr<Expression>> &args) {
@@ -1168,57 +1168,57 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 		return info;
 	};
 
-	// pac_select(UBIGINT hash, list<bool>) -> UBIGINT
-	ScalarFunction pac_select_fn("pac_select", {LogicalType::UBIGINT, list_bool_type}, LogicalType::UBIGINT,
+	// priv_select(UBIGINT hash, list<bool>) -> UBIGINT
+	ScalarFunction pac_select_fn("priv_select", {LogicalType::UBIGINT, list_bool_type}, LogicalType::UBIGINT,
 	                             PacSelectFunction, PacCategoricalBind);
 	loader.RegisterFunction(
 	    make_scalar_info(pac_select_fn, "[INTERNAL] Combines boolean mask with hash for categorical PAC queries."));
 
-	// pac_filter(list<bool>) -> BOOLEAN
-	ScalarFunction pac_filter_list("pac_filter", {list_bool_type}, LogicalType::BOOLEAN, PacFilterFromBoolListFunction,
+	// priv_filter(list<bool>) -> BOOLEAN
+	ScalarFunction pac_filter_list("priv_filter", {list_bool_type}, LogicalType::BOOLEAN, PacFilterFromBoolListFunction,
 	                               PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
 	loader.RegisterFunction(make_scalar_info(
 	    pac_filter_list, "[INTERNAL] Probabilistic filter from boolean list for categorical queries."));
 
-	// pac_coalesce(list<PAC_FLOAT>) -> list<PAC_FLOAT>
+	// priv_coalesce(list<PAC_FLOAT>) -> list<PAC_FLOAT>
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	ScalarFunction pac_coalesce("pac_coalesce", {list_double_type}, list_double_type, PacCoalesceFunction);
-	pac_coalesce.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	loader.RegisterFunction(make_scalar_info(pac_coalesce, "[INTERNAL] Replaces NULL counter list with 64 zeros."));
+	ScalarFunction priv_coalesce("priv_coalesce", {list_double_type}, list_double_type, PacCoalesceFunction);
+	priv_coalesce.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	loader.RegisterFunction(make_scalar_info(priv_coalesce, "[INTERNAL] Replaces NULL counter list with 64 zeros."));
 
-	// pac_noised(list<PAC_FLOAT>) -> PAC_FLOAT
-	ScalarFunction pac_noised("pac_noised", {list_double_type}, PacFloatLogicalType(), PacNoisedFunction,
-	                          PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	// priv_noised(list<PAC_FLOAT>) -> PAC_FLOAT
+	ScalarFunction priv_noised("priv_noised", {list_double_type}, PacFloatLogicalType(), PacNoisedFunction,
+	                           PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
 	loader.RegisterFunction(
-	    make_scalar_info(pac_noised, "[INTERNAL] Applies PAC noise to 64-element counter list, returns scalar."));
+	    make_scalar_info(priv_noised, "[INTERNAL] Applies PAC noise to 64-element counter list, returns scalar."));
 
-	// pac_div(list<PAC_FLOAT>, list<PAC_FLOAT>) -> list<PAC_FLOAT>
-	ScalarFunction pac_div("pac_div", {list_double_type, list_double_type}, list_double_type, PacDivFunction);
-	loader.RegisterFunction(make_scalar_info(pac_div, "[INTERNAL] Element-wise division of two counter lists."));
+	// priv_div(list<PAC_FLOAT>, list<PAC_FLOAT>) -> list<PAC_FLOAT>
+	ScalarFunction priv_div("priv_div", {list_double_type, list_double_type}, list_double_type, PacDivFunction);
+	loader.RegisterFunction(make_scalar_info(priv_div, "[INTERNAL] Element-wise division of two counter lists."));
 
-	// pac_noised_div(list<PAC_FLOAT> sum, list<PAC_FLOAT> cnt) -> DOUBLE
-	ScalarFunction pac_noised_div("pac_noised_div", {list_double_type, list_double_type}, LogicalType::DOUBLE,
-	                              PacNoisedDivFunction, PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	// priv_noised_div(list<PAC_FLOAT> sum, list<PAC_FLOAT> cnt) -> DOUBLE
+	ScalarFunction priv_noised_div("priv_noised_div", {list_double_type, list_double_type}, LogicalType::DOUBLE,
+	                               PacNoisedDivFunction, PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
 	loader.RegisterFunction(
-	    make_scalar_info(pac_noised_div, "[INTERNAL] Fused counter-list division + noise for AVG."));
+	    make_scalar_info(priv_noised_div, "[INTERNAL] Fused counter-list division + noise for AVG."));
 
-	// pac_filter_<cmp>: optimized comparison + filter in a single pass
-	RegisterPacFilterCmp<PacFilterCmpOp::GT>(loader, "pac_filter_gt");
-	RegisterPacFilterCmp<PacFilterCmpOp::GTE>(loader, "pac_filter_gte");
-	RegisterPacFilterCmp<PacFilterCmpOp::LT>(loader, "pac_filter_lt");
-	RegisterPacFilterCmp<PacFilterCmpOp::LTE>(loader, "pac_filter_lte");
-	RegisterPacFilterCmp<PacFilterCmpOp::EQ>(loader, "pac_filter_eq");
-	RegisterPacFilterCmp<PacFilterCmpOp::NEQ>(loader, "pac_filter_neq");
+	// priv_filter_<cmp>: optimized comparison + filter in a single pass
+	RegisterPacFilterCmp<PacFilterCmpOp::GT>(loader, "priv_filter_gt");
+	RegisterPacFilterCmp<PacFilterCmpOp::GTE>(loader, "priv_filter_gte");
+	RegisterPacFilterCmp<PacFilterCmpOp::LT>(loader, "priv_filter_lt");
+	RegisterPacFilterCmp<PacFilterCmpOp::LTE>(loader, "priv_filter_lte");
+	RegisterPacFilterCmp<PacFilterCmpOp::EQ>(loader, "priv_filter_eq");
+	RegisterPacFilterCmp<PacFilterCmpOp::NEQ>(loader, "priv_filter_neq");
 
-	// pac_select_<cmp>: compare scalar against counter list, apply mask to hash
-	RegisterPacSelectCmp<PacFilterCmpOp::GT>(loader, "pac_select_gt");
-	RegisterPacSelectCmp<PacFilterCmpOp::GTE>(loader, "pac_select_gte");
-	RegisterPacSelectCmp<PacFilterCmpOp::LT>(loader, "pac_select_lt");
-	RegisterPacSelectCmp<PacFilterCmpOp::LTE>(loader, "pac_select_lte");
-	RegisterPacSelectCmp<PacFilterCmpOp::EQ>(loader, "pac_select_eq");
-	RegisterPacSelectCmp<PacFilterCmpOp::NEQ>(loader, "pac_select_neq");
+	// priv_select_<cmp>: compare scalar against counter list, apply mask to hash
+	RegisterPacSelectCmp<PacFilterCmpOp::GT>(loader, "priv_select_gt");
+	RegisterPacSelectCmp<PacFilterCmpOp::GTE>(loader, "priv_select_gte");
+	RegisterPacSelectCmp<PacFilterCmpOp::LT>(loader, "priv_select_lt");
+	RegisterPacSelectCmp<PacFilterCmpOp::LTE>(loader, "priv_select_lte");
+	RegisterPacSelectCmp<PacFilterCmpOp::EQ>(loader, "priv_select_eq");
+	RegisterPacSelectCmp<PacFilterCmpOp::NEQ>(loader, "priv_select_neq");
 
-	// List aggregates are now registered as overloads of pac_sum/pac_count/pac_min/pac_max
+	// List aggregates are now registered as overloads of priv_sum/priv_count/priv_min/priv_max
 	// alongside the counters variants, via AddPacListAggregateOverload() called from each
 	// Register*CountersFunctions() function.
 }

@@ -231,7 +231,7 @@ ORDER BY
 # Test 2b: Q13-style query with inner aggregate grouping by NON-PK column
 # Tests: When inner aggregate groups by a regular column (not PU key), the INNER aggregate should be PAC-transformed
 # This is different from Test 2 where inner groups by c_custkey (PU key) and outer gets PAC-transformed
-# Here we group by c_nationkey (not a PU key), so inner aggregate gets pac_count, not outer
+# Here we group by c_nationkey (not a PU key), so inner aggregate gets priv_count, not outer
 query II
 SELECT
     nation_order_count,

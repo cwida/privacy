@@ -105,7 +105,7 @@ statement ok
 ALTER TABLE lineitem ADD PRIVACY_LINK (l_orderkey) REFERENCES orders(o_orderkey);
 
 statement ok
-SET pac_join_elimination = true;
+SET priv_join_elimination = true;
 
 statement ok
 set privacy_seed = 42;
@@ -143,8 +143,8 @@ ORDER BY
 3-MEDIUM	2
 
 # Test Top-K pushdown with correlated EXISTS subquery (Q4 + LIMIT)
-# The top-k optimizer should rewrite pac_count to list-returning pac_count,
-# insert pac_mean for ordering, and apply pac_mean to the final top-k rows
+# The top-k optimizer should rewrite priv_count to list-returning priv_count,
+# insert priv_mean for ordering, and apply priv_mean to the final top-k rows
 query II
 SELECT
     o_orderpriority,
@@ -294,8 +294,8 @@ WHERE
 #
 # This test returns NULL (no rows match l_quantity < 0.2 * avg)
 # Each partkey has exactly one lineitem, so avg = the value itself.
-# For positive x, x < 0.2*x is always false, so pac_select zeros all hash bits,
-# pac_filter removes all rows, and SUM of empty set is NULL.
+# For positive x, x < 0.2*x is always false, so priv_select zeros all hash bits,
+# priv_filter removes all rows, and SUM of empty set is NULL.
 query I
 SELECT
     SUM(l_extendedprice) AS total_revenue

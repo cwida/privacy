@@ -382,7 +382,7 @@ static void PacClipMinMaxFinalize(Vector &states, AggregateInputData &input, Vec
 			}
 			update_count += neg->update_count;
 		}
-		CheckPacSampleDiversity(key_hash, buf, update_count, IS_MAX ? "pac_noised_clip_max" : "pac_noised_clip_min",
+		CheckPacSampleDiversity(key_hash, buf, update_count, IS_MAX ? "priv_noised_clip_max" : "priv_noised_clip_min",
 		                        bind);
 		double noise_var = 0.0;
 		PAC_FLOAT result_val =
@@ -476,7 +476,7 @@ static void PacClipMinMaxFinalizeCounters(Vector &states, AggregateInputData &in
 			}
 			update_count += neg->update_count;
 		}
-		CheckPacSampleDiversity(key_hash, buf, update_count, IS_MAX ? "pac_clip_max" : "pac_clip_min", bind);
+		CheckPacSampleDiversity(key_hash, buf, update_count, IS_MAX ? "priv_clip_max" : "priv_clip_min", bind);
 
 		idx_t base = i * 64;
 		for (int j = 0; j < 64; j++) {
@@ -516,7 +516,7 @@ static void PacClipMinMaxInitialize(const AggregateFunction &, data_ptr_t state_
 // ============================================================================
 template <bool IS_MAX>
 static AggregateFunction GetPacClipMinMaxNoisedAggregate(PhysicalType type) {
-	const char *name = IS_MAX ? "pac_noised_clip_max" : "pac_noised_clip_min";
+	const char *name = IS_MAX ? "priv_noised_clip_max" : "priv_noised_clip_min";
 	auto finalize = IS_MAX ? PacClipMaxNoisedFinalizeBigInt : PacClipMinNoisedFinalizeBigInt;
 	auto combine = IS_MAX ? PacClipMaxCombine : PacClipMinCombine;
 	auto state_size = PacClipMinMaxStateSize<IS_MAX>;
@@ -545,7 +545,7 @@ static AggregateFunction GetPacClipMinMaxNoisedAggregate(PhysicalType type) {
 		                         FunctionNullHandling::DEFAULT_NULL_HANDLING,
 		                         IS_MAX ? PacClipMaxUpdateBigInt : PacClipMinUpdateBigInt);
 	default:
-		throw InternalException("pac_noised_clip_min/max: unsupported decimal physical type");
+		throw InternalException("priv_noised_clip_min/max: unsupported decimal physical type");
 	}
 }
 
@@ -554,7 +554,7 @@ static unique_ptr<FunctionData> BindDecimalPacNoisedClipMinMax(ClientContext &ct
                                                                vector<unique_ptr<Expression>> &args) {
 	auto decimal_type = args[1]->return_type;
 	function = GetPacClipMinMaxNoisedAggregate<IS_MAX>(decimal_type.InternalType());
-	function.name = IS_MAX ? "pac_noised_clip_max" : "pac_noised_clip_min";
+	function.name = IS_MAX ? "priv_noised_clip_max" : "priv_noised_clip_min";
 	function.arguments[1] = decimal_type;
 	function.return_type = LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(decimal_type));
 	return PacClipBind(ctx, function, args);
@@ -736,7 +736,7 @@ static void AddFloatDoubleOverloads(AggregateFunctionSet &set, const string &nam
 // ============================================================================
 template <bool IS_MAX>
 static void RegisterPacClipMinMaxCountersFunctions(ExtensionLoader &loader) {
-	const string name = IS_MAX ? "pac_clip_max" : "pac_clip_min";
+	const string name = IS_MAX ? "priv_clip_max" : "priv_clip_min";
 	const string short_name = IS_MAX ? "clip_max" : "clip_min";
 	AggregateFunctionSet fcn_set(name);
 	RegisterClipMinMaxTypeOverloads<IS_MAX>(fcn_set, name, true);
@@ -760,7 +760,7 @@ static void RegisterPacClipMinMaxCountersFunctions(ExtensionLoader &loader) {
 
 template <bool IS_MAX>
 static void RegisterPacNoisedClipMinMaxFunctions(ExtensionLoader &loader) {
-	const string name = IS_MAX ? "pac_noised_clip_max" : "pac_noised_clip_min";
+	const string name = IS_MAX ? "priv_noised_clip_max" : "priv_noised_clip_min";
 	AggregateFunctionSet fcn_set(name);
 	RegisterClipMinMaxTypeOverloads<IS_MAX>(fcn_set, name, false);
 

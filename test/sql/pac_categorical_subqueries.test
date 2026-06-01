@@ -8,14 +8,14 @@ statement ok
 PRAGMA clear_privacy_metadata;
 
 # Categorical queries are queries where:
-# - An inner subquery contains a PAC aggregate (e.g., pac_sum, pac_count)
+# - An inner subquery contains a PAC aggregate (e.g., priv_sum, priv_count)
 # - The outer query compares the aggregate result without its own aggregate
-# - Example: WHERE value > (SELECT 0.5 * pac_noised_sum(...) FROM ...)
+# - Example: WHERE value > (SELECT 0.5 * priv_noised_sum(...) FROM ...)
 #
 # These require special handling:
 # - Inner PAC aggregate returns all 64 counters (pac_*_counters variant)
 # - Comparison becomes pac_gt/pac_lt/etc. returning a 64-bit mask
-# - Final selection uses pac_filter() for probabilistic filtering
+# - Final selection uses priv_filter() for probabilistic filtering
 
 # ============================================================================
 # Schema Setup - TPC-H style schema with customer as privacy unit
@@ -432,7 +432,7 @@ ORDER BY
 3	ocean red
 4	forest yellow
 
-# Note: Part 4 (forest yellow) is included because with corrected pac_avg
+# Note: Part 4 (forest yellow) is included because with corrected priv_avg
 # (2x compensation for 50% sampling), the avg(l_extendedprice/l_quantity)
 # values are correct, and ps_supplycost=30 < avg ~= 43.33 evaluates to TRUE.
 
@@ -529,7 +529,7 @@ SELECT count(*) FROM (
 # ============================================================================
 # Test 11: Categorical with AVG aggregate
 # Find parts where avg quantity exceeds threshold
-# NOTE: Result is 2 with proper avg decomposition (pac_noised_avg → sum/count)
+# NOTE: Result is 2 with proper avg decomposition (priv_noised_avg → sum/count)
 # ============================================================================
 
 query I
@@ -659,9 +659,9 @@ ORDER BY total_qty DESC;
 # ============================================================================
 # COALESCE(AVG(...)) with ORDER BY/LIMIT (crash 30873)
 # ============================================================================
-# TopK rewriter wraps LIST colrefs with pac_noised() which returns FLOAT,
+# TopK rewriter wraps LIST colrefs with priv_noised() which returns FLOAT,
 # but COALESCE was bound for DOUBLE arguments (from AVG). The fix casts
-# pac_noised() back to the original aggregate type.
+# priv_noised() back to the original aggregate type.
 # The crash requires COALESCE(AVG(...)) as a direct aggregate in the same
 # GROUP BY that feeds into ORDER BY ... LIMIT (TopK pushdown path).
 

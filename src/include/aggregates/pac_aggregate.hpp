@@ -107,7 +107,7 @@ static inline LogicalType PacFloatLogicalType() {
 }
 
 // Header for PAC aggregate helpers and public declarations used across pac_* files.
-// Contains bindings and small helpers shared between pac_aggregate, pac_count and pac_sum implementations.
+// Contains bindings and small helpers shared between pac_aggregate, priv_count and priv_sum implementations.
 
 // ============================================================================
 // PacPState: per-query Bayesian posterior tracker for persistent secret composition
@@ -135,13 +135,13 @@ std::shared_ptr<PacPState> GetOrCreatePState(uint64_t query_hash);
 // Throws InvalidInputException if mi < 0.
 double ComputeDeltaFromValues(const vector<PAC_FLOAT> &values, double mi);
 
-// Register pac_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
+// Register priv_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
 void RegisterPacHashFunction(ExtensionLoader &loader);
 
-// Register pac_finalize scalar function (LIST<DOUBLE> -> DOUBLE, read-time noise for derived tables)
+// Register priv_finalize scalar function (LIST<DOUBLE> -> DOUBLE, read-time noise for derived tables)
 void RegisterPacFinalizeFunction(ExtensionLoader &loader);
 
-// Declare the noisy-sample helper so other translation units (pac_count.cpp) can call it.
+// Declare the noisy-sample helper so other translation units (priv_count.cpp) can call it.
 // is_null: bitmask where bit i=1 means counter i should be excluded (compacted out)
 // mi: mutual information parameter for noise calculation
 // correction: factor to multiply values by after compacting NULLs but before adding noise
@@ -202,15 +202,15 @@ inline double GetPacMiFromSetting(ClientContext &ctx) {
 
 // Bind data used by PAC aggregates to carry `mi` and `correction` parameters.
 // Reads seed from privacy_seed setting (or uses query-id if not set) and computes query_hash.
-// query_hash is XOR'd with per-row key_hash inside pac_hash() (centralized) and used as
+// query_hash is XOR'd with per-row key_hash inside priv_hash() (centralized) and used as
 // the counter selector for PacNoisySampleFrom64Counters in finalize functions.
 struct PacBindData : public FunctionData {
 	double mi;                // mutual information parameter from pac_mi setting (controls noise/NULL probability)
 	double correction;        // correction factor: multiplies sum/avg/count results, reduces NULL prob for min/max
 	uint64_t seed;            // RNG seed: privacy_seed setting value, or query-id if not set
-	uint64_t query_hash;      // derived from seed: used inside pac_hash() for XOR and as counter selector
-	double scale_divisor;     // for DECIMAL pac_avg: divide result by 10^scale (default 1.0)
-	bool hash_repair;         // if true, pac_hash() repairs hash to exactly 32 bits set
+	uint64_t query_hash;      // derived from seed: used inside priv_hash() for XOR and as counter selector
+	double scale_divisor;     // for DECIMAL priv_avg: divide result by 10^scale (default 1.0)
+	bool hash_repair;         // if true, priv_hash() repairs hash to exactly 32 bits set
 	double utility_threshold; // z-score threshold for utility NULLing (NaN = disabled, any value = enabled)
 
 	// Persistent secret p-tracking: shared across all aggregates in the same query (same query_hash).
@@ -295,7 +295,7 @@ inline unique_ptr<FunctionData> MakePacBindData(ClientContext &ctx, vector<uniqu
 	return make_uniq<PacBindData>(ctx, mi, correction, scale_divisor);
 }
 
-// Helper to convert double to accumulator type (used by pac_sum finalizers)
+// Helper to convert double to accumulator type (used by priv_sum finalizers)
 template <class T>
 static inline T FromDouble(double val) {
 	return static_cast<T>(val);

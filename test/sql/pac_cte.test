@@ -279,7 +279,7 @@ SELECT
 # ============================================================
 # Test 7: CTE referenced multiple times
 # Tests: Single CTE referenced in both main query and subquery
-# Categorical rewrite: subquery AVG becomes counter-based pac_select_gt
+# Categorical rewrite: subquery AVG becomes counter-based priv_select_gt
 # ============================================================
 query I
 WITH cust_orders AS (
@@ -315,7 +315,7 @@ SELECT COUNT(*) FROM cust_nation;
 # Tests: CTE computes per-supplier revenue, main query uses IN
 # subquery on CTE with a filter on the PAC aggregate. The IN
 # creates a MARK_JOIN that the categorical rewriter must replace
-# with CROSS_PRODUCT + pac_filter, removing the dangling mark ref.
+# with CROSS_PRODUCT + priv_filter, removing the dangling mark ref.
 # ============================================================
 query II
 WITH supplier_totals AS (
@@ -357,7 +357,7 @@ statement ok
 INSERT INTO scores VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, 40);
 
 # CTE only selects grp and value — PRIVACY_KEY 'id' is NOT projected.
-# The aggregate should still be noised (pac_noised_sum) after CTE expansion.
+# The aggregate should still be noised (priv_noised_sum) after CTE expansion.
 query II
 WITH data AS (
     SELECT grp, value FROM scores

@@ -5,12 +5,12 @@
 // (queries that don't return aggregates but use PAC aggregates in subquery predicates).
 //
 // Problem: When an inner query has a PAC aggregate and the outer query uses it in a comparison
-// (e.g., WHERE value > pac_sum(...)), picking ONE subsample for the inner aggregate leaks privacy
+// (e.g., WHERE value > priv_sum(...)), picking ONE subsample for the inner aggregate leaks privacy
 // because the outer query's filter decision is based on that specific subsample.
 //
 // Solution: The inner PAC aggregate returns ALL 64 counter values. The comparison is evaluated
 // against all 64 values, producing a 64-bit mask where bit i = 1 if subsample i satisfies the
-// condition. The final selection happens at the outermost categorical boundary using pac_filter().
+// condition. The final selection happens at the outermost categorical boundary using priv_filter().
 //
 // Key Functions:
 // - pac_counters(hash, value) -> LIST[DOUBLE] : Returns all 64 counter values (no noise/selection yet)
@@ -18,9 +18,9 @@
 // - pac_lt(value, counters) -> UBIGINT : Returns mask where bit i = 1 if value < counters[i]
 // - pac_gte(value, counters) -> UBIGINT : Returns mask where bit i = 1 if value >= counters[i]
 // - pac_lte(value, counters) -> UBIGINT : Returns mask where bit i = 1 if value <= counters[i]
-// - pac_select(hash, list<bool>) -> UBIGINT : Convert booleans to mask, combined with hash subsampling
-// - pac_filter(mask) -> BOOLEAN : Probabilistically filter based on popcount(mask)/64
-// - pac_filter(list<bool>) -> BOOLEAN : Convert to mask, then filter
+// - priv_select(hash, list<bool>) -> UBIGINT : Convert booleans to mask, combined with hash subsampling
+// - priv_filter(mask) -> BOOLEAN : Probabilistically filter based on popcount(mask)/64
+// - priv_filter(list<bool>) -> BOOLEAN : Convert to mask, then filter
 // - NOT: ~mask (negate condition)
 //
 // Created by ila on 1/22/26.
@@ -45,7 +45,7 @@ void AddPacListAggregateOverload(AggregateFunctionSet &set, const string &aggr_t
 // ============================================================================
 // PAC_COUNTERS aggregate: Returns all 64 counters as a LIST for categorical queries
 // ============================================================================
-// This is a variant of pac_sum that returns the raw counters instead of picking one.
+// This is a variant of priv_sum that returns the raw counters instead of picking one.
 // Used when the aggregate result will be used in a comparison in an outer categorical query.
 
 // ============================================================================
@@ -62,21 +62,21 @@ void AddPacListAggregateOverload(AggregateFunctionSet &set, const string &aggr_t
 // ============================================================================
 // PAC_SELECT: Convert list<bool> to bitmask, combined with hash subsampling
 // ============================================================================
-// pac_select(UBIGINT hash, list<bool>) -> UBIGINT
+// priv_select(UBIGINT hash, list<bool>) -> UBIGINT
 // Converts booleans to a mask and combines with the privacy-unit hash.
 // Output is query_hash-compatible for downstream pac aggregates.
 
 // ============================================================================
 // PAC_FILTER: Final probabilistic selection based on mask
 // ============================================================================
-// pac_filter(mask) -> BOOLEAN
+// priv_filter(mask) -> BOOLEAN
 // Returns true with probability proportional to popcount(mask)/64
 // This should be called at the outermost categorical query boundary
 
-// pac_filter(mask, mi) -> BOOLEAN
+// priv_filter(mask, mi) -> BOOLEAN
 // Same as above but with explicit mi parameter (mi=0 means deterministic: majority voting)
 
-// pac_filter(list<bool>) -> BOOLEAN
+// priv_filter(list<bool>) -> BOOLEAN
 // Convenience: converts list to mask, then applies filter logic
 
 // ============================================================================

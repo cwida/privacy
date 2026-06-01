@@ -18,7 +18,7 @@
 #include "parser/privacy_parser.hpp"
 // Include utility diff
 #include "diff/pac_utility_diff.hpp"
-// Include derived_pu rewriter (counter conversion + pac_finalize injection)
+// Include derived_pu rewriter (counter conversion + priv_finalize injection)
 #include "query_processing/pac_derived_rewriter.hpp"
 // Include deep copy for utility diff
 #include "duckdb/planner/logical_operator_deep_copy.hpp"
@@ -326,7 +326,7 @@ static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, uniqu
 // ============================================================================
 // PACDerivedTypePatcher — patches statement types after physical planning
 // ============================================================================
-// When the optimizer changes output types (e.g. LIST<FLOAT> → FLOAT via pac_finalize),
+// When the optimizer changes output types (e.g. LIST<FLOAT> → FLOAT via priv_finalize),
 // the statement's result types (set at plan time) become stale. This state patches them
 // in OnFinalizePrepare, which fires after the physical plan is generated.
 struct PACDerivedTypePatcher : public ClientContextState {
@@ -376,18 +376,18 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	if (!plan) {
 		return;
 	}
-	// Propagate CTAS metadata even when pac_rewrite is disabled, so that
+	// Propagate CTAS metadata even when priv_rewrite is disabled, so that
 	// tables created via CTAS (e.g. IVM delta tables) inherit PRIVACY_KEY and
 	// PROTECTED columns from their source tables.
 	bool pac_ctas_enabled = GetBooleanSetting(input.context, "pac_ctas", true);
 	if (pac_ctas_enabled && plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE && !plan->children.empty()) {
 		PropagateCTASMetadata(plan, plan->children[0], input);
 	}
-	// When pac_rewrite is disabled (e.g. by IVM during internal delta plan derivation),
-	// skip the rest of PAC optimization. This is separate from pac_check, which
+	// When priv_rewrite is disabled (e.g. by IVM during internal delta plan derivation),
+	// skip the rest of privacy optimization. This is separate from priv_check, which
 	// only controls the protected column access restrictions.
-	bool pac_rewrite_enabled = GetBooleanSetting(input.context, "pac_rewrite", true);
-	if (!pac_rewrite_enabled) {
+	bool priv_rewrite_enabled = GetBooleanSetting(input.context, "priv_rewrite", true);
+	if (!priv_rewrite_enabled) {
 		return;
 	}
 	if (GetPrivacyMode(input.context) == "dp_elastic" &&
@@ -395,7 +395,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 		ValidateDPElasticDelta(input.context);
 	}
 	// Register type patcher to fix stale statement types after optimizer changes output types.
-	// Read path (pac_finalize injection) is handled by PACDerivedReadRule (post-optimizer)
+	// Read path (priv_finalize injection) is handled by PACDerivedReadRule (post-optimizer)
 	// so it runs after DuckDB's built-in projection removal optimizer.
 	input.context.registered_state->GetOrCreate<PACDerivedTypePatcher>("pac_derived_type_patcher");
 	// If the optimizer extension provided a PACOptimizerInfo, and a replan is already in progress,
@@ -518,7 +518,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	// active_query is NULL. DuckDB's GetCurrentQuery() dereferences that unique_ptr
 	// and throws InternalException. The query string is only used for the compiled-
 	// file hash, so we fall back to a fixed string to let PAC compilation proceed
-	// (needed so delta queries get pac_noised_sum / pac_hash rewrites).
+	// (needed so delta queries get priv_noised_sum / priv_hash rewrites).
 	string current_query;
 	try {
 		current_query = input.context.GetCurrentQuery();
@@ -595,7 +595,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 				CompilePacBitsliceQuery(check, input, target_plan, privacy_units, normalized, query_hash);
 			}
 
-			// For DML targeting derived_pu tables: convert pac_noised_* → pac_* counter variants
+			// For DML targeting derived_pu tables: convert priv_noised_* → priv_* counter variants
 			// so the table stores raw 64-element counter lists instead of noised scalars.
 			// Check the DML TARGET table (not source tables) for derived_pu.
 			// PropagateCTASMetadata already ran (line 276) and set derived_pu on the target.
@@ -651,20 +651,20 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 // PACDerivedReadRule — post-optimizer: finalize derived_pu counter columns
 // ============================================================================
 // Runs AFTER DuckDB's built-in optimizers (which may remove trivial projections).
-// Wraps LIST<FLOAT> column refs from derived_pu tables with pac_finalize().
+// Wraps LIST<FLOAT> column refs from derived_pu tables with priv_finalize().
 void PACDerivedReadRule::PACDerivedReadFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
-	bool pac_rewrite_enabled = GetBooleanSetting(input.context, "pac_rewrite", true);
-	if (!pac_rewrite_enabled) {
+	bool priv_rewrite_enabled = GetBooleanSetting(input.context, "priv_rewrite", true);
+	if (!priv_rewrite_enabled) {
 		return;
 	}
-	// Skip pac_finalize injection for DML that writes raw counter data.
+	// Skip priv_finalize injection for DML that writes raw counter data.
 	// INSERT/CTAS need raw LIST<FLOAT> counters preserved.
 	// UPDATE SET on counter columns is unusual — skip for now.
 	if (plan->type == LogicalOperatorType::LOGICAL_INSERT || plan->type == LogicalOperatorType::LOGICAL_UPDATE ||
 	    plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE) {
 		return;
 	}
-	// DELETE: the WHERE clause needs pac_filter_<cmp> for counter column comparisons,
+	// DELETE: the WHERE clause needs priv_filter_<cmp> for counter column comparisons,
 	// but the DELETE operator itself only reads row IDs. Run the rewriter on the child
 	// subtree (the read side) so filters are rewritten without touching DELETE's state.
 	if (plan->type == LogicalOperatorType::LOGICAL_DELETE && !plan->children.empty()) {
@@ -687,12 +687,12 @@ void PACDerivedReadRule::PACDerivedReadFunction(OptimizerExtensionInput &input, 
 	if (!HasDerivedPuCounterGets(plan.get())) {
 		return;
 	}
-	PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] === PLAN BEFORE pac_finalize injection ===");
+	PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] === PLAN BEFORE priv_finalize injection ===");
 #if PRIVACY_DEBUG
 	plan->Print();
 #endif
 	InjectPacFinalizeForDerivedPu(input, plan);
-	PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] === PLAN AFTER pac_finalize injection ===");
+	PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] === PLAN AFTER priv_finalize injection ===");
 #if PRIVACY_DEBUG
 	plan->Print();
 #endif

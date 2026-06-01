@@ -134,7 +134,7 @@ static double ComputePrivacyUnitCardinality(ClientContext &context) {
 
 	auto &db = DatabaseInstance::GetDatabase(context);
 	Connection conn(db);
-	auto disable_rewrite = conn.Query("SET pac_rewrite=false");
+	auto disable_rewrite = conn.Query("SET priv_rewrite=false");
 	if (!disable_rewrite || disable_rewrite->HasError()) {
 		throw InvalidInputException("refresh_dp_stats: failed to disable privacy rewrite while computing stats" +
 		                            (disable_rewrite ? (": " + disable_rewrite->GetError()) : ""));
@@ -261,11 +261,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	}
 
 	// Register PAC optimizer rule
-	auto pac_rewrite_rule = PACRewriteRule();
+	auto priv_rewrite_rule = PACRewriteRule();
 	// attach PAC-specific optimizer info so the extension can coordinate replan state
 	auto pac_info = make_shared_ptr<PACOptimizerInfo>();
-	pac_rewrite_rule.optimizer_info = pac_info;
-	OptimizerExtension::Register(db.config, std::move(pac_rewrite_rule));
+	priv_rewrite_rule.optimizer_info = pac_info;
+	OptimizerExtension::Register(db.config, std::move(priv_rewrite_rule));
 
 	// Register PAC DROP TABLE cleanup rule (separate rule to handle DROP TABLE operations)
 	auto pac_drop_table_rule = PACDropTableRule();
@@ -276,8 +276,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	pac_topk_rule.optimizer_info = pac_info;
 	OptimizerExtension::Register(db.config, std::move(pac_topk_rule));
 
-	// Register pac_avg rewrite rule (post-optimizer: decomposes pac_noised_avg/pac_avg into sum/count + division).
-	// This post-optimizer handles user-written pac_avg() in SQL. Compiler-generated pac_noised_avg is already
+	// Register priv_avg rewrite rule (post-optimizer: decomposes priv_noised_avg/priv_avg into sum/count + division).
+	// This post-optimizer handles user-written priv_avg() in SQL. Compiler-generated priv_noised_avg is already
 	// decomposed during the pre-optimizer phase (in CompilePacBitsliceQuery) so this is a no-op for those.
 	{
 		OptimizerExtension pac_avg_rule;
@@ -285,7 +285,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 		OptimizerExtension::Register(db.config, std::move(pac_avg_rule));
 	}
 
-	// Register derived_pu read rule (post-optimizer: inject pac_finalize for SELECT on derived_pu tables)
+	// Register derived_pu read rule (post-optimizer: inject priv_finalize for SELECT on derived_pu tables)
 	{
 		auto pac_derived_read_rule = PACDerivedReadRule();
 		OptimizerExtension::Register(db.config, std::move(pac_derived_read_rule));
@@ -294,7 +294,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Enable lenient implicit casting so the binder can resolve comparisons (>, <, etc.)
 	// on derived_pu counter columns (LIST<FLOAT>) at bind time. Without this, the new
 	// casting rules reject FLOAT[] vs scalar comparisons before our optimizer can rewrite
-	// them to pac_filter_<cmp> calls.
+	// them to priv_filter_<cmp> calls.
 	db.config.SetOptionByName("old_implicit_casting", Value::BOOLEAN(true));
 
 	// ---- User-facing settings ----
@@ -349,21 +349,21 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// ---- Internal settings ----
 	// Enforce protected column access restrictions (prevents direct projection of protected columns)
-	db.config.AddExtensionOption("pac_check", "[INTERNAL] Enforce protected column access restrictions",
+	db.config.AddExtensionOption("priv_check", "[INTERNAL] Enforce protected column access restrictions",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
-	// Enable PAC query plan rewriting (the core optimizer that injects noise)
-	db.config.AddExtensionOption("pac_rewrite", "[INTERNAL] Enable PAC query plan rewriting", LogicalType::BOOLEAN,
+	// Enable privacy query plan rewriting (the core optimizer that injects noise)
+	db.config.AddExtensionOption("priv_rewrite", "[INTERNAL] Enable privacy query plan rewriting", LogicalType::BOOLEAN,
 	                             Value::BOOLEAN(true));
 	// Number of per-sample subsets (m) used by PAC (default 128)
 	db.config.AddExtensionOption("pac_m", "[INTERNAL] Number of per-sample subsets", LogicalType::INTEGER);
 	// Toggle enforcement of per-sample array length == pac_m
 	db.config.AddExtensionOption("enforce_m_values", "[INTERNAL] Enforce per-sample array length equals pac_m",
 	                             LogicalType::BOOLEAN);
-	// Path where compiled PAC artifacts (CTEs) are written
-	db.config.AddExtensionOption("pac_compiled_path", "[INTERNAL] Path to write compiled PAC artifacts",
+	// Path where compiled privacy artifacts (CTEs) are written
+	db.config.AddExtensionOption("priv_compiled_path", "[INTERNAL] Path to write compiled privacy artifacts",
 	                             LogicalType::VARCHAR);
 	// Enable/disable join elimination (stop FK chain before reaching PU)
-	db.config.AddExtensionOption("pac_join_elimination", "[INTERNAL] Eliminate final join to PU table",
+	db.config.AddExtensionOption("priv_join_elimination", "[INTERNAL] Eliminate final join to PU table",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	// When false, unsupported operators skip PAC compilation instead of throwing
 	db.config.AddExtensionOption("pac_conservative_mode",
@@ -372,8 +372,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Enable categorical query rewrites (comparisons against PAC aggregates)
 	db.config.AddExtensionOption("pac_categorical", "[INTERNAL] Enable categorical query rewrites",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
-	// Use pac_select for categorical filters below pac aggregates
-	db.config.AddExtensionOption("pac_select", "[INTERNAL] Use pac_select for categorical filters below pac aggregates",
+	// Use priv_select for categorical filters below pac aggregates
+	db.config.AddExtensionOption("priv_select",
+	                             "[INTERNAL] Use priv_select for categorical filters below pac aggregates",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	// Top-k pushdown: when true, top-k is applied on true aggregates before noising
 	db.config.AddExtensionOption("pac_pushdown_topk", "[INTERNAL] Apply top-k before noise instead of after",
@@ -384,8 +385,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("pac_topk_expansion",
 	                             "[INTERNAL] Expansion factor for top-k superset (1 = no expansion)",
 	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));
-	// Control whether pac_hash() repairs hashes to exactly 32 bits set
-	db.config.AddExtensionOption("pac_hash_repair", "[INTERNAL] pac_hash() repairs hash to exactly 32 bits set",
+	// Control whether priv_hash() repairs hashes to exactly 32 bits set
+	db.config.AddExtensionOption("pac_hash_repair", "[INTERNAL] priv_hash() repairs hash to exactly 32 bits set",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	// Propagate PAC metadata through CREATE TABLE AS SELECT
 	db.config.AddExtensionOption("pac_ctas", "[INTERNAL] Propagate PAC metadata through CTAS", LogicalType::BOOLEAN,
@@ -397,18 +398,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("pac_ptracking", "[INTERNAL] Enable persistent secret p-tracking for query-level MIA",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
-	db.config.AddExtensionOption("pac_clip_support",
-	                             "Dynamic outlier clipping threshold for pac_clip_sum. "
+	db.config.AddExtensionOption("priv_clip_support",
+	                             "Dynamic outlier clipping threshold for priv_clip_sum. "
 	                             "Levels with fewer than this many estimated distinct contributors are zeroed out. "
-	                             "NULL (default) disables pac_clip_sum; set to e.g. 64 to enable.",
+	                             "NULL (default) disables priv_clip_sum; set to e.g. 64 to enable.",
 	                             LogicalType::BIGINT, Value());
 
-	db.config.AddExtensionOption("pac_clip_scale",
+	db.config.AddExtensionOption("priv_clip_scale",
 	                             "Scale unsupported outlier levels to nearest supported level instead of omitting. "
 	                             "Default false (omit).",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
 
-	// Register pac_sum aggregate functions
+	// Register priv_sum aggregate functions
 	RegisterPacSumFunctions(loader);
 	RegisterPacSumCountersFunctions(loader);
 	RegisterDpSampleSumFunctions(loader);
@@ -420,7 +421,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacCountCountersFunctions(loader);
 	RegisterPacClipCountFunctions(loader);
 	RegisterPacNoisedClipCountFunctions(loader);
-	// Register pac_min/pac_max aggregate functions
+	// Register priv_min/priv_max aggregate functions
 	RegisterPacMinFunctions(loader);
 	RegisterPacMaxFunctions(loader);
 	// Register _counters variants for categorical queries
@@ -432,22 +433,22 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacNoisedClipMinFunctions(loader);
 	RegisterPacNoisedClipMaxFunctions(loader);
 
-	// Register dummy pac_noised_avg / pac_avg (replaced by RewritePacAvgToDiv before execution)
+	// Register dummy priv_noised_avg / priv_avg (replaced by RewritePacAvgToDiv before execution)
 	RegisterPacAvgFunctions(loader);
 
-	// Register PAC categorical functions (pac_select, pac_filter, pac_filter_<cmp>, etc.)
+	// Register PAC categorical functions (priv_select, priv_filter, priv_filter_<cmp>, etc.)
 	RegisterPacCategoricalFunctions(loader);
 
-	// Register pac_mean scalar function (used by top-k pushdown for ordering)
+	// Register priv_mean scalar function (used by top-k pushdown for ordering)
 	RegisterPacMeanFunction(loader);
 
-	// Register pac_finalize scalar function (LIST<DOUBLE> -> DOUBLE, read-time noise for derived tables)
+	// Register priv_finalize scalar function (LIST<DOUBLE> -> DOUBLE, read-time noise for derived tables)
 	RegisterPacFinalizeFunction(loader);
 
-	// Register pac_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
+	// Register priv_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
 	RegisterPacHashFunction(loader);
 
-	// Register dp_laplace_noise scalar function (value, scale) -> value + Lap(scale)
+	// Register priv_laplace_noise scalar function (value, scale) -> value + Lap(scale)
 	RegisterDpLaplaceNoiseFunction(loader);
 	RegisterDpSmoothMedianNoiseFunction(loader);
 

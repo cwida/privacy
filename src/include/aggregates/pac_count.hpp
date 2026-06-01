@@ -13,7 +13,7 @@
 #define PAC_NOCASCADING 1
 #endif
 
-// PAC_GODBOLT mode: cpp -DPAC_GODBOLT -P -E -w  src/include/pac_count.hpp
+// PAC_GODBOLT mode: cpp -DPAC_GODBOLT -P -E -w  src/include/priv_count.hpp
 // Isolates the SIMD kernel for Godbolt analysis (-P removes line markers)
 #ifdef PAC_GODBOLT
 using uint8_t = unsigned char;

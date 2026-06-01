@@ -168,7 +168,7 @@ template void AddToTotalsSimple<int64_t, int64_t>(int64_t *, int64_t, uint64_t);
 template void AddToTotalsSimple<double, double>(double *, double, uint64_t);
 #else
 // =========================
-// Integer pac_sum (cascaded multi-level accumulation for SIMD efficiency)
+// Integer priv_sum (cascaded multi-level accumulation for SIMD efficiency)
 // =========================
 
 // SIGNED is compile-time known, so will be compiled away (signed is then left with 2 comparisons, unsigned with 1)
@@ -578,7 +578,7 @@ struct PacSumIntState {
 	}
 };
 
-// Double pac_sum state is noncascading: directly aggregates float/double into double
+// Double priv_sum state is noncascading: directly aggregates float/double into double
 struct PacSumDoubleState {
 	uint64_t key_hash;     // OR of all key_hashes seen (for PacNoiseInNull)
 	uint64_t update_count; // number of non-null updates (used for sample diversity check)
@@ -693,9 +693,9 @@ using PacSumIntStateWrapper = PacSumStateWrapper<PacSumIntState<SIGNED>, typenam
 using PacSumDoubleStateWrapper = PacSumStateWrapper<PacSumDoubleState, double>;
 #endif // PAC_NOBUFFERING
 
-// Forward declarations for pac_sum functions
+// Forward declarations for priv_sum functions
 
-// State type selection (defined in pac_sum.cpp, needed by pac_avg.cpp)
+// State type selection (defined in priv_sum.cpp, needed by priv_avg.cpp)
 #ifdef PAC_NOBUFFERING
 template <bool SIGNED>
 using ScatterIntState = PacSumIntState<SIGNED>;
@@ -705,13 +705,13 @@ template <bool SIGNED>
 using ScatterIntState = PacSumIntStateWrapper<SIGNED>;
 using ScatterDoubleState = PacSumDoubleStateWrapper;
 
-// FlushBuffer - flushes src's buffer into dst's inner state (declared here, defined in pac_sum.cpp)
+// FlushBuffer - flushes src's buffer into dst's inner state (declared here, defined in priv_sum.cpp)
 template <bool SIGNED, typename WrapperT>
 void PacSumFlushBuffer(WrapperT &src, WrapperT &dst, ArenaAllocator &a);
 #endif
 
 // ============================================================================
-// Double-sided mode helpers (used by pac_sum and pac_avg finalization)
+// Double-sided mode helpers (used by priv_sum and priv_avg finalization)
 // ============================================================================
 #ifndef PAC_SIGNEDSUM
 // For int states: cast to unsigned before Flush (uses unsigned counters in Cascade)
@@ -764,15 +764,15 @@ SubtractNegStateTotals(State *, PAC_FLOAT *, uint64_t &, ArenaAllocator &) {
 }
 #endif
 
-// Generic finalize template (used by pac_sum)
+// Generic finalize template (used by priv_sum)
 template <class State, class ACC_TYPE, bool SIGNED>
 void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset);
 
-// Bind for DECIMAL pac_sum
+// Bind for DECIMAL priv_sum
 unique_ptr<FunctionData> BindDecimalPacSum(ClientContext &ctx, AggregateFunction &function,
                                            vector<unique_ptr<Expression>> &args);
 
-// FinalizeCounters for pac_sum_counters
+// FinalizeCounters for priv_sum
 template <class State, bool SIGNED>
 void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset);
 

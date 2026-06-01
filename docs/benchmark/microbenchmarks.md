@@ -1,6 +1,6 @@
 # PAC Microbenchmark Suite
 
-Comprehensive performance benchmarks for PAC aggregate functions (pac_count, pac_sum, pac_avg, pac_min, pac_max) with various optimization configurations. The extension should be compiled with clang.
+Comprehensive performance benchmarks for PAC aggregate functions (priv_count, priv_sum, priv_avg, priv_min, priv_max) with various optimization configurations. The extension should be compiled with clang.
 
 ## Quick Start
 Install the required dependencies (assuming a Debian-based system):
@@ -46,14 +46,14 @@ The suite builds multiple DuckDB binaries with different optimization flags:
 
 ## Benchmarks
 
-### pac_count (`bench_count.sh`)
+### priv_count (`bench_count.sh`)
 
 Tests counter overflow handling and banked vs non-banked performance:
 
 - **Ungrouped**: 10M, 100M, 500M, 1B+ rows (tests 16→32→64 bit counter upgrade)
 - **Grouped**: 1 to 10M groups (tests per-group state overhead)
 
-### pac_sum/avg (`bench_sum_avg.sh`)
+### priv_sum/avg (`bench_sum_avg.sh`)
 
 Tests cascading accumulator performance:
 
@@ -62,7 +62,7 @@ Tests cascading accumulator performance:
 - **Grouped vs ungrouped**
 - **Scaling**: 10M to 500M rows
 
-### pac_min/max (`bench_min_max.sh`)
+### priv_min/max (`bench_min_max.sh`)
 
 Tests bound optimization and bank allocation:
 

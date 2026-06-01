@@ -46,14 +46,14 @@ PRAGMA clear_privacy_metadata;
 
 query I
 SELECT count(*) FROM (
-    SELECT grp, pac_noised_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    SELECT grp, priv_noised_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
     FROM ut_data GROUP BY grp
 ) t WHERE s IS NULL
 ----
 0
 
 # ============================================================================
-# Part 2: pac_noised_sum — low threshold, no NULLs
+# Part 2: priv_noised_sum — low threshold, no NULLs
 # ============================================================================
 
 statement ok
@@ -64,14 +64,14 @@ SET privacy_min_group_count = 0.5
 
 query I
 SELECT count(*) FROM (
-    SELECT grp, pac_noised_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    SELECT grp, priv_noised_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
     FROM ut_data GROUP BY grp
 ) t WHERE s IS NULL
 ----
 0
 
 # ============================================================================
-# Part 3: pac_noised_sum — high threshold, more NULLs
+# Part 3: priv_noised_sum — high threshold, more NULLs
 # Monotonicity: higher threshold >= lower threshold NULLs
 # ============================================================================
 
@@ -83,14 +83,14 @@ SET privacy_min_group_count = 100
 
 query I
 SELECT count(*) > 0 FROM (
-    SELECT grp, pac_noised_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    SELECT grp, priv_noised_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
     FROM ut_data GROUP BY grp
 ) t WHERE s IS NULL
 ----
 true
 
 # ============================================================================
-# Part 4: pac_noised_sum — very high threshold NULLs everything
+# Part 4: priv_noised_sum — very high threshold NULLs everything
 # ============================================================================
 
 statement ok
@@ -101,14 +101,14 @@ SET privacy_min_group_count = 1000
 
 query I
 SELECT count(*) FROM (
-    SELECT grp, pac_noised_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    SELECT grp, priv_noised_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
     FROM ut_data GROUP BY grp
 ) t WHERE s IS NULL
 ----
 5
 
 # ============================================================================
-# Part 5: pac_noised_count — disabled, no NULLs
+# Part 5: priv_noised_count — disabled, no NULLs
 # ============================================================================
 
 statement ok
@@ -119,14 +119,14 @@ SET privacy_min_group_count = NULL
 
 query I
 SELECT count(*) FROM (
-    SELECT grp, pac_noised_count(hash(rowid)::UBIGINT, value::INTEGER) AS c
+    SELECT grp, priv_noised_count(hash(rowid)::UBIGINT, value::INTEGER) AS c
     FROM ut_data GROUP BY grp
 ) t WHERE c IS NULL
 ----
 0
 
 # ============================================================================
-# Part 6: pac_noised_count — high threshold, some NULLed
+# Part 6: priv_noised_count — high threshold, some NULLed
 # ============================================================================
 
 statement ok
@@ -137,14 +137,14 @@ SET privacy_min_group_count = 100
 
 query I
 SELECT count(*) > 0 FROM (
-    SELECT grp, pac_noised_count(hash(rowid)::UBIGINT, value::INTEGER) AS c
+    SELECT grp, priv_noised_count(hash(rowid)::UBIGINT, value::INTEGER) AS c
     FROM ut_data GROUP BY grp
 ) t WHERE c IS NULL
 ----
 true
 
 # ============================================================================
-# Part 7: pac_noised_count — very high threshold NULLs everything
+# Part 7: priv_noised_count — very high threshold NULLs everything
 # ============================================================================
 
 statement ok
@@ -155,7 +155,7 @@ SET privacy_min_group_count = 1000
 
 query I
 SELECT count(*) FROM (
-    SELECT grp, pac_noised_count(hash(rowid)::UBIGINT, value::INTEGER) AS c
+    SELECT grp, priv_noised_count(hash(rowid)::UBIGINT, value::INTEGER) AS c
     FROM ut_data GROUP BY grp
 ) t WHERE c IS NULL
 ----
@@ -173,18 +173,18 @@ SET privacy_min_group_count = NULL
 
 query I
 SELECT count(*) FROM (
-    SELECT grp, pac_noised_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    SELECT grp, priv_noised_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
     FROM ut_data GROUP BY grp
 ) t WHERE s IS NULL
 ----
 0
 
 # ============================================================================
-# Part 9: pac_noised_clip_sum WITH utility threshold (pac_clip_support active)
+# Part 9: priv_noised_clip_sum WITH utility threshold (priv_clip_support active)
 # ============================================================================
 
 statement ok
-SET pac_clip_support = 40
+SET priv_clip_support = 40
 
 # Disabled: no NULLs
 
@@ -196,7 +196,7 @@ SET privacy_min_group_count = NULL
 
 query I
 SELECT count(*) FROM (
-    SELECT grp, pac_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    SELECT grp, priv_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
     FROM ut_data GROUP BY grp
 ) t WHERE s IS NULL
 ----
@@ -212,7 +212,7 @@ SET privacy_min_group_count = 0.5
 
 query I
 SELECT count(*) FROM (
-    SELECT grp, pac_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    SELECT grp, priv_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
     FROM ut_data GROUP BY grp
 ) t WHERE s IS NULL
 ----
@@ -228,7 +228,7 @@ SET privacy_min_group_count = 100
 
 query I
 SELECT count(*) > 0 FROM (
-    SELECT grp, pac_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    SELECT grp, priv_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
     FROM ut_data GROUP BY grp
 ) t WHERE s IS NULL
 ----
@@ -244,14 +244,14 @@ SET privacy_min_group_count = 1000
 
 query I
 SELECT count(*) FROM (
-    SELECT grp, pac_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
+    SELECT grp, priv_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER) AS s
     FROM ut_data GROUP BY grp
 ) t WHERE s IS NULL
 ----
 5
 
 # ============================================================================
-# Part 10: pac_noised_clip_min / pac_noised_clip_max WITH utility threshold
+# Part 10: priv_noised_clip_min / priv_noised_clip_max WITH utility threshold
 # Verify the threshold path is wired up (no crash, correct behavior)
 # ============================================================================
 
@@ -263,7 +263,7 @@ SET privacy_min_group_count = NULL
 
 query I
 SELECT count(*) FROM (
-    SELECT grp, pac_noised_clip_min(hash(rowid)::UBIGINT, value::INTEGER) AS m
+    SELECT grp, priv_noised_clip_min(hash(rowid)::UBIGINT, value::INTEGER) AS m
     FROM ut_data GROUP BY grp
 ) t WHERE m IS NULL
 ----
@@ -271,7 +271,7 @@ SELECT count(*) FROM (
 
 query I
 SELECT count(*) FROM (
-    SELECT grp, pac_noised_clip_max(hash(rowid)::UBIGINT, value::INTEGER) AS m
+    SELECT grp, priv_noised_clip_max(hash(rowid)::UBIGINT, value::INTEGER) AS m
     FROM ut_data GROUP BY grp
 ) t WHERE m IS NULL
 ----
@@ -285,7 +285,7 @@ statement ok
 SET privacy_min_group_count = NULL
 
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 statement ok
 DROP TABLE ut_data

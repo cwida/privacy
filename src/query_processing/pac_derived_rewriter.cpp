@@ -5,13 +5,13 @@
 // Derived_pu tables store PAC counter lists (LIST<FLOAT>, 64 elements) instead of scalar values.
 //
 // Write path (ConvertDerivedPuToCounters):
-//   Converts pac_noised_* aggregates to pac_* counter variants in INSERT/CTAS plans,
+//   Converts priv_noised_* aggregates to priv_* counter variants in INSERT/CTAS plans,
 //   so the table stores raw counter lists instead of finalized noised scalars.
 //
 // Read path (InjectPacFinalizeForDerivedPu):
-//   Rewrites comparisons on counter columns to pac_filter_<cmp>(scalar, counters)
+//   Rewrites comparisons on counter columns to priv_filter_<cmp>(scalar, counters)
 //   calls, which evaluate all 64 subsamples via majority voting. Non-comparison
-//   contexts (projections, ORDER BY) are wrapped with pac_finalize() instead.
+//   contexts (projections, ORDER BY) are wrapped with priv_finalize() instead.
 //   Runs as a post-optimizer rule (after DuckDB's built-in optimizers).
 //
 // Key challenges:
@@ -20,9 +20,9 @@
 //     position-based matching against the original GET.
 //   - DuckDB's filter pushdown may push comparisons (including BETWEEN) into
 //     GET.table_filters before our post-optimizer runs. RewriteCounterFiltersFromGets
-//     pulls these out and converts them to pac_filter_<cmp> calls.
+//     pulls these out and converts them to priv_filter_<cmp> calls.
 //   - AGGREGATE operators (e.g. first() in scalar subqueries) need raw FLOAT[] input,
-//     so pac_finalize injection is suppressed inside aggregate subtrees.
+//     so priv_finalize injection is suppressed inside aggregate subtrees.
 //
 
 #include "query_processing/pac_derived_rewriter.hpp"
@@ -56,9 +56,10 @@ static LogicalType CounterListType() {
 	return LogicalType::LIST(PacFloatLogicalType());
 }
 
-// Returns true if the expression tree contains a pac_finalize call.
+// Returns true if the expression tree contains a priv_finalize call.
 static bool ExpressionContainsPacFinalize(Expression &e) {
-	if (e.type == ExpressionType::BOUND_FUNCTION && e.Cast<BoundFunctionExpression>().function.name == "pac_finalize") {
+	if (e.type == ExpressionType::BOUND_FUNCTION &&
+	    e.Cast<BoundFunctionExpression>().function.name == "priv_finalize") {
 		return true;
 	}
 	bool found = false;
@@ -71,7 +72,7 @@ static bool ExpressionContainsPacFinalize(Expression &e) {
 }
 
 // ============================================================================
-// Write path: convert pac_noised_* → pac_* counter variants for derived_pu DML
+// Write path: convert priv_noised_* → priv_* counter variants for derived_pu DML
 // ============================================================================
 
 static void ConvertAggregatesRecursive(OptimizerExtensionInput &input, LogicalOperator *op,
@@ -181,7 +182,7 @@ void ConvertDerivedPuToCounters(OptimizerExtensionInput &input, unique_ptr<Logic
 }
 
 // ============================================================================
-// Read path: inject pac_finalize for SELECT on derived_pu tables
+// Read path: inject priv_finalize for SELECT on derived_pu tables
 // ============================================================================
 
 // Find all GET operators that scan derived_pu tables with counter columns.
@@ -239,48 +240,48 @@ static unique_ptr<Expression> ExtractCounterRef(unique_ptr<Expression> e, const 
 	return e;
 }
 
-// Map ExpressionType comparison to pac_filter_<cmp> function name.
+// Map ExpressionType comparison to priv_filter_<cmp> function name.
 // When the counter is on the left side, we flip the comparison direction.
 static string GetPacFilterFuncName(ExpressionType cmp_type, bool counter_on_left) {
 	if (counter_on_left) {
-		// Flip: counter > scalar becomes pac_filter_lt(scalar, counter)
+		// Flip: counter > scalar becomes priv_filter_lt(scalar, counter)
 		switch (cmp_type) {
 		case ExpressionType::COMPARE_GREATERTHAN:
-			return "pac_filter_lt";
+			return "priv_filter_lt";
 		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-			return "pac_filter_lte";
+			return "priv_filter_lte";
 		case ExpressionType::COMPARE_LESSTHAN:
-			return "pac_filter_gt";
+			return "priv_filter_gt";
 		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-			return "pac_filter_gte";
+			return "priv_filter_gte";
 		case ExpressionType::COMPARE_EQUAL:
-			return "pac_filter_eq";
+			return "priv_filter_eq";
 		case ExpressionType::COMPARE_NOTEQUAL:
-			return "pac_filter_neq";
+			return "priv_filter_neq";
 		default:
 			return "";
 		}
 	} else {
 		switch (cmp_type) {
 		case ExpressionType::COMPARE_GREATERTHAN:
-			return "pac_filter_gt";
+			return "priv_filter_gt";
 		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-			return "pac_filter_gte";
+			return "priv_filter_gte";
 		case ExpressionType::COMPARE_LESSTHAN:
-			return "pac_filter_lt";
+			return "priv_filter_lt";
 		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-			return "pac_filter_lte";
+			return "priv_filter_lte";
 		case ExpressionType::COMPARE_EQUAL:
-			return "pac_filter_eq";
+			return "priv_filter_eq";
 		case ExpressionType::COMPARE_NOTEQUAL:
-			return "pac_filter_neq";
+			return "priv_filter_neq";
 		default:
 			return "";
 		}
 	}
 }
 
-// Ensure the scalar side is cast to PAC_FLOAT for pac_filter_<cmp>.
+// Ensure the scalar side is cast to PAC_FLOAT for priv_filter_<cmp>.
 // Strips binder-inserted CAST(scalar→FLOAT[]) and FLOAT[] constants back to scalars.
 static unique_ptr<Expression> CastScalarToPacFloat(unique_ptr<Expression> scalar, const LogicalType &pac_float_type,
                                                    const LogicalType &list_type) {
@@ -311,7 +312,7 @@ static unique_ptr<Expression> CastScalarToPacFloat(unique_ptr<Expression> scalar
 	return scalar;
 }
 
-// Rewrite a comparison expression on a counter column to a pac_filter_<cmp> call.
+// Rewrite a comparison expression on a counter column to a priv_filter_<cmp> call.
 // Returns the rewritten expression, or nullptr if the comparison doesn't involve a counter column.
 static unique_ptr<Expression> RewriteComparisonToFilterCmp(OptimizerExtensionInput &input,
                                                            BoundComparisonExpression &cmp, const LogicalType &list_type,
@@ -337,8 +338,8 @@ static unique_ptr<Expression> RewriteComparisonToFilterCmp(OptimizerExtensionInp
 	return input.optimizer.BindScalarFunction(func_name, std::move(scalar_expr), std::move(counter_ref));
 }
 
-// Rewrite a BETWEEN expression on a counter column to pac_filter_<cmp> AND conjunction.
-// total BETWEEN low AND high → pac_filter_lte(low, counter) AND pac_filter_gte(high, counter)
+// Rewrite a BETWEEN expression on a counter column to priv_filter_<cmp> AND conjunction.
+// total BETWEEN low AND high → priv_filter_lte(low, counter) AND priv_filter_gte(high, counter)
 static unique_ptr<Expression>
 RewriteBetweenToFilterCmp(OptimizerExtensionInput &input, unique_ptr<Expression> counter_ref1,
                           unique_ptr<Expression> counter_ref2, unique_ptr<Expression> lower,
@@ -346,10 +347,10 @@ RewriteBetweenToFilterCmp(OptimizerExtensionInput &input, unique_ptr<Expression>
                           const LogicalType &finalized_type, const LogicalType &list_type) {
 	auto lower_scalar = CastScalarToPacFloat(std::move(lower), finalized_type, list_type);
 	auto upper_scalar = CastScalarToPacFloat(std::move(upper), finalized_type, list_type);
-	// counter >= low → low <= counter → pac_filter_lte(low, counter)
-	// counter <= high → high >= counter → pac_filter_gte(high, counter)
-	string lower_func = lower_inclusive ? "pac_filter_lte" : "pac_filter_lt";
-	string upper_func = upper_inclusive ? "pac_filter_gte" : "pac_filter_gt";
+	// counter >= low → low <= counter → priv_filter_lte(low, counter)
+	// counter <= high → high >= counter → priv_filter_gte(high, counter)
+	string lower_func = lower_inclusive ? "priv_filter_lte" : "priv_filter_lt";
+	string upper_func = upper_inclusive ? "priv_filter_gte" : "priv_filter_gt";
 	auto lower_call = input.optimizer.BindScalarFunction(lower_func, std::move(lower_scalar), std::move(counter_ref1));
 	auto upper_call = input.optimizer.BindScalarFunction(upper_func, std::move(upper_scalar), std::move(counter_ref2));
 	PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Rewriting BETWEEN to " + lower_func + " AND " + upper_func);
@@ -357,19 +358,19 @@ RewriteBetweenToFilterCmp(OptimizerExtensionInput &input, unique_ptr<Expression>
 	                                             std::move(upper_call));
 }
 
-// Wrap counter column refs with pac_finalize, bottom-up through the plan.
+// Wrap counter column refs with priv_finalize, bottom-up through the plan.
 //
 // Uses op->types (resolved after DuckDB's optimizer) to identify counter columns
 // because the optimizer may reorder columns, making position-based matching unreliable.
 //
-// Comparisons involving counter columns are rewritten to pac_filter_<cmp>(scalar, counters)
+// Comparisons involving counter columns are rewritten to priv_filter_<cmp>(scalar, counters)
 // which evaluates all 64 subsamples using majority voting. This works for scan-level
-// filters too because pac_filter_<cmp> returns BOOLEAN.
+// filters too because priv_filter_<cmp> returns BOOLEAN.
 //
-// Non-comparison contexts (projections, ORDER BY, etc.) still use pac_finalize wrapping.
+// Non-comparison contexts (projections, ORDER BY, etc.) still use priv_finalize wrapping.
 //
 // Suppresses wrapping inside AGGREGATE subtrees — aggregates (e.g. first() in scalar
-// subqueries, SUM() over counter columns) need raw FLOAT[] input. pac_finalize is
+// subqueries, SUM() over counter columns) need raw FLOAT[] input. priv_finalize is
 // applied above the aggregate via projection wrapping or the registered implicit cast.
 static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalOperator *op,
                                         const unordered_set<idx_t> &derived_table_indices,
@@ -411,13 +412,13 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 	};
 	LogicalOperatorVisitor::EnumerateExpressions(*op, [&](unique_ptr<Expression> *expr_ptr) { FixExpr(*expr_ptr); });
 
-	// Rewrite comparisons on counter columns to pac_filter_<cmp> calls,
-	// and wrap remaining counter column refs with pac_finalize.
+	// Rewrite comparisons on counter columns to priv_filter_<cmp> calls,
+	// and wrap remaining counter column refs with priv_finalize.
 	std::function<void(unique_ptr<Expression> &)> WrapExpr = [&](unique_ptr<Expression> &e) {
 		// Skip already-wrapped expressions
 		if (e->type == ExpressionType::BOUND_FUNCTION) {
 			auto &func_name = e->Cast<BoundFunctionExpression>().function.name;
-			if (func_name == "pac_finalize" || StringUtil::StartsWith(func_name, "pac_filter_")) {
+			if (func_name == "priv_finalize" || StringUtil::StartsWith(func_name, "priv_filter_")) {
 				return;
 			}
 		}
@@ -445,7 +446,7 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 				e = std::move(rewritten);
 				return;
 			}
-			// Both sides are counters or no counter — fall through to pac_finalize wrapping
+			// Both sides are counters or no counter — fall through to priv_finalize wrapping
 		}
 
 		// Rewrite BoundBetweenExpression where input is a counter column
@@ -475,8 +476,8 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 			if (col_ref.return_type == list_type) {
 				PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Wrapping binding (" +
 				                    std::to_string(col_ref.binding.table_index) + "," +
-				                    std::to_string(col_ref.binding.column_index) + ") with pac_finalize");
-				e = input.optimizer.BindScalarFunction("pac_finalize", std::move(e));
+				                    std::to_string(col_ref.binding.column_index) + ") with priv_finalize");
+				e = input.optimizer.BindScalarFunction("priv_finalize", std::move(e));
 			}
 		}
 		// Retarget CAST(scalar→FLOAT[]) to CAST(scalar→FLOAT), strip no-op casts
@@ -510,7 +511,7 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 				proj.types[i] = proj.expressions[i]->return_type;
 			}
 			// Only mark as finalized if the expression actually produces a counter type.
-			// Expressions that CONTAIN pac_finalize in sub-expressions (e.g. CASE WHEN pac_finalize(x) > 100 ...)
+			// Expressions that CONTAIN priv_finalize in sub-expressions (e.g. CASE WHEN priv_finalize(x) > 100 ...)
 			// may return a different type (e.g. VARCHAR) and should NOT be marked finalized.
 			bool is_counter_output =
 			    (proj.expressions[i]->return_type == finalized_type) ||
@@ -543,10 +544,10 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 	}
 }
 
-// Rewrite scan-level table_filters on counter columns into pac_filter_<cmp> expressions.
+// Rewrite scan-level table_filters on counter columns into priv_filter_<cmp> expressions.
 // DuckDB's filter pushdown may push comparisons (including BETWEEN) into GET.table_filters
 // before our post-optimizer runs. The scan executor doesn't support LIST types, so we pull
-// these filters out and convert them to pac_filter_<cmp> calls in a FILTER operator.
+// these filters out and convert them to priv_filter_<cmp> calls in a FILTER operator.
 static void RewriteCounterFiltersFromGets(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &op,
                                           const unordered_set<idx_t> &derived_table_indices) {
 	if (!op) {
@@ -596,7 +597,7 @@ static void RewriteCounterFiltersFromGets(OptimizerExtensionInput &input, unique
 		}
 		auto col_ref = make_uniq<BoundColumnRefExpression>(col_type, binding);
 		auto expr = filter->ToExpression(*col_ref);
-		// Rewrite the expression to pac_filter_<cmp> calls
+		// Rewrite the expression to priv_filter_<cmp> calls
 		if (expr->GetExpressionClass() == ExpressionClass::BOUND_BETWEEN) {
 			auto &between = expr->Cast<BoundBetweenExpression>();
 			auto counter1 = make_uniq<BoundColumnRefExpression>(col_type, binding);
@@ -612,7 +613,7 @@ static void RewriteCounterFiltersFromGets(OptimizerExtensionInput &input, unique
 			filter_exprs.push_back(std::move(expr));
 		}
 		get.table_filters.filters.erase(filter_col_idx);
-		PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Rewrote table_filter to pac_filter_<cmp> for counter column " +
+		PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Rewrote table_filter to priv_filter_<cmp> for counter column " +
 		                    std::to_string(filter_col_idx));
 	}
 	auto filter_op = make_uniq<LogicalFilter>();
@@ -638,9 +639,9 @@ void InjectPacFinalizeForDerivedPu(OptimizerExtensionInput &input, unique_ptr<Lo
 	if (derived_table_indices.empty()) {
 		return;
 	}
-	PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Injecting pac_finalize for " +
+	PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Injecting priv_finalize for " +
 	                    std::to_string(derived_table_indices.size()) + " derived_pu table(s)");
-	// Rewrite scan-level filters on counter columns to pac_filter_<cmp> calls.
+	// Rewrite scan-level filters on counter columns to priv_filter_<cmp> calls.
 	// DuckDB's filter pushdown may push comparisons (including BETWEEN) into table_filters
 	// before our post-optimizer runs. The scan executor doesn't support LIST types.
 	RewriteCounterFiltersFromGets(input, plan, derived_table_indices);

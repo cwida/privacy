@@ -100,7 +100,7 @@ void CheckPacSampleDiversity(uint64_t key_hash, const PAC_FLOAT *buf, uint64_t u
 }
 
 // ============================================================================
-// NOTE: pac_count implementation was moved to src/pac_count.cpp / src/include/pac_count.hpp.
+// NOTE: priv_count implementation was moved to src/priv_count.cpp / src/include/priv_count.hpp.
 // The noisy-sample computation used by multiple aggregates is kept here and exported.
 // ============================================================================
 
@@ -299,7 +299,7 @@ double ComputeDeltaFromValues(const vector<PAC_FLOAT> &values, double mi) {
 }
 
 // ============================================================================
-// pac_hash: UBIGINT -> UBIGINT with exactly 32 bits set
+// priv_hash: UBIGINT -> UBIGINT with exactly 32 bits set
 // ============================================================================
 
 // 64-bit prime with exactly 32 bits set (irregular pattern), used for hashing in hash32_32
@@ -356,8 +356,8 @@ static void PacHashFunction(DataChunk &args, ExpressionState &state, Vector &res
 }
 
 void RegisterPacHashFunction(ExtensionLoader &loader) {
-	ScalarFunction pac_hash("pac_hash", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacHashFunction, PacHashBind);
-	CreateScalarFunctionInfo info(pac_hash);
+	ScalarFunction priv_hash("priv_hash", {LogicalType::UBIGINT}, LogicalType::UBIGINT, PacHashFunction, PacHashBind);
+	CreateScalarFunctionInfo info(priv_hash);
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Hashes a privacy unit key for PAC subsample assignment.";
 	info.descriptions.push_back(std::move(desc));

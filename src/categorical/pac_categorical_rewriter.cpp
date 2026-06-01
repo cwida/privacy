@@ -148,7 +148,7 @@ static void ReplaceAggregatesOverCounters(LogicalOperator *op, ClientContext &co
 
 // Minimal processing for filter-pattern projection slots:
 // update counter col_ref types but don't wrap with any terminal.
-// The parent filter/join will expand these expressions and generate list_transform + pac_filter.
+// The parent filter/join will expand these expressions and generate list_transform + priv_filter.
 static void PrepareFilterPatternSlot(LogicalProjection &proj, idx_t i,
                                      const unordered_map<uint64_t, ColumnBinding> &counter_bindings) {
 	auto &expr = proj.expressions[i];
@@ -173,28 +173,28 @@ static void PrepareFilterPatternSlot(LogicalProjection &proj, idx_t i,
 // expr: the expression to transform (boolean for filter, numeric for projection)
 // wrap_kind: determines terminal function and type parameters
 // target_type: for PAC_NOISED, cast result to this type (ignored for PAC_FILTER/PAC_SELECT)
-// pac_hash: for PAC_SELECT, the hash binding to pass to pac_select/pac_select_<cmp>
+// priv_hash: for PAC_SELECT, the hash binding to pass to priv_select/priv_select_<cmp>
 static unique_ptr<Expression>
 RewriteExpressionWithCounters(OptimizerExtensionInput &input, const vector<PacBindingInfo> &pac_bindings,
                               Expression *expr, const unordered_map<uint64_t, ColumnBinding> &counter_bindings,
                               PacWrapKind wrap_kind, const LogicalType &target_type = PacFloatLogicalType(),
-                              ColumnBinding pac_hash = ColumnBinding()) {
+                              ColumnBinding priv_hash = ColumnBinding()) {
 	if (pac_bindings.empty()) {
 		return nullptr;
 	}
-	// Try optimized pac_{filter,select}_<cmp> for filter/select comparisons (single binding, simple comparison).
+	// Try optimized priv_{filter,select}_<cmp> for filter/select comparisons (single binding, simple comparison).
 	// TryRewriteFilterComparison always returns the (possibly simplified) expression when it can
-	// do any work. Check if the result is a pac_{filter,select}_<cmp> call (full optimization succeeded)
+	// do any work. Check if the result is a priv_{filter,select}_<cmp> call (full optimization succeeded)
 	// or a simplified comparison (partial — pass to lambda path which benefits from the rewriting).
 	unique_ptr<Expression> simplified_expr;
 	if (wrap_kind == PacWrapKind::PAC_FILTER || wrap_kind == PacWrapKind::PAC_SELECT) {
-		auto cmp_result = TryRewriteFilterComparison(input, pac_bindings, expr, counter_bindings, wrap_kind, pac_hash);
+		auto cmp_result = TryRewriteFilterComparison(input, pac_bindings, expr, counter_bindings, wrap_kind, priv_hash);
 		if (cmp_result) {
 			if (cmp_result->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
 				auto &func = cmp_result->Cast<BoundFunctionExpression>();
-				if (func.function.name.rfind("pac_filter_", 0) == 0 ||
-				    func.function.name.rfind("pac_select_", 0) == 0) {
-					return cmp_result; // Full optimization to pac_{filter,select}_<cmp>
+				if (func.function.name.rfind("priv_filter_", 0) == 0 ||
+				    func.function.name.rfind("priv_select_", 0) == 0) {
+					return cmp_result; // Full optimization to priv_{filter,select}_<cmp>
 				}
 			}
 			simplified_expr = std::move(cmp_result); // Partial simplification — use for the lambda path
@@ -208,16 +208,16 @@ RewriteExpressionWithCounters(OptimizerExtensionInput &input, const vector<PacBi
 	    BuildCategoricalLambdas(input, pac_bindings, expr_for_lambda, counter_bindings, result_element_type);
 	if (list_expr) {
 		if (wrap_kind == PacWrapKind::PAC_NOISED) {
-			auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(list_expr));
+			auto noised = input.optimizer.BindScalarFunction("priv_noised", std::move(list_expr));
 			if (target_type != PacFloatLogicalType()) {
 				noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), target_type);
 			}
 			return noised;
 		} else if (wrap_kind == PacWrapKind::PAC_SELECT) {
-			auto hash_ref = make_uniq<BoundColumnRefExpression>("pac_pu", LogicalType::UBIGINT, pac_hash);
-			return input.optimizer.BindScalarFunction("pac_select", std::move(hash_ref), std::move(list_expr));
+			auto hash_ref = make_uniq<BoundColumnRefExpression>("pac_pu", LogicalType::UBIGINT, priv_hash);
+			return input.optimizer.BindScalarFunction("priv_select", std::move(hash_ref), std::move(list_expr));
 		} else {
-			return input.optimizer.BindScalarFunction("pac_filter", std::move(list_expr));
+			return input.optimizer.BindScalarFunction("priv_filter", std::move(list_expr));
 		}
 	}
 	return nullptr;
@@ -300,10 +300,10 @@ static void ExpandProjectionRefsInExpression(unique_ptr<Expression> &expr, Logic
 	});
 }
 
-// Wrap counter column references with pac_noised.
-// After converting pac_noised_sum → pac_sum (LIST<FLOAT> output),
+// Wrap counter column references with priv_noised.
+// After converting priv_noised_sum → priv_sum (LIST<FLOAT> output),
 // expressions may still reference the aggregate with the original type (e.g. DECIMAL).
-// This wraps those references with pac_noised() to convert back to scalar, then casts to original type.
+// This wraps those references with priv_noised() to convert back to scalar, then casts to original type.
 static void WrapCounterRefsWithNoised(unique_ptr<Expression> &expr,
                                       const unordered_map<uint64_t, ColumnBinding> &counter_bindings,
                                       OptimizerExtensionInput &input) {
@@ -313,11 +313,11 @@ static void WrapCounterRefsWithNoised(unique_ptr<Expression> &expr,
 			auto original_type = col_ref.return_type;
 			auto list_type = LogicalType::LIST(PacFloatLogicalType());
 			// If the universal type fix already changed the col_ref to LIST<FLOAT>,
-			// we can't cast back to it — just use pac_noised's natural scalar return type.
+			// we can't cast back to it — just use priv_noised's natural scalar return type.
 			bool needs_cast = (original_type != PacFloatLogicalType() && original_type != list_type);
-			// Ensure col_ref type is LIST<FLOAT> for correct pac_noised binding.
+			// Ensure col_ref type is LIST<FLOAT> for correct priv_noised binding.
 			col_ref.return_type = list_type;
-			unique_ptr<Expression> noised = input.optimizer.BindScalarFunction("pac_noised", expr->Copy());
+			unique_ptr<Expression> noised = input.optimizer.BindScalarFunction("priv_noised", expr->Copy());
 			if (needs_cast) {
 				noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), original_type);
 			}
@@ -329,7 +329,7 @@ static void WrapCounterRefsWithNoised(unique_ptr<Expression> &expr,
 	    *expr, [&](unique_ptr<Expression> &child) { WrapCounterRefsWithNoised(child, counter_bindings, input); });
 }
 
-// Rewrite a single projection expression: update col_ref types, build list_transform + pac_noised terminal.
+// Rewrite a single projection expression: update col_ref types, build list_transform + priv_noised terminal.
 // Only called for non-filter-pattern projections (filter patterns are handled by the parent filter/join).
 // Returns true if the slot remains a counter binding (non-terminal pass-through).
 static bool RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalProjection &proj, idx_t i,
@@ -349,7 +349,7 @@ static bool RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalP
 	if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
 		auto original_type = (i < proj.types.size()) ? proj.types[i] : expr->return_type;
 		if (is_terminal) {
-			unique_ptr<Expression> result = input.optimizer.BindScalarFunction("pac_noised", expr->Copy());
+			unique_ptr<Expression> result = input.optimizer.BindScalarFunction("priv_noised", expr->Copy());
 			if (original_type != PacFloatLogicalType()) {
 				result = BoundCastExpression::AddDefaultCastToType(std::move(result), original_type);
 			}
@@ -365,7 +365,7 @@ static bool RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalP
 		WrapCounterRefsWithNoised(expr, counter_bindings, input);
 		return false;
 	}
-	// Arithmetic over PAC aggregates: build list_transform + pac_noised terminal.
+	// Arithmetic over PAC aggregates: build list_transform + priv_noised terminal.
 	Expression *expr_to_clone = expr.get();
 	if (expr->type == ExpressionType::OPERATOR_CAST &&
 	    expr->Cast<BoundCastExpression>().return_type != PacFloatLogicalType()) {
@@ -437,9 +437,9 @@ static ColumnBinding InsertPacSelectProjection(OptimizerExtensionInput &input, u
 
 // Single bottom-up rewrite pass.
 // Processes children first, then current operator. Handles:
-// - AGGREGATE: convert pac_noised_sum → pac_sum (counters), then aggregate-over-counters → pac_sum (list)
-// - PROJECTION: update simple col_ref types, build list_transform + pac_noised for arithmetic
-// - FILTER (in rewrite_map): build list_transform + pac_filter
+// - AGGREGATE: convert priv_noised_sum → priv_sum (counters), then aggregate-over-counters → priv_sum (list)
+// - PROJECTION: update simple col_ref types, build list_transform + priv_noised for arithmetic
+// - FILTER (in rewrite_map): build list_transform + priv_filter
 // - JOIN (in rewrite_map): rewrite conditions (two-list → CROSS_PRODUCT+FILTER, single-list → double-lambda)
 static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtensionInput &input,
                             unique_ptr<LogicalOperator> &plan,
@@ -457,8 +457,8 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 		                counter_bindings, child_in_cte);
 	}
 	// After processing children, check if this FILTER references a mark column
-	// from a MARK_JOIN that was replaced by CROSS_PRODUCT + FILTER(pac_filter_eq).
-	// The pac_filter_eq below already handles the filtering, so this FILTER is
+	// from a MARK_JOIN that was replaced by CROSS_PRODUCT + FILTER(priv_filter_eq).
+	// The priv_filter_eq below already handles the filtering, so this FILTER is
 	// now redundant with a dangling mark column reference. Remove it.
 	if (op->type == LogicalOperatorType::LOGICAL_FILTER && !replaced_mark_bindings.empty()) {
 		auto &filter = op->Cast<LogicalFilter>();
@@ -480,7 +480,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 	LogicalOperator *plan_root = plan.get();
 	// Handle non-categorical FILTER (HAVING) BEFORE the universal type fix,
 	// so col_ref types still hold the original scalar type (e.g. DECIMAL).
-	// WrapCounterRefsWithNoised will set the col_ref type to LIST<FLOAT> for pac_noised binding,
+	// WrapCounterRefsWithNoised will set the col_ref type to LIST<FLOAT> for priv_noised binding,
 	// then cast the result back to the original scalar type so the parent comparison stays valid.
 	if (op->type == LogicalOperatorType::LOGICAL_FILTER && !inside_cte_definition && !counter_bindings.empty()) {
 		auto it = pattern_lookup.find(op);
@@ -496,7 +496,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 	// to counters, output types change (e.g. DECIMAL → LIST<FLOAT>). Expressions in all operators
 	// may reference the old types. Fix them before operator-specific semantic work.
 	// Skip universal type fix for ordering/limit operators — they need scalar types.
-	// The terminal projection below them handles pac_noised wrapping.
+	// The terminal projection below them handles priv_noised wrapping.
 	bool skip_type_fix =
 	    (op->type == LogicalOperatorType::LOGICAL_ORDER_BY || op->type == LogicalOperatorType::LOGICAL_TOP_N ||
 	     op->type == LogicalOperatorType::LOGICAL_LIMIT);
@@ -592,7 +592,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 		}
 		if (is_filter_pattern) {
 			// Filter-pattern projection: minimal processing only (type updates, no terminal wrapping).
-			// The parent filter/join will expand these expressions and generate list_transform + pac_filter.
+			// The parent filter/join will expand these expressions and generate list_transform + priv_filter.
 			for (idx_t i = 0; i < proj.expressions.size(); i++) {
 				PrepareFilterPatternSlot(proj, i, counter_bindings);
 				// All filter-pattern slots with counter content remain counter bindings
@@ -604,7 +604,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 				}
 			}
 		} else {
-			// Normal projection: full PAC rewriting with pac_noised terminal.
+			// Normal projection: full PAC rewriting with priv_noised terminal.
 			bool is_terminal = (op == plan_root);
 			if (!is_terminal) {
 				auto *root = plan_root;
@@ -626,7 +626,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 			}
 		}
 	} else if (op->type == LogicalOperatorType::LOGICAL_FILTER &&
-	           !inside_cte_definition) { // === FILTER: rewrite expressions with pac_filter ===
+	           !inside_cte_definition) { // === FILTER: rewrite expressions with priv_filter ===
 		auto it = pattern_lookup.find(op);
 		if (it != pattern_lookup.end()) {
 			auto &filter = op->Cast<LogicalFilter>();
@@ -650,7 +650,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 				for (auto &p : patterns) {
 					if (p.parent_op == op && p.has_outer_pac_hash) {
 						pattern_hash = p.outer_pac_hash;
-						if (GetBooleanSetting(input.context, "pac_select", true)) {
+						if (GetBooleanSetting(input.context, "priv_select", true)) {
 							wrap_kind = PacWrapKind::PAC_SELECT;
 						}
 						break;
@@ -660,10 +660,10 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 				                                            wrap_kind, PacFloatLogicalType(), pattern_hash);
 				if (result) {
 					if (wrap_kind == PacWrapKind::PAC_SELECT) {
-						// Insert projection below filter replacing hash with pac_select result
+						// Insert projection below filter replacing hash with priv_select result
 						auto new_hash =
 						    InsertPacSelectProjection(input, plan, op->children[0], pattern_hash, std::move(result));
-						// Replace filter condition with pac_hash <> 0 for majority-vote decision
+						// Replace filter condition with priv_hash <> 0 for majority-vote decision
 						filter.expressions[expr_idx] = make_uniq<BoundComparisonExpression>(
 						    ExpressionType::COMPARE_NOTEQUAL,
 						    make_uniq<BoundColumnRefExpression>("pac_pu", LogicalType::UBIGINT, new_hash),
@@ -678,7 +678,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 	           !inside_cte_definition && !counter_bindings.empty()) {
 		// ORDER BY / TOP N that references counter bindings need scalar values.
 		// col_ref types are still scalar (skip_type_fix), so WrapCounterRefsWithNoised
-		// fixes types to LIST<FLOAT> for pac_noised binding and casts back to the original type.
+		// fixes types to LIST<FLOAT> for priv_noised binding and casts back to the original type.
 		if (op->type == LogicalOperatorType::LOGICAL_ORDER_BY) {
 			auto &order = op->Cast<LogicalOrder>();
 			for (auto &o : order.orders) {
@@ -703,7 +703,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 		for (auto &p : patterns) {
 			if (p.parent_op == op && p.has_outer_pac_hash) {
 				join_pattern_hash = p.outer_pac_hash;
-				if (GetBooleanSetting(input.context, "pac_select", true)) {
+				if (GetBooleanSetting(input.context, "priv_select", true)) {
 					join_wrap_kind = PacWrapKind::PAC_SELECT;
 				}
 				break;
@@ -753,7 +753,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 				auto filter_op = make_uniq<LogicalFilter>();
 
 				if (join_wrap_kind == PacWrapKind::PAC_SELECT) {
-					// Insert projection below filter replacing hash with pac_select result
+					// Insert projection below filter replacing hash with priv_select result
 					auto new_hash =
 					    InsertPacSelectProjection(input, plan, cross_product, join_pattern_hash, std::move(pac_expr));
 					filter_op->expressions.push_back(make_uniq<BoundComparisonExpression>(
@@ -835,9 +835,9 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 		}
 	}
 	// Bottom-up rewrite pass
-	// - Aggregates: pac_noised_sum → pac_sum (counters), then aggregate-over-counters → pac_sum (list)
-	// - Projections: update col_ref types, build list_transform + pac_noised/pass-through
-	// - Filters: build list_transform + pac_filter
+	// - Aggregates: priv_noised_sum → priv_sum (counters), then aggregate-over-counters → priv_sum (list)
+	// - Projections: update col_ref types, build list_transform + priv_noised/pass-through
+	// - Filters: build list_transform + priv_filter
 	// - Joins: rewrite conditions (two-list → CROSS_PRODUCT+FILTER, single-list → double-lambda)
 	unordered_set<uint64_t> replaced_mark_bindings;
 	unordered_map<uint64_t, ColumnBinding> counter_bindings;

@@ -27,9 +27,9 @@
 namespace duckdb {
 
 static bool IsPacAggregate(const string &func) {
-	static const std::unordered_set<string> pac_aggs = {"pac_noised_sum", "pac_noised_count", "pac_noised_min",
-	                                                    "pac_noised_max", "pac_sum",          "pac_count",
-	                                                    "pac_min",        "pac_max"};
+	static const std::unordered_set<string> pac_aggs = {"priv_noised_sum", "priv_noised_count", "priv_noised_min",
+	                                                    "priv_noised_max", "priv_sum",          "priv_count",
+	                                                    "priv_min",        "priv_max"};
 	string lower_func = func;
 	std::transform(lower_func.begin(), lower_func.end(), lower_func.begin(), ::tolower);
 	return pac_aggs.count(lower_func) > 0;
@@ -224,14 +224,14 @@ static bool CheckPacAggregatesHaveProperJoins(const LogicalOperator &op,
 			// 1. PU table is directly scanned, OR
 			// 2. A scanned table has an FK path to the PU
 			if (!has_pu_table && !has_fk_to_pu) {
-				throw InvalidInputException(
-				    "PAC rewrite: PAC aggregates (pac_sum, pac_count, etc.) must be joined with the privacy unit table "
-				    "or a table that has a foreign key path to the privacy unit");
+				throw InvalidInputException("PAC rewrite: PAC aggregates (priv_sum, priv_count, etc.) must be joined "
+				                            "with the privacy unit table "
+				                            "or a table that has a foreign key path to the privacy unit");
 			}
 		}
 
 		// If this aggregate has regular aggregates wrapping PAC results, check children for PAC aggregates
-		// This handles cases like COUNT(...) on top of a subquery with pac_count(...)
+		// This handles cases like COUNT(...) on top of a subquery with priv_count(...)
 		if (has_regular_aggregate) {
 			// Recursively check children - they might contain PAC aggregates in subqueries
 			for (auto &child : op.children) {
@@ -1015,10 +1015,10 @@ PrivacyCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &pla
 	// Check for protected columns FIRST (before other structural checks)
 	// This ensures we get the correct error message for protected column violations.
 	// The unified set covers PU PKs, LINK FKs, and metadata PROTECTED columns.
-	// The pac_check setting can be disabled (e.g. by IVM during delta maintenance)
+	// The priv_check setting can be disabled (e.g. by IVM during delta maintenance)
 	// to allow queries that project protected columns outside aggregates.
-	bool pac_check_enabled = GetBooleanSetting(context, "pac_check", true);
-	if (!result.protected_columns.empty() && pac_check_enabled) {
+	bool priv_check_enabled = GetBooleanSetting(context, "priv_check", true);
+	if (!result.protected_columns.empty() && priv_check_enabled) {
 		CheckOutputColumnsNotProtected(*plan, *plan, result.protected_columns);
 		CheckFiltersNotUsingProtectedColumns(*plan, *plan, result.protected_columns);
 	}
@@ -1095,7 +1095,7 @@ PrivacyCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &pla
 		}
 
 		// Check that PAC aggregates are properly joined with PU or FK path tables
-		// This validates that pac_sum, pac_count, etc. have access to the privacy unit
+		// This validates that priv_sum, priv_count, etc. have access to the privacy unit
 		// Returns true if PAC aggregates were found
 		bool has_pac_aggregates = false;
 		if (!all_privacy_units.empty()) {

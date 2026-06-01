@@ -133,8 +133,8 @@ The 43 queries cover a range of aggregate patterns:
 
 Compares two approaches for computing multiple ratio expressions (numerator/denominator pairs) under PAC:
 
-- **Naive**: N independent `pac_sum()` calls — applies noise N times
-- **Optimized**: Single noise application via `pac_sum()` (counters variant) + `list_transform()` + `pac_noised()`
+- **Naive**: N independent `priv_sum()` calls — applies noise N times
+- **Optimized**: Single noise application via `priv_sum()` (counters variant) + `list_transform()` + `priv_noised()`
 
 The benchmark runs queries Q1–Q20, where Q_N computes the sum of N ratio expressions of the form `100 * SUM(l_extendedprice * f(l_discount, l_tax)) / SUM(l_extendedprice)`.
 

@@ -1,5 +1,5 @@
 # name: test/sql/pac_clip_sum.test
-# description: Test pac_clip_sum and pac_noised_clip_sum aggregate functions with clipping
+# description: Test priv_clip_sum and priv_noised_clip_sum aggregate functions with clipping
 # group: [sql]
 
 require privacy
@@ -16,8 +16,13 @@ SET threads = 1
 statement ok
 SET pac_mi = 0
 
+statement error
+SET pac_clip_support = 5
+----
+pac_clip_support
+
 # ============================================================================
-# Basic pac_clip_sum correctness (returns LIST<FLOAT>)
+# Basic priv_clip_sum correctness (returns LIST<FLOAT>)
 # ============================================================================
 
 statement ok
@@ -25,33 +30,33 @@ CREATE TABLE test_data AS
 SELECT i AS rowid, i % 3 AS grp, (i % 100) AS value
 FROM range(4000) t(i)
 
-# pac_clip_sum returns LIST<FLOAT> (64 counters)
+# priv_clip_sum returns LIST<FLOAT> (64 counters)
 query I
-SELECT typeof(pac_clip_sum(hash(rowid)::UBIGINT, value::INTEGER)) FROM test_data
+SELECT typeof(priv_clip_sum(hash(rowid)::UBIGINT, value::INTEGER)) FROM test_data
 ----
 FLOAT[]
 
-# pac_noised_clip_sum returns HUGEINT (fused noised scalar)
+# priv_noised_clip_sum returns HUGEINT (fused noised scalar)
 query I
-SELECT typeof(pac_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER)) FROM test_data
+SELECT typeof(priv_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER)) FROM test_data
 ----
 HUGEINT
 
 # Works with different types
 query I
-SELECT pac_noised_clip_sum(hash(rowid)::UBIGINT, value::BIGINT) IS NOT NULL FROM test_data
+SELECT priv_noised_clip_sum(hash(rowid)::UBIGINT, value::BIGINT) IS NOT NULL FROM test_data
 ----
 true
 
 query I
-SELECT pac_noised_clip_sum(hash(rowid)::UBIGINT, value::SMALLINT) IS NOT NULL FROM test_data
+SELECT priv_noised_clip_sum(hash(rowid)::UBIGINT, value::SMALLINT) IS NOT NULL FROM test_data
 ----
 true
 
 # Grouped aggregation
 query I
 SELECT count(*) FROM (
-  SELECT grp, pac_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER) as s
+  SELECT grp, priv_noised_clip_sum(hash(rowid)::UBIGINT, value::INTEGER) as s
   FROM test_data GROUP BY grp
 ) t WHERE s IS NOT NULL
 ----
@@ -59,13 +64,13 @@ SELECT count(*) FROM (
 
 # NULL handling
 query I
-SELECT pac_noised_clip_sum(hash(rowid)::UBIGINT, CASE WHEN rowid % 2 = 0 THEN value ELSE NULL END) IS NOT NULL
+SELECT priv_noised_clip_sum(hash(rowid)::UBIGINT, CASE WHEN rowid % 2 = 0 THEN value ELSE NULL END) IS NOT NULL
 FROM test_data
 ----
 true
 
 # ============================================================================
-# Clipping: outlier elimination via pac_noised_clip_sum
+# Clipping: outlier elimination via priv_noised_clip_sum
 # ============================================================================
 
 # Create data with 1000 normal rows and 1 huge outlier
@@ -79,31 +84,31 @@ FROM range(1, 1002) t(i)
 
 # Without clip_support: result includes the outlier (expect ~1M+ range)
 query I
-SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) > 100000 FROM outlier_test
+SELECT priv_noised_clip_sum(hash(id)::UBIGINT, value) > 100000 FROM outlier_test
 ----
 true
 
 # With clip_support=5: outlier level has only 1 contributor, gets clipped
 # Result should be close to sum without outlier = 5500
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 query I
-SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) < 100000 FROM outlier_test
+SELECT priv_noised_clip_sum(hash(id)::UBIGINT, value) < 100000 FROM outlier_test
 ----
 true
 
 # Verify the clipped result is in the right ballpark (within 5x of 5500)
 query I
-SELECT abs(pac_noised_clip_sum(hash(id)::UBIGINT, value) - 5500) < 5500 * 5 FROM outlier_test
+SELECT abs(priv_noised_clip_sum(hash(id)::UBIGINT, value) - 5500) < 5500 * 5 FROM outlier_test
 ----
 true
 
 # Hard-zero: outlier level is unsupported and contributes nothing,
 # so result should be >= no-outlier baseline (equal or greater due to noise)
 query I
-SELECT (SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) FROM outlier_test)
-     >= (SELECT pac_noised_clip_sum(hash(i)::UBIGINT, (i % 10) + 1) FROM range(1, 1001) t(i))
+SELECT (SELECT priv_noised_clip_sum(hash(id)::UBIGINT, value) FROM outlier_test)
+     >= (SELECT priv_noised_clip_sum(hash(i)::UBIGINT, (i % 10) + 1) FROM range(1, 1001) t(i))
 ----
 true
 
@@ -124,7 +129,7 @@ FROM range(1, 1003) t(i)
 # Group 1 (odd ids): ~500 normal values + one 10M outlier
 # With clip_support: the outlier's level should be clipped in group 1
 query IT
-SELECT grp, pac_noised_clip_sum(hash(id)::UBIGINT, value) < 100000 as reasonable
+SELECT grp, priv_noised_clip_sum(hash(id)::UBIGINT, value) < 100000 as reasonable
 FROM grouped_outlier
 GROUP BY grp
 ORDER BY grp
@@ -146,19 +151,19 @@ FROM range(1, 1002) t(i)
 
 # Without clip_support: outlier drags result very negative
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 query I
-SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) < -100000 FROM neg_outlier
+SELECT priv_noised_clip_sum(hash(id)::UBIGINT, value) < -100000 FROM neg_outlier
 ----
 true
 
 # With clip_support: outlier clipped, result near 500 (sum of 1..500 - sum of 1..499 = 500)
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 query I
-SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) > -100000 FROM neg_outlier
+SELECT priv_noised_clip_sum(hash(id)::UBIGINT, value) > -100000 FROM neg_outlier
 ----
 true
 
@@ -167,33 +172,33 @@ true
 # ============================================================================
 
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 query I
-SELECT pac_noised_clip_sum(hash(i)::UBIGINT, i::HUGEINT) IS NOT NULL FROM range(1, 101) t(i)
+SELECT priv_noised_clip_sum(hash(i)::UBIGINT, i::HUGEINT) IS NOT NULL FROM range(1, 101) t(i)
 ----
 true
 
 # ============================================================================
-# Clip synonyms: pac_clip_count, pac_clip_min, pac_clip_max exist
+# Clip synonyms: priv_clip_count, priv_clip_min, priv_clip_max exist
 # ============================================================================
 
 query I
-SELECT typeof(pac_clip_count(hash(i)::UBIGINT)) FROM range(1, 101) t(i)
+SELECT typeof(priv_clip_count(hash(i)::UBIGINT)) FROM range(1, 101) t(i)
 ----
 FLOAT[]
 
 query I
-SELECT typeof(pac_noised_clip_count(hash(i)::UBIGINT)) FROM range(1, 101) t(i)
+SELECT typeof(priv_noised_clip_count(hash(i)::UBIGINT)) FROM range(1, 101) t(i)
 ----
 BIGINT
 
 # ============================================================================
-# pac_clip_support setting via compiler (sum → pac_noised_clip_sum)
+# priv_clip_support setting via compiler (sum → priv_noised_clip_sum)
 # ============================================================================
 
 statement ok
-SET pac_clip_support = 64
+SET priv_clip_support = 64
 
 statement ok
 CREATE TABLE compiler_test (id INTEGER, value INTEGER)
@@ -207,7 +212,7 @@ ALTER TABLE compiler_test SET PU
 statement ok
 INSERT INTO compiler_test SELECT i, i % 100 FROM range(1, 1001) t(i)
 
-# When pac_clip_support is set, regular SUM should go through clip rewrite
+# When priv_clip_support is set, regular SUM should go through clip rewrite
 query I
 SELECT sum(value) IS NOT NULL FROM compiler_test
 ----
@@ -219,7 +224,7 @@ true
 # ============================================================================
 
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 # Level 0: 0-255, Level 1: 256-1023, Level 2: 1024-4095, Level 3: 4096-16383
 # 1000 rows at value=100 (level 0), 1 outlier at 4096 (level 3) → different level → clipped
@@ -232,7 +237,7 @@ SELECT i as id,
 FROM range(1, 1002) t(i)
 
 query I
-SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) < 200000 FROM boundary_test
+SELECT priv_noised_clip_sum(hash(id)::UBIGINT, value) < 200000 FROM boundary_test
 ----
 true
 
@@ -247,19 +252,19 @@ FROM range(1, 1002) t(i)
 
 # Without clipping: sum = 1000*100 + 255 = 100255
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 query I
-SELECT abs(pac_noised_clip_sum(hash(id)::UBIGINT, value) - 100255) < 50000 FROM same_level_test
+SELECT abs(priv_noised_clip_sum(hash(id)::UBIGINT, value) - 100255) < 50000 FROM same_level_test
 ----
 true
 
 # With clipping: 255 is same level as 100, so it's NOT clipped — result similar
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 query I
-SELECT abs(pac_noised_clip_sum(hash(id)::UBIGINT, value) - 100255) < 50000 FROM same_level_test
+SELECT abs(priv_noised_clip_sum(hash(id)::UBIGINT, value) - 100255) < 50000 FROM same_level_test
 ----
 true
 
@@ -268,7 +273,7 @@ true
 # ============================================================================
 
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 # Normal values + one HUGEINT outlier at 2^70
 statement ok
@@ -281,19 +286,19 @@ FROM range(1, 1002) t(i)
 
 # Without clip_support: result includes the huge outlier
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 query I
-SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) > 1000000000000 FROM hugeint_outlier
+SELECT priv_noised_clip_sum(hash(id)::UBIGINT, value) > 1000000000000 FROM hugeint_outlier
 ----
 true
 
 # With clip_support: outlier at high level gets hard-zeroed
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 query I
-SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) < 1000000000000 FROM hugeint_outlier
+SELECT priv_noised_clip_sum(hash(id)::UBIGINT, value) < 1000000000000 FROM hugeint_outlier
 ----
 true
 
@@ -311,19 +316,19 @@ FROM range(1, 1002) t(i)
 
 # Without clip_support: huge negative outlier dominates
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 query I
-SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) < -1000000000000 FROM neg_hugeint_outlier
+SELECT priv_noised_clip_sum(hash(id)::UBIGINT, value) < -1000000000000 FROM neg_hugeint_outlier
 ----
 true
 
 # With clip_support: negative outlier clipped via neg_state
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 query I
-SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) > -1000000000000 FROM neg_hugeint_outlier
+SELECT priv_noised_clip_sum(hash(id)::UBIGINT, value) > -1000000000000 FROM neg_hugeint_outlier
 ----
 true
 
@@ -332,26 +337,26 @@ true
 # ============================================================================
 
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 statement ok
 SET pac_mi = 0
 
 # Type checks
 query I
-SELECT typeof(pac_clip_sum(hash(i)::UBIGINT, (i * 0.5)::FLOAT)) FROM range(1, 101) t(i)
+SELECT typeof(priv_clip_sum(hash(i)::UBIGINT, (i * 0.5)::FLOAT)) FROM range(1, 101) t(i)
 ----
 FLOAT[]
 
 query I
-SELECT typeof(pac_noised_clip_sum(hash(i)::UBIGINT, (i * 0.5)::FLOAT)) FROM range(1, 101) t(i)
+SELECT typeof(priv_noised_clip_sum(hash(i)::UBIGINT, (i * 0.5)::FLOAT)) FROM range(1, 101) t(i)
 ----
 FLOAT
 
 # Basic FLOAT sum: 4000 rows each 0.5 → true sum = 2000
 # pac is approximate, but should be in the right ballpark
 query I
-SELECT abs(pac_noised_clip_sum(hash(i)::UBIGINT, 0.5::FLOAT) - 2000.0) < 1000.0 FROM range(1, 4001) t(i)
+SELECT abs(priv_noised_clip_sum(hash(i)::UBIGINT, 0.5::FLOAT) - 2000.0) < 1000.0 FROM range(1, 4001) t(i)
 ----
 true
 
@@ -367,16 +372,16 @@ FROM range(1, 1002) t(i)
 
 # Without clip: outlier included → ~198039
 query I
-SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value)::INTEGER FROM float_outlier
+SELECT priv_noised_clip_sum(hash(id)::UBIGINT, value)::INTEGER FROM float_outlier
 ----
 198039
 
 # With clip: outlier removed → ~1431 (close to 1000*1.5=1500)
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 query I
-SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value)::INTEGER FROM float_outlier
+SELECT priv_noised_clip_sum(hash(id)::UBIGINT, value)::INTEGER FROM float_outlier
 ----
 1431
 
@@ -385,22 +390,22 @@ SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value)::INTEGER FROM float_outlier
 # ============================================================================
 
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 # Type checks
 query I
-SELECT typeof(pac_clip_sum(hash(i)::UBIGINT, (i * 0.001)::DOUBLE)) FROM range(1, 101) t(i)
+SELECT typeof(priv_clip_sum(hash(i)::UBIGINT, (i * 0.001)::DOUBLE)) FROM range(1, 101) t(i)
 ----
 FLOAT[]
 
 query I
-SELECT typeof(pac_noised_clip_sum(hash(i)::UBIGINT, (i * 0.001)::DOUBLE)) FROM range(1, 101) t(i)
+SELECT typeof(priv_noised_clip_sum(hash(i)::UBIGINT, (i * 0.001)::DOUBLE)) FROM range(1, 101) t(i)
 ----
 DOUBLE
 
 # Basic DOUBLE sum: 4000 rows each 0.25 → true sum = 1000
 query I
-SELECT abs(pac_noised_clip_sum(hash(i)::UBIGINT, 0.25::DOUBLE) - 1000.0) < 500.0 FROM range(1, 4001) t(i)
+SELECT abs(priv_noised_clip_sum(hash(i)::UBIGINT, 0.25::DOUBLE) - 1000.0) < 500.0 FROM range(1, 4001) t(i)
 ----
 true
 
@@ -415,36 +420,36 @@ FROM range(1, 1002) t(i)
 
 # Without clip: outlier included → ~1968584
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 query I
-SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value)::INTEGER FROM double_outlier
+SELECT priv_noised_clip_sum(hash(id)::UBIGINT, value)::INTEGER FROM double_outlier
 ----
 1968584
 
 # With clip: outlier removed → ~2504 (close to 1000*2.718=2718)
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 query I
-SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value)::INTEGER FROM double_outlier
+SELECT priv_noised_clip_sum(hash(id)::UBIGINT, value)::INTEGER FROM double_outlier
 ----
 2504
 
 # Grouped float/double aggregation
 statement ok
-SET pac_clip_support = NULL
+SET priv_clip_support = NULL
 
 query I
 SELECT count(*) FROM (
-  SELECT id % 3 AS grp, pac_noised_clip_sum(hash(id)::UBIGINT, value) AS s
+  SELECT id % 3 AS grp, priv_noised_clip_sum(hash(id)::UBIGINT, value) AS s
   FROM float_outlier GROUP BY grp
 ) t WHERE s IS NOT NULL
 ----
 3
 
 # ============================================================================
-# Over-clipping: pac_clip_support higher than group size → zero result
+# Over-clipping: priv_clip_support higher than group size → zero result
 # ============================================================================
 
 statement ok
@@ -452,10 +457,10 @@ CREATE TABLE tiny_group AS SELECT i as id, i * 10 as value FROM range(1, 4) t(i)
 
 # 3 rows, clip_support=10 → no level has 10 contributors → all zeroed
 statement ok
-SET pac_clip_support = 10
+SET priv_clip_support = 10
 
 query I
-SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) FROM tiny_group
+SELECT priv_noised_clip_sum(hash(id)::UBIGINT, value) FROM tiny_group
 ----
 0
 
@@ -464,7 +469,7 @@ SELECT pac_noised_clip_sum(hash(id)::UBIGINT, value) FROM tiny_group
 # ============================================================================
 
 statement ok
-SET pac_clip_support = 5
+SET priv_clip_support = 5
 
 statement ok
 CREATE TABLE multigroup AS
@@ -478,7 +483,7 @@ FROM range(1, 1001) t(i)
 # Other groups are normal
 query I
 SELECT count(*) FROM (
-  SELECT grp, pac_noised_clip_sum(hash(id)::UBIGINT, value) as s
+  SELECT grp, priv_noised_clip_sum(hash(id)::UBIGINT, value) as s
   FROM multigroup GROUP BY grp
 ) t WHERE abs(s) < 500000
 ----

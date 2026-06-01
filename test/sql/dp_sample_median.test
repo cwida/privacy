@@ -46,7 +46,7 @@ WITH vals AS (
 ), counters AS (
     SELECT list(v ORDER BY v) AS l FROM vals
 )
-SELECT abs(dp_smooth_median_noise(l, 10.0, 1e-6)) > 10000.0
+SELECT abs(priv_smooth_median_noise(l, 10.0, 1e-6)) > 10000.0
 FROM counters;
 ----
 true
@@ -107,15 +107,15 @@ statement ok
 SET dp_sum_bound = 1.0;
 
 statement ok
-SET pac_clip_support = 0;
+SET priv_clip_support = 0;
 
 statement error
 SELECT SUM(v) FROM events;
 ----
-pac_clip_support
+priv_clip_support
 
 statement ok
-SET pac_clip_support = 1;
+SET priv_clip_support = 1;
 
 query I
 SELECT SUM(v) BETWEEN 900.0 AND 1100.0 FROM events;
@@ -222,15 +222,15 @@ statement ok
 SET dp_sum_bound = 1.0;
 
 statement ok
-SET pac_clip_support = 0;
+SET priv_clip_support = 0;
 
 statement error
 SELECT AVG(v) FROM events;
 ----
-pac_clip_support
+priv_clip_support
 
 statement ok
-SET pac_clip_support = 1;
+SET priv_clip_support = 1;
 
 statement ok
 CREATE TABLE clicks AS
@@ -292,7 +292,7 @@ statement ok
 SET dp_sum_bound = 2.0;
 
 statement ok
-SET pac_clip_support = 1;
+SET priv_clip_support = 1;
 
 query III
 SELECT COUNT(*) BETWEEN 13000 AND 17000,
