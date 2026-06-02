@@ -29,8 +29,10 @@
 
 #include "aggregates/pac_aggregate.hpp"
 #include "categorical/pac_categorical_detection.hpp"
+#include "categorical/pac_categorical_rewriter.hpp"
 #include "metadata/privacy_metadata_manager.hpp"
 #include "privacy_debug.hpp"
+#include "utils/privacy_helpers.hpp"
 #include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
@@ -240,47 +242,6 @@ static unique_ptr<Expression> ExtractCounterRef(unique_ptr<Expression> e, const 
 	return e;
 }
 
-// Map ExpressionType comparison to priv_filter_<cmp> function name.
-// When the counter is on the left side, we flip the comparison direction.
-static string GetPacFilterFuncName(ExpressionType cmp_type, bool counter_on_left) {
-	if (counter_on_left) {
-		// Flip: counter > scalar becomes priv_filter_lt(scalar, counter)
-		switch (cmp_type) {
-		case ExpressionType::COMPARE_GREATERTHAN:
-			return "priv_filter_lt";
-		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-			return "priv_filter_lte";
-		case ExpressionType::COMPARE_LESSTHAN:
-			return "priv_filter_gt";
-		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-			return "priv_filter_gte";
-		case ExpressionType::COMPARE_EQUAL:
-			return "priv_filter_eq";
-		case ExpressionType::COMPARE_NOTEQUAL:
-			return "priv_filter_neq";
-		default:
-			return "";
-		}
-	} else {
-		switch (cmp_type) {
-		case ExpressionType::COMPARE_GREATERTHAN:
-			return "priv_filter_gt";
-		case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-			return "priv_filter_gte";
-		case ExpressionType::COMPARE_LESSTHAN:
-			return "priv_filter_lt";
-		case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-			return "priv_filter_lte";
-		case ExpressionType::COMPARE_EQUAL:
-			return "priv_filter_eq";
-		case ExpressionType::COMPARE_NOTEQUAL:
-			return "priv_filter_neq";
-		default:
-			return "";
-		}
-	}
-}
-
 // Ensure the scalar side is cast to PAC_FLOAT for priv_filter_<cmp>.
 // Strips binder-inserted CAST(scalar→FLOAT[]) and FLOAT[] constants back to scalars.
 static unique_ptr<Expression> CastScalarToPacFloat(unique_ptr<Expression> scalar, const LogicalType &pac_float_type,
@@ -327,10 +288,12 @@ static unique_ptr<Expression> RewriteComparisonToFilterCmp(OptimizerExtensionInp
 		return nullptr;
 	}
 	bool counter_on_left = left_is_counter;
-	string func_name = GetPacFilterFuncName(cmp.type, counter_on_left);
-	if (func_name.empty()) {
+	ExpressionType effective = counter_on_left ? FlipComparison(cmp.type) : cmp.type;
+	const char *resolved = GetPacFilterCmpName(effective, GetPrivacyMode(input.context));
+	if (!resolved) {
 		return nullptr;
 	}
+	string func_name = resolved;
 	auto counter_ref = ExtractCounterRef(std::move(counter_on_left ? cmp.left : cmp.right), list_type);
 	auto scalar_expr =
 	    CastScalarToPacFloat(std::move(counter_on_left ? cmp.right : cmp.left), finalized_type, list_type);
@@ -349,8 +312,12 @@ RewriteBetweenToFilterCmp(OptimizerExtensionInput &input, unique_ptr<Expression>
 	auto upper_scalar = CastScalarToPacFloat(std::move(upper), finalized_type, list_type);
 	// counter >= low → low <= counter → priv_filter_lte(low, counter)
 	// counter <= high → high >= counter → priv_filter_gte(high, counter)
-	string lower_func = lower_inclusive ? "priv_filter_lte" : "priv_filter_lt";
-	string upper_func = upper_inclusive ? "priv_filter_gte" : "priv_filter_gt";
+	string privacy_mode = GetPrivacyMode(input.context);
+	string lower_func = GetPacFilterCmpName(
+	    lower_inclusive ? ExpressionType::COMPARE_LESSTHANOREQUALTO : ExpressionType::COMPARE_LESSTHAN, privacy_mode);
+	string upper_func = GetPacFilterCmpName(upper_inclusive ? ExpressionType::COMPARE_GREATERTHANOREQUALTO
+	                                                        : ExpressionType::COMPARE_GREATERTHAN,
+	                                        privacy_mode);
 	auto lower_call = input.optimizer.BindScalarFunction(lower_func, std::move(lower_scalar), std::move(counter_ref1));
 	auto upper_call = input.optimizer.BindScalarFunction(upper_func, std::move(upper_scalar), std::move(counter_ref2));
 	PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Rewriting BETWEEN to " + lower_func + " AND " + upper_func);

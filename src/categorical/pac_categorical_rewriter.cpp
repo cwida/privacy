@@ -94,7 +94,7 @@ static bool TryRebindToListVariant(LogicalAggregate &agg, idx_t i, ClientContext
 	                    bound_agg.children.size() > 1;
 	idx_t value_child_idx = is_pac_style ? 1 : 0;
 	string base_name = GetBasePacAggregateName(bound_agg.function.name); // strips _counters if present
-	string list_name = GetListAggregateVariant(base_name);
+	string list_name = GetListAggregateVariant(base_name, GetPrivacyMode(context));
 	if (list_name.empty()) {
 		// Generic aggregate (e.g., first()) over counter input — rebind with same name
 		if (bound_agg.children[value_child_idx]->return_type == LogicalType::LIST(PacFloatLogicalType())) {

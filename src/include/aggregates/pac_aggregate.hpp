@@ -122,7 +122,7 @@ static inline LogicalType PacFloatLogicalType() {
 	return std::is_same<PAC_FLOAT, float>::value ? LogicalType::FLOAT : LogicalType::DOUBLE;
 }
 
-// Header for PAC aggregate helpers and public declarations used across pac_* files.
+// Header for privacy aggregate helpers and public declarations used across pac_* files.
 // Contains bindings and small helpers shared between pac_aggregate, priv_count and priv_sum implementations.
 
 // ============================================================================
@@ -144,7 +144,7 @@ struct PacPState {
 };
 
 // Global map for cross-aggregate PacPState sharing within a query.
-// Keyed by query_hash. Uses weak_ptr so lifetime is tied to PacBindData instances.
+// Keyed by query_hash. Uses weak_ptr so lifetime is tied to PrivBindData instances.
 std::shared_ptr<PacPState> GetOrCreatePState(uint64_t query_hash);
 
 // Compute the PAC noise variance (delta) from per-sample values and mutual information budget mi.
@@ -194,13 +194,13 @@ bool PacUtilityNull(double noised_value, double noise_variance, double threshold
 // (in the [29,35] suspicious range), so small test datasets need a higher threshold.
 #define PAC_SUSPICIOUS_THRESHOLD 500
 
-struct PacBindData; // forward declaration
+struct PrivBindData; // forward declaration
 
 // Check for absence of sample diversity in PAC aggregates.
 // Accumulates per-group exact_count into bind_data totals, classifies the group as
 // suspicious or not, and throws if total_exact_count >= threshold AND suspicious > nonsuspicious.
 void CheckPacSampleDiversity(uint64_t key_hash, const PAC_FLOAT *buf, uint64_t update_count, const char *aggr_name,
-                             PacBindData &bind_data);
+                             PrivBindData &bind_data);
 
 // Helper function to generate a random seed (defined in pac_aggregate.cpp)
 // This avoids including <random> in the header for std::random_device
@@ -216,11 +216,11 @@ inline double GetPacMiFromSetting(ClientContext &ctx) {
 	return 1.0 / 128; // default
 }
 
-// Bind data used by PAC aggregates to carry `mi` and `correction` parameters.
+// Bind data used by privacy aggregates to carry `mi`, `correction`, and sampling parameters.
 // Reads seed from privacy_seed setting (or uses query-id if not set) and computes query_hash.
 // query_hash is XOR'd with per-row key_hash inside priv_hash() (centralized) and used as
 // the counter selector for PacNoisySampleFrom64Counters in finalize functions.
-struct PacBindData : public FunctionData {
+struct PrivBindData : public FunctionData {
 	double mi;                // mutual information parameter from pac_mi setting (controls noise/NULL probability)
 	double correction;        // correction factor: multiplies sum/avg/count results, reduces NULL prob for min/max
 	uint64_t seed;            // RNG seed: privacy_seed setting value, or query-id if not set
@@ -242,8 +242,8 @@ struct PacBindData : public FunctionData {
 
 	// Primary constructor - reads seed from privacy_seed setting, or uses query-id if not set.
 	// All aggregates in the same query get the same seed and query_hash.
-	explicit PacBindData(ClientContext &ctx, double mi_val, double correction_val = 1.0, double scale_div = 1.0,
-	                     bool hash_repair_val = false, int sample_lanes_val = 0)
+	explicit PrivBindData(ClientContext &ctx, double mi_val, double correction_val = 1.0, double scale_div = 1.0,
+	                      bool hash_repair_val = false, int sample_lanes_val = 0)
 	    : mi(mi_val), correction(correction_val), scale_divisor(scale_div), hash_repair(hash_repair_val),
 	      sample_lanes(sample_lanes_val), utility_threshold(std::numeric_limits<double>::quiet_NaN()),
 	      total_update_count(0), suspicious_count(0), nonsuspicious_count(0) {
@@ -277,34 +277,40 @@ struct PacBindData : public FunctionData {
 	}
 
 	unique_ptr<FunctionData> Copy() const override {
-		auto copy = make_uniq<PacBindData>(*this); // copies shared_ptr (shares pstate)
-		copy->total_update_count = 0;              // reset runtime diversity counters
+		auto copy = make_uniq<PrivBindData>(*this); // copies shared_ptr (shares pstate)
+		copy->total_update_count = 0;               // reset runtime diversity counters
 		copy->suspicious_count = 0;
 		copy->nonsuspicious_count = 0;
 		return copy;
 	}
 	bool Equals(const FunctionData &other) const override {
-		auto &o = other.Cast<PacBindData>();
+		auto &o = other.Cast<PrivBindData>();
 		return mi == o.mi && correction == o.correction && seed == o.seed && query_hash == o.query_hash &&
 		       scale_divisor == o.scale_divisor && hash_repair == o.hash_repair && sample_lanes == o.sample_lanes &&
 		       utility_threshold == o.utility_threshold;
 	}
 };
 
-static inline int GetPacSampleLanes(AggregateInputData &aggr) {
-	return aggr.bind_data ? aggr.bind_data->Cast<PacBindData>().sample_lanes : 0;
+static inline int GetPrivSampleLanes(AggregateInputData &aggr) {
+	return aggr.bind_data ? aggr.bind_data->Cast<PrivBindData>().sample_lanes : 0;
 }
 
 static inline uint64_t TransformPacUpdateHash(uint64_t key_hash, int sample_lanes) {
 	return sample_lanes > 0 ? DpSampleHash(key_hash, sample_lanes) : key_hash;
 }
 
+// Shared bind for SASS sample-* aggregates: no mi/correction, just the active
+// dp_sample_lanes setting. Used by priv_sample_sum, priv_sample_count, etc.
+inline unique_ptr<FunctionData> MakeDpSampleBindData(ClientContext &ctx) {
+	return make_uniq<PrivBindData>(ctx, 0.0, 1.0, 1.0, false, GetDpSampleLanes(ctx));
+}
+
 // Common bind helper: reads mi from setting, extracts correction from args[correction_arg_index],
-// validates it (foldable constant >= 0), and returns a PacBindData.
+// validates it (foldable constant >= 0), and returns a PrivBindData.
 // Returns correction=1.0 if correction_arg_index >= args.size().
-inline unique_ptr<FunctionData> MakePacBindData(ClientContext &ctx, vector<unique_ptr<Expression>> &args,
-                                                idx_t correction_arg_index, const char *func_name,
-                                                double scale_divisor = 1.0) {
+inline unique_ptr<FunctionData> MakePrivBindData(ClientContext &ctx, vector<unique_ptr<Expression>> &args,
+                                                 idx_t correction_arg_index, const char *func_name,
+                                                 double scale_divisor = 1.0) {
 	double mi = GetPacMiFromSetting(ctx);
 	double correction = 1.0;
 	if (correction_arg_index < args.size()) {
@@ -317,7 +323,7 @@ inline unique_ptr<FunctionData> MakePacBindData(ClientContext &ctx, vector<uniqu
 			throw InvalidInputException("%s: correction must be >= 0", func_name);
 		}
 	}
-	return make_uniq<PacBindData>(ctx, mi, correction, scale_divisor);
+	return make_uniq<PrivBindData>(ctx, mi, correction, scale_divisor);
 }
 
 // Helper to convert double to accumulator type (used by priv_sum finalizers)

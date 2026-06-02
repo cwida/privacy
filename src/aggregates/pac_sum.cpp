@@ -411,10 +411,10 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 	auto state_ptrs = FlatVector::GetData<State *>(states);
 	auto data = FlatVector::GetData<ACC_TYPE>(result);
 	auto &result_mask = FlatVector::Validity(result);
-	double mi = input.bind_data ? input.bind_data->Cast<PacBindData>().mi : 0.0;
-	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
-	uint64_t query_hash = input.bind_data ? input.bind_data->Cast<PacBindData>().query_hash : 0;
-	auto pstate = input.bind_data ? input.bind_data->Cast<PacBindData>().pstate : nullptr;
+	double mi = input.bind_data ? input.bind_data->Cast<PrivBindData>().mi : 0.0;
+	double correction = input.bind_data ? input.bind_data->Cast<PrivBindData>().correction : 1.0;
+	uint64_t query_hash = input.bind_data ? input.bind_data->Cast<PrivBindData>().query_hash : 0;
+	auto pstate = input.bind_data ? input.bind_data->Cast<PrivBindData>().pstate : nullptr;
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -429,7 +429,7 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 		// Use per-group deterministic RNG seeded by both privacy_seed and key_hash
 		// This ensures each group gets the same noise regardless of processing order
 		uint64_t key_hash = pos->key_hash;
-		std::mt19937_64 gen(input.bind_data->Cast<PacBindData>().seed);
+		std::mt19937_64 gen(input.bind_data->Cast<PrivBindData>().seed);
 		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_mask.SetInvalid(offset + i); // return NULL (probabilistic decision)
 			continue;
@@ -445,14 +445,14 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 		pos->GetTotals(buf);
 		uint64_t update_count = pos->update_count;
 #endif
-		CheckPacSampleDiversity(key_hash, buf, update_count, "priv_noised_sum", input.bind_data->Cast<PacBindData>());
+		CheckPacSampleDiversity(key_hash, buf, update_count, "priv_noised_sum", input.bind_data->Cast<PrivBindData>());
 		double noise_var = 0.0;
 		PAC_FLOAT result_val =
 		    PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash, query_hash, pstate, &noise_var);
 		// priv_sum needs 2x compensation: doubles the sum to compensate for ~50% of values contributing to each counter
 		result_val *= PAC_FLOAT(2.0);
 		// Noise variance also scales by 4x (2x on the value means 4x on variance)
-		double utility_threshold = input.bind_data->Cast<PacBindData>().utility_threshold;
+		double utility_threshold = input.bind_data->Cast<PrivBindData>().utility_threshold;
 		if (PacUtilityNull(static_cast<double>(result_val), noise_var * 4.0, utility_threshold, gen)) {
 			result_mask.SetInvalid(offset + i);
 			continue;
@@ -498,12 +498,12 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 	                        idx_t count) {                                                                             \
 		auto &state = *reinterpret_cast<ScatterIntState<SIGNED> *>(state_p);                                           \
 		PacSumUpdate<ScatterIntState<SIGNED>, SIGNED, VALUE_T, INPUT_T>(                                               \
-		    inputs, state, count, aggr_input_data.allocator, GetPacSampleLanes(aggr_input_data));                      \
+		    inputs, state, count, aggr_input_data.allocator, GetPrivSampleLanes(aggr_input_data));                     \
 	}                                                                                                                  \
 	void PacSumScatterUpdate##NAME(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,        \
 	                               idx_t count) {                                                                      \
 		PacSumScatterUpdate<ScatterIntState<SIGNED>, SIGNED, VALUE_T, INPUT_T>(                                        \
-		    inputs, states, count, aggr_input_data.allocator, GetPacSampleLanes(aggr_input_data));                     \
+		    inputs, states, count, aggr_input_data.allocator, GetPrivSampleLanes(aggr_input_data));                    \
 	}
 PAC_INT_TYPES_SIGNED
 PAC_INT_TYPES_UNSIGNED
@@ -514,56 +514,56 @@ void PacSumUpdateHugeIntDouble(Vector inputs[], AggregateInputData &aggr_input_d
                                idx_t count) {
 	auto &state = *reinterpret_cast<ScatterDoubleState *>(state_p);
 	PacSumUpdate<ScatterDoubleState, true, double, hugeint_t>(inputs, state, count, aggr_input_data.allocator,
-	                                                          GetPacSampleLanes(aggr_input_data));
+	                                                          GetPrivSampleLanes(aggr_input_data));
 }
 void PacSumUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, data_ptr_t state_p,
                           idx_t count) {
 	auto &state = *reinterpret_cast<ScatterDoubleState *>(state_p);
 	PacSumUpdate<ScatterDoubleState, true, double, uhugeint_t>(inputs, state, count, aggr_input_data.allocator,
-	                                                           GetPacSampleLanes(aggr_input_data));
+	                                                           GetPrivSampleLanes(aggr_input_data));
 }
 void PacSumUpdateFloat(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, data_ptr_t state_p, idx_t count) {
 	auto &state = *reinterpret_cast<ScatterDoubleState *>(state_p);
 	PacSumUpdate<ScatterDoubleState, true, double, float>(inputs, state, count, aggr_input_data.allocator,
-	                                                      GetPacSampleLanes(aggr_input_data));
+	                                                      GetPrivSampleLanes(aggr_input_data));
 }
 void PacSumUpdateDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, data_ptr_t state_p, idx_t count) {
 	auto &state = *reinterpret_cast<ScatterDoubleState *>(state_p);
 	PacSumUpdate<ScatterDoubleState, true, double, double>(inputs, state, count, aggr_input_data.allocator,
-	                                                       GetPacSampleLanes(aggr_input_data));
+	                                                       GetPrivSampleLanes(aggr_input_data));
 }
 void PacSumScatterUpdateHugeIntDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,
                                       idx_t count) {
 	PacSumScatterUpdate<ScatterDoubleState, true, double, hugeint_t>(inputs, states, count, aggr_input_data.allocator,
-	                                                                 GetPacSampleLanes(aggr_input_data));
+	                                                                 GetPrivSampleLanes(aggr_input_data));
 }
 void PacSumScatterUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,
                                  idx_t count) {
 	PacSumScatterUpdate<ScatterDoubleState, true, double, uhugeint_t>(inputs, states, count, aggr_input_data.allocator,
-	                                                                  GetPacSampleLanes(aggr_input_data));
+	                                                                  GetPrivSampleLanes(aggr_input_data));
 }
 void PacSumScatterUpdateFloat(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,
                               idx_t count) {
 	PacSumScatterUpdate<ScatterDoubleState, true, double, float>(inputs, states, count, aggr_input_data.allocator,
-	                                                             GetPacSampleLanes(aggr_input_data));
+	                                                             GetPrivSampleLanes(aggr_input_data));
 }
 void PacSumScatterUpdateDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,
                                idx_t count) {
 	PacSumScatterUpdate<ScatterDoubleState, true, double, double>(inputs, states, count, aggr_input_data.allocator,
-	                                                              GetPacSampleLanes(aggr_input_data));
+	                                                              GetPrivSampleLanes(aggr_input_data));
 }
 
 static void DpSampleSumUpdateDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, data_ptr_t state_p,
                                     idx_t count) {
 	auto &state = *reinterpret_cast<ScatterDoubleState *>(state_p);
 	PacSumUpdate<ScatterDoubleState, true, double, double>(inputs, state, count, aggr_input_data.allocator,
-	                                                       GetPacSampleLanes(aggr_input_data));
+	                                                       GetPrivSampleLanes(aggr_input_data));
 }
 
 static void DpSampleSumScatterUpdateDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,
                                            idx_t count) {
 	PacSumScatterUpdate<ScatterDoubleState, true, double, double>(inputs, states, count, aggr_input_data.allocator,
-	                                                              GetPacSampleLanes(aggr_input_data));
+	                                                              GetPrivSampleLanes(aggr_input_data));
 }
 
 // instantiate Combine methods
@@ -595,7 +595,7 @@ void PacSumFinalizeDoubleToHugeint(Vector &states, AggregateInputData &input, Ve
 // Internal bind helper with scale_divisor parameter (used by BindDecimalPacSum)
 static unique_ptr<FunctionData> PacBindWithScaleDivisor(ClientContext &ctx, vector<unique_ptr<Expression>> &args,
                                                         double scale_divisor) {
-	return MakePacBindData(ctx, args, 2, "priv_noised_sum", scale_divisor);
+	return MakePrivBindData(ctx, args, 2, "priv_noised_sum", scale_divisor);
 }
 
 unique_ptr<FunctionData> // Bind function for priv_sum with optional mi parameter (must be constant)
@@ -605,7 +605,7 @@ PacSumBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expression
 
 static unique_ptr<FunctionData> DpSampleSumBind(ClientContext &ctx, AggregateFunction &,
                                                 vector<unique_ptr<Expression>> &) {
-	return make_uniq<PacBindData>(ctx, 0.0, 1.0, 1.0, false, GetDpSampleLanes(ctx));
+	return MakeDpSampleBindData(ctx);
 }
 
 idx_t PacSumIntStateSize(const AggregateFunction &) {
@@ -784,10 +784,10 @@ static void PacSumAvgFinalizeCountersInternal(Vector &states, AggregateInputData
 	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
 
 	// correction factor for value scaling
-	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
+	double correction = input.bind_data ? input.bind_data->Cast<PrivBindData>().correction : 1.0;
 	bool dp_sample = MODE == PacSumCountersFinalizeMode::DP_SAMPLE;
 	double dp_sample_rescale =
-	    dp_sample && input.bind_data ? DpSampleRescale(input.bind_data->Cast<PacBindData>().sample_lanes) : 1.0;
+	    dp_sample && input.bind_data ? DpSampleRescale(input.bind_data->Cast<PrivBindData>().sample_lanes) : 1.0;
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -823,7 +823,7 @@ static void PacSumAvgFinalizeCountersInternal(Vector &states, AggregateInputData
 
 		if (!dp_sample) {
 			CheckPacSampleDiversity(key_hash, buf, update_count, "priv_noised_sum",
-			                        input.bind_data->Cast<PacBindData>());
+			                        input.bind_data->Cast<PrivBindData>());
 		}
 
 		// PAC counters need 2x compensation for 50% sampling; DP sample counters use their own lane probability.

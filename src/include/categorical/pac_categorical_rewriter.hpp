@@ -69,44 +69,56 @@ static inline string GetStructFieldName(idx_t index) {
 // move arithmetic from the list side to the scalar side, then emit a single
 // priv_filter_<cmp>(scalar, counters) call instead of list_transform + priv_filter.
 
-// Map ExpressionType comparison to priv_filter_<cmp> function name
-static inline const char *GetPacFilterCmpName(ExpressionType cmp_type) {
+// Resolve the priv_{filter,select}[_sass]_<cmp> SQL function name for a comparison.
+// Internal helper: callers should use the GetPacFilterCmpName / GetPacSelectCmpName wrappers.
+enum class PacCmpKind : uint8_t { FILTER = 0, SELECT = 1 };
+
+static inline const char *GetPacCmpFuncName(ExpressionType cmp_type, PacCmpKind kind, const string &privacy_mode) {
+	int suf;
 	switch (cmp_type) {
 	case ExpressionType::COMPARE_GREATERTHAN:
-		return "priv_filter_gt";
+		suf = 0;
+		break;
 	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-		return "priv_filter_gte";
+		suf = 1;
+		break;
 	case ExpressionType::COMPARE_LESSTHAN:
-		return "priv_filter_lt";
+		suf = 2;
+		break;
 	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-		return "priv_filter_lte";
+		suf = 3;
+		break;
 	case ExpressionType::COMPARE_EQUAL:
-		return "priv_filter_eq";
+		suf = 4;
+		break;
 	case ExpressionType::COMPARE_NOTEQUAL:
-		return "priv_filter_neq";
+		suf = 5;
+		break;
 	default:
 		return nullptr;
 	}
+	// [kind][sass][suffix]: 2 × 2 × 6 — one stable const char* per registered SQL function.
+	static const char *const TABLE[2][2][6] = {
+	    {{"priv_filter_gt", "priv_filter_gte", "priv_filter_lt", "priv_filter_lte", "priv_filter_eq",
+	      "priv_filter_neq"},
+	     {"priv_filter_sass_gt", "priv_filter_sass_gte", "priv_filter_sass_lt", "priv_filter_sass_lte",
+	      "priv_filter_sass_eq", "priv_filter_sass_neq"}},
+	    {{"priv_select_gt", "priv_select_gte", "priv_select_lt", "priv_select_lte", "priv_select_eq",
+	      "priv_select_neq"},
+	     {"priv_select_sass_gt", "priv_select_sass_gte", "priv_select_sass_lt", "priv_select_sass_lte",
+	      "priv_select_sass_eq", "priv_select_sass_neq"}},
+	};
+	int sass_idx = privacy_mode == "dp_sass" ? 1 : 0;
+	return TABLE[static_cast<int>(kind)][sass_idx][suf];
 }
 
-// Map ExpressionType comparison to priv_select_<cmp> function name
-static inline const char *GetPacSelectCmpName(ExpressionType cmp_type) {
-	switch (cmp_type) {
-	case ExpressionType::COMPARE_GREATERTHAN:
-		return "priv_select_gt";
-	case ExpressionType::COMPARE_GREATERTHANOREQUALTO:
-		return "priv_select_gte";
-	case ExpressionType::COMPARE_LESSTHAN:
-		return "priv_select_lt";
-	case ExpressionType::COMPARE_LESSTHANOREQUALTO:
-		return "priv_select_lte";
-	case ExpressionType::COMPARE_EQUAL:
-		return "priv_select_eq";
-	case ExpressionType::COMPARE_NOTEQUAL:
-		return "priv_select_neq";
-	default:
-		return nullptr;
-	}
+// Thin wrappers preserved for existing call sites in pac_categorical_lambdas.cpp
+// and pac_derived_rewriter.cpp.
+static inline const char *GetPacFilterCmpName(ExpressionType cmp_type, const string &privacy_mode = "pac") {
+	return GetPacCmpFuncName(cmp_type, PacCmpKind::FILTER, privacy_mode);
+}
+static inline const char *GetPacSelectCmpName(ExpressionType cmp_type, const string &privacy_mode = "pac") {
+	return GetPacCmpFuncName(cmp_type, PacCmpKind::SELECT, privacy_mode);
 }
 
 // Flip a comparison when swapping sides (PAC was on left, move to right)

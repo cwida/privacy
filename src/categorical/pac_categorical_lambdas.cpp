@@ -452,8 +452,9 @@ unique_ptr<Expression> TryRewriteFilterComparison(OptimizerExtensionInput &input
 		return make_uniq<BoundComparisonExpression>(cmp_type, std::move(scalar_side), std::move(list_side));
 	}
 	// Build priv_{filter,select}_<cmp>(scalar_side, counters) or priv_select_<cmp>(hash, scalar, counters)
-	const char *func_name =
-	    (wrap_kind == PacWrapKind::PAC_SELECT) ? GetPacSelectCmpName(cmp_type) : GetPacFilterCmpName(cmp_type);
+	string privacy_mode = GetPrivacyMode(input.context);
+	const char *func_name = (wrap_kind == PacWrapKind::PAC_SELECT) ? GetPacSelectCmpName(cmp_type, privacy_mode)
+	                                                               : GetPacFilterCmpName(cmp_type, privacy_mode);
 	if (!func_name) {
 		return make_uniq<BoundComparisonExpression>(cmp_type, std::move(scalar_side), std::move(list_side));
 	}

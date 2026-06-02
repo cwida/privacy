@@ -134,21 +134,25 @@ static inline string GetBasePacAggregateName(const string &name) {
 	return name;
 }
 
-// Any variant → priv_sum (list aggregate name, same as counters name now)
-static inline string GetListAggregateVariant(const string &name) {
+// Map any aggregate name to the list-emitting variant for the active privacy mode.
+// PAC: priv_<aggr> (the counter aggregates). SASS: priv_sample_<aggr> (DpSample finalize),
+// limited to sum/count/avg today — min/max not yet implemented in SASS, so fall back to "".
+static inline string GetListAggregateVariant(const string &name, const string &privacy_mode = "pac") {
+	bool sass = privacy_mode == "dp_sass";
 	for (auto &aggr : {"sum", "count", "min", "max", "avg"}) {
-		// Match bare names: sum → priv_sum
-		if (name == string(aggr)) {
-			return string("priv_") + aggr;
+		bool matches = name == string(aggr) || name == string("priv_noised_") + aggr ||
+		               name == string("priv_") + aggr || name == string("priv_sample_") + aggr;
+		if (!matches) {
+			continue;
 		}
-		// Match noised names: priv_noised_sum → priv_sum
-		if (name == string("priv_noised_") + aggr) {
-			return string("priv_") + aggr;
+		if (sass) {
+			string a(aggr);
+			if (a == "sum" || a == "count" || a == "avg") {
+				return "priv_sample_" + a;
+			}
+			return ""; // priv_sample_min/max not implemented
 		}
-		// Match already-correct names: priv_sum → priv_sum
-		if (name == string("priv_") + aggr) {
-			return string("priv_") + aggr;
-		}
+		return string("priv_") + aggr;
 	}
 	return "";
 }

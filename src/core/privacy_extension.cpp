@@ -282,7 +282,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register priv_avg rewrite rule (post-optimizer: decomposes priv_noised_avg/priv_avg into sum/count + division).
 	// This post-optimizer handles user-written priv_avg() in SQL. Compiler-generated priv_noised_avg is already
-	// decomposed during the pre-optimizer phase (in CompilePacBitsliceQuery) so this is a no-op for those.
+	// decomposed during the pre-optimizer phase (in CompilePrivQuery) so this is a no-op for those.
 	{
 		OptimizerExtension pac_avg_rule;
 		pac_avg_rule.optimize_function = RewritePacAvgToDiv;
@@ -309,8 +309,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "Lower values = more noise = more privacy. Set to 0 for deterministic (no noise) mode.",
 	    LogicalType::DOUBLE, Value::DOUBLE(1.0 / 128));
 	// Privacy mechanism selector: 'pac' (default), 'dp_elastic', or 'dp_sass'
-	db.config.AddExtensionOption("privacy_mode",
-	                             "Privacy mechanism: 'pac' (default), 'dp_elastic', or 'dp_sass'",
+	db.config.AddExtensionOption("privacy_mode", "Privacy mechanism: 'pac' (default), 'dp_elastic', or 'dp_sass'",
 	                             LogicalType::VARCHAR, Value("pac"));
 	db.config.AddExtensionOption(
 	    "dp_sample_lanes", "Number of sample lanes a privacy unit contributes in privacy_mode='dp_sass'",
@@ -369,10 +368,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Enable/disable join elimination (stop FK chain before reaching PU)
 	db.config.AddExtensionOption("priv_join_elimination", "[INTERNAL] Eliminate final join to PU table",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
-	// When false, unsupported operators skip PAC compilation instead of throwing
-	db.config.AddExtensionOption("pac_conservative_mode",
-	                             "[INTERNAL] Throw errors for unsupported operators (when false, skip PAC compilation)",
-	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	// When false, unsupported operators skip privacy compilation instead of throwing
+	db.config.AddExtensionOption(
+	    "pac_conservative_mode",
+	    "[INTERNAL] Throw errors for unsupported operators (when false, skip privacy compilation)",
+	    LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	// Enable categorical query rewrites (comparisons against PAC aggregates)
 	db.config.AddExtensionOption("pac_categorical", "[INTERNAL] Enable categorical query rewrites",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
@@ -423,6 +423,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterDpSampleClipSumFunctions(loader);
 	RegisterPacCountFunctions(loader);
 	RegisterPacCountCountersFunctions(loader);
+	RegisterDpSampleCountFunctions(loader);
 	RegisterPacClipCountFunctions(loader);
 	RegisterPacNoisedClipCountFunctions(loader);
 	// Register priv_min/priv_max aggregate functions

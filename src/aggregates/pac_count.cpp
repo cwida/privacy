@@ -15,7 +15,7 @@ static unique_ptr<FunctionData> PacCountBind(ClientContext &ctx, AggregateFuncti
 			corr_idx = args.size() - 1;
 		}
 	}
-	return MakePacBindData(ctx, args, corr_idx, "priv_noised_count");
+	return MakePrivBindData(ctx, args, corr_idx, "priv_noised_count");
 }
 
 // State types: simple (non-scatter) always uses PacCountState directly
@@ -37,7 +37,7 @@ static void PacCountInitialize(const AggregateFunction &, data_ptr_t state_ptr) 
 
 void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr, idx_t count) {
 	ScatterState &agg = *reinterpret_cast<ScatterState *>(state_ptr);
-	int sample_lanes = GetPacSampleLanes(aggr);
+	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat idata;
 	inputs[0].ToUnifiedFormat(count, idata);
 	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
@@ -56,7 +56,7 @@ void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t
 
 void PacCountColumnUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr, idx_t count) {
 	ScatterState &agg = *reinterpret_cast<ScatterState *>(state_ptr);
-	int sample_lanes = GetPacSampleLanes(aggr);
+	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, col_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, col_data);
@@ -76,7 +76,7 @@ void PacCountColumnUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data
 }
 
 void PacCountScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
-	int sample_lanes = GetPacSampleLanes(aggr);
+	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat idata, sdata;
 	inputs[0].ToUnifiedFormat(count, idata);
 	states.ToUnifiedFormat(count, sdata);
@@ -96,7 +96,7 @@ void PacCountScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vec
 }
 
 void PacCountColumnScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
-	int sample_lanes = GetPacSampleLanes(aggr);
+	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, col_data, sdata;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, col_data);
@@ -155,7 +155,7 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	auto aggs = FlatVector::GetData<ScatterState *>(states);
 	auto data = FlatVector::GetData<int64_t>(result);
 	auto &result_mask = FlatVector::Validity(result);
-	auto &bind = input.bind_data->Cast<PacBindData>();
+	auto &bind = input.bind_data->Cast<PrivBindData>();
 	std::mt19937_64 gen(bind.seed);
 	double mi = bind.mi;
 	double correction = bind.correction;
@@ -179,14 +179,14 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 			memset(buf, 0, sizeof(buf));
 		}
 		CheckPacSampleDiversity(key_hash, buf, s ? s->GetUpdateCount() : 0, "priv_noised_count",
-		                        input.bind_data->Cast<PacBindData>());
+		                        input.bind_data->Cast<PrivBindData>());
 		// Multiply by 2 to compensate for 50% sampling, then apply correction
 		double noise_var = 0.0;
 		double result_val = static_cast<double>(PacNoisySampleFrom64Counters(buf, mi, correction, gen, ~key_hash,
 		                                                                     query_hash, pstate, &noise_var)) *
 		                    2.0;
 		// Noise variance scales by 4x (2x on value means 4x on variance)
-		double utility_threshold = input.bind_data->Cast<PacBindData>().utility_threshold;
+		double utility_threshold = input.bind_data->Cast<PrivBindData>().utility_threshold;
 		if (PacUtilityNull(result_val, noise_var * 4.0, utility_threshold, gen)) {
 			result_mask.SetInvalid(offset + i);
 			continue;
@@ -207,7 +207,7 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 // Position j is 0 if key_hash bit j is 0, otherwise value * 2 * correction.
 void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	auto aggs = FlatVector::GetData<ScatterState *>(states);
-	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
+	double correction = input.bind_data ? input.bind_data->Cast<PrivBindData>().correction : 1.0;
 
 	// Result is LIST<DOUBLE>
 	auto list_entries = FlatVector::GetData<list_entry_t>(result);
@@ -241,7 +241,7 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 		uint64_t key_hash = s->key_hash;
 		s->GetTotalsWithSWAR(buf);
 		CheckPacSampleDiversity(key_hash, buf, s->GetUpdateCount(), "priv_noised_count",
-		                        input.bind_data->Cast<PacBindData>());
+		                        input.bind_data->Cast<PrivBindData>());
 
 		// Copy counters to list: 0 where key_hash bit is 0, value * 2 * correction otherwise
 		// The 2x factor compensates for 50% sampling, correction is user-specified multiplier
@@ -285,6 +285,73 @@ void RegisterPacCountFunctions(ExtensionLoader &loader) {
 	desc.description = "Privacy-preserving COUNT. Automatically injected by PAC for protected columns.";
 	desc.examples = {
 	    "SELECT c_mktsegment, priv_noised_count(priv_hash(hash(c_custkey))) FROM customer GROUP BY c_mktsegment"};
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
+}
+
+// ============================================================================
+// SASS counter Finalize: fills all 64 positions with rescaled counts so that
+// downstream smooth-median / median-filter logic sees a complete distribution.
+// PAC's `PacCountFinalizeCounters` zeroes positions where (key_hash >> j) & 1 == 0;
+// SASS samples each lane independently via DpSampleHash, so all 64 are meaningful.
+// ============================================================================
+static void DpSampleCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                          idx_t offset) {
+	auto aggs = FlatVector::GetData<ScatterState *>(states);
+	int sample_lanes = input.bind_data ? input.bind_data->Cast<PrivBindData>().sample_lanes : 1;
+	double rescale = DpSampleRescale(sample_lanes);
+
+	auto list_entries = FlatVector::GetData<list_entry_t>(result);
+	auto &child_vec = ListVector::GetEntry(result);
+
+	idx_t total_elements = count * 64;
+	ListVector::Reserve(result, total_elements);
+	ListVector::SetListSize(result, total_elements);
+
+	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
+	PAC_FLOAT buf[64];
+
+	for (idx_t i = 0; i < count; i++) {
+#if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
+		aggs[i]->FlushBuffer(*aggs[i], input.allocator);
+#endif
+		PacCountState *s = aggs[i]->GetState();
+
+		list_entries[offset + i].offset = i * 64;
+		list_entries[offset + i].length = 64;
+
+		idx_t base = i * 64;
+		if (!s) {
+			memset(child_data + base, 0, 64 * sizeof(PAC_FLOAT));
+			continue;
+		}
+
+		s->GetTotalsWithSWAR(buf);
+		for (int j = 0; j < 64; j++) {
+			child_data[base + j] = static_cast<PAC_FLOAT>(buf[j] * rescale);
+		}
+	}
+}
+
+static unique_ptr<FunctionData> DpSampleCountBind(ClientContext &ctx, AggregateFunction &,
+                                                  vector<unique_ptr<Expression>> &) {
+	return MakeDpSampleBindData(ctx);
+}
+
+void RegisterDpSampleCountFunctions(ExtensionLoader &loader) {
+	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+	AggregateFunctionSet set("priv_sample_count");
+	set.AddFunction(AggregateFunction("priv_sample_count", {LogicalType::UBIGINT}, list_type, PacCountStateSize,
+	                                  PacCountInitialize, PacCountScatterUpdate, PacCountCombine,
+	                                  DpSampleCountFinalizeCounters, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	                                  PacCountUpdate, DpSampleCountBind));
+	set.AddFunction(AggregateFunction(
+	    "priv_sample_count", {LogicalType::UBIGINT, LogicalType::ANY}, list_type, PacCountStateSize, PacCountInitialize,
+	    PacCountColumnScatterUpdate, PacCountCombine, DpSampleCountFinalizeCounters,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, DpSampleCountBind));
+	CreateAggregateFunctionInfo info(set);
+	FunctionDescription desc;
+	desc.description = "[INTERNAL] Returns 64 sample-median DP counters for COUNT-like values.";
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 }

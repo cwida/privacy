@@ -1,0 +1,131 @@
+# name: test/sql/priv_sass_filter.test
+# description: SASS median-region filter/select scalars (M5)
+# group: [sql]
+
+#
+# Peter's policy: sort the 64 counter values, evaluate the comparison at each
+# sorted position, then look at the window of size 2*sample_lanes+1 centered
+# on the median (index 32). Unanimous true / false in that window → safe
+# answer; mixed → random coin flip seeded by privacy_seed.
+
+require privacy
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET privacy_seed = 42;
+
+statement ok
+SET privacy_mode = 'dp_sass';
+
+statement ok
+SET dp_epsilon = 1.0;
+
+statement ok
+SET dp_delta = 1e-6;
+
+statement ok
+SET dp_sample_lanes = 1;
+
+# Build a 64-element list with 32 zeros followed by 32 tens. After sort, the
+# values at positions 31, 32, 33 are 0.0, 10.0, 10.0 — a mixed window.
+# Build a list of all tens: window is unanimously 10.0 → val > 10 is decided.
+query I
+WITH t AS (SELECT 10.0::FLOAT AS v FROM range(64))
+SELECT priv_filter_sass_gt(20.0::FLOAT, LIST(v)) FROM t;
+----
+true
+
+query I
+WITH t AS (SELECT 10.0::FLOAT AS v FROM range(64))
+SELECT priv_filter_sass_gt(5.0::FLOAT, LIST(v)) FROM t;
+----
+false
+
+# Unanimous less-than.
+query I
+WITH t AS (SELECT 10.0::FLOAT AS v FROM range(64))
+SELECT priv_filter_sass_lt(5.0::FLOAT, LIST(v)) FROM t;
+----
+true
+
+query I
+WITH t AS (SELECT 10.0::FLOAT AS v FROM range(64))
+SELECT priv_filter_sass_lt(20.0::FLOAT, LIST(v)) FROM t;
+----
+false
+
+# priv_select_sass_<cmp>: unanimous true → pass hash through; unanimous false
+# → return 0.
+query I
+WITH t AS (SELECT 10.0::FLOAT AS v FROM range(64))
+SELECT priv_select_sass_gt(123456789::UBIGINT, 20.0::FLOAT, LIST(v)) FROM t;
+----
+123456789
+
+query I
+WITH t AS (SELECT 10.0::FLOAT AS v FROM range(64))
+SELECT priv_select_sass_gt(123456789::UBIGINT, 5.0::FLOAT, LIST(v)) FROM t;
+----
+0
+
+# Wider window from larger sample_lanes still resolves a uniform list.
+statement ok
+SET dp_sample_lanes = 4;
+
+query I
+WITH t AS (SELECT 7.5::FLOAT AS v FROM range(64))
+SELECT priv_filter_sass_gte(7.5::FLOAT, LIST(v)) FROM t;
+----
+true
+
+query I
+WITH t AS (SELECT 7.5::FLOAT AS v FROM range(64))
+SELECT priv_filter_sass_eq(7.5::FLOAT, LIST(v)) FROM t;
+----
+true
+
+query I
+WITH t AS (SELECT 7.5::FLOAT AS v FROM range(64))
+SELECT priv_filter_sass_neq(7.5::FLOAT, LIST(v)) FROM t;
+----
+false
+
+statement ok
+SET dp_sample_lanes = 1;
+
+# Mixed-median case: 32 zeros, 32 tens. With sample_lanes=1 the window is
+# {sorted[31], sorted[32], sorted[33]} = {0.0, 10.0, 10.0}. val=5 is neither
+# greater nor less than all three, so the answer is a random coin flip.
+# The exact result depends on (privacy_seed XOR query_hash); we just verify
+# it returns a defined boolean.
+query I
+WITH t AS (
+  SELECT CASE WHEN i < 32 THEN 0.0::FLOAT ELSE 10.0::FLOAT END AS v
+  FROM range(64) AS r(i)
+)
+SELECT priv_filter_sass_gt(5.0::FLOAT, LIST(v)) IS NOT NULL FROM t;
+----
+true
+
+# Plan check: the EXPLAIN output for a manually-written SASS filter call must
+# show the SASS-flavored function name (priv_filter_sass_gt), confirming the
+# scalar registration and bind reach the planner.
+query I nosort explain_sass_filter
+EXPLAIN
+WITH t AS (SELECT 10.0::FLOAT AS v FROM range(64))
+SELECT priv_filter_sass_gt(20.0::FLOAT, LIST(v)) FROM t;
+----
+priv_filter_sass_gt
+
+# Same for the SASS select variant.
+query I nosort explain_sass_select
+EXPLAIN
+WITH t AS (SELECT 10.0::FLOAT AS v FROM range(64))
+SELECT priv_select_sass_gt(7::UBIGINT, 20.0::FLOAT, LIST(v)) FROM t;
+----
+priv_select_sass_gt

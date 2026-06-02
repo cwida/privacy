@@ -24,6 +24,7 @@ using uint64_t = unsigned long long;
 namespace duckdb {
 void RegisterPacCountFunctions(ExtensionLoader &);
 void RegisterPacCountCountersFunctions(ExtensionLoader &);
+void RegisterDpSampleCountFunctions(ExtensionLoader &);
 void RegisterPacAvgFunctions(ExtensionLoader &);
 void RegisterPacNoisedClipCountFunctions(ExtensionLoader &);
 void RegisterPacClipCountFunctions(ExtensionLoader &);

@@ -1,0 +1,124 @@
+# name: test/sql/priv_sass_categorical.test
+# description: SASS-mode counter aggregates for categorical queries (M4)
+# group: [sql]
+
+#
+# The SASS pipeline (CompileDPSampleMedianQuery) does not yet auto-invoke the
+# PAC categorical rewriter, so these tests exercise the new priv_sample_count
+# aggregate directly. End-to-end wiring (running RewriteCategoricalQuery
+# inside the SASS compiler) is a follow-up — the variant lookup and the SASS
+# filter/select scalars are already in place (see priv_sass_filter.test).
+
+require privacy
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET privacy_seed = 42;
+
+statement ok
+SET privacy_mode = 'dp_sass';
+
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET dp_epsilon = 1.0;
+
+statement ok
+SET dp_delta = 1e-6;
+
+statement ok
+SET dp_sample_lanes = 1;
+
+# priv_sample_count produces LIST<FLOAT> of length 64.
+query I
+SELECT len(priv_sample_count(0::UBIGINT));
+----
+64
+
+# With a single row hashed to 0 and sample_lanes=1, exactly one lane (bit 0)
+# receives the count. Lane probability = 1/64 → rescale = 64, so the lane
+# value is 1 * 64 = 64; the other 63 lanes stay at 0.
+query II
+SELECT priv_sample_count(0::UBIGINT)[1]::INTEGER,
+       priv_sample_count(0::UBIGINT)[2]::INTEGER;
+----
+64	0
+
+# With sample_lanes=2, the DpSampleHash spreads across more bits — at least
+# the first lane (bit 0) gets a non-zero rescaled count.
+statement ok
+SET dp_sample_lanes = 2;
+
+query I
+SELECT priv_sample_count(0::UBIGINT)[1] > 0;
+----
+true
+
+# Length is invariant across lane settings.
+query I
+SELECT len(priv_sample_count(0::UBIGINT)) = 64;
+----
+true
+
+# priv_sample_count handles ANY value column overload.
+statement ok
+SET dp_sample_lanes = 1;
+
+query I
+SELECT len(priv_sample_count(0::UBIGINT, 'x'));
+----
+64
+
+# Plan check: an EXPLAIN of a query that calls priv_sample_count must mention
+# the function by name. This confirms the registration is discoverable and the
+# bind sees dp_sass mode (so it picks up dp_sample_lanes from the setting).
+query I nosort explain_sass_count
+EXPLAIN SELECT priv_sample_count(0::UBIGINT);
+----
+priv_sample_count
+
+# Plan check: under PAC mode the categorical rewriter still picks the
+# non-SASS variant — verifying M5b didn't accidentally re-route PAC plans.
+statement ok
+SET privacy_mode = 'pac';
+
+statement ok
+CREATE TABLE _check_dim (dim_id INTEGER, dim_name VARCHAR);
+
+statement ok
+ALTER TABLE _check_dim ADD PRIVACY_KEY (dim_id);
+
+statement ok
+CREATE PU TABLE _check_pu (id INTEGER, PRIVACY_KEY (id));
+
+statement ok
+CREATE TABLE _check_facts (fact_id INTEGER, dim_id INTEGER, pu_id INTEGER, qty INTEGER);
+
+statement ok
+ALTER TABLE _check_facts ADD PRIVACY_KEY (fact_id),
+    ADD PRIVACY_LINK (pu_id) REFERENCES _check_pu(id),
+    ADD PRIVACY_LINK (dim_id) REFERENCES _check_dim(dim_id);
+
+statement ok
+INSERT INTO _check_dim VALUES (1, 'A'), (2, 'B');
+
+statement ok
+INSERT INTO _check_pu VALUES (1), (2), (3);
+
+statement ok
+INSERT INTO _check_facts VALUES (1, 1, 1, 30), (2, 1, 2, 40), (3, 2, 3, 10);
+
+# Categorical predicate: the inner SUM is replaced with priv_sum counters and a
+# priv_filter_gt terminal under PAC. (priv_filter_sass_gt would indicate a
+# regression where SASS dispatch leaked into PAC mode.)
+query I nosort explain_pac_filter
+EXPLAIN SELECT d.dim_id FROM _check_dim d
+WHERE (SELECT sum(f.qty) FROM _check_facts f WHERE f.dim_id = d.dim_id) > 50;
+----
+priv_filter_gt
