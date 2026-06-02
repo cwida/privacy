@@ -84,10 +84,16 @@ string GetPacCompileMethod(ClientContext &context, const string &default_method 
 string GetPrivacyMode(ClientContext &context);
 // Return the DP budget (ε) from `dp_epsilon`; falls back to default if unset.
 double GetDpEpsilon(ClientContext &context, double default_value = 1.0);
+// Like GetDpEpsilon but throws InvalidInputException if the value is not a positive finite number.
+// `mechanism_name` is used in the error message (e.g., "dp_elastic", "dp_sample_median").
+double GetValidatedDpEpsilon(ClientContext &context, const string &mechanism_name);
 // Read `dp_sum_bound` into `out`. Returns false if the setting is unset/NULL.
 bool TryGetDpSumBound(ClientContext &context, double &out);
 // Read `dp_delta` into `out`. Returns false if unset/NULL (→ use global elastic sensitivity).
 bool TryGetDpDelta(ClientContext &context, double &out);
+// Read `privacy_min_group_count` into `out`. Returns true only when set, non-NULL, and a
+// positive finite number — the conditions under which support filtering should be applied.
+bool TryGetPrivacyMinGroupCount(ClientContext &context, double &out);
 
 // Helper to safely retrieve boolean settings with defaults
 bool GetBooleanSetting(ClientContext &context, const string &setting_name, bool default_value);

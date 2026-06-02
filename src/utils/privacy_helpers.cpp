@@ -594,42 +594,51 @@ string GetPrivacyMode(ClientContext &context) {
 	return GetNormalizedStringSetting(context, "privacy_mode", "pac");
 }
 
-double GetDpEpsilon(ClientContext &context, double default_value) {
+static bool TryGetDoubleSetting(ClientContext &context, const char *setting_name, double &out) {
 	Value v;
-	if (!context.TryGetCurrentSetting("dp_epsilon", v) || v.IsNull()) {
-		return default_value;
+	if (!context.TryGetCurrentSetting(setting_name, v) || v.IsNull()) {
+		return false;
 	}
 	try {
-		return v.GetValue<double>();
+		out = v.GetValue<double>();
+		return true;
 	} catch (...) {
-		return default_value;
+		return false;
 	}
+}
+
+double GetDpEpsilon(ClientContext &context, double default_value) {
+	double out;
+	return TryGetDoubleSetting(context, "dp_epsilon", out) ? out : default_value;
+}
+
+double GetValidatedDpEpsilon(ClientContext &context, const string &mechanism_name) {
+	double epsilon = GetDpEpsilon(context, 1.0);
+	if (epsilon <= 0.0 || !std::isfinite(epsilon)) {
+		throw InvalidInputException(mechanism_name + ": dp_epsilon must be a positive finite number (got " +
+		                            std::to_string(epsilon) + ")");
+	}
+	return epsilon;
+}
+
+bool TryGetPrivacyMinGroupCount(ClientContext &context, double &out) {
+	double threshold;
+	if (!TryGetDoubleSetting(context, "privacy_min_group_count", threshold)) {
+		return false;
+	}
+	if (threshold <= 0.0 || !std::isfinite(threshold)) {
+		return false;
+	}
+	out = threshold;
+	return true;
 }
 
 bool TryGetDpSumBound(ClientContext &context, double &out) {
-	Value v;
-	if (!context.TryGetCurrentSetting("dp_sum_bound", v) || v.IsNull()) {
-		return false;
-	}
-	try {
-		out = v.GetValue<double>();
-		return true;
-	} catch (...) {
-		return false;
-	}
+	return TryGetDoubleSetting(context, "dp_sum_bound", out);
 }
 
 bool TryGetDpDelta(ClientContext &context, double &out) {
-	Value v;
-	if (!context.TryGetCurrentSetting("dp_delta", v) || v.IsNull()) {
-		return false;
-	}
-	try {
-		out = v.GetValue<double>();
-		return true;
-	} catch (...) {
-		return false;
-	}
+	return TryGetDoubleSetting(context, "dp_delta", out);
 }
 
 // Add implementation for GetPacCompileMethod

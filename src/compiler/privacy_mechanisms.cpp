@@ -1,13 +1,11 @@
-#include "compiler/dp_elastic_compiler.hpp"
+#include "compiler/privacy_mechanisms.hpp"
 #include "aggregates/pac_aggregate.hpp"
 #include "utils/privacy_helpers.hpp"
-#include "compiler/pac_bitslice_compiler.hpp"
+#include "compiler/privacy_compiler.hpp"
 #include "query_processing/pac_plan_traversal.hpp"
 #include "query_processing/pac_expression_builder.hpp"
 #include "privacy_debug.hpp"
 
-#include "duckdb/catalog/catalog.hpp"
-#include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/exception.hpp"
@@ -16,17 +14,12 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/optimizer/column_binding_replacer.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
-#include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
-#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
-#include "duckdb/planner/operator/logical_any_join.hpp"
-#include "duckdb/planner/operator/logical_comparison_join.hpp"
-#include "duckdb/planner/operator/logical_cross_product.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
@@ -57,36 +50,6 @@ struct AvgInfo {
 	idx_t count_pos; // position of the appended COUNT(*) in the rewritten aggregate
 };
 
-// Bind a plain aggregate function (sum, count_star, etc.) by name.
-static unique_ptr<Expression> BindAggregateLocal(OptimizerExtensionInput &input, const string &func_name,
-                                                 vector<unique_ptr<Expression>> children,
-                                                 AggregateType aggr_type = AggregateType::NON_DISTINCT) {
-	FunctionBinder function_binder(input.context);
-	ErrorData error;
-	vector<LogicalType> arg_types;
-	for (auto &child : children) {
-		arg_types.push_back(child->return_type);
-	}
-	auto &entry = Catalog::GetSystemCatalog(input.context)
-	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, func_name);
-	auto best = function_binder.BindFunction(entry.name, entry.functions, arg_types, error);
-	if (!best.IsValid()) {
-		throw InternalException("dp_elastic: failed to bind aggregate '" + func_name + "'");
-	}
-	auto func = entry.functions.GetFunctionByOffset(best.GetIndex());
-	return function_binder.BindAggregateFunction(func, std::move(children), nullptr, aggr_type);
-}
-
-static unique_ptr<Expression> BindAggregateLocal(OptimizerExtensionInput &input, const string &func_name,
-                                                 unique_ptr<Expression> arg,
-                                                 AggregateType aggr_type = AggregateType::NON_DISTINCT) {
-	vector<unique_ptr<Expression>> children;
-	if (arg) {
-		children.push_back(std::move(arg));
-	}
-	return BindAggregateLocal(input, func_name, std::move(children), aggr_type);
-}
-
 static unique_ptr<Expression> BindScalarLocal(OptimizerExtensionInput &input, const string &func_name,
                                               vector<unique_ptr<Expression>> children) {
 	FunctionBinder function_binder(input.context);
@@ -115,11 +78,11 @@ static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, Logi
 		auto filter_for_sum = std::move(aggr.filter);
 		auto filter_for_count = filter_for_sum ? filter_for_sum->Copy() : nullptr;
 
-		agg->expressions[i] = BindAggregateLocal(input, "sum", std::move(arg));
+		agg->expressions[i] = BindPlainAggregate(input, "sum", std::move(arg));
 		agg->expressions[i]->Cast<BoundAggregateExpression>().filter = std::move(filter_for_sum);
 
 		idx_t count_pos = agg->expressions.size();
-		agg->expressions.push_back(BindAggregateLocal(input, "count_star", nullptr));
+		agg->expressions.push_back(BindPlainAggregate(input, "count_star", nullptr));
 		agg->expressions.back()->Cast<BoundAggregateExpression>().filter = std::move(filter_for_count);
 
 		avg_infos.push_back({i, count_pos});
@@ -128,33 +91,6 @@ static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, Logi
 		agg->ResolveOperatorTypes();
 	}
 	return avg_infos;
-}
-
-// ----------------------------------------------------------------------------
-// Plan walkers
-// ----------------------------------------------------------------------------
-
-static void CollectGetNodes(LogicalOperator *op, vector<LogicalGet *> &out) {
-	if (op->type == LogicalOperatorType::LOGICAL_GET) {
-		out.push_back(&op->Cast<LogicalGet>());
-	}
-	for (auto &child : op->children) {
-		CollectGetNodes(child.get(), out);
-	}
-}
-
-// Find the unique_ptr slot holding `target` in the plan. Returns nullptr if not found.
-static unique_ptr<LogicalOperator> *FindSlotForOperator(unique_ptr<LogicalOperator> &root, LogicalOperator *target) {
-	if (root.get() == target) {
-		return &root;
-	}
-	for (auto &child : root->children) {
-		auto *slot = FindSlotForOperator(child, target);
-		if (slot) {
-			return slot;
-		}
-	}
-	return nullptr;
 }
 
 // ----------------------------------------------------------------------------
@@ -267,35 +203,33 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 	return chain;
 }
 
-// ----------------------------------------------------------------------------
-// Eligibility check (Phase D: allows linear FK join chains)
-// ----------------------------------------------------------------------------
-
-static LogicalAggregate *CheckDPAggregates(unique_ptr<LogicalOperator> &plan) {
+static LogicalAggregate *CheckDPAggregates(unique_ptr<LogicalOperator> &plan, const string &mechanism_name) {
 	vector<LogicalAggregate *> aggs;
 	FindAllAggregates(plan, aggs);
 	if (aggs.size() != 1) {
-		throw InvalidInputException("dp_elastic: expected exactly one aggregate, found " + std::to_string(aggs.size()));
+		throw InvalidInputException(mechanism_name + ": expected exactly one aggregate, found " +
+		                            std::to_string(aggs.size()));
 	}
 	auto *agg = aggs[0];
 	for (auto &expr : agg->expressions) {
 		if (expr->GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {
-			throw InvalidInputException("dp_elastic: unsupported non-aggregate expression in aggregate node");
+			throw InvalidInputException(mechanism_name + ": unsupported non-aggregate expression in aggregate node");
 		}
-		auto &a = expr->Cast<BoundAggregateExpression>();
-		if (a.IsDistinct()) {
-			throw InvalidInputException("dp_elastic: DISTINCT aggregates are not supported");
+		auto &aggr = expr->Cast<BoundAggregateExpression>();
+		if (aggr.IsDistinct()) {
+			throw InvalidInputException(mechanism_name + ": DISTINCT aggregates are not supported");
 		}
-		const string &name = a.function.name;
+		string name = StringUtil::Lower(aggr.function.name);
 		if (name != "count" && name != "count_star" && name != "sum" && name != "avg") {
-			throw InvalidInputException("dp_elastic: only COUNT, SUM, and AVG are supported (got '" + name + "')");
+			throw InvalidInputException(mechanism_name + ": only COUNT, SUM, and AVG are supported (got '" +
+			                            aggr.function.name + "')");
 		}
-		if ((name == "sum" || name == "avg") && a.children.size() != 1) {
-			throw InvalidInputException("dp_elastic: " + name + " must have exactly one argument");
+		if ((name == "sum" || name == "avg") && aggr.children.size() != 1) {
+			throw InvalidInputException(mechanism_name + ": " + name + " must have exactly one argument");
 		}
-		if ((name == "sum" || name == "avg") && !a.children[0]->return_type.IsNumeric()) {
-			throw InvalidInputException("dp_elastic: " + name + " argument must be a numeric type (got '" +
-			                            a.children[0]->return_type.ToString() + "')");
+		if ((name == "sum" || name == "avg") && !aggr.children[0]->return_type.IsNumeric()) {
+			throw InvalidInputException(mechanism_name + ": " + name + " argument must be a numeric type (got '" +
+			                            aggr.children[0]->return_type.ToString() + "')");
 		}
 	}
 	return agg;
@@ -304,14 +238,14 @@ static LogicalAggregate *CheckDPAggregates(unique_ptr<LogicalOperator> &plan) {
 static DPFKChain ExtractDPElasticFKChain(unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
                                          const PrivacyCompatibilityResult &check) {
 	vector<LogicalGet *> gets;
-	CollectGetNodes(plan.get(), gets);
+	FindAllGetNodes(plan.get(), gets);
 	return ExtractFKChain(check, gets, privacy_units, true);
 }
 
-static void ValidateDPFKChainShape(unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                                   const PrivacyCompatibilityResult &check) {
+static void CheckDPFKChainShape(unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
+                                const PrivacyCompatibilityResult &check) {
 	vector<LogicalGet *> gets;
-	CollectGetNodes(plan.get(), gets);
+	FindAllGetNodes(plan.get(), gets);
 	ExtractFKChain(check, gets, privacy_units, false);
 }
 
@@ -452,18 +386,6 @@ static double Sensitivity(const BoundAggregateExpression &aggr, double sum_bound
 	throw InternalException("dp_elastic: Sensitivity received unsupported '" + name + "'");
 }
 
-static LogicalGet *FindGetForTable(unique_ptr<LogicalOperator> &plan, const string &table_name) {
-	vector<LogicalGet *> gets;
-	CollectGetNodes(plan.get(), gets);
-	string needle = StringUtil::Lower(table_name);
-	for (auto *get : gets) {
-		if (StringUtil::Lower(get->GetTable()->name) == needle) {
-			return get;
-		}
-	}
-	return nullptr;
-}
-
 static unique_ptr<Expression> BuildSupportKeyExpression(unique_ptr<LogicalOperator> &plan, const DPFKChain &chain) {
 	if (chain.tables.size() > 2) {
 		throw InvalidInputException("dp_elastic: privacy_min_group_count currently supports single-table PU queries "
@@ -473,7 +395,7 @@ static unique_ptr<Expression> BuildSupportKeyExpression(unique_ptr<LogicalOperat
 		return nullptr;
 	}
 
-	auto *get = FindGetForTable(plan, chain.tables[0]);
+	auto *get = FindTableScanInSubtree(plan.get(), chain.tables[0]);
 	if (!get) {
 		throw InternalException("dp_elastic: could not find support source table '" + chain.tables[0] + "'");
 	}
@@ -494,9 +416,9 @@ static optional_idx AddSupportAggregate(OptimizerExtensionInput &input, unique_p
 
 	auto support_key = BuildSupportKeyExpression(plan, chain);
 	if (support_key) {
-		agg->expressions.push_back(BindAggregateLocal(input, "count", std::move(support_key), AggregateType::DISTINCT));
+		agg->expressions.push_back(BindPlainAggregate(input, "count", std::move(support_key), AggregateType::DISTINCT));
 	} else {
-		agg->expressions.push_back(BindAggregateLocal(input, "count_star", nullptr));
+		agg->expressions.push_back(BindPlainAggregate(input, "count_star", nullptr));
 	}
 	agg->ResolveOperatorTypes();
 	return optional_idx(agg->expressions.size() - 1);
@@ -515,7 +437,7 @@ static LogicalFilter *ApplySupportFilter(OptimizerExtensionInput &input, unique_
 	auto filter = make_uniq<LogicalFilter>();
 	filter->expressions.push_back(std::move(condition));
 
-	auto *slot = FindSlotForOperator(plan, agg);
+	auto *slot = FindOperatorSlotByPointer(plan, agg);
 	if (!slot) {
 		throw InternalException("dp_elastic: could not locate aggregate slot for support filter");
 	}
@@ -556,7 +478,7 @@ static NoiseProjection InsertProjectionAndRemap(unique_ptr<LogicalOperator> &pla
                                                 idx_t proj_idx, idx_t source_group_idx, idx_t source_agg_idx,
                                                 idx_t n_groups, idx_t n_aggs, idx_t source_agg_offset,
                                                 const string &error_message) {
-	auto *slot = FindSlotForOperator(plan, insert_above);
+	auto *slot = FindOperatorSlotByPointer(plan, insert_above);
 	if (!slot) {
 		throw InternalException(error_message);
 	}
@@ -733,15 +655,15 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 		auto &aggr = expr->Cast<BoundAggregateExpression>();
 		vector<unique_ptr<Expression>> children;
 		if (aggr.function.name == "count_star") {
-			lower_expressions.push_back(BindAggregateLocal(input, "count_star", std::move(children)));
+			lower_expressions.push_back(BindPlainAggregate(input, "count_star", std::move(children)));
 		} else if (aggr.function.name == "count") {
 			if (!aggr.children.empty()) {
 				children.push_back(aggr.children[0]->Copy());
 			}
-			lower_expressions.push_back(BindAggregateLocal(input, "count", std::move(children)));
+			lower_expressions.push_back(BindPlainAggregate(input, "count", std::move(children)));
 		} else if (aggr.function.name == "sum") {
 			children.push_back(aggr.children[0]->Copy());
-			lower_expressions.push_back(BindAggregateLocal(input, "sum", std::move(children)));
+			lower_expressions.push_back(BindPlainAggregate(input, "sum", std::move(children)));
 		} else {
 			throw InvalidInputException("dp_sample_median: only COUNT and SUM aggregates are supported");
 		}
@@ -751,7 +673,6 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 	auto pre_agg = InsertPuPreAggregation(input, agg, std::move(lower_expressions), std::move(pu_hash_expr));
 
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
-		auto &original = agg->expressions[ai]->Cast<BoundAggregateExpression>();
 		auto lower_type = pre_agg.lower_agg->types[pre_agg.num_original_groups + 1 + ai];
 		unique_ptr<Expression> lower_ref =
 		    make_uniq<BoundColumnRefExpression>(lower_type, ColumnBinding(pre_agg.lower_agg_index, ai));
@@ -760,11 +681,7 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 		vector<unique_ptr<Expression>> children;
 		children.push_back(pre_agg.pu_hash_ref->Copy());
 		children.push_back(std::move(lower_ref));
-		if (original.function.name == "sum") {
-			agg->expressions[ai] = BindAggregateLocal(input, "priv_sample_clip_sum", std::move(children));
-		} else {
-			agg->expressions[ai] = BindAggregateLocal(input, "priv_sample_sum", std::move(children));
-		}
+		agg->expressions[ai] = BindPlainAggregate(input, "priv_sample_sum", std::move(children));
 	}
 	agg->ResolveOperatorTypes();
 }
@@ -779,16 +696,10 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 	(void)query_hash;
 	PRIVACY_DEBUG_PRINT("[DP_ELASTIC] CompileDPElasticQuery: start");
 
-	double epsilon = GetDpEpsilon(input.context, 1.0);
-	if (epsilon <= 0.0 || !std::isfinite(epsilon)) {
-		throw InvalidInputException("dp_elastic: dp_epsilon must be a positive finite number (got " +
-		                            std::to_string(epsilon) + ")");
-	}
-
-	plan->ResolveOperatorTypes();
+	double epsilon = GetValidatedDpEpsilon(input.context, "dp_elastic");
 
 	auto fk_chain = ExtractDPElasticFKChain(plan, privacy_units, check);
-	auto *agg = CheckDPAggregates(plan);
+	auto *agg = CheckDPAggregates(plan, "dp_elastic");
 
 	// Rewrite AVG(x) → SUM(x) + COUNT(*) before bound/clipping checks.
 	// Each AVG uses ε/2 per component so the combined cost is still ε-DP.
@@ -796,11 +707,8 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 	idx_t n_original_aggs = agg->expressions.size() - avg_infos.size();
 	idx_t n_groups = agg->groups.size();
 
-	Value threshold_val;
 	double support_threshold = 0.0;
-	bool apply_support_filter =
-	    input.context.TryGetCurrentSetting("privacy_min_group_count", threshold_val) && !threshold_val.IsNull() &&
-	    (support_threshold = threshold_val.GetValue<double>()) > 0.0 && std::isfinite(support_threshold);
+	bool apply_support_filter = TryGetPrivacyMinGroupCount(input.context, support_threshold);
 	auto support_pos = AddSupportAggregate(input, plan, agg, fk_chain, support_threshold);
 	idx_t n_dp_aggs = support_pos.IsValid() ? support_pos.GetIndex() : agg->expressions.size();
 	LogicalOperator *noise_anchor = agg;
@@ -875,11 +783,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	(void)query_hash;
 	PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] CompileDPSampleMedianQuery: start");
 
-	double epsilon = GetDpEpsilon(input.context, 1.0);
-	if (epsilon <= 0.0 || !std::isfinite(epsilon)) {
-		throw InvalidInputException("dp_sample_median: dp_epsilon must be a positive finite number (got " +
-		                            std::to_string(epsilon) + ")");
-	}
+	double epsilon = GetValidatedDpEpsilon(input.context, "dp_sample_median");
 	double delta = 0.0;
 	if (!TryGetDpDelta(input.context, delta)) {
 		throw InvalidInputException(
@@ -889,30 +793,12 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		throw InvalidInputException("dp_sample_median: dp_delta must be in (0, 0.5)");
 	}
 
-	plan->ResolveOperatorTypes();
-	ValidateDPFKChainShape(plan, privacy_units, check);
-	auto *agg = CheckDPAggregates(plan);
+	CheckDPFKChainShape(plan, privacy_units, check);
+	auto *agg = CheckDPAggregates(plan, "dp_sass");
 
 	auto avg_infos = RewriteAvgAggregates(input, agg);
 	idx_t n_original_aggs = agg->expressions.size() - avg_infos.size();
 	idx_t n_groups = agg->groups.size();
-
-	double sum_bound = 0.0;
-	bool has_sum = AggregateContainsSum(agg);
-	if (has_sum) {
-		if (!TryGetDpSumBound(input.context, sum_bound)) {
-			throw InvalidInputException("dp_sample_median: dp_sum_bound must be set for SUM and AVG aggregates");
-		}
-		if (sum_bound <= 0.0 || !std::isfinite(sum_bound)) {
-			throw InvalidInputException("dp_sample_median: dp_sum_bound must be a positive finite number");
-		}
-		Value clip_support_val;
-		if (!input.context.TryGetCurrentSetting("priv_clip_support", clip_support_val) || clip_support_val.IsNull() ||
-		    clip_support_val.GetValue<int64_t>() <= 0) {
-			throw InvalidInputException("dp_sample_median: priv_clip_support must be set for SUM and AVG aggregates");
-		}
-		ClipSumInputs(input, agg, sum_bound);
-	}
 
 	vector<LogicalType> output_types;
 	output_types.reserve(agg->expressions.size());
@@ -941,14 +827,11 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	RewriteAggregateToSampleMedian(input, agg, std::move(hash_infos[0].hash_expr));
 
 	LogicalOperator *projection_anchor = agg;
-	Value threshold_val;
 	double support_threshold = 0.0;
-	bool apply_support_filter =
-	    input.context.TryGetCurrentSetting("privacy_min_group_count", threshold_val) && !threshold_val.IsNull() &&
-	    (support_threshold = threshold_val.GetValue<double>()) > 0.0 && std::isfinite(support_threshold);
+	bool apply_support_filter = TryGetPrivacyMinGroupCount(input.context, support_threshold);
 	if (apply_support_filter) {
 		idx_t support_pos = agg->expressions.size();
-		agg->expressions.push_back(BindAggregateLocal(input, "count_star", nullptr));
+		agg->expressions.push_back(BindPlainAggregate(input, "count_star", nullptr));
 		agg->ResolveOperatorTypes();
 		projection_anchor = ApplySupportFilter(input, plan, agg, support_pos, support_threshold);
 	}

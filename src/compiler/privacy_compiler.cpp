@@ -1,9 +1,8 @@
 //
-// PAC Bitslice Compiler
+// Privacy Compiler
 //
-// This file implements the bitslice compilation strategy for PAC (Privacy-Augmented Computation).
-// The bitslice compiler transforms query plans to add necessary joins and hash expressions for
-// computing PAC aggregates over privacy units.
+// This file implements the unified privacy compiler entrypoint plus the PAC bitslice strategy.
+// DP/SASS mechanism-specific strategies live in privacy_mechanisms.cpp and are called from here.
 //
 // Key Concepts:
 // - Privacy Unit (PU): The entity that defines privacy boundaries (e.g., customer)
@@ -14,7 +13,8 @@
 // Created by ila on 12/21/25.
 //
 
-#include "compiler/pac_bitslice_compiler.hpp"
+#include "compiler/privacy_compiler.hpp"
+#include "compiler/privacy_mechanisms.hpp"
 #include "privacy_debug.hpp"
 #include "utils/privacy_helpers.hpp"
 #include "metadata/privacy_compatibility_check.hpp"
@@ -39,6 +39,32 @@
 #include <cmath>
 
 namespace duckdb {
+
+static void CompilePacMechanism(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
+                                unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
+                                const string &query, const string &query_hash);
+
+void CompilePrivQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
+                      unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units, const string &query,
+                      const string &query_hash) {
+	string privacy_mode = GetPrivacyMode(input.context);
+	PRIVACY_DEBUG_PRINT("[PRIV_COMPILER] CompilePrivQuery mode=" + privacy_mode);
+
+	// We run in the pre-optimizer phase, so the LogicalOperator::types vectors are empty.
+	// Resolve once here so all mechanisms can rely on populated types.
+	plan->ResolveOperatorTypes();
+
+	if (privacy_mode == "pac") {
+		CompilePacMechanism(check, input, plan, privacy_units, query, query_hash);
+	} else if (privacy_mode == "dp_sass") {
+		CompileDPSampleMedianQuery(check, input, plan, privacy_units, query_hash);
+	} else if (privacy_mode == "dp_elastic") {
+		CompileDPElasticQuery(check, input, plan, privacy_units, query_hash);
+	} else {
+		throw InvalidInputException("unknown privacy_mode '" + privacy_mode +
+		                            "' (expected 'pac', 'dp_elastic', or 'dp_sass')");
+	}
+}
 
 // --- Helpers ---
 
@@ -448,11 +474,11 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 	return CTEHashMatch();
 }
 
-vector<PacAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExtensionInput &input,
-                                                                 unique_ptr<LogicalOperator> &plan,
-                                                                 const vector<string> &pu_table_names,
-                                                                 const PrivacyCompatibilityResult &check,
-                                                                 const CTETableMap &cte_map) {
+vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExtensionInput &input,
+                                                                  unique_ptr<LogicalOperator> &plan,
+                                                                  const vector<string> &pu_table_names,
+                                                                  const PrivacyCompatibilityResult &check,
+                                                                  const CTETableMap &cte_map) {
 	// Find ALL aggregate nodes in the plan first
 	vector<LogicalAggregate *> all_aggregates;
 	FindAllAggregates(plan, all_aggregates);
@@ -513,7 +539,7 @@ vector<PacAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExtens
 	std::unordered_map<idx_t, ColumnBinding> cte_hash_cache;
 
 	// For each target aggregate, build hash expressions and modify it
-	vector<PacAggregateHashInfo> result;
+	vector<PrivAggregateHashInfo> result;
 	for (auto *target_agg : target_aggregates) {
 		// Build hash expressions for each privacy unit
 		vector<unique_ptr<Expression>> hash_exprs;
@@ -545,7 +571,7 @@ vector<PacAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExtens
 				if (it != check.table_metadata.end() && !it->second.pks.empty()) {
 					pks = it->second.pks;
 				} else {
-					throw InternalException("PAC compiler: PU table '" + pu_table_name +
+					throw InternalException("Privacy compiler: PU table '" + pu_table_name +
 					                        "' has no PRIVACY_KEY defined. Use ALTER PU TABLE " + pu_table_name +
 					                        " ADD PRIVACY_KEY (column_name) to define one.");
 				}
@@ -771,8 +797,8 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	}
 }
 
-PacPUHashingSetup PreparePlanForPUHashing(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
-                                          unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units) {
+PrivPUHashingSetup PreparePlanForPUHashing(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
+                                           unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units) {
 	// Build the CTE table map once — used for both routing and aggregate filtering
 	auto cte_map = BuildAndResolveCTETableMap(plan.get());
 
@@ -813,7 +839,7 @@ PacPUHashingSetup PreparePlanForPUHashing(const PrivacyCompatibilityResult &chec
 
 		auto it = check.fk_paths.find(start_table);
 		if (it == check.fk_paths.end() || it->second.empty()) {
-			throw InvalidInputException("PAC compiler: expected fk_path for start table " + start_table);
+			throw InvalidInputException("Privacy compiler: expected fk_path for start table " + start_table);
 		}
 
 		// Deduplicate missing tables
@@ -828,11 +854,11 @@ PacPUHashingSetup PreparePlanForPUHashing(const PrivacyCompatibilityResult &chec
 	return {std::move(cte_map), std::move(pu_names)};
 }
 
-void CompilePacBitsliceQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
-                             unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                             const string &query, const string &query_hash) {
+static void CompilePacMechanism(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
+                                unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
+                                const string &query, const string &query_hash) {
 #if PRIVACY_DEBUG
-	PRIVACY_DEBUG_PRINT("=== PAC BITSLICE COMPILATION ===");
+	PRIVACY_DEBUG_PRINT("=== PRIVACY BITSLICE COMPILATION ===");
 	PRIVACY_DEBUG_PRINT("Query hash: " + query_hash);
 	PRIVACY_DEBUG_PRINT("Query: " + query.substr(0, 100) + (query.length() > 100 ? "..." : ""));
 	PRIVACY_DEBUG_PRINT("Privacy units: " + std::to_string(privacy_units.size()));
@@ -842,9 +868,6 @@ void CompilePacBitsliceQuery(const PrivacyCompatibilityResult &check, OptimizerE
 	PRIVACY_DEBUG_PRINT("Scanned PU tables: " + std::to_string(check.scanned_pu_tables.size()));
 	PRIVACY_DEBUG_PRINT("Scanned non-PU tables: " + std::to_string(check.scanned_non_pu_tables.size()));
 #endif
-	// Resolve operator types on the raw plan so that .types vectors are populated.
-	// In the pre-optimizer phase, ResolveOperatorTypes hasn't run yet.
-	plan->ResolveOperatorTypes();
 
 	// Generate filename with all PU names concatenated
 	string path = GetPacCompiledPath(input.context, ".");
@@ -872,22 +895,22 @@ void CompilePacBitsliceQuery(const PrivacyCompatibilityResult &check, OptimizerE
 	// b.3) we hash the PK(s) as in a) and AND them together
 
 #if PRIVACY_DEBUG
-	PRIVACY_DEBUG_PRINT("=== PLAN BEFORE PAC TRANSFORMATION ===");
+	PRIVACY_DEBUG_PRINT("=== PLAN BEFORE PRIVACY TRANSFORMATION ===");
 	plan->Print();
 #endif
 	auto pu_setup = PreparePlanForPUHashing(check, input, plan, privacy_units);
 	// Phase 2: always transform aggregates via unified path
-	PacAggregateInfoMap pac_agg_info;
-	ModifyPlanWithPU(input, plan, pu_setup.pu_names, check, pu_setup.cte_map, pac_agg_info);
+	PacAggregateInfoMap priv_agg_info;
+	ModifyPlanWithPU(input, plan, pu_setup.pu_names, check, pu_setup.cte_map, priv_agg_info);
 
 	// ============================================================================
 	// CATEGORICAL QUERY HANDLING
 	// ============================================================================
-	// After the standard PAC transformation, check if this is a categorical query
-	// (outer query compares against inner PAC aggregate without its own aggregate).
+	// After the standard aggregate transformation, check if this is a categorical query
+	// (outer query compares against inner privacy aggregate without its own aggregate).
 	// If so, rewrite to use _counters variants and priv_filter for probabilistic filtering.
 	if (GetBooleanSetting(input.context, "pac_categorical", true)) {
-		RewriteCategoricalQuery(input, plan, pac_agg_info);
+		RewriteCategoricalQuery(input, plan, priv_agg_info);
 	}
 
 	// Decompose priv_noised_avg / priv_avg into sum/count + division NOW, in the
@@ -910,9 +933,9 @@ void CompilePacBitsliceQuery(const PrivacyCompatibilityResult &check, OptimizerE
 	}
 
 #if PRIVACY_DEBUG
-	PRIVACY_DEBUG_PRINT("=== PAC-OPTIMIZED PLAN ===");
+	PRIVACY_DEBUG_PRINT("=== PRIVACY-OPTIMIZED PLAN ===");
 	plan->Print();
-	PRIVACY_DEBUG_PRINT("=== PAC COMPILATION END ===");
+	PRIVACY_DEBUG_PRINT("=== PRIVACY COMPILATION END ===");
 #endif
 }
 } // namespace duckdb

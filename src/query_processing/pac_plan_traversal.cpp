@@ -76,7 +76,7 @@ LogicalGet *FindTableScanInSubtree(LogicalOperator *subtree, const string &table
 	if (subtree->type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = subtree->Cast<LogicalGet>();
 		auto tblptr = get.GetTable();
-		if (tblptr && tblptr->name == table_name) {
+		if (tblptr && StringUtil::CIEquals(tblptr->name, table_name)) {
 			return &get;
 		}
 	}
@@ -176,6 +176,19 @@ unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperator> *roo
 		}
 	}
 
+	return nullptr;
+}
+
+unique_ptr<LogicalOperator> *FindOperatorSlotByPointer(unique_ptr<LogicalOperator> &root, LogicalOperator *target) {
+	if (root.get() == target) {
+		return &root;
+	}
+	for (auto &child : root->children) {
+		auto *result = FindOperatorSlotByPointer(child, target);
+		if (result) {
+			return result;
+		}
+	}
 	return nullptr;
 }
 
@@ -401,6 +414,18 @@ void FindAllNodesByTable(unique_ptr<LogicalOperator> *root, const string &table_
 	// Recursively check children
 	for (auto &child : cur->children) {
 		FindAllNodesByTable(&child, table_name, results);
+	}
+}
+
+void FindAllGetNodes(LogicalOperator *root, vector<LogicalGet *> &results) {
+	if (!root) {
+		return;
+	}
+	if (root->type == LogicalOperatorType::LOGICAL_GET) {
+		results.push_back(&root->Cast<LogicalGet>());
+	}
+	for (auto &child : root->children) {
+		FindAllGetNodes(child.get(), results);
 	}
 }
 
