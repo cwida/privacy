@@ -14,10 +14,7 @@ statement ok
 SET privacy_seed = 42;
 
 statement ok
-SET privacy_mode = 'dp_elastic';
-
-statement ok
-SET dp_strategy = 'sample_median';
+SET privacy_mode = 'dp_sass';
 
 statement ok
 SET privacy_noise = false;
@@ -29,9 +26,9 @@ statement ok
 SET dp_delta = 1e-6;
 
 query I
-SELECT current_setting('dp_strategy');
+SELECT current_setting('privacy_mode');
 ----
-sample_median
+dp_sass
 
 query I
 SELECT current_setting('dp_sample_lanes');
@@ -364,4 +361,4 @@ even	true
 odd	true
 
 statement ok
-SET dp_strategy = 'elastic';
+SET privacy_mode = 'dp_elastic';

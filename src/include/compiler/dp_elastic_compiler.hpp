@@ -9,7 +9,8 @@
 namespace duckdb {
 
 // Entry point for the elastic-sensitivity differential privacy compiler.
-// Selected via `SET privacy_mode = 'dp_elastic'`. Mirrors CompilePacBitsliceQuery's signature.
+// Selected via `SET privacy_mode = 'dp_elastic'` and `SET privacy_mode = 'dp_sass'`.
+// Mirrors CompilePacBitsliceQuery's signature.
 void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
                            unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
                            const string &query_hash);

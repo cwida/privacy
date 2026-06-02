@@ -308,15 +308,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "Mutual information bound controlling privacy-utility tradeoff (default: 1/128). "
 	    "Lower values = more noise = more privacy. Set to 0 for deterministic (no noise) mode.",
 	    LogicalType::DOUBLE, Value::DOUBLE(1.0 / 128));
-	// Privacy mechanism selector: 'pac' (default) or 'dp_elastic' for elastic-sensitivity DP
+	// Privacy mechanism selector: 'pac' (default), 'dp_elastic', or 'dp_sass'
 	db.config.AddExtensionOption("privacy_mode",
-	                             "Privacy mechanism: 'pac' (default) or 'dp_elastic' for elastic-sensitivity DP",
+	                             "Privacy mechanism: 'pac' (default), 'dp_elastic', or 'dp_sass'",
 	                             LogicalType::VARCHAR, Value("pac"));
-	db.config.AddExtensionOption("dp_strategy",
-	                             "DP strategy for privacy_mode='dp_elastic': 'elastic' or 'sample_median'",
-	                             LogicalType::VARCHAR, Value("elastic"));
 	db.config.AddExtensionOption(
-	    "dp_sample_lanes", "Number of sample lanes a privacy unit contributes in dp_strategy='sample_median'",
+	    "dp_sample_lanes", "Number of sample lanes a privacy unit contributes in privacy_mode='dp_sass'",
 	    LogicalType::INTEGER, Value::INTEGER(DP_SAMPLE_DEFAULT_LANES), ValidateDpSampleLanesSetting);
 	// Differential privacy budget (ε), used only when privacy_mode = 'dp_elastic'
 	db.config.AddExtensionOption("dp_epsilon", "Differential privacy budget (used when privacy_mode = 'dp_elastic')",

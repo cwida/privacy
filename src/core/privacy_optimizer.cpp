@@ -390,7 +390,8 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	if (!priv_rewrite_enabled) {
 		return;
 	}
-	if (GetPrivacyMode(input.context) == "dp_elastic" &&
+	string early_privacy_mode = GetPrivacyMode(input.context);
+	if ((early_privacy_mode == "dp_elastic" || early_privacy_mode == "dp_sass") &&
 	    (ContainsAggregateOperator(plan.get()) || ContainsGetOperator(plan.get()))) {
 		ValidateDPElasticDelta(input.context);
 	}
@@ -569,9 +570,9 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	if (check.eligible_for_rewrite) {
 		bool apply_noise = IsPacNoiseEnabled(input.context, true);
 		string privacy_mode = GetPrivacyMode(input.context);
-		// dp_elastic always runs its pipeline so clipping, FK chain, and sensitivity
-		// are exercised even when privacy_noise=false. The compiler zeroes scales internally.
-		bool should_compile = apply_noise || privacy_mode == "dp_elastic";
+		// DP modes always run their pipelines so clipping, FK chain, and sensitivity
+		// are exercised even when privacy_noise=false. The compilers zero scales internally.
+		bool should_compile = apply_noise || privacy_mode == "dp_elastic" || privacy_mode == "dp_sass";
 		if (should_compile) {
 #if PRIVACY_DEBUG
 			PRIVACY_DEBUG_PRINT("Query requires PAC Compilation for privacy units:");
@@ -582,17 +583,14 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 			// set replan flag for duration of compilation
 			ReplanGuard scoped2(pac_info);
 			if (privacy_mode == "dp_elastic") {
-				string dp_strategy = GetDPStrategy(input.context);
-				if (dp_strategy == "elastic") {
-					CompileDPElasticQuery(check, input, target_plan, privacy_units, query_hash);
-				} else if (dp_strategy == "sample_median") {
-					CompileDPSampleMedianQuery(check, input, target_plan, privacy_units, query_hash);
-				} else {
-					throw InvalidInputException("dp_elastic: unknown dp_strategy '" + dp_strategy +
-					                            "' (expected 'elastic' or 'sample_median')");
-				}
-			} else {
+				CompileDPElasticQuery(check, input, target_plan, privacy_units, query_hash);
+			} else if (privacy_mode == "dp_sass") {
+				CompileDPSampleMedianQuery(check, input, target_plan, privacy_units, query_hash);
+			} else if (privacy_mode == "pac") {
 				CompilePacBitsliceQuery(check, input, target_plan, privacy_units, normalized, query_hash);
+			} else {
+				throw InvalidInputException("unknown privacy_mode '" + privacy_mode +
+				                            "' (expected 'pac', 'dp_elastic', or 'dp_sass')");
 			}
 
 			// For DML targeting derived_pu tables: convert priv_noised_* → priv_* counter variants

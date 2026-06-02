@@ -594,10 +594,6 @@ string GetPrivacyMode(ClientContext &context) {
 	return GetNormalizedStringSetting(context, "privacy_mode", "pac");
 }
 
-string GetDPStrategy(ClientContext &context) {
-	return GetNormalizedStringSetting(context, "dp_strategy", "elastic");
-}
-
 double GetDpEpsilon(ClientContext &context, double default_value) {
 	Value v;
 	if (!context.TryGetCurrentSetting("dp_epsilon", v) || v.IsNull()) {
