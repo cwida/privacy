@@ -703,12 +703,14 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 		proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(agg->types[gi], ColumnBinding(agg->group_index, gi)));
 	}
 
+	int sample_lanes = GetDpSampleLanes(input.context);
 	for (idx_t ai = 0; ai < n_aggs; ai++) {
 		vector<unique_ptr<Expression>> children;
 		children.push_back(
 		    make_uniq<BoundColumnRefExpression>(agg->types[n_groups + ai], ColumnBinding(agg->aggregate_index, ai)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(epsilons[ai])));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(deltas[ai])));
+		children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(sample_lanes)));
 		unique_ptr<Expression> noised = BindScalarLocal(input, "priv_smooth_median_noise", std::move(children));
 		if (output_types[ai] != LogicalType::DOUBLE) {
 			noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), output_types[ai]);

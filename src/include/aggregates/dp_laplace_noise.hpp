@@ -10,7 +10,7 @@ class ExtensionLoader;
 // Returns value + Lap(scale) (location 0, scale = scale). Deterministic when `privacy_seed` is set.
 void RegisterDpLaplaceNoiseFunction(ExtensionLoader &loader);
 
-// Registers `priv_smooth_median_noise(counters, epsilon, delta) -> DOUBLE`.
+// Registers `priv_smooth_median_noise(counters, epsilon, delta, sample_lanes) -> DOUBLE`.
 // The counters are already scaled to full-population estimates.
 void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader);
 

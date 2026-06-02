@@ -34,27 +34,43 @@
 
 #define PAC_MAGIC_HASH 2983746509182734091ULL
 
-constexpr int DP_SAMPLE_DRAWS = 8;
-constexpr double DP_SAMPLE_LANE_PROBABILITY = 0.11837573434899539; // 1 - (63/64)^8
-constexpr double DP_SAMPLE_RESCALE = 1.0 / DP_SAMPLE_LANE_PROBABILITY;
+constexpr int DP_SAMPLE_DEFAULT_LANES = 1;
+constexpr int DP_SAMPLE_MAX_LANES = 8;
 
-static inline uint64_t DpSampleHash(uint64_t key_hash) {
+static inline int ValidateDpSampleLanes(int64_t sample_lanes) {
+	if (sample_lanes < 1 || sample_lanes > DP_SAMPLE_MAX_LANES) {
+		throw duckdb::InvalidInputException("dp_sample_lanes must be between 1 and 8");
+	}
+	return static_cast<int>(sample_lanes);
+}
+
+static inline int GetDpSampleLanes(duckdb::ClientContext &ctx) {
+	duckdb::Value sample_lanes_val;
+	if (ctx.TryGetCurrentSetting("dp_sample_lanes", sample_lanes_val) && !sample_lanes_val.IsNull()) {
+		return ValidateDpSampleLanes(sample_lanes_val.GetValue<int64_t>());
+	}
+	return DP_SAMPLE_DEFAULT_LANES;
+}
+
+static inline uint64_t DpSampleHash(uint64_t key_hash, int sample_lanes) {
 	uint64_t sample_hash = 0;
-	for (int i = 0; i < DP_SAMPLE_DRAWS; i++) {
+	for (int i = 0; i < sample_lanes; i++) {
 		sample_hash |= 1ULL << ((key_hash >> (i * 6)) & 63);
 	}
 	return sample_hash;
 }
 
+static inline double DpSampleLaneProbability(int sample_lanes) {
+	return 1.0 - std::pow(63.0 / 64.0, static_cast<double>(sample_lanes));
+}
+
+static inline double DpSampleRescale(int sample_lanes) {
+	return 1.0 / DpSampleLaneProbability(sample_lanes);
+}
+
 struct PacIdentityHash {
 	static inline uint64_t Transform(uint64_t key_hash) {
 		return key_hash;
-	}
-};
-
-struct PacDpSampleHash {
-	static inline uint64_t Transform(uint64_t key_hash) {
-		return DpSampleHash(key_hash);
 	}
 };
 
@@ -211,6 +227,7 @@ struct PacBindData : public FunctionData {
 	uint64_t query_hash;      // derived from seed: used inside priv_hash() for XOR and as counter selector
 	double scale_divisor;     // for DECIMAL priv_avg: divide result by 10^scale (default 1.0)
 	bool hash_repair;         // if true, priv_hash() repairs hash to exactly 32 bits set
+	int sample_lanes;         // SASS mode: number of sampled lanes per PU hash; 0 means identity hash
 	double utility_threshold; // z-score threshold for utility NULLing (NaN = disabled, any value = enabled)
 
 	// Persistent secret p-tracking: shared across all aggregates in the same query (same query_hash).
@@ -226,10 +243,10 @@ struct PacBindData : public FunctionData {
 	// Primary constructor - reads seed from privacy_seed setting, or uses query-id if not set.
 	// All aggregates in the same query get the same seed and query_hash.
 	explicit PacBindData(ClientContext &ctx, double mi_val, double correction_val = 1.0, double scale_div = 1.0,
-	                     bool hash_repair_val = false)
+	                     bool hash_repair_val = false, int sample_lanes_val = 0)
 	    : mi(mi_val), correction(correction_val), scale_divisor(scale_div), hash_repair(hash_repair_val),
-	      utility_threshold(std::numeric_limits<double>::quiet_NaN()), total_update_count(0), suspicious_count(0),
-	      nonsuspicious_count(0) {
+	      sample_lanes(sample_lanes_val), utility_threshold(std::numeric_limits<double>::quiet_NaN()),
+	      total_update_count(0), suspicious_count(0), nonsuspicious_count(0) {
 		// Read utility threshold: if set (non-null), enables probabilistic NULLing of low-SNR cells
 		Value ut_val;
 		if (ctx.TryGetCurrentSetting("privacy_min_group_count", ut_val) && !ut_val.IsNull()) {
@@ -269,10 +286,18 @@ struct PacBindData : public FunctionData {
 	bool Equals(const FunctionData &other) const override {
 		auto &o = other.Cast<PacBindData>();
 		return mi == o.mi && correction == o.correction && seed == o.seed && query_hash == o.query_hash &&
-		       scale_divisor == o.scale_divisor && hash_repair == o.hash_repair &&
+		       scale_divisor == o.scale_divisor && hash_repair == o.hash_repair && sample_lanes == o.sample_lanes &&
 		       utility_threshold == o.utility_threshold;
 	}
 };
+
+static inline int GetPacSampleLanes(AggregateInputData &aggr) {
+	return aggr.bind_data ? aggr.bind_data->Cast<PacBindData>().sample_lanes : 0;
+}
+
+static inline uint64_t TransformPacUpdateHash(uint64_t key_hash, int sample_lanes) {
+	return sample_lanes > 0 ? DpSampleHash(key_hash, sample_lanes) : key_hash;
+}
 
 // Common bind helper: reads mi from setting, extracts correction from args[correction_arg_index],
 // validates it (foldable constant >= 0), and returns a PacBindData.

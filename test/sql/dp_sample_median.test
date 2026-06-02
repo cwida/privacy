@@ -33,11 +33,53 @@ SELECT current_setting('dp_strategy');
 ----
 sample_median
 
+query I
+SELECT current_setting('dp_sample_lanes');
+----
+1
+
+statement error
+SET dp_sample_lanes = 0;
+----
+dp_sample_lanes
+
+statement error
+SET dp_sample_lanes = 9;
+----
+dp_sample_lanes
+
+statement ok
+SET dp_sample_lanes = 1;
+
+query II
+SELECT priv_sample_sum(0::UBIGINT, 1.0)[1]::INTEGER,
+       priv_sample_sum(0::UBIGINT, 1.0)[2]::INTEGER;
+----
+64	0
+
+statement ok
+SET dp_sample_lanes = 2;
+
+query III
+SELECT abs(priv_sample_sum(64::UBIGINT, 1.0)[1] - (4096.0 / 127.0)) < 1e-5,
+       abs(priv_sample_sum(64::UBIGINT, 1.0)[2] - (4096.0 / 127.0)) < 1e-5,
+       priv_sample_sum(64::UBIGINT, 1.0)[3] = 0;
+----
+true	true	true
+
+statement ok
+SET dp_sample_lanes = 8;
+
 # Smooth sensitivity treats affected as a sample-aggregate step size. One PU can
-# affect eight sample lanes, so an eight-lane median jump must be charged at
-# distance 0, not exponentially decayed as eight separate PU changes.
+# affect dp_sample_lanes sample lanes, so an eight-lane median jump must be charged
+# at distance 0 here, not exponentially decayed as eight separate PU changes. The
+# scalar takes sample_lanes explicitly so prepared statements and reused counters
+# do not observe a later setting change.
 statement ok
 SET privacy_noise = true;
+
+statement ok
+SET dp_sample_lanes = 1;
 
 query I
 WITH vals AS (
@@ -46,7 +88,7 @@ WITH vals AS (
 ), counters AS (
     SELECT list(v ORDER BY v) AS l FROM vals
 )
-SELECT abs(priv_smooth_median_noise(l, 10.0, 1e-6)) > 10000.0
+SELECT abs(priv_smooth_median_noise(l, 10.0, 1e-6, 8)) > 10000.0
 FROM counters;
 ----
 true
@@ -73,7 +115,7 @@ ALTER TABLE users SET PU;
 statement ok
 ALTER TABLE events ADD PRIVACY_LINK (uid) REFERENCES users(uid);
 
-# COUNT uses the 8-of-64 sample mask and median release. With noise disabled,
+# COUNT uses the configured sample mask and median release. With noise disabled,
 # it is deterministic but still an estimator, not the exact count.
 query I
 SELECT COUNT(*) BETWEEN 900 AND 1100 FROM events;

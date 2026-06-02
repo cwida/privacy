@@ -37,16 +37,18 @@ static void PacCountInitialize(const AggregateFunction &, data_ptr_t state_ptr) 
 
 void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr, idx_t count) {
 	ScatterState &agg = *reinterpret_cast<ScatterState *>(state_ptr);
+	int sample_lanes = GetPacSampleLanes(aggr);
 	UnifiedVectorFormat idata;
 	inputs[0].ToUnifiedFormat(count, idata);
 	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
 	for (idx_t i = 0; i < count; i++) {
 		auto idx = idata.sel->get_index(i);
 		if (idata.validity.RowIsValid(idx)) {
+			auto key_hash = TransformPacUpdateHash(input_data[idx], sample_lanes);
 #if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
-			PacCountUpdateOne(agg, input_data[idx], aggr.allocator);
+			PacCountUpdateOne(agg, key_hash, aggr.allocator);
 #else
-			PacCountBufferOrUpdateOne(agg, input_data[idx], aggr.allocator);
+			PacCountBufferOrUpdateOne(agg, key_hash, aggr.allocator);
 #endif
 		}
 	}
@@ -54,6 +56,7 @@ void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t
 
 void PacCountColumnUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr, idx_t count) {
 	ScatterState &agg = *reinterpret_cast<ScatterState *>(state_ptr);
+	int sample_lanes = GetPacSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, col_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, col_data);
@@ -62,16 +65,18 @@ void PacCountColumnUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data
 		auto h_idx = hash_data.sel->get_index(i);
 		auto c_idx = col_data.sel->get_index(i);
 		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
+			auto key_hash = TransformPacUpdateHash(hashes[h_idx], sample_lanes);
 #if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
-			PacCountUpdateOne(agg, hashes[h_idx], aggr.allocator);
+			PacCountUpdateOne(agg, key_hash, aggr.allocator);
 #else
-			PacCountBufferOrUpdateOne(agg, hashes[h_idx], aggr.allocator);
+			PacCountBufferOrUpdateOne(agg, key_hash, aggr.allocator);
 #endif
 		}
 	}
 }
 
 void PacCountScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
+	int sample_lanes = GetPacSampleLanes(aggr);
 	UnifiedVectorFormat idata, sdata;
 	inputs[0].ToUnifiedFormat(count, idata);
 	states.ToUnifiedFormat(count, sdata);
@@ -80,16 +85,18 @@ void PacCountScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vec
 	for (idx_t i = 0; i < count; i++) {
 		auto idx = idata.sel->get_index(i);
 		if (idata.validity.RowIsValid(idx)) { // to protect against very many groups, thus uses buffering
+			auto key_hash = TransformPacUpdateHash(input_data[idx], sample_lanes);
 #if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
-			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], input_data[idx], aggr.allocator);
+			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], key_hash, aggr.allocator);
 #else
-			PacCountBufferOrUpdateOne(*state_p[sdata.sel->get_index(i)], input_data[idx], aggr.allocator);
+			PacCountBufferOrUpdateOne(*state_p[sdata.sel->get_index(i)], key_hash, aggr.allocator);
 #endif
 		}
 	}
 }
 
 void PacCountColumnScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
+	int sample_lanes = GetPacSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, col_data, sdata;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, col_data);
@@ -101,10 +108,11 @@ void PacCountColumnScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_
 		auto c_idx = col_data.sel->get_index(i);
 		if (hash_data.validity.RowIsValid(h_idx) && col_data.validity.RowIsValid(c_idx)) {
 			// to protect against very many groups, thus uses buffering
+			auto key_hash = TransformPacUpdateHash(hashes[h_idx], sample_lanes);
 #if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
-			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], hashes[h_idx], aggr.allocator);
+			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], key_hash, aggr.allocator);
 #else
-			PacCountBufferOrUpdateOne(*state_p[sdata.sel->get_index(i)], hashes[h_idx], aggr.allocator);
+			PacCountBufferOrUpdateOne(*state_p[sdata.sel->get_index(i)], key_hash, aggr.allocator);
 #endif
 		}
 	}

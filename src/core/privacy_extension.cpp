@@ -100,6 +100,10 @@ static void SetExtensionSetting(ClientContext &context, const string &name, cons
 	client_config.user_settings.SetUserSetting(extension_option.setting_index.GetIndex(), std::move(target_value));
 }
 
+static void ValidateDpSampleLanesSetting(ClientContext &, SetScope, Value &parameter) {
+	ValidateDpSampleLanes(parameter.GetValue<int64_t>());
+}
+
 static double ComputePrivacyUnitCardinality(ClientContext &context) {
 	auto table_names = PrivacyMetadataManager::Get().GetAllTableNames();
 	vector<std::pair<string, PrivacyTableMetadata>> pu_tables;
@@ -311,6 +315,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("dp_strategy",
 	                             "DP strategy for privacy_mode='dp_elastic': 'elastic' or 'sample_median'",
 	                             LogicalType::VARCHAR, Value("elastic"));
+	db.config.AddExtensionOption(
+	    "dp_sample_lanes", "Number of sample lanes a privacy unit contributes in dp_strategy='sample_median'",
+	    LogicalType::INTEGER, Value::INTEGER(DP_SAMPLE_DEFAULT_LANES), ValidateDpSampleLanesSetting);
 	// Differential privacy budget (ε), used only when privacy_mode = 'dp_elastic'
 	db.config.AddExtensionOption("dp_epsilon", "Differential privacy budget (used when privacy_mode = 'dp_elastic')",
 	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));

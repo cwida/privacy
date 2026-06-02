@@ -112,7 +112,7 @@ inline void PacClipMinMaxFlushBuffer(PacClipMinMaxStateWrapper<IS_MAX> &src, Pac
 // ============================================================================
 template <bool IS_MAX, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
 static void PacClipMinMaxUpdate(Vector inputs[], PacClipMinMaxStateWrapper<IS_MAX> &state, idx_t count,
-                                ArenaAllocator &allocator) {
+                                ArenaAllocator &allocator, int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -123,7 +123,7 @@ static void PacClipMinMaxUpdate(Vector inputs[], PacClipMinMaxStateWrapper<IS_MA
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
-			PacClipMinMaxUpdateOne<IS_MAX, SIGNED>(state, hashes[h_idx],
+			PacClipMinMaxUpdateOne<IS_MAX, SIGNED>(state, TransformPacUpdateHash(hashes[h_idx], sample_lanes),
 			                                       ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 		}
 	} else {
@@ -133,14 +133,15 @@ static void PacClipMinMaxUpdate(Vector inputs[], PacClipMinMaxStateWrapper<IS_MA
 			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 				continue;
 			}
-			PacClipMinMaxUpdateOne<IS_MAX, SIGNED>(state, hashes[h_idx],
+			PacClipMinMaxUpdateOne<IS_MAX, SIGNED>(state, TransformPacUpdateHash(hashes[h_idx], sample_lanes),
 			                                       ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 		}
 	}
 }
 
 template <bool IS_MAX, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
-static void PacClipMinMaxScatterUpdate(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator) {
+static void PacClipMinMaxScatterUpdate(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator,
+                                       int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data, sdata;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -157,8 +158,8 @@ static void PacClipMinMaxScatterUpdate(Vector inputs[], Vector &states, idx_t co
 		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 			continue;
 		}
-		PacClipMinMaxUpdateOne<IS_MAX, SIGNED>(*state, hashes[h_idx], ConvertValue<VALUE_TYPE>::convert(values[v_idx]),
-		                                       allocator);
+		PacClipMinMaxUpdateOne<IS_MAX, SIGNED>(*state, TransformPacUpdateHash(hashes[h_idx], sample_lanes),
+		                                       ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 	}
 }
 
@@ -182,11 +183,13 @@ static void PacClipMinMaxScatterUpdate(Vector inputs[], Vector &states, idx_t co
 	static void PacClipMaxUpdate##NAME(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p,           \
 	                                   idx_t count) {                                                                  \
 		auto &state = *reinterpret_cast<PacClipMinMaxStateWrapper<true> *>(state_p);                                   \
-		PacClipMinMaxUpdate<true, SIGNED_VAL, VALUE_T, INPUT_T>(inputs, state, count, aggr.allocator);                 \
+		PacClipMinMaxUpdate<true, SIGNED_VAL, VALUE_T, INPUT_T>(inputs, state, count, aggr.allocator,                  \
+		                                                        GetPacSampleLanes(aggr));                              \
 	}                                                                                                                  \
 	static void PacClipMaxScatterUpdate##NAME(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,        \
 	                                          idx_t count) {                                                           \
-		PacClipMinMaxScatterUpdate<true, SIGNED_VAL, VALUE_T, INPUT_T>(inputs, states, count, aggr.allocator);         \
+		PacClipMinMaxScatterUpdate<true, SIGNED_VAL, VALUE_T, INPUT_T>(inputs, states, count, aggr.allocator,          \
+		                                                               GetPacSampleLanes(aggr));                       \
 	}
 PCMM_INT_TYPES_SIGNED
 PCMM_INT_TYPES_UNSIGNED
@@ -197,11 +200,13 @@ PCMM_INT_TYPES_UNSIGNED
 	static void PacClipMinUpdate##NAME(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p,           \
 	                                   idx_t count) {                                                                  \
 		auto &state = *reinterpret_cast<PacClipMinMaxStateWrapper<false> *>(state_p);                                  \
-		PacClipMinMaxUpdate<false, SIGNED_VAL, VALUE_T, INPUT_T>(inputs, state, count, aggr.allocator);                \
+		PacClipMinMaxUpdate<false, SIGNED_VAL, VALUE_T, INPUT_T>(inputs, state, count, aggr.allocator,                 \
+		                                                         GetPacSampleLanes(aggr));                             \
 	}                                                                                                                  \
 	static void PacClipMinScatterUpdate##NAME(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,        \
 	                                          idx_t count) {                                                           \
-		PacClipMinMaxScatterUpdate<false, SIGNED_VAL, VALUE_T, INPUT_T>(inputs, states, count, aggr.allocator);        \
+		PacClipMinMaxScatterUpdate<false, SIGNED_VAL, VALUE_T, INPUT_T>(inputs, states, count, aggr.allocator,         \
+		                                                                GetPacSampleLanes(aggr));                      \
 	}
 PCMM_INT_TYPES_SIGNED
 PCMM_INT_TYPES_UNSIGNED
@@ -212,7 +217,7 @@ PCMM_INT_TYPES_UNSIGNED
 // ============================================================================
 template <bool IS_MAX, typename FLOAT_TYPE, int SHIFT>
 static void PacClipMinMaxUpdateFloat(Vector inputs[], PacClipMinMaxStateWrapper<IS_MAX> &state, idx_t count,
-                                     ArenaAllocator &allocator) {
+                                     ArenaAllocator &allocator, int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -223,7 +228,7 @@ static void PacClipMinMaxUpdateFloat(Vector inputs[], PacClipMinMaxStateWrapper<
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
-			PacClipMinMaxUpdateOne<IS_MAX, true>(state, hashes[h_idx],
+			PacClipMinMaxUpdateOne<IS_MAX, true>(state, TransformPacUpdateHash(hashes[h_idx], sample_lanes),
 			                                     ScaleFloatToInt64<FLOAT_TYPE, SHIFT>(values[v_idx]), allocator);
 		}
 	} else {
@@ -233,14 +238,15 @@ static void PacClipMinMaxUpdateFloat(Vector inputs[], PacClipMinMaxStateWrapper<
 			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 				continue;
 			}
-			PacClipMinMaxUpdateOne<IS_MAX, true>(state, hashes[h_idx],
+			PacClipMinMaxUpdateOne<IS_MAX, true>(state, TransformPacUpdateHash(hashes[h_idx], sample_lanes),
 			                                     ScaleFloatToInt64<FLOAT_TYPE, SHIFT>(values[v_idx]), allocator);
 		}
 	}
 }
 
 template <bool IS_MAX, typename FLOAT_TYPE, int SHIFT>
-static void PacClipMinMaxScatterUpdateFloat(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator) {
+static void PacClipMinMaxScatterUpdateFloat(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator,
+                                            int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data, sdata;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -256,8 +262,8 @@ static void PacClipMinMaxScatterUpdateFloat(Vector inputs[], Vector &states, idx
 		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 			continue;
 		}
-		PacClipMinMaxUpdateOne<IS_MAX, true>(*state, hashes[h_idx], ScaleFloatToInt64<FLOAT_TYPE, SHIFT>(values[v_idx]),
-		                                     allocator);
+		PacClipMinMaxUpdateOne<IS_MAX, true>(*state, TransformPacUpdateHash(hashes[h_idx], sample_lanes),
+		                                     ScaleFloatToInt64<FLOAT_TYPE, SHIFT>(values[v_idx]), allocator);
 	}
 }
 
@@ -270,20 +276,24 @@ static void PacClipMinMaxScatterUpdateFloat(Vector inputs[], Vector &states, idx
 	static void PacClipMaxUpdate##NAME(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p,           \
 	                                   idx_t count) {                                                                  \
 		auto &state = *reinterpret_cast<PacClipMinMaxStateWrapper<true> *>(state_p);                                   \
-		PacClipMinMaxUpdateFloat<true, FLOAT_T, SHIFT_VAL>(inputs, state, count, aggr.allocator);                      \
+		PacClipMinMaxUpdateFloat<true, FLOAT_T, SHIFT_VAL>(inputs, state, count, aggr.allocator,                       \
+		                                                   GetPacSampleLanes(aggr));                                   \
 	}                                                                                                                  \
 	static void PacClipMaxScatterUpdate##NAME(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,        \
 	                                          idx_t count) {                                                           \
-		PacClipMinMaxScatterUpdateFloat<true, FLOAT_T, SHIFT_VAL>(inputs, states, count, aggr.allocator);              \
+		PacClipMinMaxScatterUpdateFloat<true, FLOAT_T, SHIFT_VAL>(inputs, states, count, aggr.allocator,               \
+		                                                          GetPacSampleLanes(aggr));                            \
 	}                                                                                                                  \
 	static void PacClipMinUpdate##NAME(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p,           \
 	                                   idx_t count) {                                                                  \
 		auto &state = *reinterpret_cast<PacClipMinMaxStateWrapper<false> *>(state_p);                                  \
-		PacClipMinMaxUpdateFloat<false, FLOAT_T, SHIFT_VAL>(inputs, state, count, aggr.allocator);                     \
+		PacClipMinMaxUpdateFloat<false, FLOAT_T, SHIFT_VAL>(inputs, state, count, aggr.allocator,                      \
+		                                                    GetPacSampleLanes(aggr));                                  \
 	}                                                                                                                  \
 	static void PacClipMinScatterUpdate##NAME(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,        \
 	                                          idx_t count) {                                                           \
-		PacClipMinMaxScatterUpdateFloat<false, FLOAT_T, SHIFT_VAL>(inputs, states, count, aggr.allocator);             \
+		PacClipMinMaxScatterUpdateFloat<false, FLOAT_T, SHIFT_VAL>(inputs, states, count, aggr.allocator,              \
+		                                                           GetPacSampleLanes(aggr));                           \
 	}
 PCMM_FLOAT_TYPES
 #undef XF

@@ -99,8 +99,8 @@ struct PacClipBindData : public PacBindData {
 	bool clip_scale;            // true: scale outlier levels to nearest supported; false: omit them
 
 	PacClipBindData(ClientContext &ctx, double mi_val, double correction_val, int clip_support,
-	                double float_scale_val = 1.0, bool clip_scale_val = false)
-	    : PacBindData(ctx, mi_val, correction_val, 1.0), clip_support_threshold(clip_support),
+	                double float_scale_val = 1.0, bool clip_scale_val = false, int sample_lanes_val = 0)
+	    : PacBindData(ctx, mi_val, correction_val, 1.0, false, sample_lanes_val), clip_support_threshold(clip_support),
 	      float_scale(float_scale_val), clip_scale(clip_scale_val) {
 	}
 

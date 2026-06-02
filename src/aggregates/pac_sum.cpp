@@ -232,7 +232,7 @@ inline void PacSumUpdateOne(PacSumIntStateWrapper<SIGNED> &agg, uint64_t key_has
 
 // PacSumUpdate - unified for both int and double states
 template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE, class HASH_TRANSFORM = PacIdentityHash>
-static void PacSumUpdate(Vector inputs[], State &state, idx_t count, ArenaAllocator &allocator) {
+static void PacSumUpdate(Vector inputs[], State &state, idx_t count, ArenaAllocator &allocator, int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -243,7 +243,8 @@ static void PacSumUpdate(Vector inputs[], State &state, idx_t count, ArenaAlloca
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
-			PacSumUpdateOne<SIGNED>(state, HASH_TRANSFORM::Transform(hashes[h_idx]),
+			PacSumUpdateOne<SIGNED>(state,
+			                        TransformPacUpdateHash(HASH_TRANSFORM::Transform(hashes[h_idx]), sample_lanes),
 			                        ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 		}
 	} else {
@@ -253,14 +254,16 @@ static void PacSumUpdate(Vector inputs[], State &state, idx_t count, ArenaAlloca
 			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 				continue;
 			}
-			PacSumUpdateOne<SIGNED>(state, HASH_TRANSFORM::Transform(hashes[h_idx]),
+			PacSumUpdateOne<SIGNED>(state,
+			                        TransformPacUpdateHash(HASH_TRANSFORM::Transform(hashes[h_idx]), sample_lanes),
 			                        ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 		}
 	}
 }
 
 template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE, class HASH_TRANSFORM = PacIdentityHash>
-static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator) {
+static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator,
+                                int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data, sdata;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -277,7 +280,7 @@ static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, Ar
 		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 			continue; // ignore NULLs
 		}
-		PacSumUpdateOne<SIGNED>(*state, HASH_TRANSFORM::Transform(hashes[h_idx]),
+		PacSumUpdateOne<SIGNED>(*state, TransformPacUpdateHash(HASH_TRANSFORM::Transform(hashes[h_idx]), sample_lanes),
 		                        ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 	}
 }
@@ -494,13 +497,13 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 	void PacSumUpdate##NAME(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, data_ptr_t state_p,           \
 	                        idx_t count) {                                                                             \
 		auto &state = *reinterpret_cast<ScatterIntState<SIGNED> *>(state_p);                                           \
-		PacSumUpdate<ScatterIntState<SIGNED>, SIGNED, VALUE_T, INPUT_T>(inputs, state, count,                          \
-		                                                                aggr_input_data.allocator);                    \
+		PacSumUpdate<ScatterIntState<SIGNED>, SIGNED, VALUE_T, INPUT_T>(                                               \
+		    inputs, state, count, aggr_input_data.allocator, GetPacSampleLanes(aggr_input_data));                      \
 	}                                                                                                                  \
 	void PacSumScatterUpdate##NAME(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,        \
 	                               idx_t count) {                                                                      \
-		PacSumScatterUpdate<ScatterIntState<SIGNED>, SIGNED, VALUE_T, INPUT_T>(inputs, states, count,                  \
-		                                                                       aggr_input_data.allocator);             \
+		PacSumScatterUpdate<ScatterIntState<SIGNED>, SIGNED, VALUE_T, INPUT_T>(                                        \
+		    inputs, states, count, aggr_input_data.allocator, GetPacSampleLanes(aggr_input_data));                     \
 	}
 PAC_INT_TYPES_SIGNED
 PAC_INT_TYPES_UNSIGNED
@@ -510,49 +513,57 @@ PAC_INT_TYPES_UNSIGNED
 void PacSumUpdateHugeIntDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, data_ptr_t state_p,
                                idx_t count) {
 	auto &state = *reinterpret_cast<ScatterDoubleState *>(state_p);
-	PacSumUpdate<ScatterDoubleState, true, double, hugeint_t>(inputs, state, count, aggr_input_data.allocator);
+	PacSumUpdate<ScatterDoubleState, true, double, hugeint_t>(inputs, state, count, aggr_input_data.allocator,
+	                                                          GetPacSampleLanes(aggr_input_data));
 }
 void PacSumUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, data_ptr_t state_p,
                           idx_t count) {
 	auto &state = *reinterpret_cast<ScatterDoubleState *>(state_p);
-	PacSumUpdate<ScatterDoubleState, true, double, uhugeint_t>(inputs, state, count, aggr_input_data.allocator);
+	PacSumUpdate<ScatterDoubleState, true, double, uhugeint_t>(inputs, state, count, aggr_input_data.allocator,
+	                                                           GetPacSampleLanes(aggr_input_data));
 }
 void PacSumUpdateFloat(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, data_ptr_t state_p, idx_t count) {
 	auto &state = *reinterpret_cast<ScatterDoubleState *>(state_p);
-	PacSumUpdate<ScatterDoubleState, true, double, float>(inputs, state, count, aggr_input_data.allocator);
+	PacSumUpdate<ScatterDoubleState, true, double, float>(inputs, state, count, aggr_input_data.allocator,
+	                                                      GetPacSampleLanes(aggr_input_data));
 }
 void PacSumUpdateDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, data_ptr_t state_p, idx_t count) {
 	auto &state = *reinterpret_cast<ScatterDoubleState *>(state_p);
-	PacSumUpdate<ScatterDoubleState, true, double, double>(inputs, state, count, aggr_input_data.allocator);
+	PacSumUpdate<ScatterDoubleState, true, double, double>(inputs, state, count, aggr_input_data.allocator,
+	                                                       GetPacSampleLanes(aggr_input_data));
 }
 void PacSumScatterUpdateHugeIntDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,
                                       idx_t count) {
-	PacSumScatterUpdate<ScatterDoubleState, true, double, hugeint_t>(inputs, states, count, aggr_input_data.allocator);
+	PacSumScatterUpdate<ScatterDoubleState, true, double, hugeint_t>(inputs, states, count, aggr_input_data.allocator,
+	                                                                 GetPacSampleLanes(aggr_input_data));
 }
 void PacSumScatterUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,
                                  idx_t count) {
-	PacSumScatterUpdate<ScatterDoubleState, true, double, uhugeint_t>(inputs, states, count, aggr_input_data.allocator);
+	PacSumScatterUpdate<ScatterDoubleState, true, double, uhugeint_t>(inputs, states, count, aggr_input_data.allocator,
+	                                                                  GetPacSampleLanes(aggr_input_data));
 }
 void PacSumScatterUpdateFloat(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,
                               idx_t count) {
-	PacSumScatterUpdate<ScatterDoubleState, true, double, float>(inputs, states, count, aggr_input_data.allocator);
+	PacSumScatterUpdate<ScatterDoubleState, true, double, float>(inputs, states, count, aggr_input_data.allocator,
+	                                                             GetPacSampleLanes(aggr_input_data));
 }
 void PacSumScatterUpdateDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,
                                idx_t count) {
-	PacSumScatterUpdate<ScatterDoubleState, true, double, double>(inputs, states, count, aggr_input_data.allocator);
+	PacSumScatterUpdate<ScatterDoubleState, true, double, double>(inputs, states, count, aggr_input_data.allocator,
+	                                                              GetPacSampleLanes(aggr_input_data));
 }
 
 static void DpSampleSumUpdateDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, data_ptr_t state_p,
                                     idx_t count) {
 	auto &state = *reinterpret_cast<ScatterDoubleState *>(state_p);
-	PacSumUpdate<ScatterDoubleState, true, double, double, PacDpSampleHash>(inputs, state, count,
-	                                                                        aggr_input_data.allocator);
+	PacSumUpdate<ScatterDoubleState, true, double, double>(inputs, state, count, aggr_input_data.allocator,
+	                                                       GetPacSampleLanes(aggr_input_data));
 }
 
 static void DpSampleSumScatterUpdateDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,
                                            idx_t count) {
-	PacSumScatterUpdate<ScatterDoubleState, true, double, double, PacDpSampleHash>(inputs, states, count,
-	                                                                               aggr_input_data.allocator);
+	PacSumScatterUpdate<ScatterDoubleState, true, double, double>(inputs, states, count, aggr_input_data.allocator,
+	                                                              GetPacSampleLanes(aggr_input_data));
 }
 
 // instantiate Combine methods
@@ -594,7 +605,7 @@ PacSumBind(ClientContext &ctx, AggregateFunction &, vector<unique_ptr<Expression
 
 static unique_ptr<FunctionData> DpSampleSumBind(ClientContext &ctx, AggregateFunction &,
                                                 vector<unique_ptr<Expression>> &) {
-	return make_uniq<PacBindData>(ctx, 0.0, 1.0, 1.0, false);
+	return make_uniq<PacBindData>(ctx, 0.0, 1.0, 1.0, false, GetDpSampleLanes(ctx));
 }
 
 idx_t PacSumIntStateSize(const AggregateFunction &) {
@@ -775,6 +786,8 @@ static void PacSumAvgFinalizeCountersInternal(Vector &states, AggregateInputData
 	// correction factor for value scaling
 	double correction = input.bind_data ? input.bind_data->Cast<PacBindData>().correction : 1.0;
 	bool dp_sample = MODE == PacSumCountersFinalizeMode::DP_SAMPLE;
+	double dp_sample_rescale =
+	    dp_sample && input.bind_data ? DpSampleRescale(input.bind_data->Cast<PacBindData>().sample_lanes) : 1.0;
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -817,7 +830,7 @@ static void PacSumAvgFinalizeCountersInternal(Vector &states, AggregateInputData
 		idx_t base = i * 64;
 		for (int j = 0; j < 64; j++) {
 			if (dp_sample) {
-				child_data[base + j] = static_cast<PAC_FLOAT>(buf[j] * DP_SAMPLE_RESCALE);
+				child_data[base + j] = static_cast<PAC_FLOAT>(buf[j] * dp_sample_rescale);
 			} else if ((key_hash >> j) & 1ULL) {
 				child_data[base + j] = static_cast<PAC_FLOAT>(buf[j] * 2.0 * correction);
 			} else {
