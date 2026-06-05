@@ -135,8 +135,7 @@ static inline string GetBasePacAggregateName(const string &name) {
 }
 
 // Map any aggregate name to the list-emitting variant for the active privacy mode.
-// PAC: priv_<aggr> (the counter aggregates). SASS: priv_sample_<aggr> (DpSample finalize),
-// limited to sum/count/avg today — min/max not yet implemented in SASS, so fall back to "".
+// PAC: priv_<aggr> (the counter aggregates). SASS: priv_sample_<aggr> (DpSample finalize).
 static inline string GetListAggregateVariant(const string &name, const string &privacy_mode = "pac") {
 	bool sass = privacy_mode == "dp_sass";
 	for (auto &aggr : {"sum", "count", "min", "max", "avg"}) {
@@ -147,10 +146,9 @@ static inline string GetListAggregateVariant(const string &name, const string &p
 		}
 		if (sass) {
 			string a(aggr);
-			if (a == "sum" || a == "count" || a == "avg") {
+			if (a == "sum" || a == "count" || a == "avg" || a == "min" || a == "max") {
 				return "priv_sample_" + a;
 			}
-			return ""; // priv_sample_min/max not implemented
 		}
 		return string("priv_") + aggr;
 	}

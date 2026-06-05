@@ -432,6 +432,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register _counters variants for categorical queries
 	RegisterPacMinCountersFunctions(loader);
 	RegisterPacMaxCountersFunctions(loader);
+	RegisterDpSampleMinFunctions(loader);
+	RegisterDpSampleMaxFunctions(loader);
 	// Register clip synonyms for min/max
 	RegisterPacClipMinFunctions(loader);
 	RegisterPacClipMaxFunctions(loader);

@@ -16,6 +16,7 @@
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_case_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
@@ -204,6 +205,7 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 }
 
 static LogicalAggregate *CheckDPAggregates(unique_ptr<LogicalOperator> &plan, const string &mechanism_name) {
+	bool allow_min_max = mechanism_name == "dp_sass";
 	vector<LogicalAggregate *> aggs;
 	FindAllAggregates(plan, aggs);
 	if (aggs.size() != 1) {
@@ -220,14 +222,18 @@ static LogicalAggregate *CheckDPAggregates(unique_ptr<LogicalOperator> &plan, co
 			throw InvalidInputException(mechanism_name + ": DISTINCT aggregates are not supported");
 		}
 		string name = StringUtil::Lower(aggr.function.name);
-		if (name != "count" && name != "count_star" && name != "sum" && name != "avg") {
-			throw InvalidInputException(mechanism_name + ": only COUNT, SUM, and AVG are supported (got '" +
+		bool is_count = name == "count" || name == "count_star";
+		bool is_sum_avg = name == "sum" || name == "avg";
+		bool is_min_max = name == "min" || name == "max";
+		if (!is_count && !is_sum_avg && !(allow_min_max && is_min_max)) {
+			string supported = allow_min_max ? "COUNT, SUM, AVG, MIN, and MAX" : "COUNT, SUM, and AVG";
+			throw InvalidInputException(mechanism_name + ": only " + supported + " are supported (got '" +
 			                            aggr.function.name + "')");
 		}
-		if ((name == "sum" || name == "avg") && aggr.children.size() != 1) {
+		if ((is_sum_avg || is_min_max) && aggr.children.size() != 1) {
 			throw InvalidInputException(mechanism_name + ": " + name + " must have exactly one argument");
 		}
-		if ((name == "sum" || name == "avg") && !aggr.children[0]->return_type.IsNumeric()) {
+		if ((is_sum_avg || is_min_max) && !aggr.children[0]->return_type.IsNumeric()) {
 			throw InvalidInputException(mechanism_name + ": " + name + " argument must be a numeric type (got '" +
 			                            aggr.children[0]->return_type.ToString() + "')");
 		}
@@ -556,7 +562,7 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 static std::pair<idx_t, LogicalProjection *>
 WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                        const NoiseProjection &noise_proj, const vector<AvgInfo> &avg_infos, idx_t n_groups,
-                       idx_t n_original_aggs, LogicalOperator *insert_above) {
+                       idx_t n_original_aggs, LogicalOperator *insert_above, bool null_on_nonpositive_count) {
 	D_ASSERT(!avg_infos.empty());
 
 	// Build lookup: original-agg-position → AvgInfo
@@ -584,21 +590,40 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 			proj_exprs.push_back(
 			    make_uniq<BoundColumnRefExpression>(col_type, ColumnBinding(noise_proj.proj_idx, n_groups + ai)));
 		} else {
-			// AVG: compute CAST(noised_sum AS DOUBLE) / greatest(CAST(noised_count AS DOUBLE), 1.0)
+			// AVG: compute CAST(noised_sum AS DOUBLE) / CAST(noised_count AS DOUBLE)
 			const AvgInfo &info = *avg_info;
 			auto sum_type = noise_proj.proj_types[n_groups + info.sum_pos];
 			auto cnt_type = noise_proj.proj_types[n_groups + info.count_pos];
-			auto sum_ref = make_uniq<BoundColumnRefExpression>(
-			    sum_type, ColumnBinding(noise_proj.proj_idx, n_groups + info.sum_pos));
-			auto cnt_ref = make_uniq<BoundColumnRefExpression>(
-			    cnt_type, ColumnBinding(noise_proj.proj_idx, n_groups + info.count_pos));
-			auto sum_dbl = BoundCastExpression::AddCastToType(input.context, std::move(sum_ref), LogicalType::DOUBLE);
-			auto cnt_dbl = BoundCastExpression::AddCastToType(input.context, std::move(cnt_ref), LogicalType::DOUBLE);
-			auto one = make_uniq<BoundConstantExpression>(Value::DOUBLE(1.0));
-			auto safe_cnt = input.optimizer.BindScalarFunction("greatest", std::move(cnt_dbl), std::move(one));
+
+			auto make_sum_dbl = [&]() {
+				auto sum_ref = make_uniq<BoundColumnRefExpression>(
+				    sum_type, ColumnBinding(noise_proj.proj_idx, n_groups + info.sum_pos));
+				return BoundCastExpression::AddCastToType(input.context, std::move(sum_ref), LogicalType::DOUBLE);
+			};
+			auto make_cnt_dbl = [&]() {
+				auto cnt_ref = make_uniq<BoundColumnRefExpression>(
+				    cnt_type, ColumnBinding(noise_proj.proj_idx, n_groups + info.count_pos));
+				return BoundCastExpression::AddCastToType(input.context, std::move(cnt_ref), LogicalType::DOUBLE);
+			};
+
 			// DuckDB registers "/" as "divide" for scalar functions
-			auto ratio = input.optimizer.BindScalarFunction("/", std::move(sum_dbl), std::move(safe_cnt));
-			proj_exprs.push_back(std::move(ratio));
+			auto denominator = make_cnt_dbl();
+			if (!null_on_nonpositive_count) {
+				auto one = make_uniq<BoundConstantExpression>(Value::DOUBLE(1.0));
+				denominator = input.optimizer.BindScalarFunction("greatest", std::move(denominator), std::move(one));
+				proj_exprs.push_back(input.optimizer.BindScalarFunction("/", make_sum_dbl(), std::move(denominator)));
+			} else {
+				auto ratio = input.optimizer.BindScalarFunction("/", make_sum_dbl(), std::move(denominator));
+				auto case_expr = make_uniq<BoundCaseExpression>(LogicalType::DOUBLE);
+				BoundCaseCheck check;
+				check.when_expr =
+				    make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_LESSTHANOREQUALTO, make_cnt_dbl(),
+				                                         make_uniq<BoundConstantExpression>(Value::DOUBLE(0.0)));
+				check.then_expr = make_uniq<BoundConstantExpression>(Value(LogicalType::DOUBLE));
+				case_expr->case_checks.push_back(std::move(check));
+				case_expr->else_expr = std::move(ratio);
+				proj_exprs.push_back(std::move(case_expr));
+			}
 		}
 	}
 
@@ -664,8 +689,11 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 		} else if (aggr.function.name == "sum") {
 			children.push_back(aggr.children[0]->Copy());
 			lower_expressions.push_back(BindPlainAggregate(input, "sum", std::move(children)));
+		} else if (aggr.function.name == "min" || aggr.function.name == "max") {
+			children.push_back(aggr.children[0]->Copy());
+			lower_expressions.push_back(BindPlainAggregate(input, aggr.function.name, std::move(children)));
 		} else {
-			throw InvalidInputException("dp_sample_median: only COUNT and SUM aggregates are supported");
+			throw InvalidInputException("dp_sample_median: only COUNT, SUM, MIN, and MAX aggregates are supported");
 		}
 		lower_expressions.back()->Cast<BoundAggregateExpression>().filter = aggr.filter ? aggr.filter->Copy() : nullptr;
 	}
@@ -681,7 +709,15 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 		vector<unique_ptr<Expression>> children;
 		children.push_back(pre_agg.pu_hash_ref->Copy());
 		children.push_back(std::move(lower_ref));
-		agg->expressions[ai] = BindPlainAggregate(input, "priv_sample_sum", std::move(children));
+		auto &original = agg->expressions[ai]->Cast<BoundAggregateExpression>();
+		string sample_name = "priv_sample_sum";
+		if (original.function.name == "min") {
+			sample_name = "priv_sample_min";
+		} else if (original.function.name == "max") {
+			sample_name = "priv_sample_max";
+		}
+		PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] rewrite " + original.function.name + " -> " + sample_name);
+		agg->expressions[ai] = BindPlainAggregate(input, sample_name, std::move(children));
 	}
 	agg->ResolveOperatorTypes();
 }
@@ -768,7 +804,8 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 	// Wrap AVG above the noise projection so upstream operators — including HAVING
 	// that references AVG — get remapped from the raw SUM to the ratio output.
 	if (!avg_infos.empty()) {
-		WrapAvgRatioProjection(input, plan, noise_proj, avg_infos, n_groups, n_original_aggs, noise_proj.proj_ptr);
+		WrapAvgRatioProjection(input, plan, noise_proj, avg_infos, n_groups, n_original_aggs, noise_proj.proj_ptr,
+		                       false);
 	}
 
 #if PRIVACY_DEBUG
@@ -838,7 +875,8 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 
 	auto noise_proj = WrapSampleMedianProjection(input, plan, agg, epsilons, deltas, output_types, projection_anchor);
 	if (!avg_infos.empty()) {
-		WrapAvgRatioProjection(input, plan, noise_proj, avg_infos, n_groups, n_original_aggs, noise_proj.proj_ptr);
+		WrapAvgRatioProjection(input, plan, noise_proj, avg_infos, n_groups, n_original_aggs, noise_proj.proj_ptr,
+		                       true);
 	}
 
 #if PRIVACY_DEBUG

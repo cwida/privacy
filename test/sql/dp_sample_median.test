@@ -54,6 +54,30 @@ SELECT priv_sample_sum(0::UBIGINT, 1.0)[1]::INTEGER,
 ----
 64	0
 
+query II
+SELECT priv_sample_min(0::UBIGINT, 7.0::DOUBLE)[1]::INTEGER,
+       priv_sample_min(0::UBIGINT, 7.0::DOUBLE)[2] IS NULL;
+----
+7	true
+
+query II
+SELECT priv_sample_max(0::UBIGINT, 7.0::DOUBLE)[1]::INTEGER,
+       priv_sample_max(0::UBIGINT, 7.0::DOUBLE)[2] IS NULL;
+----
+7	true
+
+query II
+SELECT abs(priv_sample_min(0::UBIGINT, 7.25::DECIMAL(10,2))[1] - 7.25) < 1e-5,
+       priv_sample_min(0::UBIGINT, 7.25::DECIMAL(10,2))[2] IS NULL;
+----
+true	true
+
+query II
+SELECT priv_sample_min(0::UBIGINT, 0.0::DOUBLE)[1] = 0.0,
+       priv_sample_min(0::UBIGINT, 0.0::DOUBLE)[2] IS NULL;
+----
+true	true
+
 statement ok
 SET dp_sample_lanes = 2;
 
@@ -92,6 +116,42 @@ true
 
 statement ok
 SET privacy_noise = false;
+
+query I
+WITH vals AS (
+    SELECT CASE WHEN i < 33 THEN NULL::FLOAT ELSE 0.0::FLOAT END AS v, i
+    FROM range(64) t(i)
+), counters AS (
+    SELECT list(v ORDER BY i) AS l FROM vals
+)
+SELECT priv_smooth_median_noise(l, 1.0, 1e-6, 1) IS NULL
+FROM counters;
+----
+true
+
+query I
+WITH vals AS (
+    SELECT CASE WHEN i < 32 THEN NULL::FLOAT ELSE 0.0::FLOAT END AS v, i
+    FROM range(64) t(i)
+), counters AS (
+    SELECT list(v ORDER BY i) AS l FROM vals
+)
+SELECT priv_smooth_median_noise(l, 1.0, 1e-6, 1) = 0.0
+FROM counters;
+----
+true
+
+query I
+WITH vals AS (
+    SELECT CASE WHEN i < 32 THEN NULL::FLOAT WHEN i < 48 THEN -10.0::FLOAT ELSE 10.0::FLOAT END AS v, i
+    FROM range(64) t(i)
+), counters AS (
+    SELECT list(v ORDER BY i) AS l FROM vals
+)
+SELECT priv_smooth_median_noise(l, 1.0, 1e-6, 1) = 10.0
+FROM counters;
+----
+true
 
 statement ok
 CREATE TABLE users AS SELECT i AS uid FROM range(1, 1001) t(i);
@@ -133,28 +193,12 @@ SELECT typeof(COUNT(*)) FROM events;
 ----
 BIGINT
 
-# SUM requires both the per-tuple DP bound and the smooth clipping support threshold.
+# SASS SUM does not use elastic-DP value bounds or clipping support.
 statement ok
 RESET dp_sum_bound;
 
-statement error
-SELECT SUM(v) FROM events;
-----
-dp_sum_bound
-
-statement ok
-SET dp_sum_bound = 1.0;
-
 statement ok
 SET priv_clip_support = 0;
-
-statement error
-SELECT SUM(v) FROM events;
-----
-priv_clip_support
-
-statement ok
-SET priv_clip_support = 1;
 
 query I
 SELECT SUM(v) BETWEEN 900.0 AND 1100.0 FROM events;
@@ -244,32 +288,145 @@ SELECT COUNT(DISTINCT uid) FROM events;
 ----
 DISTINCT
 
-statement error
-SELECT MIN(v) FROM events;
+query II
+SELECT MIN(v) BETWEEN 0.9 AND 1.1,
+       MAX(v) BETWEEN 0.9 AND 1.1
+FROM events;
 ----
-only COUNT, SUM, and AVG
+true	true
 
+query II
+SELECT typeof(MIN(v)), typeof(MAX(v)) FROM events;
+----
+DOUBLE	DOUBLE
+
+# SASS AVG is decomposed into sample SUM/COUNT and does not require bounds.
 statement ok
 RESET dp_sum_bound;
-
-statement error
-SELECT AVG(v) FROM events;
-----
-dp_sum_bound
-
-statement ok
-SET dp_sum_bound = 1.0;
 
 statement ok
 SET priv_clip_support = 0;
 
-statement error
-SELECT AVG(v) FROM events;
+query I
+SELECT AVG(v) BETWEEN 0.9 AND 1.1 FROM events;
 ----
-priv_clip_support
+true
 
 statement ok
-SET priv_clip_support = 1;
+CREATE TABLE typed_scores AS
+SELECT i AS uid,
+       (i % 100)::INTEGER AS score_i,
+       ((i % 100) + 0.25)::DECIMAL(10,2) AS score_dec
+FROM range(1, 1001) t(i);
+
+statement ok
+ALTER TABLE typed_scores ADD PRIVACY_LINK (uid) REFERENCES users(uid);
+
+query III
+SELECT MIN(score_i) BETWEEN 0 AND 20,
+       MAX(score_i) BETWEEN 80 AND 99,
+       typeof(MIN(score_i))
+FROM typed_scores;
+----
+true	true	INTEGER
+
+query III
+SELECT MIN(score_dec) BETWEEN 0.25::DECIMAL(10,2) AND 20.25::DECIMAL(10,2),
+       MAX(score_dec) BETWEEN 80.25::DECIMAL(10,2) AND 99.25::DECIMAL(10,2),
+       typeof(MIN(score_dec))
+FROM typed_scores;
+----
+true	true	DECIMAL(10,2)
+
+statement ok
+CREATE TABLE non_numeric_scores AS
+SELECT i AS uid,
+       'name-' || i::VARCHAR AS name,
+       DATE '2020-01-01' + i::INTEGER AS created_at
+FROM range(1, 11) t(i);
+
+statement ok
+ALTER TABLE non_numeric_scores ADD PRIVACY_LINK (uid) REFERENCES users(uid);
+
+statement error
+SELECT MIN(name) FROM non_numeric_scores;
+----
+min argument must be a numeric type
+
+statement error
+SELECT MAX(created_at) FROM non_numeric_scores;
+----
+max argument must be a numeric type
+
+statement ok
+CREATE TABLE tiny_events(uid INTEGER, v DOUBLE);
+
+statement ok
+INSERT INTO tiny_events VALUES (1, 10.0);
+
+statement ok
+ALTER TABLE tiny_events ADD PRIVACY_LINK (uid) REFERENCES users(uid);
+
+query IIIII
+SELECT COUNT(*) = 0,
+       SUM(v) = 0.0,
+       AVG(v) IS NULL,
+       MIN(v) IS NULL,
+       MAX(v) IS NULL
+FROM tiny_events;
+----
+true	true	true	true	true
+
+query III
+SELECT AVG(v) IS NULL,
+       MIN(v) IS NULL,
+       MAX(v) IS NULL
+FROM tiny_events
+WHERE uid > 1;
+----
+true	true	true
+
+statement ok
+CREATE TABLE scores AS
+SELECT i AS uid,
+       CASE WHEN i % 2 = 0 THEN 'even' ELSE 'odd' END AS segment,
+       (i % 100)::DOUBLE AS score
+FROM range(1, 1001) t(i);
+
+statement ok
+ALTER TABLE scores ADD PRIVACY_LINK (uid) REFERENCES users(uid);
+
+query II
+SELECT MIN(score) BETWEEN 0.0 AND 20.0,
+       MAX(score) BETWEEN 80.0 AND 99.0
+FROM scores;
+----
+true	true
+
+query III
+SELECT segment,
+       MIN(score) BETWEEN 0.0 AND 25.0,
+       MAX(score) BETWEEN 74.0 AND 99.0
+FROM scores
+GROUP BY segment
+ORDER BY segment;
+----
+even	true	true
+odd	true	true
+
+statement ok
+SET privacy_noise = true;
+
+query III
+SELECT MIN(score) IS NOT NULL,
+       isfinite(MIN(score)),
+       isfinite(MAX(score))
+FROM scores;
+----
+true	true	true
+
+statement ok
+SET privacy_noise = false;
 
 statement ok
 CREATE TABLE clicks AS
@@ -328,10 +485,10 @@ statement ok
 ALTER TABLE lines2 ADD PRIVACY_LINK (oid) REFERENCES orders2(oid);
 
 statement ok
-SET dp_sum_bound = 2.0;
+RESET dp_sum_bound;
 
 statement ok
-SET priv_clip_support = 1;
+SET priv_clip_support = 0;
 
 query III
 SELECT COUNT(*) BETWEEN 13000 AND 17000,

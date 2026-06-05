@@ -57,37 +57,37 @@ ALTER TABLE t1 ADD PRIVACY_KEY (a);
 statement ok
 ALTER TABLE t1 SET PU;
 
-# PAC-compatible query: SUM
+# Privacy-compatible query: SUM
 query I
 SELECT SUM(b) FROM t1;
 ----
 180
 
-# PAC-compatible query: COUNT
+# Privacy-compatible query: COUNT
 query I
 SELECT COUNT(*) FROM t1;
 ----
 6
 
-# PAC-compatible query: AVG
+# Privacy-compatible query: AVG
 query I
 SELECT AVG(b) FROM t1;
 ----
 30.0
 
-# Not PAC-compatible: GROUP BY on PRIVACY_KEY column
+# Not Privacy-compatible: GROUP BY on PRIVACY_KEY column
 statement error
 SELECT a, SUM(b) FROM t1 GROUP BY a ORDER BY a;
 ----
-PAC rewrite: protected column 't1.a' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 't1.a' can only be accessed inside aggregate functions
 
-# Not PAC-compatible: projecting PRIVACY_KEY column directly
+# Not Privacy-compatible: projecting PRIVACY_KEY column directly
 statement error
 SELECT a FROM t1;
 ----
-PAC rewrite: protected column 't1.a' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 't1.a' can only be accessed inside aggregate functions
 
-# PAC-compatible: MIN
+# Privacy-compatible: MIN
 query I
 SELECT MIN(a) FROM t1;
 ----
@@ -106,33 +106,33 @@ CREATE TABLE t3(m INTEGER, n INTEGER);
 statement ok
 INSERT INTO t3 VALUES (1, 1000), (2, 2000);
 
-# PAC-compatible: not a PAC query (table not in privacy file)
+# Privacy-compatible: not a PAC query (table not in privacy file)
 query II
 SELECT * FROM t2;
 ----
 1	100
 2	200
 
-# Not PAC-compatible: projecting join key from non-PU table (exposes PU column value)
+# Not Privacy-compatible: projecting join key from non-PU table (exposes PU column value)
 statement error
 SELECT t2.x, SUM(t1.b) FROM t1 INNER JOIN t2 ON t1.a = t2.x GROUP BY t2.x ORDER BY t2.x;
 ----
-PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
+Privacy rewrite: columns from privacy unit tables can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
 
-# PAC-compatible: projecting non-join key from non-PU table is OK
+# Privacy-compatible: projecting non-join key from non-PU table is OK
 query II
 SELECT t2.y, SUM(t1.b) FROM t1 INNER JOIN t2 ON t1.a = t2.x GROUP BY t2.y ORDER BY t2.y;
 ----
 100	0
 200	40
 
-# Not PAC-compatible: projecting PRIVACY_KEY in window function
+# Not Privacy-compatible: projecting PRIVACY_KEY in window function
 statement error
 SELECT a, SUM(b) OVER (PARTITION BY a) FROM t1;
 ----
-PAC rewrite: protected column 't1.a' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 't1.a' can only be accessed inside aggregate functions
 
-# PAC-compatible: PU column in WHERE clause (this IS allowed)
+# Privacy-compatible: PU column in WHERE clause (this IS allowed)
 query I
 SELECT SUM(b) FROM t1 WHERE a > 1;
 ----
@@ -208,25 +208,25 @@ ALTER TABLE sales ADD PROTECTED (amount, quantity);
 statement ok
 ALTER TABLE sales ADD PRIVACY_LINK (customer_id) REFERENCES customers(id);
 
-# PAC-compatible: protected column inside SUM aggregate
+# Privacy-compatible: protected column inside SUM aggregate
 query I
 SELECT SUM(amount) FROM sales;
 ----
 199.68
 
-# Not PAC-compatible: protected column in GROUP BY
+# Not Privacy-compatible: protected column in GROUP BY
 statement error
 SELECT amount, COUNT(*) FROM sales GROUP BY amount;
 ----
-PAC rewrite: protected column 'sales.amount' can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
+Privacy rewrite: protected column 'sales.amount' can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
 
-# Not PAC-compatible: protected column in SELECT without aggregate
+# Not Privacy-compatible: protected column in SELECT without aggregate
 statement error
 SELECT amount FROM sales;
 ----
-PAC rewrite: protected column 'sales.amount' can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
+Privacy rewrite: protected column 'sales.amount' can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
 
-# PAC-compatible: non-protected column in GROUP BY with protected column in aggregate
+# Privacy-compatible: non-protected column in GROUP BY with protected column in aggregate
 query II
 SELECT product_id, SUM(amount) FROM sales GROUP BY product_id ORDER BY product_id;
 ----
@@ -234,13 +234,13 @@ SELECT product_id, SUM(amount) FROM sales GROUP BY product_id ORDER BY product_i
 101	0.00
 102	50.00
 
-# Not PAC-compatible: protected column projected directly (even with other aggregates)
+# Not Privacy-compatible: protected column projected directly (even with other aggregates)
 statement error
 SELECT amount, SUM(quantity) FROM sales GROUP BY amount;
 ----
-PAC rewrite: protected column 'sales.amount' can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
+Privacy rewrite: protected column 'sales.amount' can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
 
-# PAC-compatible: protected column in WHERE clause with aggregate in SELECT
+# Privacy-compatible: protected column in WHERE clause with aggregate in SELECT
 query I
 SELECT SUM(quantity) FROM sales WHERE amount > 30;
 ----
@@ -253,18 +253,18 @@ CREATE TABLE products(product_id INTEGER, name VARCHAR, category VARCHAR);
 statement ok
 INSERT INTO products VALUES (100, 'Widget', 'Hardware'), (101, 'Gadget', 'Electronics'), (102, 'Gizmo', 'Hardware');
 
-# PAC-compatible: join with protected column only in aggregate
+# Privacy-compatible: join with protected column only in aggregate
 query II
 SELECT products.category, SUM(sales.amount) FROM sales JOIN products ON sales.product_id = products.product_id GROUP BY products.category ORDER BY products.category;
 ----
 Electronics	0.00
 Hardware	199.68
 
-# Not PAC-compatible: protected column in GROUP BY after join
+# Not Privacy-compatible: protected column in GROUP BY after join
 statement error
 SELECT sales.amount, COUNT(*) FROM sales JOIN products ON sales.product_id = products.product_id GROUP BY sales.amount;
 ----
-PAC rewrite: protected column 'sales.amount' can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
+Privacy rewrite: protected column 'sales.amount' can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
 
 # Clean up protected columns test
 statement ok
@@ -355,7 +355,7 @@ Carol
 statement error
 SELECT salary FROM pac_users;
 ----
-PAC rewrite: protected column 'pac_users.salary' can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
+Privacy rewrite: protected column 'pac_users.salary' can only be accessed inside aggregate functions (e.g., SUM, COUNT, AVG, MIN, MAX)
 
 # Test 2: CREATE TABLE (not PAC) with PROTECTED - should NOT be a privacy unit
 # Protected columns cannot be projected, but table doesn't trigger PAC compilation
@@ -381,7 +381,7 @@ SELECT id, public_data FROM regular_with_protected ORDER BY id;
 statement error
 SELECT secret_data FROM regular_with_protected;
 ----
-PAC rewrite: protected column 'regular_with_protected.secret_data' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'regular_with_protected.secret_data' can only be accessed inside aggregate functions
 
 # Aggregating protected columns should work (no PAC compilation triggered since not a PU)
 query I
@@ -422,7 +422,7 @@ ALTER TABLE convertible_table SET PU;
 statement error
 SELECT id, value FROM convertible_table;
 ----
-PAC rewrite: protected column 'convertible_table.id' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'convertible_table.id' can only be accessed inside aggregate functions
 
 # Aggregation should work with PAC compilation
 query I
@@ -511,7 +511,7 @@ INSERT INTO drop_test_self VALUES (1, 111), (2, 222);
 statement error
 SELECT * FROM drop_test_self;
 ----
-PAC rewrite: protected column 'drop_test_self.id' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'drop_test_self.id' can only be accessed inside aggregate functions
 
 # Drop the table
 statement ok
@@ -577,7 +577,7 @@ SELECT SUM(public_val) FROM test_linked_protected;
 statement error
 SELECT secret_val FROM test_linked_protected;
 ----
-PAC rewrite: protected column 'test_linked_protected.secret_val' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'test_linked_protected.secret_val' can only be accessed inside aggregate functions
 
 # Clean up
 statement ok
@@ -621,19 +621,19 @@ ALTER TABLE d_sales ADD PROTECTED (amount, quantity);
 statement ok
 ALTER TABLE d_sales ADD PRIVACY_LINK (customer_id) REFERENCES d_customers(id);
 
-# Not PAC-compatible: SELECT DISTINCT on protected column (even without aggregate, protected check fires first)
+# Not Privacy-compatible: SELECT DISTINCT on protected column (even without aggregate, protected check fires first)
 statement error
 SELECT DISTINCT amount FROM d_sales;
 ----
-PAC rewrite: protected column 'd_sales.amount' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'd_sales.amount' can only be accessed inside aggregate functions
 
-# Not PAC-compatible: SELECT DISTINCT on protected column (with aggregate present)
+# Not Privacy-compatible: SELECT DISTINCT on protected column (with aggregate present)
 statement error
 SELECT DISTINCT amount, SUM(quantity) FROM d_sales GROUP BY amount;
 ----
-PAC rewrite: protected column 'd_sales.amount' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'd_sales.amount' can only be accessed inside aggregate functions
 
-# PAC-compatible: SELECT DISTINCT on non-protected column with aggregate
+# Privacy-compatible: SELECT DISTINCT on non-protected column with aggregate
 query II
 SELECT DISTINCT product_id, SUM(amount) FROM d_sales GROUP BY product_id ORDER BY product_id;
 ----
@@ -641,19 +641,19 @@ SELECT DISTINCT product_id, SUM(amount) FROM d_sales GROUP BY product_id ORDER B
 101	120.00
 102	50.00
 
-# PAC-compatible: SELECT DISTINCT with only aggregates (DISTINCT is a no-op here but should not block)
+# Privacy-compatible: SELECT DISTINCT with only aggregates (DISTINCT is a no-op here but should not block)
 query I
 SELECT DISTINCT SUM(amount) FROM d_sales;
 ----
 399.68
 
-# PAC-compatible: SELECT DISTINCT as subquery with outer aggregate
+# Privacy-compatible: SELECT DISTINCT as subquery with outer aggregate
 query I
 SELECT SUM(total) FROM (SELECT DISTINCT product_id, SUM(amount) AS total FROM d_sales GROUP BY product_id) sub;
 ----
 399.76
 
-# Not PAC-compatible: SELECT DISTINCT without aggregate on FK-linked table (even on non-protected column)
+# Not Privacy-compatible: SELECT DISTINCT without aggregate on FK-linked table (even on non-protected column)
 statement error
 SELECT DISTINCT product_id FROM d_sales ORDER BY product_id;
 ----
@@ -665,3 +665,33 @@ DROP TABLE d_sales;
 
 statement ok
 DROP TABLE d_customers;
+
+# ============================================================================
+# Mode-aware compatibility checks for DP modes
+# ============================================================================
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET privacy_mode = 'dp_sass';
+
+statement ok
+SET dp_delta = 1e-6;
+
+statement ok
+CREATE PU TABLE dp_check_users(id INTEGER, v INTEGER, PRIVACY_KEY (id));
+
+statement ok
+INSERT INTO dp_check_users VALUES (1, 10), (2, 20), (3, 30);
+
+query II
+SELECT MIN(v) IS NULL, MAX(v) IS NULL FROM dp_check_users;
+----
+true	true
+
+statement ok
+SET privacy_mode = 'pac';
+
+statement ok
+DROP TABLE dp_check_users;

@@ -143,13 +143,21 @@ static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state,
 			continue;
 		}
 		std::array<double, 64> values;
+		idx_t valid_count = 0;
 		for (idx_t j = 0; j < 64; j++) {
 			auto child_idx = child_data.sel->get_index(entry.offset + j);
-			double value =
-			    child_data.validity.RowIsValid(child_idx) ? static_cast<double>(child_values[child_idx]) : 0.0;
-			values[j] = value;
+			if (child_data.validity.RowIsValid(child_idx)) {
+				values[valid_count++] = static_cast<double>(child_values[child_idx]);
+			}
 		}
-		std::sort(values.begin(), values.end());
+		if (valid_count < 32) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+		std::sort(values.begin(), values.begin() + valid_count);
+		for (idx_t j = valid_count; j < values.size(); j++) {
+			values[j] = values[valid_count - 1];
+		}
 		double median = values[31];
 		if (!noise_enabled) {
 			result_data[i] = median;
