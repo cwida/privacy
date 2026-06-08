@@ -2,6 +2,7 @@
 #include "aggregates/pac_aggregate.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/common/vector_operations/ternary_executor.hpp"
 
 #include <algorithm>
 #include <array>
@@ -10,42 +11,57 @@
 
 namespace duckdb {
 
-static void DpLaplaceNoiseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &context = state.GetContext();
-
+static uint64_t GetDpNoiseSeed(ClientContext &context) {
 	Value seed_val;
-	uint64_t seed = (context.TryGetCurrentSetting("privacy_seed", seed_val) && !seed_val.IsNull())
-	                    ? uint64_t(seed_val.GetValue<int64_t>())
-	                    : uint64_t(std::random_device {}());
-	// If a seed was explicitly set, keep the run deterministic; otherwise vary per active query.
-	if (!seed_val.IsNull()) {
-		// keep deterministic
+	uint64_t seed = 42;
+	if (context.TryGetCurrentSetting("privacy_seed", seed_val) && !seed_val.IsNull()) {
+		seed = uint64_t(seed_val.GetValue<int64_t>());
 	} else {
 		seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(context.ActiveTransaction().GetActiveQuery());
 	}
+	return (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
+}
 
+static double AddLaplaceNoise(double value, double scale, uint64_t seed, uint64_t nonce) {
+	if (scale <= 0.0 || !std::isfinite(scale)) {
+		return value;
+	}
+	std::mt19937_64 gen(seed ^ (PAC_MAGIC_HASH * nonce));
+	std::uniform_real_distribution<double> uni(-0.5, 0.5);
+	double u = uni(gen);
+	double sign = (u < 0.0) ? -1.0 : 1.0;
+	double noise = -scale * sign * std::log(std::max(1e-300, 1.0 - 2.0 * std::abs(u)));
+	return value + noise;
+}
+
+static void DpLaplaceNoiseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &context = state.GetContext();
+	uint64_t seed = GetDpNoiseSeed(context);
 	auto count = args.size();
+
+	if (args.ColumnCount() == 3) {
+		TernaryExecutor::Execute<double, double, uint64_t, double>(
+		    args.data[0], args.data[1], args.data[2], result, count,
+		    [&](double value, double scale, uint64_t nonce) -> double {
+			    return AddLaplaceNoise(value, scale, seed, nonce);
+		    });
+		return;
+	}
+
+	uint64_t row_nonce = 0;
 	BinaryExecutor::Execute<double, double, double>(
-	    args.data[0], args.data[1], result, count, [&](double value, double scale) -> double {
-		    if (scale <= 0.0 || !std::isfinite(scale)) {
-			    return value;
-		    }
-		    // Per-row seed mixing — stable across vectorized batches as long as inputs repeat.
-		    std::mt19937_64 gen(seed ^ (PAC_MAGIC_HASH * static_cast<uint64_t>(std::hash<double> {}(value) ^
-		                                                                       std::hash<double> {}(scale))));
-		    std::uniform_real_distribution<double> uni(-0.5, 0.5);
-		    double u = uni(gen);
-		    // Inverse CDF of Laplace(0, scale): -scale * sgn(u) * ln(1 - 2|u|)
-		    double sign = (u < 0.0) ? -1.0 : 1.0;
-		    double noise = -scale * sign * std::log(std::max(1e-300, 1.0 - 2.0 * std::abs(u)));
-		    return value + noise;
-	    });
+	    args.data[0], args.data[1], result, count,
+	    [&](double value, double scale) -> double { return AddLaplaceNoise(value, scale, seed, row_nonce++); });
 }
 
 void RegisterDpLaplaceNoiseFunction(ExtensionLoader &loader) {
-	ScalarFunction fn("priv_laplace_noise", {LogicalType::DOUBLE, LogicalType::DOUBLE}, LogicalType::DOUBLE,
-	                  DpLaplaceNoiseFunction);
-	CreateScalarFunctionInfo info(fn);
+	ScalarFunctionSet set("priv_laplace_noise");
+	set.AddFunction(ScalarFunction("priv_laplace_noise", {LogicalType::DOUBLE, LogicalType::DOUBLE},
+	                               LogicalType::DOUBLE, DpLaplaceNoiseFunction));
+	set.AddFunction(ScalarFunction("priv_laplace_noise",
+	                               {LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::UBIGINT},
+	                               LogicalType::DOUBLE, DpLaplaceNoiseFunction));
+	CreateScalarFunctionInfo info(set);
 	FunctionDescription desc;
 	desc.description = "Adds Laplace(0, scale) noise to a value for elastic-sensitivity DP.";
 	info.descriptions.push_back(std::move(desc));

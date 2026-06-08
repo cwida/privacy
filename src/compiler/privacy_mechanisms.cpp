@@ -538,8 +538,19 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 		unique_ptr<Expression> value_expr =
 		    BoundCastExpression::AddCastToType(input.context, std::move(col_ref), LogicalType::DOUBLE);
 		auto scale_expr = make_uniq<BoundConstantExpression>(Value::DOUBLE(scale));
-		unique_ptr<Expression> noised =
-		    input.optimizer.BindScalarFunction("priv_laplace_noise", std::move(value_expr), std::move(scale_expr));
+		unique_ptr<Expression> nonce = make_uniq<BoundConstantExpression>(Value::UBIGINT(
+		    PAC_MAGIC_HASH ^ (static_cast<uint64_t>(agg_idx) * PAC_MAGIC_HASH) ^ static_cast<uint64_t>(ai + 1)));
+		for (idx_t gi = 0; gi < n_groups; gi++) {
+			unique_ptr<Expression> group_ref =
+			    make_uniq<BoundColumnRefExpression>(agg_types[gi], ColumnBinding(group_idx, gi));
+			auto group_hash = input.optimizer.BindScalarFunction("hash", std::move(group_ref));
+			nonce = input.optimizer.BindScalarFunction("xor", std::move(nonce), std::move(group_hash));
+		}
+		vector<unique_ptr<Expression>> noise_children;
+		noise_children.push_back(std::move(value_expr));
+		noise_children.push_back(std::move(scale_expr));
+		noise_children.push_back(std::move(nonce));
+		unique_ptr<Expression> noised = BindScalarLocal(input, "priv_laplace_noise", std::move(noise_children));
 		if (agg_col_type != LogicalType::DOUBLE) {
 			noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), agg_col_type);
 		}
@@ -819,6 +830,10 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
                                 const string &query_hash) {
 	(void)query_hash;
 	PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] CompileDPSampleMedianQuery: start");
+
+	throw InvalidInputException(
+	    "dp_sass is disabled for automatic private query rewriting: SAA + smooth sensitivity requires enforced "
+	    "per-PU contribution bounds and sample-output/domain bounds. Use privacy_mode='dp_elastic' for formal DP.");
 
 	double epsilon = GetValidatedDpEpsilon(input.context, "dp_sample_median");
 	double delta = 0.0;

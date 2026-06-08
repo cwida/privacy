@@ -75,6 +75,12 @@ SELECT abs(priv_laplace_noise(100.0, 5.0) - 100.0) < 1000;
 ----
 true
 
+query II
+SELECT priv_laplace_noise(100.0, 5.0, 1::UBIGINT) = priv_laplace_noise(100.0, 5.0, 1::UBIGINT),
+       priv_laplace_noise(100.0, 5.0, 1::UBIGINT) <> priv_laplace_noise(100.0, 5.0, 2::UBIGINT);
+----
+true	true
+
 # ---------------------------------------------------------------------------
 # dp_elastic dispatch reaches the stub (Phase A: NotImplemented)
 # ---------------------------------------------------------------------------
@@ -237,6 +243,44 @@ statement error
 SELECT MIN(id) FROM u;
 ----
 only COUNT, SUM, and AVG
+
+statement ok
+SET dp_sum_bound = 100.0;
+
+statement ok
+SET dp_delta = 1e-6;
+
+statement ok
+CREATE PU TABLE equal_noise_users(id INTEGER, PRIVACY_KEY(id));
+
+statement ok
+CREATE TABLE equal_noise_sales(uid INTEGER, grp INTEGER, salary DOUBLE);
+
+statement ok
+ALTER TABLE equal_noise_sales ADD PRIVACY_LINK (uid) REFERENCES equal_noise_users(id);
+
+statement ok
+INSERT INTO equal_noise_users VALUES (1), (2), (3), (4);
+
+statement ok
+INSERT INTO equal_noise_sales VALUES (1, 1, 50.0), (2, 1, 50.0), (3, 2, 50.0), (4, 2, 50.0);
+
+# Both groups have true SUM(salary)=100 and the same scale. The DP rewrite must
+# seed noise from a per-cell nonce, not from the private aggregate value, so the
+# materialized outputs should not be exactly equal.
+statement ok
+CREATE TABLE equal_noise_outputs AS
+SELECT grp, SUM(salary) AS s
+FROM equal_noise_sales
+GROUP BY grp;
+
+query I
+SELECT COUNT(DISTINCT s) = 2 FROM equal_noise_outputs;
+----
+true
+
+statement ok
+SET dp_delta = 0.49;
 
 # ---------------------------------------------------------------------------
 # Phase D: FK joins — elastic sensitivity = product of mf_K along chain

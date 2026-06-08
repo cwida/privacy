@@ -685,10 +685,10 @@ CREATE PU TABLE dp_check_users(id INTEGER, v INTEGER, PRIVACY_KEY (id));
 statement ok
 INSERT INTO dp_check_users VALUES (1, 10), (2, 20), (3, 30);
 
-query II
+statement error
 SELECT MIN(v) IS NULL, MAX(v) IS NULL FROM dp_check_users;
 ----
-true	true
+SAA + smooth sensitivity requires enforced per-PU contribution bounds
 
 statement ok
 SET privacy_mode = 'pac';

@@ -308,8 +308,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "Mutual information bound controlling privacy-utility tradeoff (default: 1/128). "
 	    "Lower values = more noise = more privacy. Set to 0 for deterministic (no noise) mode.",
 	    LogicalType::DOUBLE, Value::DOUBLE(1.0 / 128));
-	// Privacy mechanism selector: 'pac' (default), 'dp_elastic', or 'dp_sass'
-	db.config.AddExtensionOption("privacy_mode", "Privacy mechanism: 'pac' (default), 'dp_elastic', or 'dp_sass'",
+	// Privacy mechanism selector: 'pac' (default), 'dp_elastic', or experimental 'dp_sass'
+	db.config.AddExtensionOption("privacy_mode",
+	                             "Privacy mechanism: 'pac' (default), 'dp_elastic', or experimental disabled 'dp_sass'",
 	                             LogicalType::VARCHAR, Value("pac"));
 	db.config.AddExtensionOption(
 	    "dp_sample_lanes", "Number of sample lanes a privacy unit contributes in privacy_mode='dp_sass'",
