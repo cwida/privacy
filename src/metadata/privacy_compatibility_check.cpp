@@ -20,6 +20,7 @@
 #include <algorithm>
 #include "compiler/pac_compiler_helpers.hpp"
 #include "core/privacy_optimizer.hpp"
+#include <functional>
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
@@ -58,10 +59,10 @@ static bool ContainsDisallowedJoin(const LogicalOperator &op) {
 			return true;
 		}
 	} else if (op.type == LogicalOperatorType::LOGICAL_CROSS_PRODUCT) {
-		// CROSS_PRODUCT is allowed for PAC compilation
+		// CROSS_PRODUCT is allowed for privacy compilation
 		// Don't return true here, just continue checking children
 	} else if (op.type == LogicalOperatorType::LOGICAL_EXCEPT || op.type == LogicalOperatorType::LOGICAL_INTERSECT) {
-		// These operator types are disallowed for PAC compilation
+		// These operator types are disallowed for privacy compilation
 		// Note: UNION, UNION ALL, CROSS_PRODUCT, and ANY_JOIN are allowed
 		return true;
 	}
@@ -224,9 +225,10 @@ static bool CheckPacAggregatesHaveProperJoins(const LogicalOperator &op,
 			// 1. PU table is directly scanned, OR
 			// 2. A scanned table has an FK path to the PU
 			if (!has_pu_table && !has_fk_to_pu) {
-				throw InvalidInputException("PAC rewrite: PAC aggregates (priv_sum, priv_count, etc.) must be joined "
-				                            "with the privacy unit table "
-				                            "or a table that has a foreign key path to the privacy unit");
+				throw InvalidInputException(
+				    "Privacy rewrite: PAC aggregates (priv_sum, priv_count, etc.) must be joined "
+				    "with the privacy unit table "
+				    "or a table that has a foreign key path to the privacy unit");
 			}
 		}
 
@@ -276,12 +278,10 @@ static bool CheckPacAggregatesHaveProperJoins(const LogicalOperator &op,
 	return found_pac_aggregate;
 }
 
-// Trace a binding down through the plan to check if it ultimately comes from a PU table.
-// If the binding comes from an aggregate expression, it's safe (the value has been aggregated).
-// If the binding comes from a GROUP BY column, we need to trace that column's source further.
-// If we reach a PU table column directly (or via join key equivalence), we reject.
-static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &binding, const vector<string> &pu_tables,
-                                  LogicalOperator &root) {
+// Trace a binding down through projections, aggregate groups, and CTE refs to each base source binding.
+// Aggregate result bindings are safe and are not traced further.
+static void TraceBindingToSources(LogicalOperator &root, const ColumnBinding &binding,
+                                  const std::function<void(const ColumnBinding &)> &visit_source_binding) {
 	// Find the operator that produces this binding's table_index
 	auto *source_op = FindOperatorByTableIndex(&root, binding.table_index);
 	if (!source_op) {
@@ -289,15 +289,7 @@ static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &bind
 	}
 
 	if (source_op->type == LogicalOperatorType::LOGICAL_GET) {
-		// This binding comes directly from a table scan
-		// Use ColumnBelongsToTable which handles join key equivalences
-		for (auto &pu_table : pu_tables) {
-			if (ColumnBelongsToTable(root, pu_table, binding)) {
-				throw InvalidInputException(
-				    "PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate "
-				    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)");
-			}
-		}
+		visit_source_binding(binding);
 	} else if (source_op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
 		auto &aggr = source_op->Cast<LogicalAggregate>();
 
@@ -311,7 +303,7 @@ static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &bind
 				    const_cast<unique_ptr<Expression> &>(aggr.groups[group_idx]), [&](Expression &expr) {
 					    if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
 						    auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-						    TraceBindingToPUTable(*source_op, col_ref.binding, pu_tables, root);
+						    TraceBindingToSources(root, col_ref.binding, visit_source_binding);
 					    }
 				    });
 			}
@@ -324,7 +316,7 @@ static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &bind
 			ExpressionIterator::EnumerateExpression(proj.expressions[binding.column_index], [&](Expression &expr) {
 				if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
 					auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-					TraceBindingToPUTable(*source_op, col_ref.binding, pu_tables, root);
+					TraceBindingToSources(root, col_ref.binding, visit_source_binding);
 				}
 			});
 		}
@@ -335,10 +327,26 @@ static void TraceBindingToPUTable(LogicalOperator &op, const ColumnBinding &bind
 			auto &cte_body = *cte_def->children[0];
 			auto body_bindings = cte_body.GetColumnBindings();
 			if (binding.column_index < body_bindings.size()) {
-				TraceBindingToPUTable(cte_body, body_bindings[binding.column_index], pu_tables, root);
+				TraceBindingToSources(root, body_bindings[binding.column_index], visit_source_binding);
 			}
 		}
 	}
+}
+
+// Trace a binding down through the plan to check if it ultimately comes from a PU table.
+// If we reach a PU table column directly (or via join key equivalence), we reject.
+static void TraceBindingToPUTable(LogicalOperator &root, const ColumnBinding &binding,
+                                  const vector<string> &pu_tables) {
+	TraceBindingToSources(root, binding, [&](const ColumnBinding &source_binding) {
+		// Use ColumnBelongsToTable which handles join key equivalences
+		for (auto &pu_table : pu_tables) {
+			if (ColumnBelongsToTable(root, pu_table, source_binding)) {
+				throw InvalidInputException(
+				    "Privacy rewrite: columns from privacy unit tables can only be accessed inside aggregate "
+				    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)");
+			}
+		}
+	});
 }
 
 // Helper: Check if a binding refers to a protected column (PU PKs, LINK FKs, or metadata PROTECTED).
@@ -417,7 +425,7 @@ static void CheckOutputColumnsNotFromPU(LogicalOperator &current_op, LogicalOper
 			ExpressionIterator::EnumerateExpression(expr, [&](Expression &e) {
 				if (e.type == ExpressionType::BOUND_COLUMN_REF) {
 					auto &col_ref = e.Cast<BoundColumnRefExpression>();
-					TraceBindingToPUTable(plan_root, col_ref.binding, actual_pu_tables, plan_root);
+					TraceBindingToPUTable(plan_root, col_ref.binding, actual_pu_tables);
 				}
 			});
 		}
@@ -438,7 +446,7 @@ static void CheckOutputColumnsNotFromPU(LogicalOperator &current_op, LogicalOper
 			for (auto &pu_table : actual_pu_tables) {
 				if (table_entry->name == pu_table) {
 					throw InvalidInputException(
-					    "PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate "
+					    "Privacy rewrite: columns from privacy unit tables can only be accessed inside aggregate "
 					    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)");
 				}
 			}
@@ -458,63 +466,19 @@ static void CheckOutputColumnsNotFromPU(LogicalOperator &current_op, LogicalOper
 	}
 }
 
-// Forward declaration for protected column tracing
-static void
-TraceBindingForProtectedColumns(LogicalOperator &op, const ColumnBinding &binding, LogicalOperator &root,
-                                const std::unordered_map<string, std::unordered_set<string>> &protected_columns);
-
 // Trace a binding to check if it comes from a protected column (unified set)
 static void
-TraceBindingForProtectedColumns(LogicalOperator &op, const ColumnBinding &binding, LogicalOperator &root,
+TraceBindingForProtectedColumns(LogicalOperator &root, const ColumnBinding &binding,
                                 const std::unordered_map<string, std::unordered_set<string>> &protected_columns) {
-	auto *source_op = FindOperatorByTableIndex(&root, binding.table_index);
-	if (!source_op) {
-		return;
-	}
-
-	if (source_op->type == LogicalOperatorType::LOGICAL_GET) {
-		// Check if this is a protected column
-		std::pair<string, string> protected_info = GetProtectedColumnInfo(root, binding, protected_columns);
+	TraceBindingToSources(root, binding, [&](const ColumnBinding &source_binding) {
+		std::pair<string, string> protected_info = GetProtectedColumnInfo(root, source_binding, protected_columns);
 		if (!protected_info.first.empty()) {
-			throw InvalidInputException("PAC rewrite: protected column '%s.%s' can only be accessed inside aggregate "
-			                            "functions (e.g., SUM, COUNT, AVG, MIN, MAX)",
-			                            protected_info.first.c_str(), protected_info.second.c_str());
+			throw InvalidInputException(
+			    "Privacy rewrite: protected column '%s.%s' can only be accessed inside aggregate "
+			    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)",
+			    protected_info.first.c_str(), protected_info.second.c_str());
 		}
-	} else if (source_op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-		auto &aggr = source_op->Cast<LogicalAggregate>();
-		if (binding.table_index == aggr.group_index) {
-			idx_t group_idx = binding.column_index;
-			if (group_idx < aggr.groups.size() && aggr.groups[group_idx]) {
-				ExpressionIterator::EnumerateExpression(
-				    const_cast<unique_ptr<Expression> &>(aggr.groups[group_idx]), [&](Expression &expr) {
-					    if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
-						    auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-						    TraceBindingForProtectedColumns(*source_op, col_ref.binding, root, protected_columns);
-					    }
-				    });
-			}
-		}
-	} else if (source_op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-		auto &proj = source_op->Cast<LogicalProjection>();
-		if (binding.column_index < proj.expressions.size() && proj.expressions[binding.column_index]) {
-			ExpressionIterator::EnumerateExpression(proj.expressions[binding.column_index], [&](Expression &expr) {
-				if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
-					auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-					TraceBindingForProtectedColumns(*source_op, col_ref.binding, root, protected_columns);
-				}
-			});
-		}
-	} else if (source_op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
-		auto &cte_ref = source_op->Cast<LogicalCTERef>();
-		auto *cte_def = FindMaterializedCTE(&root, cte_ref.cte_index);
-		if (cte_def && !cte_def->children.empty() && cte_def->children[0]) {
-			auto &cte_body = *cte_def->children[0];
-			auto body_bindings = cte_body.GetColumnBindings();
-			if (binding.column_index < body_bindings.size()) {
-				TraceBindingForProtectedColumns(cte_body, body_bindings[binding.column_index], root, protected_columns);
-			}
-		}
-	}
+	});
 }
 
 // Check that no protected columns (unified set) are exposed in the final query output
@@ -533,7 +497,7 @@ CheckOutputColumnsNotProtected(LogicalOperator &current_op, LogicalOperator &pla
 			ExpressionIterator::EnumerateExpression(expr, [&](Expression &e) {
 				if (e.type == ExpressionType::BOUND_COLUMN_REF) {
 					auto &col_ref = e.Cast<BoundColumnRefExpression>();
-					TraceBindingForProtectedColumns(plan_root, col_ref.binding, plan_root, protected_columns);
+					TraceBindingForProtectedColumns(plan_root, col_ref.binding, protected_columns);
 				}
 			});
 		}
@@ -559,7 +523,7 @@ CheckOutputColumnsNotProtected(LogicalOperator &current_op, LogicalOperator &pla
 					string col_lower = StringUtil::Lower(col_name);
 					if (it->second.count(col_lower) > 0) {
 						throw InvalidInputException(
-						    "PAC rewrite: protected column '%s.%s' can only be accessed inside aggregate "
+						    "Privacy rewrite: protected column '%s.%s' can only be accessed inside aggregate "
 						    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)",
 						    table_entry->name.c_str(), col_name.c_str());
 					}
@@ -610,7 +574,7 @@ CheckFiltersNotUsingProtectedColumns(LogicalOperator &op, LogicalOperator &plan_
 					auto protected_info = GetProtectedColumnInfo(plan_root, col_ref.binding, protected_columns);
 					if (!protected_info.first.empty()) {
 						throw InvalidInputException(
-						    "PAC rewrite: protected column '%s.%s' cannot be used in WHERE/HAVING filters. "
+						    "Privacy rewrite: protected column '%s.%s' cannot be used in WHERE/HAVING filters. "
 						    "Protected columns can only appear inside aggregate functions (e.g., SUM, COUNT, AVG).",
 						    protected_info.first.c_str(), protected_info.second.c_str());
 					}
@@ -661,7 +625,7 @@ void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &co
  * A cycle exists when following foreign keys from a table can eventually lead back to itself.
  * For example: A -> B -> C -> A forms a cycle.
  *
- * This is important because PAC compilation follows FK paths from scanned tables to privacy units,
+ * This is important because privacy compilation follows FK paths from scanned tables to privacy units,
  * and cycles would cause infinite loops during path traversal.
  *
  * @param context - Client context for accessing catalog
@@ -746,8 +710,9 @@ static bool DetectCycleInFKGraph(ClientContext &context, const vector<string> &s
 	return false;
 }
 
-PrivacyCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,
-                                                PACOptimizerInfo *optimizer_info) {
+PrivacyCompatibilityResult PrivRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,
+                                                 const string &privacy_mode, PACOptimizerInfo *optimizer_info) {
+	(void)privacy_mode;
 	PrivacyCompatibilityResult result;
 
 	// If a replan/compilation is already in progress by the optimizer extension, skip compatibility checks
@@ -998,11 +963,11 @@ PrivacyCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &pla
 	bool has_fk_linked_tables = !result.fk_paths.empty();
 
 #if PRIVACY_DEBUG
-	PRIVACY_DEBUG_PRINT("PAC compatibility check: scanned_pu_tables = " +
+	PRIVACY_DEBUG_PRINT("Privacy compatibility check: scanned_pu_tables = " +
 	                    std::to_string(result.scanned_pu_tables.size()));
-	PRIVACY_DEBUG_PRINT("PAC compatibility check: tables_with_protected_columns = " +
+	PRIVACY_DEBUG_PRINT("Privacy compatibility check: tables_with_protected_columns = " +
 	                    std::to_string(tables_with_protected_columns.size()));
-	PRIVACY_DEBUG_PRINT("PAC compatibility check: fk_paths = " + std::to_string(result.fk_paths.size()));
+	PRIVACY_DEBUG_PRINT("Privacy compatibility check: fk_paths = " + std::to_string(result.fk_paths.size()));
 	for (auto &kv : result.fk_paths) {
 		string path_str = kv.first + " -> ";
 		for (auto &p : kv.second) {
@@ -1055,21 +1020,23 @@ PrivacyCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &pla
 		// This prevents infinite loops during FK path traversal
 		if (DetectCycleInFKGraph(context, scanned_tables)) {
 			if (is_conservative) {
-				throw InvalidInputException("PAC rewrite: circular foreign key dependencies detected. "
-				                            "PAC compilation requires acyclic foreign key relationships.");
+				throw InvalidInputException("Privacy rewrite: circular foreign key dependencies detected. "
+				                            "Privacy compilation requires acyclic foreign key relationships.");
 			}
 			return result;
 		}
 
 		if (ContainsRecursiveCTE(*plan)) {
 			if (is_conservative) {
-				throw InvalidInputException("PAC rewrite: recursive CTEs are not supported for PAC compilation");
+				throw InvalidInputException(
+				    "Privacy rewrite: recursive CTEs are not supported for privacy compilation");
 			}
 			return result;
 		}
 		if (ContainsWindowFunction(*plan)) {
 			if (is_conservative) {
-				throw InvalidInputException("PAC rewrite: window functions are not supported for PAC compilation");
+				throw InvalidInputException(
+				    "Privacy rewrite: window functions are not supported for privacy compilation");
 			}
 			return result;
 		}
@@ -1082,7 +1049,7 @@ PrivacyCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &pla
 		}
 		if (ContainsDisallowedJoin(*plan)) {
 			if (is_conservative) {
-				throw InvalidInputException("PAC rewrite: subqueries are not supported for PAC compilation");
+				throw InvalidInputException("Privacy rewrite: subqueries are not supported for privacy compilation");
 			}
 			return result;
 		}
@@ -1106,41 +1073,44 @@ PrivacyCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &pla
 		// The query is already using PAC functions correctly, so allow it as-is
 		if (has_pac_aggregates) {
 #if PRIVACY_DEBUG
-			PRIVACY_DEBUG_PRINT("PAC compatibility check: Query has PAC aggregates with proper joins - allowing as-is");
+			PRIVACY_DEBUG_PRINT(
+			    "Privacy compatibility check: Query has PAC aggregates with proper joins - allowing as-is");
 			PRIVACY_DEBUG_PRINT("=== QUERY PLAN (PAC aggregates with joins) ===");
 			plan->Print();
 			PRIVACY_DEBUG_PRINT("=== END QUERY PLAN ===");
 #endif
-			// Return empty result to skip PAC compilation
+			// Return empty result to skip privacy compilation
 			result.eligible_for_rewrite = false;
 			return result;
 		}
 	}
 
-	// Trigger PAC compilation if we have FK/LINK paths or scanned PU tables
+	bool has_aggregation = ContainsAggregation(*plan);
+
+	// Trigger privacy compilation if we have FK/LINK paths or scanned PU tables
 	// For PU tables with protected columns:
-	// - Non-aggregation queries on non-protected columns are allowed without PAC compilation
-	// - Aggregation queries still need PAC compilation to add noise
+	// - Non-aggregation queries on non-protected columns are allowed without privacy compilation
+	// - Aggregation queries still need privacy compilation to add noise
 	if (has_fk_linked_tables) {
 		result.eligible_for_rewrite = true;
 		return result;
 	}
 
 	if (!result.scanned_pu_tables.empty()) {
-		// If query contains aggregation, we need PAC compilation even if all PU tables have protected columns
+		// If query contains aggregation, we need privacy compilation even if all PU tables have protected columns
 		// because aggregates need to be noised
-		if (ContainsAggregation(*plan)) {
+		if (has_aggregation) {
 			result.eligible_for_rewrite = true;
 			return result;
 		}
-		// For non-aggregation queries, only trigger PAC compilation if some PU tables
+		// For non-aggregation queries, only trigger privacy compilation if some PU tables
 		// don't have protected columns (those require aggregation)
 		if (!all_pu_tables_have_protected_columns) {
 			result.eligible_for_rewrite = true;
 			return result;
 		}
 		// All PU tables have protected columns and query has no aggregation
-		// This is allowed (accessing non-protected columns) - no PAC compilation needed
+		// This is allowed (accessing non-protected columns) - no privacy compilation needed
 	}
 
 	if (result.fk_paths.empty() && result.scanned_pu_tables.empty() && !has_protected_columns) {
@@ -1150,8 +1120,8 @@ PrivacyCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &pla
 
 	// If we reach here with protected columns but no PU tables and no aggregation,
 	// the query is accessing non-protected columns from tables with protected columns defined.
-	// If there's aggregation, we still need PAC compilation.
-	if (has_protected_columns && ContainsAggregation(*plan)) {
+	// If there's aggregation, we still need privacy compilation.
+	if (has_protected_columns && has_aggregation) {
 		result.eligible_for_rewrite = true;
 	}
 

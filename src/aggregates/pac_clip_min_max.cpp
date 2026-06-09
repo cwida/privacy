@@ -184,12 +184,12 @@ static void PacClipMinMaxScatterUpdate(Vector inputs[], Vector &states, idx_t co
 	                                   idx_t count) {                                                                  \
 		auto &state = *reinterpret_cast<PacClipMinMaxStateWrapper<true> *>(state_p);                                   \
 		PacClipMinMaxUpdate<true, SIGNED_VAL, VALUE_T, INPUT_T>(inputs, state, count, aggr.allocator,                  \
-		                                                        GetPacSampleLanes(aggr));                              \
+		                                                        GetPrivSampleLanes(aggr));                             \
 	}                                                                                                                  \
 	static void PacClipMaxScatterUpdate##NAME(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,        \
 	                                          idx_t count) {                                                           \
 		PacClipMinMaxScatterUpdate<true, SIGNED_VAL, VALUE_T, INPUT_T>(inputs, states, count, aggr.allocator,          \
-		                                                               GetPacSampleLanes(aggr));                       \
+		                                                               GetPrivSampleLanes(aggr));                      \
 	}
 PCMM_INT_TYPES_SIGNED
 PCMM_INT_TYPES_UNSIGNED
@@ -201,12 +201,12 @@ PCMM_INT_TYPES_UNSIGNED
 	                                   idx_t count) {                                                                  \
 		auto &state = *reinterpret_cast<PacClipMinMaxStateWrapper<false> *>(state_p);                                  \
 		PacClipMinMaxUpdate<false, SIGNED_VAL, VALUE_T, INPUT_T>(inputs, state, count, aggr.allocator,                 \
-		                                                         GetPacSampleLanes(aggr));                             \
+		                                                         GetPrivSampleLanes(aggr));                            \
 	}                                                                                                                  \
 	static void PacClipMinScatterUpdate##NAME(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,        \
 	                                          idx_t count) {                                                           \
 		PacClipMinMaxScatterUpdate<false, SIGNED_VAL, VALUE_T, INPUT_T>(inputs, states, count, aggr.allocator,         \
-		                                                                GetPacSampleLanes(aggr));                      \
+		                                                                GetPrivSampleLanes(aggr));                     \
 	}
 PCMM_INT_TYPES_SIGNED
 PCMM_INT_TYPES_UNSIGNED
@@ -277,23 +277,23 @@ static void PacClipMinMaxScatterUpdateFloat(Vector inputs[], Vector &states, idx
 	                                   idx_t count) {                                                                  \
 		auto &state = *reinterpret_cast<PacClipMinMaxStateWrapper<true> *>(state_p);                                   \
 		PacClipMinMaxUpdateFloat<true, FLOAT_T, SHIFT_VAL>(inputs, state, count, aggr.allocator,                       \
-		                                                   GetPacSampleLanes(aggr));                                   \
+		                                                   GetPrivSampleLanes(aggr));                                  \
 	}                                                                                                                  \
 	static void PacClipMaxScatterUpdate##NAME(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,        \
 	                                          idx_t count) {                                                           \
 		PacClipMinMaxScatterUpdateFloat<true, FLOAT_T, SHIFT_VAL>(inputs, states, count, aggr.allocator,               \
-		                                                          GetPacSampleLanes(aggr));                            \
+		                                                          GetPrivSampleLanes(aggr));                           \
 	}                                                                                                                  \
 	static void PacClipMinUpdate##NAME(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p,           \
 	                                   idx_t count) {                                                                  \
 		auto &state = *reinterpret_cast<PacClipMinMaxStateWrapper<false> *>(state_p);                                  \
 		PacClipMinMaxUpdateFloat<false, FLOAT_T, SHIFT_VAL>(inputs, state, count, aggr.allocator,                      \
-		                                                    GetPacSampleLanes(aggr));                                  \
+		                                                    GetPrivSampleLanes(aggr));                                 \
 	}                                                                                                                  \
 	static void PacClipMinScatterUpdate##NAME(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,        \
 	                                          idx_t count) {                                                           \
 		PacClipMinMaxScatterUpdateFloat<false, FLOAT_T, SHIFT_VAL>(inputs, states, count, aggr.allocator,              \
-		                                                           GetPacSampleLanes(aggr));                           \
+		                                                           GetPrivSampleLanes(aggr));                          \
 	}
 PCMM_FLOAT_TYPES
 #undef XF

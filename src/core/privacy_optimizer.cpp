@@ -5,15 +5,12 @@
 #include "core/privacy_optimizer.hpp"
 #include "aggregates/pac_aggregate.hpp"
 #include "privacy_debug.hpp"
-#include <cmath>
 #include <string>
 #include <algorithm>
 
 #include "utils/privacy_helpers.hpp"
 // Include PAC bitslice compiler
-#include "compiler/pac_bitslice_compiler.hpp"
-// Include elastic-sensitivity DP compiler
-#include "compiler/dp_elastic_compiler.hpp"
+#include "compiler/privacy_compiler.hpp"
 // Include PAC parser for metadata management
 #include "parser/privacy_parser.hpp"
 // Include utility diff
@@ -40,52 +37,6 @@
 #include <stack>
 
 namespace duckdb {
-
-static bool ContainsAggregateOperator(LogicalOperator *op) {
-	if (!op) {
-		return false;
-	}
-	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-		return true;
-	}
-	for (auto &child : op->children) {
-		if (ContainsAggregateOperator(child.get())) {
-			return true;
-		}
-	}
-	return false;
-}
-
-static bool ContainsGetOperator(LogicalOperator *op) {
-	if (!op) {
-		return false;
-	}
-	if (op->type == LogicalOperatorType::LOGICAL_GET) {
-		return true;
-	}
-	for (auto &child : op->children) {
-		if (ContainsGetOperator(child.get())) {
-			return true;
-		}
-	}
-	return false;
-}
-
-static void ValidateDPElasticDelta(ClientContext &context) {
-	double delta = 0.0;
-	if (!TryGetDpDelta(context, delta)) {
-		throw InvalidInputException(
-		    "dp_elastic: dp_delta must be set. Use SET dp_delta=<value> or PRAGMA refresh_dp_stats(<epsilon>).");
-	}
-	if (delta <= 0.0 || !std::isfinite(delta)) {
-		throw InvalidInputException("dp_elastic: dp_delta must be a positive finite number (got " +
-		                            std::to_string(delta) + ")");
-	}
-	if (delta >= 0.5) {
-		throw InvalidInputException("dp_elastic: dp_delta must be < 0.5 for meaningful (ε,δ)-DP (got " +
-		                            std::to_string(delta) + ")");
-	}
-}
 
 // ============================================================================
 // PACDropTableRule - Separate optimizer rule for DROP TABLE operations
@@ -369,9 +320,9 @@ static bool PlanHasAggregate(const LogicalOperator &op) {
 	return false;
 }
 
-// PAC rewrites run in the pre-optimizer phase, BEFORE DuckDB's built-in optimizers.
+// Privacy rewrites run in the pre-optimizer phase, BEFORE DuckDB's built-in optimizers.
 // This way DuckDB's join ordering, filter pushdown, column lifetime, compressed
-// materialization etc. all run on the PAC-transformed plan automatically.
+// materialization etc. all run on the privacy-transformed plan automatically.
 void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	if (!plan) {
 		return;
@@ -390,11 +341,6 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	if (!priv_rewrite_enabled) {
 		return;
 	}
-	string early_privacy_mode = GetPrivacyMode(input.context);
-	if ((early_privacy_mode == "dp_elastic" || early_privacy_mode == "dp_sass") &&
-	    (ContainsAggregateOperator(plan.get()) || ContainsGetOperator(plan.get()))) {
-		ValidateDPElasticDelta(input.context);
-	}
 	// Register type patcher to fix stale statement types after optimizer changes output types.
 	// Read path (priv_finalize injection) is handled by PACDerivedReadRule (post-optimizer)
 	// so it runs after DuckDB's built-in projection removal optimizer.
@@ -408,8 +354,8 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 			return;
 		}
 	}
-	// Run the PAC compatibility checks only if the plan is a projection, order by, or aggregate (i.e., a SELECT query)
-	// For EXPLAIN/EXPLAIN_ANALYZE, look at the child operator to decide whether to rewrite
+	// Run the privacy compatibility checks only if the plan is a projection, order by, or aggregate (i.e., a SELECT
+	// query) For EXPLAIN/EXPLAIN_ANALYZE, look at the child operator to decide whether to rewrite
 	LogicalOperator *check_plan = plan.get();
 	PRIVACY_DEBUG_PRINT("[PAC TRACE] plan->type = " + std::to_string((int)plan->type));
 	if (plan->type == LogicalOperatorType::LOGICAL_EXPLAIN && !plan->children.empty()) {
@@ -462,8 +408,10 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	// For CTE-wrapped DML, use the full CTE tree (PAC needs to rewrite aggregates inside CTEs).
 	unique_ptr<LogicalOperator> &target_plan = is_dml_wrapper ? outer_plan->children[0] : outer_plan;
 
-	// Delegate compatibility checks (including detecting PAC table presence and internal sample scans)
-	PrivacyCompatibilityResult check = PACRewriteQueryCheck(target_plan, input.context, pac_info);
+	string privacy_mode = GetPrivacyMode(input.context);
+
+	// Delegate compatibility checks (including detecting privacy-unit table presence and internal sample scans).
+	PrivacyCompatibilityResult check = PrivRewriteQueryCheck(target_plan, input.context, privacy_mode, pac_info);
 
 	// For DML wrappers (INSERT/CTAS, including CTE-wrapped), check if any scanned tables are derived_pu.
 	// derived_pu tables are transparent to SELECT but trigger PAC noise on DML aggregates.
@@ -518,7 +466,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	// inside its own hook, the new Optimizer runs on a Connection context whose
 	// active_query is NULL. DuckDB's GetCurrentQuery() dereferences that unique_ptr
 	// and throws InternalException. The query string is only used for the compiled-
-	// file hash, so we fall back to a fixed string to let PAC compilation proceed
+	// file hash, so we fall back to a fixed string to let privacy compilation proceed
 	// (needed so delta queries get priv_noised_sum / priv_hash rewrites).
 	string current_query;
 	try {
@@ -569,29 +517,19 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 
 	if (check.eligible_for_rewrite) {
 		bool apply_noise = IsPacNoiseEnabled(input.context, true);
-		string privacy_mode = GetPrivacyMode(input.context);
 		// DP modes always run their pipelines so clipping, FK chain, and sensitivity
 		// are exercised even when privacy_noise=false. The compilers zero scales internally.
 		bool should_compile = apply_noise || privacy_mode == "dp_elastic" || privacy_mode == "dp_sass";
 		if (should_compile) {
 #if PRIVACY_DEBUG
-			PRIVACY_DEBUG_PRINT("Query requires PAC Compilation for privacy units:");
+			PRIVACY_DEBUG_PRINT("Query requires privacy compilation for privacy units:");
 			for (const auto &pu_name : privacy_units) {
 				PRIVACY_DEBUG_PRINT("  " + pu_name);
 			}
 #endif
 			// set replan flag for duration of compilation
 			ReplanGuard scoped2(pac_info);
-			if (privacy_mode == "dp_elastic") {
-				CompileDPElasticQuery(check, input, target_plan, privacy_units, query_hash);
-			} else if (privacy_mode == "dp_sass") {
-				CompileDPSampleMedianQuery(check, input, target_plan, privacy_units, query_hash);
-			} else if (privacy_mode == "pac") {
-				CompilePacBitsliceQuery(check, input, target_plan, privacy_units, normalized, query_hash);
-			} else {
-				throw InvalidInputException("unknown privacy_mode '" + privacy_mode +
-				                            "' (expected 'pac', 'dp_elastic', or 'dp_sass')");
-			}
+			CompilePrivQuery(check, input, target_plan, privacy_units, normalized, query_hash);
 
 			// For DML targeting derived_pu tables: convert priv_noised_* → priv_* counter variants
 			// so the table stores raw 64-element counter lists instead of noised scalars.

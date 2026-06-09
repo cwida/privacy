@@ -25,23 +25,24 @@ struct PrivacyCompatibilityResult {
 	vector<string> tables_with_protected_columns;
 	// Lightweight per-table metadata (PRIVACY_KEY/PRIVACY_LINK) for scanned tables
 	std::unordered_map<string, ColumnMetadata> table_metadata;
-	// Whether plan passed basic PAC-eligibility checks (aggregation/join/window/distinct checks)
+	// Whether plan passed basic privacy-rewrite checks (aggregation/join/window/distinct checks)
 	bool eligible_for_rewrite = false;
-	// List of configured PAC tables that were actually scanned in the plan
+	// List of configured privacy-unit tables that were actually scanned in the plan
 	vector<string> scanned_pu_tables;
-	// List of scanned tables that are NOT configured PAC tables
+	// List of scanned tables that are NOT configured privacy-unit tables
 	vector<string> scanned_non_pu_tables;
 	// Per-table set of protected column names (lowercased).
 	// Union of: PRIVACY_KEY columns, PRIVACY_LINK columns reaching a PU, metadata PROTECTED columns.
 	std::unordered_map<string, std::unordered_set<string>> protected_columns;
 };
 
-// Check whether a logical plan is PAC-compatible according to the project's rules.
+// Check whether a logical plan is Privacy-compatible according to the project's rules.
 // Privacy unit tables are discovered from PAC metadata (is_privacy_unit = true).
-// Returns a PrivacyCompatibilityResult with fk_paths empty when no PAC rewrite is needed.
+// Returns a PrivacyCompatibilityResult with fk_paths empty when no privacy rewrite is needed.
 // If `replan_in_progress` is true the function will return an empty result immediately to avoid recursion.
-PrivacyCompatibilityResult PACRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,
-                                                PACOptimizerInfo *optimizer_info = nullptr);
+PrivacyCompatibilityResult PrivRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,
+                                                 const string &privacy_mode = "pac",
+                                                 PACOptimizerInfo *optimizer_info = nullptr);
 
 void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &counts);
 } // namespace duckdb

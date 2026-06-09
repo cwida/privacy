@@ -20,9 +20,8 @@ struct PACLink {
 	PACLink() = default;
 
 	// Constructor for single-column FK (backward compatibility)
-	PACLink(string local_col, string ref_table, string ref_col)
-	    : local_columns({std::move(local_col)}), referenced_table(std::move(ref_table)),
-	      referenced_columns({std::move(ref_col)}) {
+	PACLink(const string &local_col, string ref_table, const string &ref_col)
+	    : local_columns({local_col}), referenced_table(std::move(ref_table)), referenced_columns({ref_col}) {
 	}
 
 	// Constructor for composite FK
@@ -57,8 +56,8 @@ struct PACParseData : public ParserExtensionParseData {
 	PrivacyTableMetadata metadata;
 	bool is_pac_ddl;
 
-	PACParseData(string sql, PrivacyTableMetadata meta, bool is_pac)
-	    : stripped_sql(std::move(sql)), metadata(std::move(meta)), is_pac_ddl(is_pac) {
+	PACParseData(string sql, const PrivacyTableMetadata &meta, bool is_pac)
+	    : stripped_sql(std::move(sql)), metadata(meta), is_pac_ddl(is_pac) {
 	}
 
 	unique_ptr<ParserExtensionParseData> Copy() const override {

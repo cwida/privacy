@@ -270,12 +270,12 @@ static void PacClipSumScatterUpdate(Vector inputs[], Vector &states, idx_t count
 	                                   idx_t cnt) {                                                                    \
 		auto &state = *reinterpret_cast<PacClipSumStateWrapper<> *>(state_p);                                          \
 		PacClipSumUpdate<CLIP_NUM_LEVELS_64, SIGNED, VALUE_T, INPUT_T>(input, state, cnt, agg.allocator,               \
-		                                                               GetPacSampleLanes(agg));                        \
+		                                                               GetPrivSampleLanes(agg));                       \
 	}                                                                                                                  \
 	static void PacClipSumScatterUpdate##NAME(Vector input[], AggregateInputData &agg, idx_t, Vector &sts,             \
 	                                          idx_t cnt) {                                                             \
 		PacClipSumScatterUpdate<CLIP_NUM_LEVELS_64, SIGNED, VALUE_T, INPUT_T>(input, sts, cnt, agg.allocator,          \
-		                                                                      GetPacSampleLanes(agg));                 \
+		                                                                      GetPrivSampleLanes(agg));                \
 	}
 CLIP_SUM_INT_TYPES_SIGNED
 CLIP_SUM_INT_TYPES_UNSIGNED
@@ -284,7 +284,7 @@ CLIP_SUM_INT_TYPES_UNSIGNED
 // HugeInt update (signed, via hugeint routing — 128-bit needs full 62 levels)
 static void PacClipSumUpdateHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count) {
 	auto &state = *reinterpret_cast<PacClipSumStateWrapper<CLIP_NUM_LEVELS> *>(state_p);
-	int sample_lanes = GetPacSampleLanes(aggr);
+	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, value_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -301,7 +301,7 @@ static void PacClipSumUpdateHugeInt(Vector inputs[], AggregateInputData &aggr, i
 }
 static void PacClipSumScatterUpdateHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
                                            idx_t count) {
-	int sample_lanes = GetPacSampleLanes(aggr);
+	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, value_data, sdata;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -324,7 +324,7 @@ static void PacClipSumScatterUpdateHugeInt(Vector inputs[], AggregateInputData &
 static void PacClipSumUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p,
                                      idx_t count) {
 	auto &state = *reinterpret_cast<PacClipSumStateWrapper<CLIP_NUM_LEVELS> *>(state_p);
-	int sample_lanes = GetPacSampleLanes(aggr);
+	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, value_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -366,7 +366,7 @@ static void PacClipSumUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr, 
 }
 static void PacClipSumScatterUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
                                             idx_t count) {
-	int sample_lanes = GetPacSampleLanes(aggr);
+	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, value_data, sdata;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -415,7 +415,7 @@ static void PacClipSumScatterUpdateUHugeInt(Vector inputs[], AggregateInputData 
 template <typename FLOAT_TYPE, int SHIFT, class HASH_TRANSFORM = PacIdentityHash>
 static void PacClipSumUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count) {
 	auto &state = *reinterpret_cast<PacClipSumStateWrapper<> *>(state_p);
-	int sample_lanes = GetPacSampleLanes(aggr);
+	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, value_data;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -447,7 +447,7 @@ static void PacClipSumUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx
 template <typename FLOAT_TYPE, int SHIFT, class HASH_TRANSFORM = PacIdentityHash>
 static void PacClipSumScatterUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
                                          idx_t count) {
-	int sample_lanes = GetPacSampleLanes(aggr);
+	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, value_data, sdata;
 	inputs[0].ToUnifiedFormat(count, hash_data);
 	inputs[1].ToUnifiedFormat(count, value_data);
@@ -530,13 +530,13 @@ AUTOVECTORIZE static void PacClipSumCombineInt(Vector &src, Vector &dst, idx_t c
 }
 
 static void PacClipSumCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
-	PacClipSumCombineInt<>(src, dst, count, aggr.allocator, GetPacSampleLanes(aggr));
+	PacClipSumCombineInt<>(src, dst, count, aggr.allocator, GetPrivSampleLanes(aggr));
 }
 static void PacClipSumCombine128(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
-	PacClipSumCombineInt<CLIP_NUM_LEVELS>(src, dst, count, aggr.allocator, GetPacSampleLanes(aggr));
+	PacClipSumCombineInt<CLIP_NUM_LEVELS>(src, dst, count, aggr.allocator, GetPrivSampleLanes(aggr));
 }
 static void DpSampleClipSumCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
-	PacClipSumCombineInt<CLIP_NUM_LEVELS_64>(src, dst, count, aggr.allocator, GetPacSampleLanes(aggr));
+	PacClipSumCombineInt<CLIP_NUM_LEVELS_64>(src, dst, count, aggr.allocator, GetPrivSampleLanes(aggr));
 }
 
 // PacClipBindData is defined in pac_clip_aggr.hpp

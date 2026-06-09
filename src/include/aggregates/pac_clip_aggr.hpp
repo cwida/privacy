@@ -93,14 +93,14 @@ static inline int ClipEffectiveLevel(int k, int first_supported, int last_suppor
 // ============================================================================
 // Shared bind data for all clip aggregates
 // ============================================================================
-struct PacClipBindData : public PacBindData {
+struct PacClipBindData : public PrivBindData {
 	int clip_support_threshold; // levels with fewer estimated distinct contributors are clipped
 	double float_scale;         // scale factor for float/double→int64 conversion (1.0 for integer types)
 	bool clip_scale;            // true: scale outlier levels to nearest supported; false: omit them
 
 	PacClipBindData(ClientContext &ctx, double mi_val, double correction_val, int clip_support,
 	                double float_scale_val = 1.0, bool clip_scale_val = false, int sample_lanes_val = 0)
-	    : PacBindData(ctx, mi_val, correction_val, 1.0, false, sample_lanes_val), clip_support_threshold(clip_support),
+	    : PrivBindData(ctx, mi_val, correction_val, 1.0, false, sample_lanes_val), clip_support_threshold(clip_support),
 	      float_scale(float_scale_val), clip_scale(clip_scale_val) {
 	}
 
@@ -112,7 +112,7 @@ struct PacClipBindData : public PacBindData {
 		return copy;
 	}
 	bool Equals(const FunctionData &other) const override {
-		if (!PacBindData::Equals(other)) {
+		if (!PrivBindData::Equals(other)) {
 			return false;
 		}
 		auto *o = dynamic_cast<const PacClipBindData *>(&other);

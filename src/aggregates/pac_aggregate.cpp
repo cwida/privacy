@@ -58,7 +58,7 @@ uint64_t PacGenerateRandomSeed() {
 // Check for absence of sample diversity in PAC aggregates.
 // Accumulates per-group stats into bind_data, then checks the population-level condition.
 void CheckPacSampleDiversity(uint64_t key_hash, const PAC_FLOAT *buf, uint64_t update_count, const char *aggr_name,
-                             PacBindData &bind_data) {
+                             PrivBindData &bind_data) {
 	bind_data.total_update_count += update_count;
 
 	// Classify this group as suspicious or not
@@ -335,7 +335,7 @@ static unique_ptr<FunctionData> PacHashBind(ClientContext &ctx, ScalarFunction &
 	if (ctx.TryGetCurrentSetting("pac_hash_repair", hr_val) && !hr_val.IsNull()) {
 		hash_repair = hr_val.GetValue<bool>();
 	}
-	return make_uniq<PacBindData>(ctx, mi, 1.0, 1.0, hash_repair);
+	return make_uniq<PrivBindData>(ctx, mi, 1.0, 1.0, hash_repair);
 }
 
 static void PacHashFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -345,7 +345,7 @@ static void PacHashFunction(DataChunk &args, ExpressionState &state, Vector &res
 	uint64_t query_hash = 0;
 	bool hash_repair = true;
 	if (function.bind_info) {
-		auto &bind_data = function.bind_info->Cast<PacBindData>();
+		auto &bind_data = function.bind_info->Cast<PrivBindData>();
 		query_hash = bind_data.query_hash;
 		hash_repair = bind_data.hash_repair;
 	}
