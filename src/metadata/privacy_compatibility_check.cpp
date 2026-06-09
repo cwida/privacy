@@ -472,9 +472,10 @@ TraceBindingForProtectedColumns(LogicalOperator &root, const ColumnBinding &bind
 	TraceBindingToSources(root, binding, [&](const ColumnBinding &source_binding) {
 		std::pair<string, string> protected_info = GetProtectedColumnInfo(root, source_binding, protected_columns);
 		if (!protected_info.first.empty()) {
-			throw InvalidInputException("Privacy rewrite: protected column '%s.%s' can only be accessed inside aggregate "
-			                            "functions (e.g., SUM, COUNT, AVG, MIN, MAX)",
-			                            protected_info.first.c_str(), protected_info.second.c_str());
+			throw InvalidInputException(
+			    "Privacy rewrite: protected column '%s.%s' can only be accessed inside aggregate "
+			    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)",
+			    protected_info.first.c_str(), protected_info.second.c_str());
 		}
 	});
 }
