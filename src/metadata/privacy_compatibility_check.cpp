@@ -225,10 +225,9 @@ static bool CheckPacAggregatesHaveProperJoins(const LogicalOperator &op,
 			// 1. PU table is directly scanned, OR
 			// 2. A scanned table has an FK path to the PU
 			if (!has_pu_table && !has_fk_to_pu) {
-				throw InvalidInputException(
-				    "Privacy rewrite: PAC aggregates (priv_sum, priv_count, etc.) must be joined "
-				    "with the privacy unit table "
-				    "or a table that has a foreign key path to the privacy unit");
+				throw InvalidInputException("PAC rewrite: PAC aggregates (priv_sum, priv_count, etc.) must be joined "
+				                            "with the privacy unit table "
+				                            "or a table that has a foreign key path to the privacy unit");
 			}
 		}
 
@@ -342,7 +341,7 @@ static void TraceBindingToPUTable(LogicalOperator &root, const ColumnBinding &bi
 		for (auto &pu_table : pu_tables) {
 			if (ColumnBelongsToTable(root, pu_table, source_binding)) {
 				throw InvalidInputException(
-				    "Privacy rewrite: columns from privacy unit tables can only be accessed inside aggregate "
+				    "PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate "
 				    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)");
 			}
 		}
@@ -446,7 +445,7 @@ static void CheckOutputColumnsNotFromPU(LogicalOperator &current_op, LogicalOper
 			for (auto &pu_table : actual_pu_tables) {
 				if (table_entry->name == pu_table) {
 					throw InvalidInputException(
-					    "Privacy rewrite: columns from privacy unit tables can only be accessed inside aggregate "
+					    "PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate "
 					    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)");
 				}
 			}
@@ -473,10 +472,9 @@ TraceBindingForProtectedColumns(LogicalOperator &root, const ColumnBinding &bind
 	TraceBindingToSources(root, binding, [&](const ColumnBinding &source_binding) {
 		std::pair<string, string> protected_info = GetProtectedColumnInfo(root, source_binding, protected_columns);
 		if (!protected_info.first.empty()) {
-			throw InvalidInputException(
-			    "Privacy rewrite: protected column '%s.%s' can only be accessed inside aggregate "
-			    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)",
-			    protected_info.first.c_str(), protected_info.second.c_str());
+			throw InvalidInputException("PAC rewrite: protected column '%s.%s' can only be accessed inside aggregate "
+			                            "functions (e.g., SUM, COUNT, AVG, MIN, MAX)",
+			                            protected_info.first.c_str(), protected_info.second.c_str());
 		}
 	});
 }
@@ -523,7 +521,7 @@ CheckOutputColumnsNotProtected(LogicalOperator &current_op, LogicalOperator &pla
 					string col_lower = StringUtil::Lower(col_name);
 					if (it->second.count(col_lower) > 0) {
 						throw InvalidInputException(
-						    "Privacy rewrite: protected column '%s.%s' can only be accessed inside aggregate "
+						    "PAC rewrite: protected column '%s.%s' can only be accessed inside aggregate "
 						    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)",
 						    table_entry->name.c_str(), col_name.c_str());
 					}
@@ -574,7 +572,7 @@ CheckFiltersNotUsingProtectedColumns(LogicalOperator &op, LogicalOperator &plan_
 					auto protected_info = GetProtectedColumnInfo(plan_root, col_ref.binding, protected_columns);
 					if (!protected_info.first.empty()) {
 						throw InvalidInputException(
-						    "Privacy rewrite: protected column '%s.%s' cannot be used in WHERE/HAVING filters. "
+						    "PAC rewrite: protected column '%s.%s' cannot be used in WHERE/HAVING filters. "
 						    "Protected columns can only appear inside aggregate functions (e.g., SUM, COUNT, AVG).",
 						    protected_info.first.c_str(), protected_info.second.c_str());
 					}
@@ -1020,23 +1018,21 @@ PrivacyCompatibilityResult PrivRewriteQueryCheck(unique_ptr<LogicalOperator> &pl
 		// This prevents infinite loops during FK path traversal
 		if (DetectCycleInFKGraph(context, scanned_tables)) {
 			if (is_conservative) {
-				throw InvalidInputException("Privacy rewrite: circular foreign key dependencies detected. "
-				                            "Privacy compilation requires acyclic foreign key relationships.");
+				throw InvalidInputException("PAC rewrite: circular foreign key dependencies detected. "
+				                            "PAC compilation requires acyclic foreign key relationships.");
 			}
 			return result;
 		}
 
 		if (ContainsRecursiveCTE(*plan)) {
 			if (is_conservative) {
-				throw InvalidInputException(
-				    "Privacy rewrite: recursive CTEs are not supported for privacy compilation");
+				throw InvalidInputException("PAC rewrite: recursive CTEs are not supported for PAC compilation");
 			}
 			return result;
 		}
 		if (ContainsWindowFunction(*plan)) {
 			if (is_conservative) {
-				throw InvalidInputException(
-				    "Privacy rewrite: window functions are not supported for privacy compilation");
+				throw InvalidInputException("PAC rewrite: window functions are not supported for PAC compilation");
 			}
 			return result;
 		}
@@ -1049,7 +1045,7 @@ PrivacyCompatibilityResult PrivRewriteQueryCheck(unique_ptr<LogicalOperator> &pl
 		}
 		if (ContainsDisallowedJoin(*plan)) {
 			if (is_conservative) {
-				throw InvalidInputException("Privacy rewrite: subqueries are not supported for privacy compilation");
+				throw InvalidInputException("PAC rewrite: subqueries are not supported for PAC compilation");
 			}
 			return result;
 		}
