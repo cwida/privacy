@@ -688,7 +688,15 @@ INSERT INTO dp_check_users VALUES (1, 10), (2, 20), (3, 30);
 statement error
 SELECT MIN(v) IS NULL, MAX(v) IS NULL FROM dp_check_users;
 ----
-SAA + smooth sensitivity requires enforced per-PU contribution bounds
+dp_sum_bound
+
+statement ok
+SET dp_sum_bound = 100.0;
+
+query II
+SELECT MIN(v) IS NULL, MAX(v) IS NULL FROM dp_check_users;
+----
+true	true
 
 statement ok
 SET privacy_mode = 'pac';

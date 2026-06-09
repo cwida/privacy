@@ -380,6 +380,19 @@ static void ClipSumInputs(OptimizerExtensionInput &input, LogicalAggregate *agg,
 	agg->ResolveOperatorTypes();
 }
 
+static double GetRequiredDpBound(ClientContext &context, const string &setting_name, const string &mechanism_name) {
+	double bound = 0.0;
+	bool found = setting_name == "dp_sum_bound" ? TryGetDpSumBound(context, bound) : TryGetDpCountBound(context, bound);
+	if (!found) {
+		throw InvalidInputException(mechanism_name + ": " + setting_name + " must be set");
+	}
+	if (bound <= 0.0 || !std::isfinite(bound)) {
+		throw InvalidInputException(mechanism_name + ": " + setting_name + " must be a positive finite number (got " +
+		                            std::to_string(bound) + ")");
+	}
+	return bound;
+}
+
 // Laplace scale = sensitivity / epsilon; sensitivity = es for COUNT, es * sum_bound for SUM
 static double Sensitivity(const BoundAggregateExpression &aggr, double sum_bound, double es) {
 	const string &name = aggr.function.name;
@@ -649,11 +662,14 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                                   LogicalAggregate *agg, const vector<double> &epsilons,
                                                   const vector<double> &deltas, const vector<LogicalType> &output_types,
-                                                  LogicalOperator *insert_above) {
+                                                  const vector<double> &lower_bounds,
+                                                  const vector<double> &upper_bounds, LogicalOperator *insert_above) {
 	idx_t n_groups = agg->groups.size();
 	idx_t n_aggs = output_types.size();
 	D_ASSERT(epsilons.size() == n_aggs);
 	D_ASSERT(deltas.size() == n_aggs);
+	D_ASSERT(lower_bounds.size() == n_aggs);
+	D_ASSERT(upper_bounds.size() == n_aggs);
 
 	vector<unique_ptr<Expression>> proj_exprs;
 	proj_exprs.reserve(n_groups + n_aggs);
@@ -669,6 +685,8 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(epsilons[ai])));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(deltas[ai])));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(sample_lanes)));
+		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(lower_bounds[ai])));
+		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(upper_bounds[ai])));
 		unique_ptr<Expression> noised = BindScalarLocal(input, "priv_smooth_median_noise", std::move(children));
 		if (output_types[ai] != LogicalType::DOUBLE) {
 			noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), output_types[ai]);
@@ -831,10 +849,6 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	(void)query_hash;
 	PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] CompileDPSampleMedianQuery: start");
 
-	throw InvalidInputException(
-	    "dp_sass is disabled for automatic private query rewriting: SAA + smooth sensitivity requires enforced "
-	    "per-PU contribution bounds and sample-output/domain bounds. Use privacy_mode='dp_elastic' for formal DP.");
-
 	double epsilon = GetValidatedDpEpsilon(input.context, "dp_sample_median");
 	double delta = 0.0;
 	if (!TryGetDpDelta(input.context, delta)) {
@@ -855,6 +869,14 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	vector<LogicalType> output_types;
 	output_types.reserve(agg->expressions.size());
 	auto avg_components = BuildAvgComponentSet(avg_infos);
+	double sum_bound = 0.0;
+	double count_bound = 0.0;
+	bool has_sum_bound = false;
+	bool has_count_bound = false;
+	vector<double> lower_bounds;
+	vector<double> upper_bounds;
+	lower_bounds.reserve(agg->expressions.size());
+	upper_bounds.reserve(agg->expressions.size());
 	double k = static_cast<double>(n_original_aggs);
 	vector<double> epsilons;
 	vector<double> deltas;
@@ -862,7 +884,23 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	deltas.reserve(agg->expressions.size());
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
 		auto &aggr = agg->expressions[ai]->Cast<BoundAggregateExpression>();
+		string name = StringUtil::Lower(aggr.function.name);
 		output_types.push_back(avg_components.count(ai) ? LogicalType::DOUBLE : aggr.return_type);
+		if (name == "count" || name == "count_star") {
+			if (!has_count_bound) {
+				count_bound = GetRequiredDpBound(input.context, "dp_count_bound", "dp_sass");
+				has_count_bound = true;
+			}
+			lower_bounds.push_back(0.0);
+			upper_bounds.push_back(count_bound);
+		} else {
+			if (!has_sum_bound) {
+				sum_bound = GetRequiredDpBound(input.context, "dp_sum_bound", "dp_sass");
+				has_sum_bound = true;
+			}
+			lower_bounds.push_back(-sum_bound);
+			upper_bounds.push_back(sum_bound);
+		}
 		double split = avg_components.count(ai) ? (2.0 * k) : k;
 		epsilons.push_back(epsilon / split);
 		deltas.push_back(delta / split);
@@ -888,7 +926,8 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		projection_anchor = ApplySupportFilter(input, plan, agg, support_pos, support_threshold);
 	}
 
-	auto noise_proj = WrapSampleMedianProjection(input, plan, agg, epsilons, deltas, output_types, projection_anchor);
+	auto noise_proj = WrapSampleMedianProjection(input, plan, agg, epsilons, deltas, output_types, lower_bounds,
+	                                             upper_bounds, projection_anchor);
 	if (!avg_infos.empty()) {
 		WrapAvgRatioProjection(input, plan, noise_proj, avg_infos, n_groups, n_original_aggs, noise_proj.proj_ptr,
 		                       true);

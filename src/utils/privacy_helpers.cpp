@@ -637,6 +637,10 @@ bool TryGetDpSumBound(ClientContext &context, double &out) {
 	return TryGetDoubleSetting(context, "dp_sum_bound", out);
 }
 
+bool TryGetDpCountBound(ClientContext &context, double &out) {
+	return TryGetDoubleSetting(context, "dp_count_bound", out);
+}
+
 bool TryGetDpDelta(ClientContext &context, double &out) {
 	return TryGetDoubleSetting(context, "dp_delta", out);
 }

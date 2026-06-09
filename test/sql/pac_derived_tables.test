@@ -45,7 +45,7 @@ SET priv_check = true;
 statement error
 SELECT value FROM ctas_copy;
 ----
-PAC rewrite: protected column 'ctas_copy.value' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'ctas_copy.value' can only be accessed inside aggregate functions
 
 # Non-protected columns should be accessible (table is empty from LIMIT 0)
 query I
@@ -84,7 +84,7 @@ SET priv_check = true;
 statement error
 SELECT amount FROM ctas_renamed;
 ----
-PAC rewrite: protected column 'ctas_renamed.amount' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'ctas_renamed.amount' can only be accessed inside aggregate functions
 
 # Non-protected renamed column should be accessible (table is empty from LIMIT 0)
 query I

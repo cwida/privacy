@@ -1,5 +1,5 @@
 # name: test/sql/dp_sample_median.test
-# description: Experimental sample-median helpers; automatic dp_sass rewriting fails closed
+# description: Sample-median helpers and bounded automatic dp_sass rewriting
 # group: [sql]
 
 require privacy
@@ -119,6 +119,21 @@ SET privacy_noise = false;
 
 query I
 WITH vals AS (
+    SELECT CASE WHEN i < 31 THEN 0.0::FLOAT ELSE 100000.0::FLOAT END AS v
+    FROM range(64) t(i)
+), counters AS (
+    SELECT list(v ORDER BY v) AS l FROM vals
+)
+SELECT priv_smooth_median_noise(l, 1.0, 1e-6, 1, -10.0, 10.0) = 10.0
+FROM counters;
+----
+true
+
+statement ok
+SET privacy_noise = false;
+
+query I
+WITH vals AS (
     SELECT CASE WHEN i < 33 THEN NULL::FLOAT ELSE 0.0::FLOAT END AS v, i
     FROM range(64) t(i)
 ), counters AS (
@@ -159,28 +174,72 @@ CREATE PU TABLE sass_users(uid INTEGER, v DOUBLE, PRIVACY_KEY(uid));
 statement ok
 INSERT INTO sass_users VALUES (1, 10.0), (2, 20.0), (3, 1000.0);
 
-# The helper aggregates above remain available for experimentation, but automatic
-# dp_sass query rewriting is disabled until the implementation enforces the
-# contribution/sample-output/domain bounds required for SAA + smooth sensitivity.
+# Automatic dp_sass requires explicit sample-output domain bounds.
 statement error
 SELECT COUNT(*) FROM sass_users;
 ----
-SAA + smooth sensitivity requires enforced per-PU contribution bounds
+dp_count_bound
 
 statement error
 SELECT SUM(v) FROM sass_users;
 ----
-SAA + smooth sensitivity requires enforced per-PU contribution bounds
+dp_sum_bound
+
+statement ok
+SET dp_sum_bound = 500.0;
 
 statement error
 SELECT AVG(v) FROM sass_users;
 ----
-SAA + smooth sensitivity requires enforced per-PU contribution bounds
+dp_count_bound
+
+statement ok
+SET dp_count_bound = -1.0;
 
 statement error
-SELECT MIN(v), MAX(v) FROM sass_users;
+SELECT COUNT(*) FROM sass_users;
 ----
-SAA + smooth sensitivity requires enforced per-PU contribution bounds
+dp_count_bound
+
+statement ok
+SET dp_count_bound = 10.0;
+
+query I
+SELECT COUNT(*) IS NOT NULL FROM sass_users;
+----
+true
+
+query I
+SELECT SUM(v) IS NOT NULL FROM sass_users;
+----
+true
+
+query I
+SELECT AVG(v) IS NULL FROM sass_users;
+----
+true
+
+statement ok
+CREATE PU TABLE sass_many(uid INTEGER, v DOUBLE, PRIVACY_KEY(uid));
+
+statement ok
+INSERT INTO sass_many
+SELECT i, i::DOUBLE FROM range(200) t(i);
+
+query I
+SELECT MIN(v) IS NOT NULL FROM sass_many;
+----
+true
+
+query I
+SELECT MAX(v) IS NOT NULL FROM sass_many;
+----
+true
+
+query I
+SELECT AVG(v) IS NOT NULL FROM sass_many;
+----
+true
 
 statement ok
 SET privacy_mode = 'dp_elastic';

@@ -757,7 +757,7 @@ ALTER TABLE set_pu_test SET PU;
 statement error
 SELECT * FROM set_pu_test;
 ----
-PAC rewrite: protected column 'set_pu_test.id' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'set_pu_test.id' can only be accessed inside aggregate functions
 
 # Aggregation should work
 query I
@@ -799,7 +799,7 @@ SELECT id, public_col FROM set_pu_with_protected ORDER BY id;
 statement error
 SELECT secret_col FROM set_pu_with_protected;
 ----
-PAC rewrite: protected column 'set_pu_with_protected.secret_col' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'set_pu_with_protected.secret_col' can only be accessed inside aggregate functions
 
 # Add PRIVACY_KEY and SET PU to make it a privacy unit
 statement ok
@@ -815,7 +815,7 @@ ALTER TABLE set_pu_with_protected SET PU;
 statement error
 SELECT id, public_col FROM set_pu_with_protected ORDER BY id;
 ----
-PAC rewrite: protected column 'set_pu_with_protected.id' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'set_pu_with_protected.id' can only be accessed inside aggregate functions
 
 query I
 SELECT public_col FROM set_pu_with_protected ORDER BY public_col;
@@ -827,7 +827,7 @@ public2
 statement error
 SELECT secret_col FROM set_pu_with_protected;
 ----
-PAC rewrite: protected column 'set_pu_with_protected.secret_col' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'set_pu_with_protected.secret_col' can only be accessed inside aggregate functions
 
 # Test 52: UNSET PU on table with PROTECTED columns - keeps PROTECTED status
 statement ok
@@ -844,7 +844,7 @@ SELECT id, public_col FROM set_pu_with_protected ORDER BY id;
 statement error
 SELECT secret_col FROM set_pu_with_protected;
 ----
-PAC rewrite: protected column 'set_pu_with_protected.secret_col' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'set_pu_with_protected.secret_col' can only be accessed inside aggregate functions
 
 # Test 53: SET PU is idempotent (calling twice is OK)
 statement ok

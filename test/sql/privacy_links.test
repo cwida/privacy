@@ -172,7 +172,7 @@ GROUP BY u.id
 ORDER BY u.id
 LIMIT 1;
 ----
-PAC rewrite: protected column 'users.id' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'users.id' can only be accessed inside aggregate functions
 
 # ==============================================================================
 # Test 7: Subquery with PRIVACY_LINK chain

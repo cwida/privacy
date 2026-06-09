@@ -341,7 +341,7 @@ static void TraceBindingToPUTable(LogicalOperator &root, const ColumnBinding &bi
 		for (auto &pu_table : pu_tables) {
 			if (ColumnBelongsToTable(root, pu_table, source_binding)) {
 				throw InvalidInputException(
-				    "PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate "
+				    "Privacy rewrite: columns from privacy unit tables can only be accessed inside aggregate "
 				    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)");
 			}
 		}
@@ -445,7 +445,7 @@ static void CheckOutputColumnsNotFromPU(LogicalOperator &current_op, LogicalOper
 			for (auto &pu_table : actual_pu_tables) {
 				if (table_entry->name == pu_table) {
 					throw InvalidInputException(
-					    "PAC rewrite: columns from privacy unit tables can only be accessed inside aggregate "
+					    "Privacy rewrite: columns from privacy unit tables can only be accessed inside aggregate "
 					    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)");
 				}
 			}
@@ -472,7 +472,7 @@ TraceBindingForProtectedColumns(LogicalOperator &root, const ColumnBinding &bind
 	TraceBindingToSources(root, binding, [&](const ColumnBinding &source_binding) {
 		std::pair<string, string> protected_info = GetProtectedColumnInfo(root, source_binding, protected_columns);
 		if (!protected_info.first.empty()) {
-			throw InvalidInputException("PAC rewrite: protected column '%s.%s' can only be accessed inside aggregate "
+			throw InvalidInputException("Privacy rewrite: protected column '%s.%s' can only be accessed inside aggregate "
 			                            "functions (e.g., SUM, COUNT, AVG, MIN, MAX)",
 			                            protected_info.first.c_str(), protected_info.second.c_str());
 		}
@@ -521,7 +521,7 @@ CheckOutputColumnsNotProtected(LogicalOperator &current_op, LogicalOperator &pla
 					string col_lower = StringUtil::Lower(col_name);
 					if (it->second.count(col_lower) > 0) {
 						throw InvalidInputException(
-						    "PAC rewrite: protected column '%s.%s' can only be accessed inside aggregate "
+						    "Privacy rewrite: protected column '%s.%s' can only be accessed inside aggregate "
 						    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)",
 						    table_entry->name.c_str(), col_name.c_str());
 					}
@@ -572,7 +572,7 @@ CheckFiltersNotUsingProtectedColumns(LogicalOperator &op, LogicalOperator &plan_
 					auto protected_info = GetProtectedColumnInfo(plan_root, col_ref.binding, protected_columns);
 					if (!protected_info.first.empty()) {
 						throw InvalidInputException(
-						    "PAC rewrite: protected column '%s.%s' cannot be used in WHERE/HAVING filters. "
+						    "Privacy rewrite: protected column '%s.%s' cannot be used in WHERE/HAVING filters. "
 						    "Protected columns can only appear inside aggregate functions (e.g., SUM, COUNT, AVG).",
 						    protected_info.first.c_str(), protected_info.second.c_str());
 					}

@@ -323,6 +323,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "dp_sum_bound",
 	    "Per-tuple clipping bound for SUM/AVG in dp_elastic mode (required when such an aggregate is present)",
 	    LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_count_bound",
+	                             "Sample-output count bound for privacy_mode='dp_sass' COUNT and AVG components",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
 	// Privacy failure probability δ for (ε, δ)-DP smooth sensitivity in dp_elastic mode.
 	// Required when privacy_mode = 'dp_elastic'; PRAGMA refresh_dp_stats(epsilon) can set it.
 	db.config.AddExtensionOption(

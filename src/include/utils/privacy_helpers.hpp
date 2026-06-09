@@ -89,6 +89,8 @@ double GetDpEpsilon(ClientContext &context, double default_value = 1.0);
 double GetValidatedDpEpsilon(ClientContext &context, const string &mechanism_name);
 // Read `dp_sum_bound` into `out`. Returns false if the setting is unset/NULL.
 bool TryGetDpSumBound(ClientContext &context, double &out);
+// Read `dp_count_bound` into `out`. Returns false if the setting is unset/NULL.
+bool TryGetDpCountBound(ClientContext &context, double &out);
 // Read `dp_delta` into `out`. Returns false if unset/NULL (→ use global elastic sensitivity).
 bool TryGetDpDelta(ClientContext &context, double &out);
 // Read `privacy_min_group_count` into `out`. Returns true only when set, non-NULL, and a

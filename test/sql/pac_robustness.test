@@ -295,19 +295,19 @@ INSERT INTO e_pu VALUES (1, 10), (2, 20), (3, 30);
 statement error
 SELECT secret FROM e_pu;
 ----
-PAC rewrite: protected column 'e_pu.secret' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'e_pu.secret' can only be accessed inside aggregate functions
 
 # E2: SELECT * from PU table (PRIVACY_KEY is auto-protected)
 statement error
 SELECT * FROM e_pu;
 ----
-PAC rewrite: protected column 'e_pu.uid' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'e_pu.uid' can only be accessed inside aggregate functions
 
 # E3: Protected column in GROUP BY
 statement error
 SELECT secret, COUNT(*) FROM e_pu GROUP BY secret;
 ----
-PAC rewrite: protected column 'e_pu.secret' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'e_pu.secret' can only be accessed inside aggregate functions
 
 # E4: SUM of protected column is OK (inside aggregate)
 query I
@@ -327,7 +327,7 @@ SELECT COUNT(*) FROM e_pu;
 statement error
 SELECT secret FROM e_pu WHERE secret > 5;
 ----
-PAC rewrite: protected column 'e_pu.secret' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'e_pu.secret' can only be accessed inside aggregate functions
 
 # E7: AVG of protected column is OK
 query I
@@ -362,7 +362,7 @@ INSERT INTO f_pu VALUES (1, 10), (2, 20), (3, 30);
 statement error
 SELECT id, SUM(val) OVER (PARTITION BY id) FROM f_pu;
 ----
-PAC rewrite: protected column 'f_pu.id' can only be accessed inside aggregate functions
+Privacy rewrite: protected column 'f_pu.id' can only be accessed inside aggregate functions
 
 # F2: Recursive CTE on PU table
 # The protected column check fires before the recursive CTE check,
@@ -375,7 +375,7 @@ WITH RECURSIVE cte AS (
 )
 SELECT SUM(val) FROM cte;
 ----
-PAC rewrite: protected column 'f_pu.id' cannot be used in WHERE/HAVING filters
+Privacy rewrite: protected column 'f_pu.id' cannot be used in WHERE/HAVING filters
 
 # Cleanup section F
 statement ok
