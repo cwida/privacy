@@ -57,6 +57,16 @@ unique_ptr<Expression> BindPacAggregate(OptimizerExtensionInput &input, const st
                                         unique_ptr<Expression> hash_expr, unique_ptr<Expression> value_expr,
                                         unique_ptr<Expression> correction_expr = nullptr);
 
+// Bind a plain DuckDB aggregate function (sum, count, count_star, etc.) by name.
+unique_ptr<Expression> BindPlainAggregate(OptimizerExtensionInput &input, const string &func_name,
+                                          vector<unique_ptr<Expression>> children,
+                                          AggregateType aggr_type = AggregateType::NON_DISTINCT);
+
+// Convenience overload for zero-or-one argument aggregates.
+unique_ptr<Expression> BindPlainAggregate(OptimizerExtensionInput &input, const string &func_name,
+                                          unique_ptr<Expression> arg,
+                                          AggregateType aggr_type = AggregateType::NON_DISTINCT);
+
 struct PuPreAggregationInfo {
 	LogicalAggregate *lower_agg;
 	idx_t num_original_groups;

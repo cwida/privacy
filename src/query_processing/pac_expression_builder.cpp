@@ -128,12 +128,12 @@ idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name) {
 void AddPKColumns(LogicalGet &get, const vector<string> &pks) {
 	auto table_entry_ptr = get.GetTable();
 	if (!table_entry_ptr) {
-		throw InternalException("PAC compiler: expected LogicalGet to be bound to a table when PKs are present");
+		throw InternalException("Privacy compiler: expected LogicalGet to be bound to a table when PKs are present");
 	}
 	for (auto &pk : pks) {
 		idx_t proj_idx = EnsureProjectedColumn(get, pk);
 		if (proj_idx == DConstants::INVALID_INDEX) {
-			throw InternalException("PAC compiler: could not find PK column " + pk + " in table");
+			throw InternalException("Privacy compiler: could not find PK column " + pk + " in table");
 		}
 	}
 }
@@ -158,7 +158,7 @@ void AddRowIDColumn(LogicalGet &get) {
 // Works for any column type (VARCHAR, INTEGER, etc.)
 unique_ptr<Expression> BuildXorHash(OptimizerExtensionInput &input, vector<unique_ptr<Expression>> cols) {
 	if (cols.empty()) {
-		throw InternalException("PAC compiler: BuildXorHash called with empty column list");
+		throw InternalException("Privacy compiler: BuildXorHash called with empty column list");
 	}
 	auto left = input.optimizer.BindScalarFunction("hash", std::move(cols[0]));
 	for (size_t i = 1; i < cols.size(); ++i) {
@@ -174,7 +174,7 @@ unique_ptr<Expression> BuildXorHashFromPKs(OptimizerExtensionInput &input, Logic
 	for (auto &pk : pks) {
 		idx_t proj_idx = EnsureProjectedColumn(get, pk);
 		if (proj_idx == DConstants::INVALID_INDEX) {
-			throw InternalException("PAC compiler: failed to find PK column " + pk);
+			throw InternalException("Privacy compiler: failed to find PK column " + pk);
 		}
 		auto col_binding = ColumnBinding(get.table_index, proj_idx);
 		auto col_index_obj = get.GetColumnIds()[proj_idx];
@@ -206,7 +206,7 @@ ColumnBinding InsertHashProjectionAboveGet(OptimizerExtensionInput &input, uniqu
 	vector<unique_ptr<LogicalOperator> *> get_nodes;
 	FindAllNodesByTableIndex(&plan, get.table_index, get_nodes);
 	if (get_nodes.empty()) {
-		throw InternalException("PAC compiler: InsertHashProjectionAboveGet could not find get #" +
+		throw InternalException("Privacy compiler: InsertHashProjectionAboveGet could not find get #" +
 		                        std::to_string(get.table_index));
 	}
 	auto &get_slot = *get_nodes[0];
@@ -326,7 +326,7 @@ ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, un
 	// 3. Find the unique_ptr slot holding this CTE_SCAN in the plan tree
 	auto *cte_slot_ptr = FindCTERefSlot(plan, cte_ref.table_index);
 	if (!cte_slot_ptr) {
-		throw InternalException("PAC compiler: InsertHashProjectionAboveCTERef could not find CTE_SCAN #" +
+		throw InternalException("Privacy compiler: InsertHashProjectionAboveCTERef could not find CTE_SCAN #" +
 		                        std::to_string(cte_ref.table_index));
 	}
 	auto &cte_slot = *cte_slot_ptr;
@@ -370,7 +370,7 @@ ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, un
 // Build AND expression from multiple hash expressions (for multiple PUs)
 unique_ptr<Expression> BuildAndFromHashes(OptimizerExtensionInput &input, vector<unique_ptr<Expression>> &hash_exprs) {
 	if (hash_exprs.empty()) {
-		throw InternalException("PAC compiler: cannot build AND expression from empty hash list");
+		throw InternalException("Privacy compiler: cannot build AND expression from empty hash list");
 	}
 
 	// If there is only one hash, return it directly
@@ -403,7 +403,7 @@ unique_ptr<Expression> BindPacAggregate(OptimizerExtensionInput &input, const st
 	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, pac_func_name);
 	auto best = function_binder.BindFunction(entry.name, entry.functions, arg_types, error);
 	if (!best.IsValid()) {
-		throw InternalException("PAC compiler: failed to bind " + pac_func_name);
+		throw InternalException("Privacy compiler: failed to bind " + pac_func_name);
 	}
 	auto func = entry.functions.GetFunctionByOffset(best.GetIndex());
 
@@ -454,7 +454,7 @@ unique_ptr<Expression> BindBitOrAggregate(OptimizerExtensionInput &input, unique
 	                         .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, "bit_or");
 	auto bit_or_best = function_binder.BindFunction(bit_or_entry.name, bit_or_entry.functions, bit_or_types, error);
 	if (!bit_or_best.IsValid()) {
-		throw InternalException("PAC compiler: failed to bind bit_or");
+		throw InternalException("Privacy compiler: failed to bind bit_or");
 	}
 	auto bit_or_func = bit_or_entry.functions.GetFunctionByOffset(bit_or_best.GetIndex());
 
@@ -486,7 +486,7 @@ static string GetPacAggregateFunctionName(const string &function_name, ClientCon
 	} else if (function_name == "avg") {
 		pac_function_name = "priv_noised_avg";
 	} else {
-		throw NotImplementedException("PAC compiler: unsupported aggregate function " + function_name);
+		throw NotImplementedException("Privacy compiler: unsupported aggregate function " + function_name);
 	}
 	return pac_function_name;
 }
@@ -571,20 +571,6 @@ static void InsertDistinctPreAggregation(OptimizerExtensionInput &input, Logical
 	                    std::to_string(inner_group_index) + ", agg_index=" + std::to_string(inner_agg_index) +
 	                    ") with " + std::to_string(num_original_groups) + " original groups + distinct value");
 #endif
-}
-
-// Find the unique_ptr slot that holds the given operator pointer in the plan tree.
-static unique_ptr<LogicalOperator> *FindSlotByPointer(unique_ptr<LogicalOperator> &root, LogicalOperator *target) {
-	if (root.get() == target) {
-		return &root;
-	}
-	for (auto &child : root->children) {
-		auto *result = FindSlotByPointer(child, target);
-		if (result) {
-			return result;
-		}
-	}
-	return nullptr;
 }
 
 // Build a standalone aggregate branch for one DISTINCT column.
@@ -921,7 +907,7 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
 		auto it = agg_idx_to_branch.find(ai);
 		if (it == agg_idx_to_branch.end()) {
-			throw InternalException("PAC compiler: multi-branch could not find aggregate " + std::to_string(ai));
+			throw InternalException("Privacy compiler: multi-branch could not find aggregate " + std::to_string(ai));
 		}
 		idx_t branch_idx = it->second.first;
 		idx_t pos_in_branch = it->second.second;
@@ -947,9 +933,9 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 	projection->ResolveOperatorTypes();
 
 	// 6. Replace the aggregate node in the plan tree
-	auto *agg_slot = FindSlotByPointer(plan, agg);
+	auto *agg_slot = FindOperatorSlotByPointer(plan, agg);
 	if (!agg_slot) {
-		throw InternalException("PAC compiler: InsertMultiBranchPreAggregation could not find aggregate in plan");
+		throw InternalException("Privacy compiler: InsertMultiBranchPreAggregation could not find aggregate in plan");
 	}
 
 	idx_t old_group_index = agg->group_index;
@@ -1135,7 +1121,7 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 			if (function_name == "count_star" || function_name == "count") {
 				value_child = make_uniq_base<Expression, BoundConstantExpression>(Value::BIGINT(1));
 			} else {
-				throw InternalException("PAC compiler: expected aggregate to have a child expression");
+				throw InternalException("Privacy compiler: expected aggregate to have a child expression");
 			}
 		} else {
 			value_child = old_aggr.children[0]->Copy();
@@ -1187,8 +1173,8 @@ static bool IsNoisedVariant(const string &name) {
 }
 
 // Bind a plain DuckDB aggregate function (sum, count, min, max)
-static unique_ptr<Expression> BindPlainAggregate(OptimizerExtensionInput &input, const string &func_name,
-                                                 vector<unique_ptr<Expression>> children) {
+unique_ptr<Expression> BindPlainAggregate(OptimizerExtensionInput &input, const string &func_name,
+                                          vector<unique_ptr<Expression>> children, AggregateType aggr_type) {
 	FunctionBinder function_binder(input.context);
 	ErrorData error;
 	vector<LogicalType> arg_types;
@@ -1199,10 +1185,19 @@ static unique_ptr<Expression> BindPlainAggregate(OptimizerExtensionInput &input,
 	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, func_name);
 	auto best = function_binder.BindFunction(entry.name, entry.functions, arg_types, error);
 	if (!best.IsValid()) {
-		throw InternalException("PAC clip rewrite: failed to bind " + func_name);
+		throw InternalException("Privacy compiler: failed to bind aggregate '" + func_name + "'");
 	}
 	auto func = entry.functions.GetFunctionByOffset(best.GetIndex());
-	return function_binder.BindAggregateFunction(func, std::move(children), nullptr, AggregateType::NON_DISTINCT);
+	return function_binder.BindAggregateFunction(func, std::move(children), nullptr, aggr_type);
+}
+
+unique_ptr<Expression> BindPlainAggregate(OptimizerExtensionInput &input, const string &func_name,
+                                          unique_ptr<Expression> arg, AggregateType aggr_type) {
+	vector<unique_ptr<Expression>> children;
+	if (arg) {
+		children.push_back(std::move(arg));
+	}
+	return BindPlainAggregate(input, func_name, std::move(children), aggr_type);
 }
 
 // Check if an aggregate contains priv_noised_* or pac_* (counters) expressions

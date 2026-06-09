@@ -51,6 +51,9 @@ LogicalProjection *FindParentProjection(unique_ptr<LogicalOperator> &root, Logic
 unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperator> *root, const string &table_name,
                                                 LogicalOperator **parent_out = nullptr, idx_t *child_idx_out = nullptr);
 
+// Find the unique_ptr slot holding `target` in the plan tree. Returns nullptr if not found.
+unique_ptr<LogicalOperator> *FindOperatorSlotByPointer(unique_ptr<LogicalOperator> &root, LogicalOperator *target);
+
 // Check if an operator has any leaf data source nodes (base table scans or CTE refs) in its subtree.
 bool HasBaseTableInSubtree(LogicalOperator *op);
 
@@ -73,6 +76,9 @@ bool HasTableInSubtreeCTE(LogicalOperator *op, const string &table_name, const C
 // Returns a vector of pointers to the unique_ptrs holding the LogicalGet nodes.
 void FindAllNodesByTable(unique_ptr<LogicalOperator> *root, const string &table_name,
                          vector<unique_ptr<LogicalOperator> *> &results);
+
+// Find all LogicalGet nodes in the plan tree.
+void FindAllGetNodes(LogicalOperator *root, vector<LogicalGet *> &results);
 
 // Check if an operator has a LogicalGet with a specific table index in its subtree.
 bool HasTableIndexInSubtree(LogicalOperator *op, idx_t table_index);
