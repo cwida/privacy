@@ -7,6 +7,7 @@
 
 #include <string>
 #include <vector>
+#include <set>
 #include "duckdb.hpp"
 
 namespace duckdb {
@@ -22,12 +23,19 @@ namespace duckdb {
 //                (default "benchmark/clickbench/clickbench_queries")
 // - out_csv: output CSV path (if empty, auto-named)
 // - micro: if true, use a smaller subset for quick testing
+// - run_naive: if true, also run the explicit sample-table-join "naive" variants for the
+//              sampling mechanisms (pac -> clickbench_naive_pac_queries, dp_sass ->
+//              clickbench_naive_dp_queries) that are present in --modes
+// - modes: which privacy mechanisms to measure (subset of {pac,dp_standard,dp_elastic,dp_sass});
+//          baseline always runs regardless
 //
 // Returns 0 on success, non-zero on error.
 int RunClickHouseBenchmark(const string &db_path = "clickbench.db",
                            const string &queries_dir = "benchmark/clickbench/clickbench_queries",
                            const string &out_csv = "",
-                           bool micro = false);
+                           bool micro = false,
+                           bool run_naive = false,
+                           const std::set<string> &modes = {"pac", "dp_standard", "dp_elastic", "dp_sass"});
 
 } // namespace duckdb
 

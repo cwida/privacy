@@ -464,6 +464,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register priv_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
 	RegisterPacHashFunction(loader);
 
+	// Register pac_aggregate scalar function (naive PAC sample-and-aggregate terminal)
+	RegisterPacAggregateFunctions(loader);
+
 	// Register dp_noise scalar function (value, scale) -> value + Lap(scale)
 	RegisterDpLaplaceNoiseFunction(loader);
 	RegisterDpSmoothMedianNoiseFunction(loader);

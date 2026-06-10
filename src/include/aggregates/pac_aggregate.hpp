@@ -154,6 +154,10 @@ double ComputeDeltaFromValues(const vector<PAC_FLOAT> &values, double mi);
 // Register priv_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
 void RegisterPacHashFunction(ExtensionLoader &loader);
 
+// Register pac_aggregate scalar function (LIST vals, LIST cnts, DOUBLE mi, INTEGER k -> DOUBLE):
+// terminal for the naive PAC sample-and-aggregate path (collapses per-subsample answers + PAC noise)
+void RegisterPacAggregateFunctions(ExtensionLoader &loader);
+
 // Register priv_finalize scalar function (LIST<DOUBLE> -> DOUBLE, read-time noise for derived tables)
 void RegisterPacFinalizeFunction(ExtensionLoader &loader);
 

@@ -129,6 +129,55 @@ static double BoundedSmoothMedianSensitivity(const std::array<double, 64> &value
 	return smooth;
 }
 
+// Shared per-row core for the sample-and-aggregate median release. Validates the inputs,
+// clips (when bounded) and sorts the 64 sample answers, takes the median (values[31]),
+// computes the smooth-sensitivity scale, and adds Laplace noise. Returns false when the row
+// is invalid (caller marks the result NULL); otherwise writes the released value to `out`.
+static bool SmoothMedianNoiseRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
+                                 const PAC_FLOAT *child_values, double epsilon, double delta, int sample_lanes_raw,
+                                 bool bounded, double lower_bound, double upper_bound, bool noise_enabled,
+                                 uint64_t seed, double &out) {
+	if (entry.length != 64) {
+		return false;
+	}
+	int sample_lanes = ValidateDpSampleLanes(sample_lanes_raw);
+	if (epsilon <= 0.0 || delta <= 0.0 || delta >= 0.5 || !std::isfinite(epsilon) || !std::isfinite(delta)) {
+		return false;
+	}
+	if (bounded && (!std::isfinite(lower_bound) || !std::isfinite(upper_bound) || lower_bound >= upper_bound)) {
+		return false;
+	}
+	std::array<double, 64> values;
+	idx_t valid_count = 0;
+	for (idx_t j = 0; j < 64; j++) {
+		auto child_idx = child_data.sel->get_index(entry.offset + j);
+		if (child_data.validity.RowIsValid(child_idx)) {
+			double value = static_cast<double>(child_values[child_idx]);
+			if (bounded) {
+				value = std::max(lower_bound, std::min(upper_bound, value));
+			}
+			values[valid_count++] = value;
+		}
+	}
+	if (valid_count < 32) {
+		return false;
+	}
+	std::sort(values.begin(), values.begin() + valid_count);
+	for (idx_t j = valid_count; j < values.size(); j++) {
+		values[j] = values[valid_count - 1];
+	}
+	double median = values[31];
+	if (!noise_enabled) {
+		out = median;
+		return true;
+	}
+	double beta = epsilon / (2.0 * std::log(2.0 / delta));
+	double smooth = bounded ? BoundedSmoothMedianSensitivity(values, beta, sample_lanes, lower_bound, upper_bound)
+	                        : SmoothMedianSensitivity(values, beta, sample_lanes);
+	out = median + LaplaceNoise((2.0 * smooth) / epsilon, seed ^ (entry.offset * PAC_MAGIC_HASH));
+	return true;
+}
+
 static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &context = state.GetContext();
 	Value seed_val;
@@ -184,52 +233,86 @@ static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state,
 			continue;
 		}
 		auto &entry = list_entries[list_idx];
-		if (entry.length != 64) {
-			result_validity.SetInvalid(i);
-			continue;
-		}
 		double epsilon = epsilons[eps_idx];
 		double delta = deltas[delta_idx];
-		int sample_lanes = ValidateDpSampleLanes(sample_lanes_values[sample_lanes_idx]);
 		double lower_bound = bounded ? lower_values[lower_idx] : 0.0;
 		double upper_bound = bounded ? upper_values[upper_idx] : 0.0;
-		if (epsilon <= 0.0 || delta <= 0.0 || delta >= 0.5 || !std::isfinite(epsilon) || !std::isfinite(delta)) {
+		double released = 0.0;
+		if (SmoothMedianNoiseRow(entry, child_data, child_values, epsilon, delta, sample_lanes_values[sample_lanes_idx],
+		                         bounded, lower_bound, upper_bound, noise_enabled, seed, released)) {
+			result_data[i] = released;
+		} else {
+			result_validity.SetInvalid(i);
+		}
+	}
+}
+
+// dp_aggregate: scalar terminal for the "naive" DP sample-and-aggregate path. Mirrors the
+// pac_aggregate signature so the naive PAC and DP queries are structurally identical, differing
+// only in this terminal. Each row carries 64 per-lane sample answers; the second `counts` list is
+// accepted purely for signature symmetry with pac_aggregate and is currently UNUSED by the median
+// path (the per-lane answers already encode the aggregate). Always bounded (lower/upper required).
+// Signature: dp_aggregate(LIST<FLOAT> samples, LIST<FLOAT> counts, DOUBLE epsilon, DOUBLE delta,
+//                         INTEGER lanes, DOUBLE lower, DOUBLE upper) -> DOUBLE
+static void DpAggregateFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &context = state.GetContext();
+	Value seed_val;
+	uint64_t seed = (context.TryGetCurrentSetting("privacy_seed", seed_val) && !seed_val.IsNull())
+	                    ? uint64_t(seed_val.GetValue<int64_t>())
+	                    : uint64_t(std::random_device {}());
+	if (seed_val.IsNull()) {
+		seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(context.ActiveTransaction().GetActiveQuery());
+	}
+	bool noise_enabled = true;
+	Value noise_val;
+	if (context.TryGetCurrentSetting("privacy_noise", noise_val) && !noise_val.IsNull()) {
+		noise_enabled = noise_val.GetValue<bool>();
+	}
+
+	idx_t count = args.size();
+	auto &list_vec = args.data[0]; // samples (counts at args.data[1] is intentionally ignored)
+	UnifiedVectorFormat list_data, epsilon_data, delta_data, sample_lanes_data, lower_data, upper_data;
+	list_vec.ToUnifiedFormat(count, list_data);
+	args.data[2].ToUnifiedFormat(count, epsilon_data);
+	args.data[3].ToUnifiedFormat(count, delta_data);
+	args.data[4].ToUnifiedFormat(count, sample_lanes_data);
+	args.data[5].ToUnifiedFormat(count, lower_data);
+	args.data[6].ToUnifiedFormat(count, upper_data);
+
+	auto &child_vec = ListVector::GetEntry(list_vec);
+	UnifiedVectorFormat child_data;
+	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
+	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+	auto epsilons = UnifiedVectorFormat::GetData<double>(epsilon_data);
+	auto deltas = UnifiedVectorFormat::GetData<double>(delta_data);
+	auto sample_lanes_values = UnifiedVectorFormat::GetData<int32_t>(sample_lanes_data);
+	auto lower_values = UnifiedVectorFormat::GetData<double>(lower_data);
+	auto upper_values = UnifiedVectorFormat::GetData<double>(upper_data);
+	auto result_data = FlatVector::GetData<double>(result);
+	auto &result_validity = FlatVector::Validity(result);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto list_idx = list_data.sel->get_index(i);
+		auto eps_idx = epsilon_data.sel->get_index(i);
+		auto delta_idx = delta_data.sel->get_index(i);
+		auto sample_lanes_idx = sample_lanes_data.sel->get_index(i);
+		auto lower_idx = lower_data.sel->get_index(i);
+		auto upper_idx = upper_data.sel->get_index(i);
+		if (!list_data.validity.RowIsValid(list_idx) || !epsilon_data.validity.RowIsValid(eps_idx) ||
+		    !delta_data.validity.RowIsValid(delta_idx) || !sample_lanes_data.validity.RowIsValid(sample_lanes_idx) ||
+		    !lower_data.validity.RowIsValid(lower_idx) || !upper_data.validity.RowIsValid(upper_idx)) {
 			result_validity.SetInvalid(i);
 			continue;
 		}
-		if (bounded && (!std::isfinite(lower_bound) || !std::isfinite(upper_bound) || lower_bound >= upper_bound)) {
+		double released = 0.0;
+		if (SmoothMedianNoiseRow(list_entries[list_idx], child_data, child_values, epsilons[eps_idx], deltas[delta_idx],
+		                         sample_lanes_values[sample_lanes_idx], /*bounded=*/true, lower_values[lower_idx],
+		                         upper_values[upper_idx], noise_enabled, seed, released)) {
+			result_data[i] = released;
+		} else {
 			result_validity.SetInvalid(i);
-			continue;
 		}
-		std::array<double, 64> values;
-		idx_t valid_count = 0;
-		for (idx_t j = 0; j < 64; j++) {
-			auto child_idx = child_data.sel->get_index(entry.offset + j);
-			if (child_data.validity.RowIsValid(child_idx)) {
-				double value = static_cast<double>(child_values[child_idx]);
-				if (bounded) {
-					value = std::max(lower_bound, std::min(upper_bound, value));
-				}
-				values[valid_count++] = value;
-			}
-		}
-		if (valid_count < 32) {
-			result_validity.SetInvalid(i);
-			continue;
-		}
-		std::sort(values.begin(), values.begin() + valid_count);
-		for (idx_t j = valid_count; j < values.size(); j++) {
-			values[j] = values[valid_count - 1];
-		}
-		double median = values[31];
-		if (!noise_enabled) {
-			result_data[i] = median;
-			continue;
-		}
-		double beta = epsilon / (2.0 * std::log(2.0 / delta));
-		double smooth = bounded ? BoundedSmoothMedianSensitivity(values, beta, sample_lanes, lower_bound, upper_bound)
-		                        : SmoothMedianSensitivity(values, beta, sample_lanes);
-		result_data[i] = median + LaplaceNoise((2.0 * smooth) / epsilon, seed ^ (entry.offset * PAC_MAGIC_HASH));
 	}
 }
 
@@ -248,6 +331,19 @@ void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
 	desc.description = "Applies smooth-sensitivity median release to 64 sample counters.";
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
+
+	// dp_aggregate: naive DP sample-and-aggregate terminal, mirroring pac_aggregate's shape
+	// (samples, counts, ...). `counts` is accepted for symmetry and ignored by the median path.
+	ScalarFunction dp_aggregate("dp_aggregate",
+	                            {list_type, LogicalType::LIST(LogicalType::DOUBLE), LogicalType::DOUBLE,
+	                             LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::DOUBLE, LogicalType::DOUBLE},
+	                            LogicalType::DOUBLE, DpAggregateFunction);
+	CreateScalarFunctionInfo agg_info(dp_aggregate);
+	FunctionDescription agg_desc;
+	agg_desc.description =
+	    "Naive DP sample-and-aggregate terminal: median + smooth-sensitivity Laplace over 64 lane answers.";
+	agg_info.descriptions.push_back(std::move(agg_desc));
+	loader.RegisterFunction(std::move(agg_info));
 }
 
 } // namespace duckdb

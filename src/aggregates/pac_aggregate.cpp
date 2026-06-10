@@ -328,6 +328,243 @@ static uint64_t hash32_32(uint64_t num) {
 	return 0xAAAAAAAAAAAAAAAAULL; // 1010...10 pattern: exactly 32 bits set
 }
 
+// ============================================================================
+// pac_aggregate: scalar terminal for the "naive" PAC sample-and-aggregate path.
+//
+// Each argument list is the output of the same SQL aggregate evaluated on many
+// random subsamples of the privacy unit (see benchmark/*/*_naive_pac_queries).
+// pac_aggregate collapses those per-subsample answers into one PAC-noised scalar:
+// it selects counter J (deterministic from query_hash), computes the empirical
+// (second-moment) variance over the subsample answers, and adds Gaussian noise
+// calibrated to that variance and the per-row mutual-information budget `mi`.
+// The fused/vectorized counterpart is priv_noised_sum/priv_noised_count.
+//
+// Signature: pac_aggregate(LIST<vals>, LIST<cnts>, DOUBLE mi, INTEGER k) -> DOUBLE
+//   vals  : per-subsample aggregate answers (up to 64 worlds, padded to 64)
+//   cnts  : per-subsample row counts (used only for the min-support `k` gate)
+//   mi    : mutual-information budget in nats (<=0 disables noise)
+//   k     : minimum per-subsample support; cells below it are released as NULL
+// ============================================================================
+struct PacAggregateLocalState : public FunctionLocalState {
+	explicit PacAggregateLocalState(uint64_t seed) : gen(seed) {
+	}
+	std::mt19937_64 gen;
+};
+
+static unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &, const BoundFunctionExpression &,
+                                                       FunctionData *bind_data) {
+	// Single source-of-truth: prefer seed supplied via bind_data (PrivBindData).
+	uint64_t seed = std::random_device {}();
+	if (bind_data) {
+		seed = bind_data->Cast<PrivBindData>().seed;
+	}
+	return make_uniq<PacAggregateLocalState>(seed);
+}
+
+// Templated over values element type T and counts element type C so we can accept
+// e.g. DOUBLE[] values with BIGINT[] counts without casts in the query.
+template <class T, class C>
+static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &vals = args.data[0];
+	auto &cnts = args.data[1];
+	auto &mi_vec = args.data[2];
+	auto &k_vec = args.data[3];
+
+	idx_t count = args.size();
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto res = FlatVector::GetData<double>(result);
+	FlatVector::Validity(result).SetAllValid(count);
+
+	auto &local = ExecuteFunctionState::GetFunctionState(state)->Cast<PacAggregateLocalState>();
+	auto &gen = local.gen;
+
+	// query_hash and pstate from bind data (deterministic counter pick + p-tracking).
+	uint64_t query_hash = 0;
+	std::shared_ptr<PacPState> pstate;
+	auto &bound_expr = state.expr.Cast<BoundFunctionExpression>();
+	if (bound_expr.bind_info) {
+		auto &bd = bound_expr.bind_info->Cast<PrivBindData>();
+		query_hash = bd.query_hash;
+		pstate = bd.pstate;
+	}
+
+	UnifiedVectorFormat vvals, vcnts;
+	vals.ToUnifiedFormat(count, vvals);
+	cnts.ToUnifiedFormat(count, vcnts);
+
+	UnifiedVectorFormat kvals;
+	k_vec.ToUnifiedFormat(count, kvals);
+	auto *kdata = UnifiedVectorFormat::GetData<int32_t>(kvals);
+
+	for (idx_t row = 0; row < count; row++) {
+		bool refuse = false;
+
+		double mi = mi_vec.GetValue(row).GetValue<double>();
+		if (mi < 0.0) {
+			throw InvalidInputException("pac_aggregate: mi must be >= 0");
+		}
+		idx_t kidx = kvals.sel ? kvals.sel->get_index(row) : row;
+		int k = kdata[kidx];
+
+		idx_t r = vvals.sel ? vvals.sel->get_index(row) : row;
+		if (!vvals.validity.RowIsValid(r) || !vcnts.validity.RowIsValid(r)) {
+			result.SetValue(row, Value());
+			continue;
+		}
+
+		auto *vals_entries = UnifiedVectorFormat::GetData<list_entry_t>(vvals);
+		auto *cnts_entries = UnifiedVectorFormat::GetData<list_entry_t>(vcnts);
+		auto ve = vals_entries[r];
+		auto ce = cnts_entries[r];
+		if (ve.length != ce.length) {
+			throw InvalidInputException("pac_aggregate: values and counts length mismatch");
+		}
+		idx_t vals_len = ve.length;
+		idx_t cnts_len = ce.length;
+
+		auto &vals_child = ListVector::GetEntry(vals);
+		auto &cnts_child = ListVector::GetEntry(cnts);
+		vals_child.Flatten(ve.offset + ve.length);
+		cnts_child.Flatten(ce.offset + ce.length);
+		auto *vdata = FlatVector::GetData<T>(vals_child);
+		auto *cdata = FlatVector::GetData<C>(cnts_child);
+
+		vector<PAC_FLOAT> values;
+		values.reserve(vals_len);
+		int64_t max_count = 0;
+		for (idx_t i = 0; i < vals_len; i++) {
+			if (!FlatVector::Validity(vals_child).RowIsValid(ve.offset + i)) {
+				refuse = true;
+				break;
+			}
+			values.push_back(ToDouble<T>(vdata[ve.offset + i]));
+			int64_t cnt_val = 0;
+			if (i < cnts_len) {
+				cnt_val = static_cast<int64_t>(cdata[ce.offset + i]);
+			}
+			max_count = std::max<int64_t>(max_count, cnt_val);
+		}
+
+		// Need exactly 64 worlds for variance/p-tracking; pad up to 64 with 0.
+		while (values.size() < 64) {
+			values.push_back(0.0);
+		}
+
+		if (refuse || values.empty() || max_count < static_cast<int64_t>(k)) {
+			result.SetValue(row, Value());
+			continue;
+		}
+
+		// mi <= 0 means no noise - return counter[0] directly.
+		if (mi <= 0.0) {
+			res[row] = values[0];
+			continue;
+		}
+
+		idx_t N = values.size();
+		idx_t J = static_cast<idx_t>(query_hash % static_cast<uint64_t>(N));
+		PAC_FLOAT yJ = values[J];
+
+		// P-tracking path (only when the list fits in 64 worlds).
+		if (pstate && N == 64) {
+			std::lock_guard<std::mutex> lock(pstate->mtx);
+			double w_mean = 0.0;
+			for (idx_t kk = 0; kk < 64; kk++) {
+				w_mean += static_cast<double>(values[kk]) * pstate->p[kk];
+			}
+			double w_var = 0.0;
+			for (idx_t kk = 0; kk < 64; kk++) {
+				double d = static_cast<double>(values[kk]) - w_mean;
+				w_var += d * d * pstate->p[kk];
+			}
+			double noise_var = w_var / (2.0 * mi);
+			if (noise_var > 0.0 && std::isfinite(noise_var)) {
+				double noise = std::normal_distribution<double>(0.0, std::sqrt(noise_var))(gen);
+				double noisy_result = static_cast<double>(yJ) + noise;
+				double log_p[64];
+				double max_log = -std::numeric_limits<double>::infinity();
+				for (idx_t kk = 0; kk < 64; kk++) {
+					double diff = static_cast<double>(values[kk]) - noisy_result;
+					log_p[kk] = std::log(pstate->p[kk] + 1e-300) + (-0.5 * diff * diff / noise_var);
+					if (log_p[kk] > max_log) {
+						max_log = log_p[kk];
+					}
+				}
+				double sum_exp = 0.0;
+				for (idx_t kk = 0; kk < 64; kk++) {
+					sum_exp += std::exp(log_p[kk] - max_log);
+				}
+				double log_sum = max_log + std::log(sum_exp);
+				for (idx_t kk = 0; kk < 64; kk++) {
+					pstate->p[kk] = std::exp(log_p[kk] - log_sum);
+				}
+				res[row] = noisy_result;
+				continue;
+			}
+			// Fall through to uniform path if no variance.
+		}
+
+		double delta = ComputeDeltaFromValues(values, mi);
+		if (delta <= 0.0 || !std::isfinite(delta)) {
+			res[row] = yJ;
+			continue;
+		}
+		res[row] = static_cast<double>(yJ) + std::normal_distribution<double>(0.0, std::sqrt(delta))(gen);
+	}
+
+	if (args.AllConstant()) {
+		result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	}
+}
+
+static unique_ptr<FunctionData> PacAggregateBind(ClientContext &ctx, ScalarFunction &,
+                                                 vector<unique_ptr<Expression>> &) {
+	// mi is supplied per-row; the bind-time value is unused for noise but seeds the RNG.
+	return make_uniq<PrivBindData>(ctx, 128.0);
+}
+
+void RegisterPacAggregateFunctions(ExtensionLoader &loader) {
+	auto make_and_register = [&](const LogicalType &vals_elem, const LogicalType &cnts_elem,
+	                             const scalar_function_t &fn) {
+		auto fun = ScalarFunction(
+		    "pac_aggregate",
+		    {LogicalType::LIST(vals_elem), LogicalType::LIST(cnts_elem), LogicalType::DOUBLE, LogicalType::INTEGER},
+		    LogicalType::DOUBLE, fn, PacAggregateBind, nullptr, nullptr, PacAggregateInit);
+		fun.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		loader.RegisterFunction(fun);
+	};
+
+#define REG_COUNTS_FOR(V_LOG, V_CPP)                                                                                   \
+	make_and_register(V_LOG, LogicalType::TINYINT, PacAggregateScalar<V_CPP, int8_t>);                                 \
+	make_and_register(V_LOG, LogicalType::SMALLINT, PacAggregateScalar<V_CPP, int16_t>);                               \
+	make_and_register(V_LOG, LogicalType::INTEGER, PacAggregateScalar<V_CPP, int32_t>);                                \
+	make_and_register(V_LOG, LogicalType::BIGINT, PacAggregateScalar<V_CPP, int64_t>);                                 \
+	make_and_register(V_LOG, LogicalType::HUGEINT, PacAggregateScalar<V_CPP, hugeint_t>);                              \
+	make_and_register(V_LOG, LogicalType::UTINYINT, PacAggregateScalar<V_CPP, uint8_t>);                               \
+	make_and_register(V_LOG, LogicalType::USMALLINT, PacAggregateScalar<V_CPP, uint16_t>);                             \
+	make_and_register(V_LOG, LogicalType::UINTEGER, PacAggregateScalar<V_CPP, uint32_t>);                              \
+	make_and_register(V_LOG, LogicalType::UBIGINT, PacAggregateScalar<V_CPP, uint64_t>);                               \
+	make_and_register(V_LOG, LogicalType::UHUGEINT, PacAggregateScalar<V_CPP, uhugeint_t>);                            \
+	make_and_register(V_LOG, LogicalType::FLOAT, PacAggregateScalar<V_CPP, float>);                                    \
+	make_and_register(V_LOG, LogicalType::DOUBLE, PacAggregateScalar<V_CPP, double>);
+
+	REG_COUNTS_FOR(LogicalType::BOOLEAN, int8_t)
+	REG_COUNTS_FOR(LogicalType::TINYINT, int8_t)
+	REG_COUNTS_FOR(LogicalType::SMALLINT, int16_t)
+	REG_COUNTS_FOR(LogicalType::INTEGER, int32_t)
+	REG_COUNTS_FOR(LogicalType::BIGINT, int64_t)
+	REG_COUNTS_FOR(LogicalType::HUGEINT, hugeint_t)
+	REG_COUNTS_FOR(LogicalType::UTINYINT, uint8_t)
+	REG_COUNTS_FOR(LogicalType::USMALLINT, uint16_t)
+	REG_COUNTS_FOR(LogicalType::UINTEGER, uint32_t)
+	REG_COUNTS_FOR(LogicalType::UBIGINT, uint64_t)
+	REG_COUNTS_FOR(LogicalType::UHUGEINT, uhugeint_t)
+	REG_COUNTS_FOR(LogicalType::FLOAT, float)
+	REG_COUNTS_FOR(LogicalType::DOUBLE, double)
+
+#undef REG_COUNTS_FOR
+}
+
 static unique_ptr<FunctionData> PacHashBind(ClientContext &ctx, ScalarFunction &, vector<unique_ptr<Expression>> &) {
 	double mi = GetPacMiFromSetting(ctx);
 	bool hash_repair = true;
