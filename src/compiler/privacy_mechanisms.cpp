@@ -2,14 +2,15 @@
 #include "aggregates/pac_aggregate.hpp"
 #include "utils/privacy_helpers.hpp"
 #include "compiler/privacy_compiler.hpp"
-#include "query_processing/pac_plan_traversal.hpp"
-#include "query_processing/pac_expression_builder.hpp"
+#include "query_processing/privacy_plan_traversal.hpp"
+#include "query_processing/privacy_expression_builder.hpp"
 #include "privacy_debug.hpp"
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/optional_idx.hpp"
+#include "duckdb/common/printer.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/optimizer/column_binding_replacer.hpp"
@@ -57,7 +58,7 @@ static unique_ptr<Expression> BindScalarLocal(OptimizerExtensionInput &input, co
 	ErrorData error;
 	auto expr = function_binder.BindScalarFunction(DEFAULT_SCHEMA, func_name, std::move(children), error);
 	if (error.HasError()) {
-		throw InternalException("dp_elastic: failed to bind scalar function '" + func_name + "': " + error.Message());
+		throw InternalException("dp: failed to bind scalar function '" + func_name + "': " + error.Message());
 	}
 	return expr;
 }
@@ -108,7 +109,7 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 		string name = StringUtil::Lower(g->GetTable()->name);
 		name_count[name]++;
 		if (name_count[name] > 1) {
-			throw InvalidInputException("dp_elastic: self-joins are not supported (table '" + g->GetTable()->name +
+			throw InvalidInputException("dp: self-joins are not supported (table '" + g->GetTable()->name +
 			                            "' appears more than once)");
 		}
 	}
@@ -116,7 +117,7 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 	// Single-table case: no non-PU tables → chain is just the PU itself, ES = 1
 	if (check.scanned_non_pu_tables.empty()) {
 		if (check.scanned_pu_tables.size() != 1) {
-			throw InvalidInputException("dp_elastic: expected exactly one privacy unit table, found " +
+			throw InvalidInputException("dp: expected exactly one privacy unit table, found " +
 			                            std::to_string(check.scanned_pu_tables.size()));
 		}
 		return {{check.scanned_pu_tables[0]}, {}};
@@ -132,7 +133,7 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 			}
 			pu_list += "'" + pu + "'";
 		}
-		throw InvalidInputException("dp_elastic: query touches multiple privacy unit tables (" + pu_list +
+		throw InvalidInputException("dp: query touches multiple privacy unit tables (" + pu_list +
 		                            "). Only one privacy unit is supported per query.");
 	}
 
@@ -143,7 +144,7 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 	for (auto &non_pu : check.scanned_non_pu_tables) {
 		auto it = check.fk_paths.find(non_pu);
 		if (it == check.fk_paths.end() || it->second.empty()) {
-			throw InvalidInputException("dp_elastic: table '" + non_pu +
+			throw InvalidInputException("dp: table '" + non_pu +
 			                            "' has no PRIVACY_LINK path to a privacy unit table. "
 			                            "Declare the link with ALTER TABLE ADD PRIVACY_LINK.");
 		}
@@ -162,7 +163,7 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 	// All non-PU scanned tables must appear in the longest path (linear chain requirement)
 	for (auto &non_pu : check.scanned_non_pu_tables) {
 		if (path_set.find(StringUtil::Lower(non_pu)) == path_set.end()) {
-			throw InvalidInputException("dp_elastic: star/diamond joins are not yet supported. Table '" + non_pu +
+			throw InvalidInputException("dp: star/diamond joins are not yet supported. Table '" + non_pu +
 			                            "' is not in the linear FK chain to the privacy unit. "
 			                            "All joined tables must form a single linear chain.");
 		}
@@ -182,13 +183,13 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 
 		auto meta_it = check.table_metadata.find(from_table);
 		if (meta_it == check.table_metadata.end()) {
-			throw InternalException("dp_elastic: no metadata for table '" + from_table + "'");
+			throw InternalException("dp: no metadata for table '" + from_table + "'");
 		}
 		bool found_fk = false;
 		for (auto &fk : meta_it->second.fks) {
 			if (StringUtil::Lower(fk.first) == StringUtil::Lower(to_table)) {
 				if (fk.second.empty()) {
-					throw InternalException("dp_elastic: empty FK column list for " + from_table + " → " + to_table);
+					throw InternalException("dp: empty FK column list for " + from_table + " → " + to_table);
 				}
 				chain.fk_cols.push_back(fk.second[0]);
 				found_fk = true;
@@ -196,8 +197,7 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 			}
 		}
 		if (!found_fk) {
-			throw InternalException("dp_elastic: could not find FK column from '" + from_table + "' to '" + to_table +
-			                        "'");
+			throw InternalException("dp: could not find FK column from '" + from_table + "' to '" + to_table + "'");
 		}
 	}
 
@@ -241,8 +241,8 @@ static LogicalAggregate *CheckDPAggregates(unique_ptr<LogicalOperator> &plan, co
 	return agg;
 }
 
-static DPFKChain ExtractDPElasticFKChain(unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                                         const PrivacyCompatibilityResult &check) {
+static DPFKChain ExtractDPFKChain(unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
+                                  const PrivacyCompatibilityResult &check) {
 	vector<LogicalGet *> gets;
 	FindAllGetNodes(plan.get(), gets);
 	return ExtractFKChain(check, gets, privacy_units, true);
@@ -267,7 +267,7 @@ static double ComputeMfK(ClientContext &context, const string &table_name, const
 	               table_name + " GROUP BY " + fk_col + ")";
 	auto result = conn.Query(query);
 	if (!result || result->HasError()) {
-		throw InvalidInputException("dp_elastic: failed to compute mf_K for " + table_name + "." + fk_col +
+		throw InvalidInputException("dp: failed to compute mf_K for " + table_name + "." + fk_col +
 		                            (result ? (": " + result->GetError()) : ": null result"));
 	}
 	if (result->RowCount() == 0) {
@@ -327,15 +327,15 @@ static double ComputeElasticSensitivity(ClientContext &context, const DPFKChain 
 	double delta = 0.0;
 	if (!TryGetDpDelta(context, delta)) {
 		throw InvalidInputException(
-		    "dp_elastic: dp_delta must be set. Use SET dp_delta=<value> or PRAGMA refresh_dp_stats(<epsilon>).");
+		    "dp: dp_delta must be set. Use SET dp_delta=<value> or PRAGMA refresh_dp_stats(<epsilon>).");
 	}
 	if (delta <= 0.0 || !std::isfinite(delta)) {
-		throw InvalidInputException("dp_elastic: dp_delta must be a positive finite number (got " +
-		                            std::to_string(delta) + ")");
+		throw InvalidInputException("dp: dp_delta must be a positive finite number (got " + std::to_string(delta) +
+		                            ")");
 	}
 	if (delta >= 0.5) {
-		throw InvalidInputException("dp_elastic: dp_delta must be < 0.5 for meaningful (ε,δ)-DP (got " +
-		                            std::to_string(delta) + ")");
+		throw InvalidInputException("dp: dp_delta must be < 0.5 for meaningful (ε,δ)-DP (got " + std::to_string(delta) +
+		                            ")");
 	}
 
 	double beta = epsilon / (2.0 * std::log(2.0 / delta));
@@ -344,6 +344,15 @@ static double ComputeElasticSensitivity(ClientContext &context, const DPFKChain 
 	                    " SES=" + std::to_string(ses));
 	return 2.0 * ses;
 }
+
+// Which clipping + sensitivity strategy the shared Laplace pipeline uses.
+//
+// GLOBAL (standard DP): bound each privacy unit's *total* contribution to a fixed constant
+//   (dp_sum_bound / dp_count_bound) via per-PU pre-aggregation, so the global sensitivity is
+//   exactly that constant — data-independent → pure ε-DP, no dp_delta. See ApplyPerPuClipping.
+// ELASTIC_SMOOTH (elastic DP): per-row clip + smooth elastic sensitivity 2·SES_β derived from
+//   the (data-dependent) join max-frequencies; (ε,δ)-DP, requires dp_delta.
+enum class DPSensitivityKind { GLOBAL, ELASTIC_SMOOTH };
 
 // ----------------------------------------------------------------------------
 // Aggregate helpers
@@ -393,8 +402,8 @@ static double GetRequiredDpBound(ClientContext &context, const string &setting_n
 	return bound;
 }
 
-// Laplace scale = sensitivity / epsilon; sensitivity = es for COUNT, es * sum_bound for SUM
-static double Sensitivity(const BoundAggregateExpression &aggr, double sum_bound, double es) {
+// Elastic Laplace scale = sensitivity / epsilon; sensitivity = es for COUNT, es * sum_bound for SUM
+static double ElasticSensitivity(const BoundAggregateExpression &aggr, double sum_bound, double es) {
 	const string &name = aggr.function.name;
 	if (name == "count" || name == "count_star") {
 		return es;
@@ -402,12 +411,136 @@ static double Sensitivity(const BoundAggregateExpression &aggr, double sum_bound
 	if (name == "sum") {
 		return es * sum_bound;
 	}
-	throw InternalException("dp_elastic: Sensitivity received unsupported '" + name + "'");
+	throw InternalException("dp: ElasticSensitivity received unsupported '" + name + "'");
+}
+
+static bool IsCountAggregate(const BoundAggregateExpression &aggr) {
+	return aggr.function.name == "count" || aggr.function.name == "count_star";
+}
+
+// Does the aggregate contain any COUNT/COUNT(*) (after AVG→SUM+COUNT rewrite)?
+static bool AggregateContainsCount(const LogicalAggregate *agg) {
+	for (auto &expr : agg->expressions) {
+		if (IsCountAggregate(expr->Cast<BoundAggregateExpression>())) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Locate the PU-identifying FK column for per-PU grouping: the FK on the table *adjacent* to
+// the PU (chain.fk_cols.back() on chain.tables[size-2]). That value uniquely identifies the PU
+// and, because the join is already in the aggregate's input subtree, is available on every
+// contributing row regardless of how many hops deep the queried table sits. Caller guarantees a
+// join (chain.tables.size() >= 2).
+static unique_ptr<Expression> BuildPuKeyExpression(unique_ptr<LogicalOperator> &plan, const DPFKChain &chain,
+                                                   const string &mech) {
+	const string &adj_table = chain.tables[chain.tables.size() - 2];
+	const string &fk_col = chain.fk_cols.back();
+	auto *get = FindTableScanInSubtree(plan.get(), adj_table);
+	if (!get) {
+		throw InternalException(mech + ": could not find PU-adjacent table '" + adj_table + "' for per-PU clipping");
+	}
+	idx_t proj_idx = EnsureProjectedColumn(*get, fk_col);
+	if (proj_idx == DConstants::INVALID_INDEX) {
+		throw InternalException(mech + ": failed to project PU key column '" + fk_col + "'");
+	}
+	auto col_index = get->GetColumnIds()[proj_idx];
+	auto col_type = get->GetColumnType(col_index);
+	return make_uniq<BoundColumnRefExpression>(col_type, ColumnBinding(get->table_index, proj_idx));
+}
+
+// Clip an expression to [lo, hi] in DOUBLE domain, then cast back to `restore_type`:
+// greatest(least(cast(expr, DOUBLE), hi), lo).
+static unique_ptr<Expression> ClipToBounds(OptimizerExtensionInput &input, unique_ptr<Expression> expr, double lo,
+                                           double hi, const LogicalType &restore_type) {
+	auto as_double = BoundCastExpression::AddCastToType(input.context, std::move(expr), LogicalType::DOUBLE);
+	auto hi_const = make_uniq<BoundConstantExpression>(Value::DOUBLE(hi));
+	auto lo_const = make_uniq<BoundConstantExpression>(Value::DOUBLE(lo));
+	auto upper = input.optimizer.BindScalarFunction("least", std::move(as_double), std::move(hi_const));
+	auto clipped = input.optimizer.BindScalarFunction("greatest", std::move(upper), std::move(lo_const));
+	return BoundCastExpression::AddCastToType(input.context, std::move(clipped), restore_type);
+}
+
+// Standard (global-sensitivity) clipping. Bounds each privacy unit's total contribution to a
+// fixed constant so global sensitivity equals that constant (data-independent → pure ε-DP).
+//
+//  - Single table (1 row == 1 PU): per-row clipping suffices. COUNT sensitivity = 1 (no bound
+//    needed); SUM clipped to dp_sum_bound, sensitivity = dp_sum_bound.
+//  - Join: pre-aggregate per PU (group by the PU-adjacent FK), clip each PU's partial to the
+//    bound, then SUM the clipped partials. SUM→dp_sum_bound, COUNT→dp_count_bound.
+//
+// Returns the per-aggregate sensitivity vector (one entry per current agg->expression) and sets
+// `per_pu_out` true when a per-PU pre-aggregation was inserted (so support counts PU groups).
+static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                         LogicalAggregate *agg, const DPFKChain &chain, const string &mech,
+                                         bool &per_pu_out) {
+	bool is_join = chain.tables.size() >= 2;
+	bool has_sum = AggregateContainsSum(agg);
+	bool has_count = AggregateContainsCount(agg);
+	per_pu_out = is_join;
+
+	double sum_bound = has_sum ? GetRequiredDpBound(input.context, "dp_sum_bound", mech) : 0.0;
+	// COUNT has data-independent sensitivity 1 on a single table, but on a join one PU can own
+	// arbitrarily many rows — so a join with COUNT requires dp_count_bound.
+	double count_bound = (is_join && has_count) ? GetRequiredDpBound(input.context, "dp_count_bound", mech) : 0.0;
+
+	idx_t n = agg->expressions.size();
+	vector<double> sens;
+	sens.reserve(n);
+
+	if (!is_join) {
+		if (has_sum) {
+			ClipSumInputs(input, agg, sum_bound);
+		}
+		for (idx_t i = 0; i < n; i++) {
+			auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
+			sens.push_back(IsCountAggregate(aggr) ? 1.0 : sum_bound);
+		}
+		return sens;
+	}
+
+	// Join: build plain per-PU lower aggregates mirroring each top aggregate.
+	auto pu_key = BuildPuKeyExpression(plan, chain, mech);
+	vector<bool> is_count;
+	is_count.reserve(n);
+	vector<unique_ptr<Expression>> lower_exprs;
+	lower_exprs.reserve(n);
+	for (idx_t i = 0; i < n; i++) {
+		auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
+		if (IsCountAggregate(aggr)) {
+			is_count.push_back(true);
+			if (aggr.function.name == "count" && !aggr.children.empty()) {
+				lower_exprs.push_back(BindPlainAggregate(input, "count", aggr.children[0]->Copy()));
+			} else {
+				lower_exprs.push_back(BindPlainAggregate(input, "count_star", nullptr));
+			}
+		} else { // sum
+			is_count.push_back(false);
+			lower_exprs.push_back(BindPlainAggregate(input, "sum", aggr.children[0]->Copy()));
+		}
+	}
+
+	auto pre = InsertPuPreAggregation(input, agg, std::move(lower_exprs), std::move(pu_key));
+
+	// Rewrite each top aggregate to SUM(clip(per-PU partial, bound)).
+	for (idx_t i = 0; i < n; i++) {
+		auto lower_type = pre.lower_agg->types[pre.num_original_groups + 1 + i];
+		unique_ptr<Expression> lower_ref =
+		    make_uniq<BoundColumnRefExpression>(lower_type, ColumnBinding(pre.lower_agg_index, i));
+		double bound = is_count[i] ? count_bound : sum_bound;
+		double lo = is_count[i] ? 0.0 : -bound; // counts are non-negative
+		auto clipped = ClipToBounds(input, std::move(lower_ref), lo, bound, lower_type);
+		agg->expressions[i] = BindPlainAggregate(input, "sum", std::move(clipped));
+		sens.push_back(bound);
+	}
+	agg->ResolveOperatorTypes();
+	return sens;
 }
 
 static unique_ptr<Expression> BuildSupportKeyExpression(unique_ptr<LogicalOperator> &plan, const DPFKChain &chain) {
 	if (chain.tables.size() > 2) {
-		throw InvalidInputException("dp_elastic: privacy_min_group_count currently supports single-table PU queries "
+		throw InvalidInputException("dp: privacy_min_group_count currently supports single-table PU queries "
 		                            "and one-hop PRIVACY_LINK chains only");
 	}
 	if (chain.tables.size() == 1) {
@@ -416,11 +549,11 @@ static unique_ptr<Expression> BuildSupportKeyExpression(unique_ptr<LogicalOperat
 
 	auto *get = FindTableScanInSubtree(plan.get(), chain.tables[0]);
 	if (!get) {
-		throw InternalException("dp_elastic: could not find support source table '" + chain.tables[0] + "'");
+		throw InternalException("dp: could not find support source table '" + chain.tables[0] + "'");
 	}
 	idx_t proj_idx = EnsureProjectedColumn(*get, chain.fk_cols[0]);
 	if (proj_idx == DConstants::INVALID_INDEX) {
-		throw InternalException("dp_elastic: failed to project support key column '" + chain.fk_cols[0] + "'");
+		throw InternalException("dp: failed to project support key column '" + chain.fk_cols[0] + "'");
 	}
 	auto col_index = get->GetColumnIds()[proj_idx];
 	auto col_type = get->GetColumnType(col_index);
@@ -428,16 +561,24 @@ static unique_ptr<Expression> BuildSupportKeyExpression(unique_ptr<LogicalOperat
 }
 
 static optional_idx AddSupportAggregate(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                        LogicalAggregate *agg, const DPFKChain &chain, double threshold) {
+                                        LogicalAggregate *agg, const DPFKChain &chain, double threshold, bool per_pu) {
 	if (threshold <= 0.0 || !std::isfinite(threshold)) {
 		return optional_idx();
 	}
 
-	auto support_key = BuildSupportKeyExpression(plan, chain);
-	if (support_key) {
-		agg->expressions.push_back(BindPlainAggregate(input, "count", std::move(support_key), AggregateType::DISTINCT));
-	} else {
+	// After a per-PU pre-aggregation the aggregate input already has exactly one row per
+	// privacy unit, so a plain COUNT(*) over those rows is the per-group PU support. Without
+	// pre-aggregation we count DISTINCT PU keys (or rows, on a single PU table).
+	if (per_pu) {
 		agg->expressions.push_back(BindPlainAggregate(input, "count_star", nullptr));
+	} else {
+		auto support_key = BuildSupportKeyExpression(plan, chain);
+		if (support_key) {
+			agg->expressions.push_back(
+			    BindPlainAggregate(input, "count", std::move(support_key), AggregateType::DISTINCT));
+		} else {
+			agg->expressions.push_back(BindPlainAggregate(input, "count_star", nullptr));
+		}
 	}
 	agg->ResolveOperatorTypes();
 	return optional_idx(agg->expressions.size() - 1);
@@ -458,7 +599,7 @@ static LogicalFilter *ApplySupportFilter(OptimizerExtensionInput &input, unique_
 
 	auto *slot = FindOperatorSlotByPointer(plan, agg);
 	if (!slot) {
-		throw InternalException("dp_elastic: could not locate aggregate slot for support filter");
+		throw InternalException("dp: could not locate aggregate slot for support filter");
 	}
 	filter->children.push_back(std::move(*slot));
 	filter->ResolveOperatorTypes();
@@ -469,7 +610,7 @@ static LogicalFilter *ApplySupportFilter(OptimizerExtensionInput &input, unique_
 
 // ----------------------------------------------------------------------------
 // Wrap aggregate output — inserts LogicalProjection above `agg` with
-// priv_laplace_noise applied to each DP-target column, cast back to original type.
+// dp_noise applied to each DP-target column, cast back to original type.
 // Returns the inserted projection so the caller can layer additional rewrites.
 // ----------------------------------------------------------------------------
 
@@ -522,9 +663,14 @@ static NoiseProjection InsertProjectionAndRemap(unique_ptr<LogicalOperator> &pla
 	return {proj_idx, proj_ptr, std::move(proj_types)};
 }
 
+// `output_types` gives the desired final type of each DP aggregate column. It differs from the
+// live agg type only for standard-DP per-PU clipping, where e.g. COUNT becomes SUM(clipped count)
+// (BIGINT→HUGEINT); casting the noised value back to the original type keeps upstream column
+// references valid.
 static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                                 LogicalAggregate *agg, LogicalOperator *insert_above,
-                                                const vector<double> &agg_scales) {
+                                                const vector<double> &agg_scales,
+                                                const vector<LogicalType> &output_types) {
 	idx_t n_groups = agg->groups.size();
 	idx_t n_aggs = agg_scales.size();
 	idx_t group_idx = agg->group_index;
@@ -532,6 +678,7 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 
 	auto agg_types = agg->types;
 	D_ASSERT(agg_types.size() >= n_groups + n_aggs);
+	D_ASSERT(output_types.size() >= n_aggs);
 
 	vector<unique_ptr<Expression>> proj_exprs;
 	proj_exprs.reserve(n_groups + n_aggs);
@@ -542,10 +689,16 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 
 	for (idx_t ai = 0; ai < n_aggs; ai++) {
 		auto agg_col_type = agg_types[n_groups + ai];
+		auto out_type = output_types[ai];
 		auto col_ref = make_uniq<BoundColumnRefExpression>(agg_col_type, ColumnBinding(agg_idx, ai));
 		double scale = agg_scales[ai];
 		if (scale <= 0.0 || !std::isfinite(scale)) {
-			proj_exprs.push_back(std::move(col_ref));
+			// No noise: still cast back to the original output type if the rewrite changed it.
+			unique_ptr<Expression> passthrough = std::move(col_ref);
+			if (agg_col_type != out_type) {
+				passthrough = BoundCastExpression::AddCastToType(input.context, std::move(passthrough), out_type);
+			}
+			proj_exprs.push_back(std::move(passthrough));
 			continue;
 		}
 		unique_ptr<Expression> value_expr =
@@ -563,9 +716,9 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 		noise_children.push_back(std::move(value_expr));
 		noise_children.push_back(std::move(scale_expr));
 		noise_children.push_back(std::move(nonce));
-		unique_ptr<Expression> noised = BindScalarLocal(input, "priv_laplace_noise", std::move(noise_children));
-		if (agg_col_type != LogicalType::DOUBLE) {
-			noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), agg_col_type);
+		unique_ptr<Expression> noised = BindScalarLocal(input, "dp_noise", std::move(noise_children));
+		if (out_type != LogicalType::DOUBLE) {
+			noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), out_type);
 		}
 		proj_exprs.push_back(std::move(noised));
 	}
@@ -573,7 +726,7 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 	idx_t proj_idx = input.optimizer.binder.GenerateTableIndex();
 	auto projection = make_uniq<LogicalProjection>(proj_idx, std::move(proj_exprs));
 	return InsertProjectionAndRemap(plan, std::move(projection), insert_above, proj_idx, group_idx, agg_idx, n_groups,
-	                                n_aggs, 0, "dp_elastic: could not locate noise insertion slot in plan");
+	                                n_aggs, 0, "dp: could not locate noise insertion slot in plan");
 }
 
 // ----------------------------------------------------------------------------
@@ -655,7 +808,7 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 	auto ratio_proj = make_uniq<LogicalProjection>(ratio_idx, std::move(proj_exprs));
 	auto inserted = InsertProjectionAndRemap(plan, std::move(ratio_proj), insert_above, ratio_idx, noise_proj.proj_idx,
 	                                         noise_proj.proj_idx, n_groups, n_original_aggs, n_groups,
-	                                         "dp_elastic: could not locate insert point for AVG ratio projection");
+	                                         "dp: could not locate insert point for AVG ratio projection");
 	return {inserted.proj_idx, inserted.proj_ptr};
 }
 
@@ -687,7 +840,7 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 		children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(sample_lanes)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(lower_bounds[ai])));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(upper_bounds[ai])));
-		unique_ptr<Expression> noised = BindScalarLocal(input, "priv_smooth_median_noise", std::move(children));
+		unique_ptr<Expression> noised = BindScalarLocal(input, "dp_smooth_median_noise", std::move(children));
 		if (output_types[ai] != LogicalType::DOUBLE) {
 			noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), output_types[ai]);
 		}
@@ -755,26 +908,55 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 // Entry point
 // ----------------------------------------------------------------------------
 
-void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
-                           unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                           const string &query_hash) {
-	(void)query_hash;
-	PRIVACY_DEBUG_PRINT("[DP_ELASTIC] CompileDPElasticQuery: start");
+// Per-mode clipping + sensitivity. Returns one sensitivity per DP aggregate (in agg->expressions
+// order, before any support aggregate is appended) and sets `per_pu` when a per-PU
+// pre-aggregation was inserted (so the support aggregate counts PU groups).
+static vector<double> ClipAndComputeSensitivities(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                                  LogicalAggregate *agg, const DPFKChain &chain, const string &mech,
+                                                  DPSensitivityKind kind, double epsilon, bool &per_pu) {
+	if (kind == DPSensitivityKind::GLOBAL) {
+		// Standard DP: per-PU contribution clipping → sensitivity = the bound (data-independent).
+		return ApplyPerPuClipping(input, plan, agg, chain, mech, per_pu);
+	}
+	// Elastic DP: per-row clipping + smooth elastic sensitivity from the join max-frequencies.
+	per_pu = false;
+	double sum_bound = 0.0;
+	if (AggregateContainsSum(agg)) {
+		sum_bound = GetRequiredDpBound(input.context, "dp_sum_bound", mech);
+		ClipSumInputs(input, agg, sum_bound);
+	}
+	double es = ComputeElasticSensitivity(input.context, chain, epsilon);
+	vector<double> sens;
+	sens.reserve(agg->expressions.size());
+	for (auto &expr : agg->expressions) {
+		sens.push_back(ElasticSensitivity(expr->Cast<BoundAggregateExpression>(), sum_bound, es));
+	}
+	return sens;
+}
 
-	double epsilon = GetValidatedDpEpsilon(input.context, "dp_elastic");
-
-	auto fk_chain = ExtractDPElasticFKChain(plan, privacy_units, check);
-	auto *agg = CheckDPAggregates(plan, "dp_elastic");
-
-	// Rewrite AVG(x) → SUM(x) + COUNT(*) before bound/clipping checks.
-	// Each AVG uses ε/2 per component so the combined cost is still ε-DP.
-	auto avg_infos = RewriteAvgAggregates(input, agg);
-	idx_t n_original_aggs = agg->expressions.size() - avg_infos.size();
-	idx_t n_groups = agg->groups.size();
-
+// Shared finalize tail for both Laplace DP modes: append the τ-support aggregate, suppress
+// low-support groups when privacy_min_group_count is set, split ε across aggregates, inject
+// Laplace noise, and (for AVG) layer the ratio projection. `agg_sens` carries one raw
+// sensitivity per DP aggregate; `per_pu` reflects whether the input was per-PU pre-aggregated.
+static void FinalizeDPLaplace(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan, LogicalAggregate *agg,
+                              const DPFKChain &chain, const string &mech, const vector<AvgInfo> &avg_infos,
+                              const vector<double> &agg_sens, const vector<LogicalType> &output_types,
+                              idx_t n_original_aggs, idx_t n_groups, double epsilon, bool noise_enabled, bool per_pu,
+                              bool allow_group_suppression) {
 	double support_threshold = 0.0;
-	bool apply_support_filter = TryGetPrivacyMinGroupCount(input.context, support_threshold);
-	auto support_pos = AddSupportAggregate(input, plan, agg, fk_chain, support_threshold);
+	bool want_support = TryGetPrivacyMinGroupCount(input.context, support_threshold);
+	// Data-dependent group suppression (τ-thresholding / partition selection) is fundamentally
+	// (ε,δ)-DP: whether a group appears is a sensitivity-1 function of the data, and δ pays for
+	// the chance a group survives on one PU alone. Pure ε-DP modes have no δ to spend, so we
+	// ignore the setting there (rather than apply an unsound filter) and tell the user.
+	bool apply_support_filter = want_support && allow_group_suppression;
+	if (want_support && !allow_group_suppression) {
+		Printer::Print("Note: privacy_min_group_count is ignored under privacy_mode='" + mech +
+		               "'. Group suppression (τ-thresholding) requires an (ε,δ) mode (dp_elastic or dp_sass); "
+		               "pure ε-DP cannot select partitions data-dependently. No groups were suppressed.");
+	}
+	auto support_pos =
+	    AddSupportAggregate(input, plan, agg, chain, apply_support_filter ? support_threshold : 0.0, per_pu);
 	idx_t n_dp_aggs = support_pos.IsValid() ? support_pos.GetIndex() : agg->expressions.size();
 	LogicalOperator *noise_anchor = agg;
 	if (apply_support_filter) {
@@ -782,28 +964,6 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 	}
 
 	auto avg_components = BuildAvgComponentSet(avg_infos);
-
-	double sum_bound = 0.0;
-	bool has_sum = AggregateContainsSum(agg); // SUM or AVG→SUM
-	if (has_sum) {
-		if (!TryGetDpSumBound(input.context, sum_bound)) {
-			throw InvalidInputException(
-			    "dp_elastic: dp_sum_bound must be set for SUM and AVG aggregates (SET dp_sum_bound = <C>)");
-		}
-		if (sum_bound <= 0.0 || !std::isfinite(sum_bound)) {
-			throw InvalidInputException("dp_elastic: dp_sum_bound must be a positive finite number (got " +
-			                            std::to_string(sum_bound) + ")");
-		}
-		ClipSumInputs(input, agg, sum_bound);
-	}
-
-	// Compute smooth elastic sensitivity using the required dp_delta setting
-	double es = ComputeElasticSensitivity(input.context, fk_chain, epsilon);
-
-	// When privacy_noise=false the compilation pipeline still runs (clipping, FK chain)
-	// but Laplace scale is zeroed → priv_laplace_noise returns the value unchanged.
-	// This mirrors pac_mi=0 for PAC and enables deterministic testing.
-	bool noise_enabled = IsPacNoiseEnabled(input.context, true);
 
 	// Build per-aggregate Laplace scales. With k user-visible aggregates we split ε equally
 	// (sequential composition) → each gets ε/k. AVG splits its share again into ε/(2k) per
@@ -814,8 +974,7 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 	vector<double> agg_scales;
 	agg_scales.reserve(n_dp_aggs);
 	for (idx_t ai = 0; ai < n_dp_aggs; ai++) {
-		auto &aggr = agg->expressions[ai]->Cast<BoundAggregateExpression>();
-		double sens = Sensitivity(aggr, sum_bound, es);
+		double sens = agg_sens[ai];
 		double scale = noise_enabled ? (sens / epsilon) : 0.0;
 		if (k > 1.0) {
 			scale *= k; // budget split across user-visible aggregates
@@ -824,11 +983,11 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 			scale *= 2.0; // additional split: each AVG component uses half its allocation
 		}
 		agg_scales.push_back(scale);
-		PRIVACY_DEBUG_PRINT("[DP_ELASTIC] agg '" + aggr.function.name + "' sensitivity=" + std::to_string(sens) +
+		PRIVACY_DEBUG_PRINT("[" + mech + "] agg sensitivity=" + std::to_string(sens) +
 		                    " scale=" + std::to_string(scale));
 	}
 
-	auto noise_proj = WrapAggregateWithLaplace(input, plan, agg, noise_anchor, agg_scales);
+	auto noise_proj = WrapAggregateWithLaplace(input, plan, agg, noise_anchor, agg_scales, output_types);
 
 	// Wrap AVG above the noise projection so upstream operators — including HAVING
 	// that references AVG — get remapped from the raw SUM to the ratio output.
@@ -838,9 +997,67 @@ void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExt
 	}
 
 #if PRIVACY_DEBUG
-	PRIVACY_DEBUG_PRINT("=== PLAN AFTER DP_ELASTIC TRANSFORMATION ===");
+	PRIVACY_DEBUG_PRINT("=== PLAN AFTER " + mech + " TRANSFORMATION ===");
 	plan->Print();
 #endif
+}
+
+// Shared Laplace-mechanism pipeline for the two additive-noise DP modes. They share the FK chain
+// extraction, AVG decomposition, τ-suppression, budget split, and Laplace injection; they differ
+// only in how contributions are clipped and how sensitivity is derived (see DPSensitivityKind /
+// ClipAndComputeSensitivities).
+static void CompileDPLaplaceQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
+                                  unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
+                                  const string &query_hash, const string &mech, DPSensitivityKind kind) {
+	(void)query_hash;
+	PRIVACY_DEBUG_PRINT("[" + mech + "] CompileDPLaplaceQuery: start");
+
+	double epsilon = GetValidatedDpEpsilon(input.context, mech);
+
+	auto fk_chain = ExtractDPFKChain(plan, privacy_units, check);
+	auto *agg = CheckDPAggregates(plan, mech);
+
+	// Rewrite AVG(x) → SUM(x) + COUNT(*) before bound/clipping checks.
+	// Each AVG uses ε/2 per component so the combined cost is still ε-DP.
+	auto avg_infos = RewriteAvgAggregates(input, agg);
+	idx_t n_original_aggs = agg->expressions.size() - avg_infos.size();
+	idx_t n_groups = agg->groups.size();
+
+	// Capture the desired final output type of each DP aggregate *before* clipping. Standard-DP
+	// per-PU clipping rewrites e.g. COUNT→SUM(clipped count), changing the type; the noise
+	// projection casts back to these originals so upstream column references stay valid.
+	agg->ResolveOperatorTypes();
+	vector<LogicalType> output_types;
+	output_types.reserve(agg->expressions.size());
+	for (idx_t i = 0; i < agg->expressions.size(); i++) {
+		output_types.push_back(agg->types[n_groups + i]);
+	}
+
+	// When privacy_noise=false the compilation pipeline still runs (clipping, FK chain)
+	// but Laplace scale is zeroed → dp_noise returns the value unchanged.
+	// This mirrors pac_mi=0 for PAC and enables deterministic testing.
+	bool noise_enabled = IsPacNoiseEnabled(input.context, true);
+
+	bool per_pu = false;
+	auto agg_sens = ClipAndComputeSensitivities(input, plan, agg, fk_chain, mech, kind, epsilon, per_pu);
+
+	// Pure ε-DP (dp_standard / GLOBAL) cannot do data-dependent group suppression — see FinalizeDPLaplace.
+	bool allow_group_suppression = kind != DPSensitivityKind::GLOBAL;
+	FinalizeDPLaplace(input, plan, agg, fk_chain, mech, avg_infos, agg_sens, output_types, n_original_aggs, n_groups,
+	                  epsilon, noise_enabled, per_pu, allow_group_suppression);
+}
+
+void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
+                           unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
+                           const string &query_hash) {
+	CompileDPLaplaceQuery(check, input, plan, privacy_units, query_hash, "dp_elastic",
+	                      DPSensitivityKind::ELASTIC_SMOOTH);
+}
+
+void CompileDPStandardQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
+                            unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
+                            const string &query_hash) {
+	CompileDPLaplaceQuery(check, input, plan, privacy_units, query_hash, "dp_standard", DPSensitivityKind::GLOBAL);
 }
 
 void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,

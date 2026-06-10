@@ -57,7 +57,7 @@ Once the PU (or its FK proxy) is reachable from every aggregate:
 5. **Replace** each standard aggregate with its PAC equivalent: `SUM(x)` becomes `priv_noised_sum(hash, x)`, `COUNT(*)` becomes `priv_noised_count(hash)`, etc.
 6. For **multiple PUs**, AND all hashes together: `hash1 AND hash2` — a tuple is in sub-sample j only if ALL its PUs have bit j set
 
-> **PAC aggregate naming:** base functions (`priv_count`, `priv_sum`, ...) return `LIST<T>` — 64 per-sample counters. `priv_noised(list<T>):T` applies noise and returns a scalar. The `priv_noised_<aggr>()` variants (e.g., `priv_noised_count`) are fused shortcuts: `priv_noised_count(hash)` = `priv_noised(priv_count(hash))`. Similarly, `priv_select` and `priv_filter` consume counter lists for categorical queries.
+> **PAC aggregate naming:** base functions (`priv_count`, `priv_sum`, ...) return `LIST<T>` — 64 per-sample counters. `pac_noised(list<T>):T` applies noise and returns a scalar. The `priv_noised_<aggr>()` variants (e.g., `priv_noised_count`) are fused shortcuts: `priv_noised_count(hash)` = `pac_noised(priv_count(hash))`. Similarly, `priv_select` and `priv_filter` consume counter lists for categorical queries.
 
 ### Example: Direct PU scan
 ```sql
@@ -147,7 +147,7 @@ Top-K queries (`ORDER BY agg LIMIT k`) get special treatment via a dedicated pos
 1. Convert PAC aggregates to `_counters` variants (return all 64 counter values as `LIST<FLOAT>`)
 2. Insert a **mean projection** (`priv_mean(counters)`) for ordering — gives the true aggregate mean
 3. **TopN** selects top-k groups based on the true mean
-4. Insert a **noised projection** (`priv_noised(counters)`) above TopN — applies noise only to selected rows, cast back to original type
+4. Insert a **noised projection** (`pac_noised(counters)`) above TopN — applies noise only to selected rows, cast back to original type
 
 Two paths depending on plan structure:
 - **Path A** (intermediate projections, e.g., string decompress): preserves intermediate projections, adds `priv_mean` passthrough columns
@@ -168,18 +168,18 @@ The compiler detects when an aggregate expression is marked as distinct and inse
 
 Categorical queries arise when a (scalar or correlated) subquery produces a PAC aggregate result that is used outside of a direct aggregation context — typically in projection expressions or filter predicates. The categorical rewriter (Phase 2) handles these by converting the inner PAC aggregate to its `_counters` variant (returning all 64 per-sample values as `LIST<DOUBLE>`) and then applying one of three terminal wrappers depending on how the result is consumed.
 
-### Case 1: `priv_noised` — Projection Expressions
+### Case 1: `pac_noised` — Projection Expressions
 
-When a PAC aggregate result appears in a **projection expression** (arithmetic over one or more aggregates), the rewriter builds a `list_transform` lambda that evaluates the expression across all 64 possible worlds, then reduces to a scalar with `priv_noised`.
+When a PAC aggregate result appears in a **projection expression** (arithmetic over one or more aggregates), the rewriter builds a `list_transform` lambda that evaluates the expression across all 64 possible worlds, then reduces to a scalar with `pac_noised`.
 
 For expressions involving multiple aggregates, `list_zip` combines the counter lists so the lambda can access all values per world.
 
 **TPC-H Q08** illustrates this: the query computes `SUM(CASE nation='BRAZIL' THEN volume ELSE 0 END) / SUM(volume)` — a ratio of two aggregates:
 
 ```sql
--- Q08: priv_noised wraps a projection expression over two aggregates
+-- Q08: pac_noised wraps a projection expression over two aggregates
 SELECT o_year,
-       CAST(priv_noised(
+       CAST(pac_noised(
               list_transform(
                 list_zip(
                   list_transform(priv_sum(pac_pu, brazil_volume),
@@ -191,7 +191,7 @@ FROM ...
 GROUP BY o_year
 ```
 
-The inner `list_transform` calls cast counters back to their original types; the outer lambda computes the division for each of the 64 worlds; `priv_noised` then reduces the 64-element list to a single noised scalar.
+The inner `list_transform` calls cast counters back to their original types; the outer lambda computes the division for each of the 64 worlds; `pac_noised` then reduces the 64-element list to a single noised scalar.
 
 ### Case 2: `priv_filter` — Filters on Non-Sensitive Tuples
 

@@ -6,17 +6,17 @@
 // plan, creates LogicalGet nodes for them, and inserts join chains to connect
 // them to existing tables.
 //
-// Created by refactoring from pac_bitslice_compiler.cpp
+// Created by refactoring from privacy_compiler.cpp
 //
 
-#ifndef PAC_BITSLICE_JOIN_CHAIN_HPP
-#define PAC_BITSLICE_JOIN_CHAIN_HPP
+#ifndef PRIVACY_BITSLICE_JOIN_CHAIN_HPP
+#define PRIVACY_BITSLICE_JOIN_CHAIN_HPP
 
 #include "duckdb.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "metadata/privacy_compatibility_check.hpp"
-#include "query_processing/pac_plan_traversal.hpp"
+#include "query_processing/privacy_plan_traversal.hpp"
 
 namespace duckdb {
 
@@ -25,7 +25,7 @@ namespace duckdb {
 // a given connecting table instance (e.g., lineitem) for hash generation.
 using ConnectingTableMap = std::unordered_map<idx_t, idx_t>;
 
-// Ensures all FK tables needed for PAC compilation are present in the plan.
+// Ensures all FK tables needed for privacy compilation are present in the plan.
 // For each connecting table instance, inserts join chains to missing FK tables
 // and builds a mapping from connecting table index to FK table index.
 ConnectingTableMap EnsureFKTablesInPlan(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
@@ -35,4 +35,4 @@ ConnectingTableMap EnsureFKTablesInPlan(const PrivacyCompatibilityResult &check,
 
 } // namespace duckdb
 
-#endif // PAC_BITSLICE_JOIN_CHAIN_HPP
+#endif // PRIVACY_BITSLICE_JOIN_CHAIN_HPP

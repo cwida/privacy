@@ -404,7 +404,7 @@ bool PrivacyParserExtension::ParseAlterTableAddPAC(const string &query, string &
 		}
 		if (!is_pu) {
 			Printer::Print("Note: PRIVACY_KEY added to non-PU table '" + metadata.table_name +
-			               "'. This does not trigger PAC compilation until you run: ALTER TABLE " +
+			               "'. This does not trigger privacy compilation until you run: ALTER TABLE " +
 			               metadata.table_name + " SET PU");
 		}
 	}

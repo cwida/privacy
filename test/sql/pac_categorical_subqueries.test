@@ -659,9 +659,9 @@ ORDER BY total_qty DESC;
 # ============================================================================
 # COALESCE(AVG(...)) with ORDER BY/LIMIT (crash 30873)
 # ============================================================================
-# TopK rewriter wraps LIST colrefs with priv_noised() which returns FLOAT,
+# TopK rewriter wraps LIST colrefs with pac_noised() which returns FLOAT,
 # but COALESCE was bound for DOUBLE arguments (from AVG). The fix casts
-# priv_noised() back to the original aggregate type.
+# pac_noised() back to the original aggregate type.
 # The crash requires COALESCE(AVG(...)) as a direct aggregate in the same
 # GROUP BY that feeds into ORDER BY ... LIMIT (TopK pushdown path).
 

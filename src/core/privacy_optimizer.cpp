@@ -519,7 +519,8 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 		bool apply_noise = IsPacNoiseEnabled(input.context, true);
 		// DP modes always run their pipelines so clipping, FK chain, and sensitivity
 		// are exercised even when privacy_noise=false. The compilers zero scales internally.
-		bool should_compile = apply_noise || privacy_mode == "dp_elastic" || privacy_mode == "dp_sass";
+		bool is_dp_mode = privacy_mode == "dp_standard" || privacy_mode == "dp_elastic" || privacy_mode == "dp_sass";
+		bool should_compile = apply_noise || is_dp_mode;
 		if (should_compile) {
 #if PRIVACY_DEBUG
 			PRIVACY_DEBUG_PRINT("Query requires privacy compilation for privacy units:");

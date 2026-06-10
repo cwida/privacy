@@ -22,12 +22,14 @@ Never execute git commands that could lose code. Always ask the user for permiss
 
 ## What is this extension?
 
-`privacy` is a DuckDB extension that automatically privatizes SQL aggregate queries. It supports two privacy mechanisms, selected via `SET privacy_mode`:
+`privacy` is a DuckDB extension that automatically privatizes SQL aggregate queries. It supports four privacy mechanisms, selected by the single `SET privacy_mode` setting (the `dp_*` settings tune the chosen mechanism, they do not select it):
 
 - **`pac`** (default): PAC Privacy — empirical MIA resistance. Maintains 64 parallel counters per aggregate (one per "world" bit), adds noise calibrated to the query variance across sub-samples. Provides theoretical mutual-information bounds. Not differential privacy.
-- **`dp_elastic`**: Elastic sensitivity DP — formal (ε,δ)-differential privacy. Derives a per-query sensitivity bound from the join tree's max frequencies, injects Laplace noise calibrated to `sensitivity/epsilon`. Only `dp_elastic` provides a formal ε-DP guarantee.
+- **`dp_standard`**: Global-sensitivity DP — formal pure ε-DP. Bounds each privacy unit's *total* contribution to a fixed constant (per-PU contribution clipping), so global sensitivity equals that constant — data-independent, no `dp_delta`. On a single PU table this is per-row clipping (COUNT sensitivity = 1, SUM = `dp_sum_bound`); on a join it pre-aggregates per PU (grouping by the PU-adjacent FK), clips each PU's partial to `dp_sum_bound`/`dp_count_bound`, then sums — so a join with COUNT requires `dp_count_bound`. Laplace noise calibrated to `bound/epsilon`.
+- **`dp_elastic`**: Elastic sensitivity DP — formal (ε,δ)-DP. Same Laplace pipeline as `dp_standard` but uses per-row clipping and the smoothed join-frequency envelope (`2·SES_β`, β derived from ε,δ) for sensitivity. Requires `dp_delta`.
+- **`dp_sass`**: Sample-and-aggregate with smooth sensitivity — formal (ε,δ)-DP. Computes 64 sample aggregates and releases the median plus Laplace noise calibrated to smooth sensitivity. Requires `dp_delta`, `dp_sum_bound`/`dp_count_bound`.
 
-Both modes share the same DDL (`PRIVACY_KEY`, `PRIVACY_LINK`, `PROTECTED`) and rewrite aggregate plans transparently — users write normal SQL.
+`dp_standard` and `dp_elastic` share one code path (`CompileDPLaplaceQuery` in `privacy_mechanisms.cpp`); they differ only in how contributions are clipped and how sensitivity is derived (`ClipAndComputeSensitivities`). All four modes share the same DDL (`PRIVACY_KEY`, `PRIVACY_LINK`, `PROTECTED`) and rewrite aggregate plans transparently — users write normal SQL.
 
 ## Build & Test
 
@@ -61,7 +63,10 @@ The optimizer hook runs in `pre_optimize_function` — BEFORE DuckDB's built-in 
 5. **AVG decomposition** (`pac_avg_rewriter.cpp`) — rewrites pac_noised_avg into pac_noised_div(pac_sum, pac_count)
 6. **Clip rewrite** (`pac_expression_builder.cpp:RewriteClipAggregates`) — when `pac_clip_support` is set, inserts lower aggregate for per-PU pre-aggregation with clipping
 
-### DP-elastic pipeline phases (in order)
+### DP-elastic / DP-standard pipeline phases (in order)
+
+> `dp_standard` and `dp_elastic` run the **same** phases below via `CompileDPLaplaceQuery`, differing only in `ClipAndComputeSensitivities`: `dp_standard` does per-PU contribution clipping (a per-PU pre-aggregation on joins) → sensitivity = the bound (pure ε-DP, no δ); `dp_elastic` does per-row clipping + smooth elastic sensitivity `2·SES_β` ((ε,δ)-DP, needs δ).
+
 
 1. **Compatibility check** (`privacy_compatibility_check.cpp`) — shared structural checks; PU columns can only appear inside aggregates
 2. **FK chain extraction** (`dp_elastic_compiler.cpp:ExtractFKChain`) — validates a linear FK path to the PU; chain may be explicit (joins in the SQL) or implicit (derived from PRIVACY_LINK metadata when the PU table is absent)
@@ -122,7 +127,14 @@ SET privacy_seed = 42;               -- reproducible results
 SET pac_clip_support = 40;           -- enable clip rewrite with support threshold
 SET privacy_min_group_count = 4;     -- suppress low-SNR cells
 
--- DP-elastic mode (formal ε-DP)
+-- DP-standard mode (formal pure ε-DP, per-PU contribution clipping)
+SET privacy_mode = 'dp_standard';
+SET dp_epsilon = 1.0;
+SET dp_sum_bound = 1000;             -- required for SUM: max total contribution per PU
+SET dp_count_bound = 50;             -- required for COUNT over a join: max rows per PU
+-- (no dp_delta: pure ε-DP)
+
+-- DP-elastic mode (formal (ε,δ)-DP, smoothed sensitivity)
 SET privacy_mode = 'dp_elastic';
 SET dp_epsilon = 1.0;
 SET dp_delta = 1e-6;

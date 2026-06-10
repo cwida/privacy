@@ -18,9 +18,9 @@ struct PACOptimizerInfo : public OptimizerExtensionInfo {
 class PACRewriteRule : public OptimizerExtension {
 public:
 	PACRewriteRule() {
-		// PAC rewrites run in the pre-optimizer phase, BEFORE DuckDB's built-in optimizers.
+		// Privacy rewrites run in the pre-optimizer phase, BEFORE DuckDB's built-in optimizers.
 		// This way DuckDB's join ordering, filter pushdown, column lifetime, compressed
-		// materialization etc. all run on the PAC-transformed plan automatically.
+		// materialization etc. all run on the privacy-transformed plan automatically.
 		pre_optimize_function = PACPreOptimizeFunction;
 	}
 

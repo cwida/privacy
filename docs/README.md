@@ -14,6 +14,7 @@ This folder contains detailed documentation for the PAC DuckDB extension.
 | [pac/ptracking.md](pac/ptracking.md)                 | Persistent secret p-tracking |
 | [pac/privacy_parser.md](pac/syntax.md)                   | PAC parser |
 | [pac/functions.md](pac/functions.md)                 | PAC functions |
+| [pac/dp_sass_smooth_sensitivity.md](pac/dp_sass_smooth_sensitivity.md) | DP SASS smooth sensitivity |
 | [test/README.md](test/README.md)                     | Running SQL and C++ tests |
 | [benchmark/README.md](benchmark/README.md)           | Benchmark overview |
 | [benchmark/tpch.md](benchmark/tpch.md)               | TPC-H benchmark instructions |

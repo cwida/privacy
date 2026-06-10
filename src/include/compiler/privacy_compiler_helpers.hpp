@@ -2,14 +2,14 @@
 // Created by ila on 12/23/25.
 //
 
-#ifndef PAC_COMPILER_HELPERS_HPP
-#define PAC_COMPILER_HELPERS_HPP
+#ifndef PRIVACY_COMPILER_HELPERS_HPP
+#define PRIVACY_COMPILER_HELPERS_HPP
 
 #include "duckdb.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
 #include "metadata/privacy_compatibility_check.hpp"
-#include "query_processing/pac_expression_builder.hpp"
-#include "query_processing/pac_plan_traversal.hpp"
+#include "query_processing/privacy_expression_builder.hpp"
+#include "query_processing/privacy_plan_traversal.hpp"
 #include "query_processing/pac_projection_propagation.hpp"
 
 namespace duckdb {
@@ -47,4 +47,4 @@ LogicalGet *FindAccessibleGetInSubtree(unique_ptr<LogicalOperator> &plan, Logica
 
 } // namespace duckdb
 
-#endif // PAC_COMPILER_HELPERS_HPP
+#endif // PRIVACY_COMPILER_HELPERS_HPP

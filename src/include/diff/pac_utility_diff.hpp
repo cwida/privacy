@@ -10,7 +10,7 @@ namespace duckdb {
 // Apply utility diff rewrite to the PAC-compiled plan.
 // Wraps the plan in a FULL OUTER JOIN with the deep-copied reference plan and
 // rewrites the top projection to encode diff information (utility %).
-// Must be called AFTER CompilePacBitsliceQuery, within the ReplanGuard scope.
+// Must be called AFTER CompilePrivQuery, within the ReplanGuard scope.
 // Pass DConstants::INVALID_INDEX for num_key_cols to auto-detect from GROUP BY.
 void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                       unique_ptr<LogicalOperator> ref_plan, idx_t num_key_cols = DConstants::INVALID_INDEX,

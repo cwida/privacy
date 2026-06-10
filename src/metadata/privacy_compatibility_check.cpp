@@ -2,7 +2,7 @@
 #include "privacy_debug.hpp"
 #include "utils/privacy_helpers.hpp"
 #include "parser/privacy_parser.hpp"
-#include "query_processing/pac_plan_traversal.hpp"
+#include "query_processing/privacy_plan_traversal.hpp"
 
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -18,7 +18,7 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 
 #include <algorithm>
-#include "compiler/pac_compiler_helpers.hpp"
+#include "compiler/privacy_compiler_helpers.hpp"
 #include "core/privacy_optimizer.hpp"
 #include <functional>
 #include <queue>

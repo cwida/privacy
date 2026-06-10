@@ -10,7 +10,7 @@
 #include "duckdb/planner/logical_operator.hpp"
 #include "metadata/privacy_compatibility_check.hpp"
 #include "categorical/pac_categorical_detection.hpp"
-#include "query_processing/pac_plan_traversal.hpp"
+#include "query_processing/privacy_plan_traversal.hpp"
 
 namespace duckdb {
 

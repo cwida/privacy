@@ -1,0 +1,187 @@
+# name: test/sql/dp_standard.test
+# description: Standard global-sensitivity DP — per-PU contribution clipping, pure ε-DP Laplace
+# group: [sql]
+
+require privacy
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET privacy_seed = 42;
+
+statement ok
+SET threads = 1;
+
+# ---------------------------------------------------------------------------
+# dp_standard is selectable via the single privacy_mode setting
+# ---------------------------------------------------------------------------
+
+statement ok
+SET privacy_mode = 'dp_standard';
+
+query I
+SELECT current_setting('privacy_mode');
+----
+dp_standard
+
+# ---------------------------------------------------------------------------
+# Single PU table, no joins: global sensitivity of COUNT(*) is 1 → scale = 1/ε.
+# Pure ε-DP, so NO dp_delta is required (unlike dp_elastic).
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE u (id BIGINT, region VARCHAR);
+
+statement ok
+INSERT INTO u SELECT i, 'r' || (i % 5) FROM range(100) t(i);
+
+statement ok
+ALTER TABLE u ADD PRIVACY_KEY (id);
+
+statement ok
+ALTER TABLE u SET PU;
+
+statement ok
+SET dp_epsilon = 1.0;
+
+# No dp_delta set — dp_standard must still compile (pure ε-DP).
+statement ok
+SET dp_delta = NULL;
+
+# 100 samples, scale = 1/ε = 1 → P(|noise| > 50) is astronomically small.
+query I
+SELECT abs(COUNT(*) - 100) < 50 FROM u;
+----
+true
+
+# COUNT preserves its original type (BIGINT). Noise is cast back after Laplace.
+query I
+SELECT typeof(COUNT(*)) FROM u;
+----
+BIGINT
+
+# With noise disabled the single-table count is exact and needs no bound.
+statement ok
+SET privacy_noise = false;
+
+query I
+SELECT COUNT(*) FROM u;
+----
+100
+
+# Single-table SUM still requires dp_sum_bound (per-row == per-PU here).
+statement ok
+SET dp_sum_bound = NULL;
+
+statement error
+SELECT SUM(id) FROM u;
+----
+dp_standard: dp_sum_bound must be set
+
+# ---------------------------------------------------------------------------
+# FK join. orders: 500 rows, exactly 5 per user (uid = i % 100).
+# Each user u's 5 orders all carry amount = (u % 10), so:
+#   per-user count = 5,  per-user sum = 5 * (u % 10)
+#   total count = 500,   total sum = 5 * sum_{u}(u%10) = 5 * 450 = 2250
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE orders (uid BIGINT, store VARCHAR, amount DOUBLE);
+
+statement ok
+INSERT INTO orders SELECT i % 100, 's' || (i % 4), (i % 10) * 1.0 FROM range(500) t(i);
+
+statement ok
+ALTER TABLE orders ADD PRIVACY_LINK (uid) REFERENCES u(id);
+
+statement ok
+SET privacy_noise = false;
+
+# COUNT over a join needs dp_count_bound (one PU can own many rows).
+statement error
+SELECT COUNT(*) FROM orders;
+----
+dp_standard: dp_count_bound must be set
+
+# Bound >= 5 (the true per-user count) leaves clipping inert → exact 500.
+statement ok
+SET dp_count_bound = 10.0;
+
+query I
+SELECT COUNT(*) FROM orders;
+----
+500
+
+# Per-PU clipping (NOT per-row): a count bound of 3 clips each user's 5 rows to 3,
+# so the total is 100 users * 3 = 300, not 500. This is the defining property.
+statement ok
+SET dp_count_bound = 3.0;
+
+query I
+SELECT COUNT(*) FROM orders;
+----
+300
+
+statement ok
+SET dp_count_bound = 10.0;
+
+# SUM over a join needs dp_sum_bound.
+statement ok
+SET dp_sum_bound = NULL;
+
+statement error
+SELECT SUM(amount) FROM orders;
+----
+dp_standard: dp_sum_bound must be set
+
+# Large bound leaves clipping inert → exact 2250.
+statement ok
+SET dp_sum_bound = 1000.0;
+
+query I
+SELECT SUM(amount) FROM orders;
+----
+2250.000000
+
+# Per-PU clipping: bound 10 clips each user's sum (= 5*(u%10)) to min(., 10).
+# Per residue r in 0..9 (10 users each): min(5r, 10) = [0,5,10,10,10,10,10,10,10,10]
+# sum over residues = 85, * 10 users = 850. (Per-ROW clipping would leave 2250.)
+statement ok
+SET dp_sum_bound = 10.0;
+
+query I
+SELECT SUM(amount) FROM orders;
+----
+850.000000
+
+statement ok
+SET dp_sum_bound = 1000.0;
+
+# ---------------------------------------------------------------------------
+# τ-thresholding (privacy_min_group_count) is IGNORED under dp_standard: data-dependent
+# group suppression is fundamentally (ε,δ)-DP (partition selection), and dp_standard is pure
+# ε-DP with no δ to spend. So the setting is a no-op here (with a notice) — groups survive
+# regardless of threshold. (Each store has 125 rows; per-user count 5 < bound 10 → clip inert.)
+# ---------------------------------------------------------------------------
+
+statement ok
+SET dp_count_bound = 10.0;
+
+# Even a threshold far above any group's PU support leaves all 4 groups present.
+statement ok
+SET privacy_min_group_count = 100000.0;
+
+query II rowsort
+SELECT store, COUNT(*) FROM orders GROUP BY store;
+----
+s0	125
+s1	125
+s2	125
+s3	125
+
+statement ok
+SET privacy_min_group_count = NULL;
+
+statement ok
+SET privacy_noise = true;

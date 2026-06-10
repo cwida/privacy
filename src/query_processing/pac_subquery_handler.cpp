@@ -10,8 +10,8 @@
 
 #include "query_processing/pac_subquery_handler.hpp"
 #include "privacy_debug.hpp"
-#include "query_processing/pac_expression_builder.hpp"
-#include "query_processing/pac_plan_traversal.hpp"
+#include "query_processing/privacy_expression_builder.hpp"
+#include "query_processing/privacy_plan_traversal.hpp"
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_delim_get.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"

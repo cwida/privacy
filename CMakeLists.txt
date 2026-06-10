@@ -21,9 +21,9 @@ include_directories(benchmark/include)
 option(PAC_NOAPPROX "Disable approximate sum algorithm, use exact cascading" OFF)
 if(PAC_NOAPPROX)
     add_definitions(-DPAC_NOAPPROX)
-    message(STATUS "PAC: Using exact cascading sum algorithm (PAC_NOAPPROX)")
+    message(STATUS "privacy: Using exact cascading sum algorithm (PAC_NOAPPROX)")
 else()
-    message(STATUS "PAC: Using approximate sum algorithm (default)")
+    message(STATUS "privacy: Using approximate sum algorithm (default)")
 endif()
 
 # Extension sources
@@ -43,13 +43,13 @@ set(EXTENSION_SOURCES
     src/aggregates/dp_laplace_noise.cpp
     src/compiler/privacy_compiler.cpp
     src/compiler/privacy_mechanisms.cpp
-    src/compiler/pac_compiler_helpers.cpp
+    src/compiler/privacy_compiler_helpers.cpp
     src/query_processing/pac_avg_rewriter.cpp
-    src/query_processing/pac_expression_builder.cpp
-    src/query_processing/pac_plan_traversal.cpp
+    src/query_processing/privacy_expression_builder.cpp
+    src/query_processing/privacy_plan_traversal.cpp
     src/query_processing/pac_projection_propagation.cpp
-    src/query_processing/pac_fk_resolver.cpp
-    src/compiler/pac_bitslice_add_fkjoins.cpp
+    src/query_processing/privacy_fk_resolver.cpp
+    src/compiler/privacy_bitslice_add_fkjoins.cpp
     src/query_processing/pac_subquery_handler.cpp
     src/parser/privacy_parser.cpp
     src/parser/privacy_parser_helpers.cpp

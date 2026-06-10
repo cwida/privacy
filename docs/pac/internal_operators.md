@@ -29,7 +29,7 @@ TopN(limit=K, order_by=[noised_agg])
 **After (expansion = 1):**
 ```
 OrderBy(order_by=[noised_agg])
-└── NoisedProj(priv_noised on K selected rows)
+└── NoisedProj(pac_noised on K selected rows)
     └── TopN(limit=K, order_by=[true_mean])
         └── MeanProj(priv_mean for ordering)
             └── Aggregate(priv_sum → LIST<FLOAT>)
@@ -38,7 +38,7 @@ OrderBy(order_by=[noised_agg])
 **After (expansion > 1, e.g. 3.0):**
 ```
 TopN(limit=K, order_by=[noised_agg])
-└── NoisedProj(priv_noised on ceil(3*K) candidates)
+└── NoisedProj(pac_noised on ceil(3*K) candidates)
     └── TopN(limit=ceil(3*K), order_by=[true_mean])
         └── MeanProj(priv_mean for ordering)
             └── Aggregate(priv_sum → LIST<FLOAT>)
@@ -52,7 +52,7 @@ TopN(limit=K, order_by=[noised_agg])
 
 3. **Rewrite TopN ORDER BY.** Order expressions that referenced PAC aggregates are rewritten to reference the `priv_mean` columns instead.
 
-4. **Insert NoisedProj.** A projection above TopN applies `priv_noised()` to each counter list, producing the final noised scalar. Non-PAC columns pass through unchanged.
+4. **Insert NoisedProj.** A projection above TopN applies `pac_noised()` to each counter list, producing the final noised scalar. Non-PAC columns pass through unchanged.
 
 5. **Re-sort.** Since noise changes the ranking, a final ORDER BY (or TopN if expansion > 1) re-sorts the output by the noised values.
 

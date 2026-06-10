@@ -5,7 +5,7 @@
 //
 
 #include "query_processing/pac_avg_rewriter.hpp"
-#include "query_processing/pac_expression_builder.hpp"
+#include "query_processing/privacy_expression_builder.hpp"
 #include "privacy_debug.hpp"
 
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"

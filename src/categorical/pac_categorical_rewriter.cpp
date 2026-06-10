@@ -208,7 +208,7 @@ RewriteExpressionWithCounters(OptimizerExtensionInput &input, const vector<PacBi
 	    BuildCategoricalLambdas(input, pac_bindings, expr_for_lambda, counter_bindings, result_element_type);
 	if (list_expr) {
 		if (wrap_kind == PacWrapKind::PAC_NOISED) {
-			auto noised = input.optimizer.BindScalarFunction("priv_noised", std::move(list_expr));
+			auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(list_expr));
 			if (target_type != PacFloatLogicalType()) {
 				noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), target_type);
 			}
@@ -317,7 +317,7 @@ static void WrapCounterRefsWithNoised(unique_ptr<Expression> &expr,
 			bool needs_cast = (original_type != PacFloatLogicalType() && original_type != list_type);
 			// Ensure col_ref type is LIST<FLOAT> for correct priv_noised binding.
 			col_ref.return_type = list_type;
-			unique_ptr<Expression> noised = input.optimizer.BindScalarFunction("priv_noised", expr->Copy());
+			unique_ptr<Expression> noised = input.optimizer.BindScalarFunction("pac_noised", expr->Copy());
 			if (needs_cast) {
 				noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), original_type);
 			}
@@ -349,7 +349,7 @@ static bool RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalP
 	if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
 		auto original_type = (i < proj.types.size()) ? proj.types[i] : expr->return_type;
 		if (is_terminal) {
-			unique_ptr<Expression> result = input.optimizer.BindScalarFunction("priv_noised", expr->Copy());
+			unique_ptr<Expression> result = input.optimizer.BindScalarFunction("pac_noised", expr->Copy());
 			if (original_type != PacFloatLogicalType()) {
 				result = BoundCastExpression::AddDefaultCastToType(std::move(result), original_type);
 			}

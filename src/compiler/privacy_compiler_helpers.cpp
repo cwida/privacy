@@ -2,7 +2,7 @@
 // Created by ila on 12/23/25.
 //
 
-#include "compiler/pac_compiler_helpers.hpp"
+#include "compiler/privacy_compiler_helpers.hpp"
 #include "privacy_debug.hpp"
 #include "core/privacy_optimizer.hpp"
 
@@ -34,7 +34,7 @@ void BuildJoinConditions(LogicalGet *left_get, LogicalGet *right_get, const vect
                          const vector<string> &right_cols, const string &left_table_name,
                          const string &right_table_name, vector<JoinCondition> &conditions) {
 	if (left_cols.size() != right_cols.size() || left_cols.empty()) {
-		throw InvalidInputException("PAC compiler: FK/PK column count mismatch for " + left_table_name + " -> " +
+		throw InvalidInputException("Privacy compiler: FK/PK column count mismatch for " + left_table_name + " -> " +
 		                            right_table_name);
 	}
 
@@ -42,7 +42,7 @@ void BuildJoinConditions(LogicalGet *left_get, LogicalGet *right_get, const vect
 		idx_t lproj = EnsureProjectedColumn(*left_get, left_cols[i]);
 		idx_t rproj = EnsureProjectedColumn(*right_get, right_cols[i]);
 		if (lproj == DConstants::INVALID_INDEX || rproj == DConstants::INVALID_INDEX) {
-			throw InternalException("PAC compiler: failed to project FK/PK columns for join");
+			throw InternalException("Privacy compiler: failed to project FK/PK columns for join");
 		}
 		JoinCondition cond;
 		cond.comparison = ExpressionType::COMPARE_EQUAL;
@@ -70,17 +70,18 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PrivacyCompatibilityResult &
 		// We extract the table from the right side of the join
 		if (left_operator->children.size() != 2 ||
 		    left_operator->children[1]->type != LogicalOperatorType::LOGICAL_GET) {
-			throw InternalException("PAC compiler: expected right child of left join to be LogicalGet");
+			throw InternalException("Privacy compiler: expected right child of left join to be LogicalGet");
 		}
 		left = &left_operator->children[1]->Cast<LogicalGet>();
 	} else {
-		throw InternalException("PAC compiler: expected left node to be LogicalGet or LogicalComparisonJoin");
+		throw InternalException("Privacy compiler: expected left node to be LogicalGet or LogicalComparisonJoin");
 	}
 
 	auto left_table_ptr = left->GetTable();
 	auto right_table_ptr = right->GetTable();
 	if (!left_table_ptr || !right_table_ptr) {
-		throw InternalException("PAC compiler: expected both LogicalGet nodes to be bound to tables for join creation");
+		throw InternalException(
+		    "Privacy compiler: expected both LogicalGet nodes to be bound to tables for join creation");
 	}
 	string left_table_name = left_table_ptr->name;
 	string right_table_name = right_table_ptr->name;
@@ -89,7 +90,7 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PrivacyCompatibilityResult &
 	auto lit = check.table_metadata.find(left_table_name);
 	auto rit = check.table_metadata.find(right_table_name);
 	if (lit == check.table_metadata.end() || rit == check.table_metadata.end()) {
-		throw InternalException("PAC compiler: missing table metadata for join: " + left_table_name + " <-> " +
+		throw InternalException("Privacy compiler: missing table metadata for join: " + left_table_name + " <-> " +
 		                        right_table_name);
 	}
 	const auto &left_meta = lit->second;
@@ -155,7 +156,7 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PrivacyCompatibilityResult &
 	}
 
 	if (conditions.empty()) {
-		throw InvalidInputException("PAC compiler: expected FK link between " + left_table_name + " and " +
+		throw InvalidInputException("Privacy compiler: expected FK link between " + left_table_name + " and " +
 		                            right_table_name);
 	}
 
@@ -261,7 +262,7 @@ void PopulateGetsFromFKPath(const PrivacyCompatibilityResult &check, vector<stri
                             vector<string> &gets_missing, string &start_table_out, vector<string> &target_pus_out) {
 	// Expect at least one FK path when this is called
 	if (check.fk_paths.empty()) {
-		throw InternalException("PAC compiler: no fk_paths available");
+		throw InternalException("Privacy compiler: no fk_paths available");
 	}
 
 	// Collect all target PUs from all FK paths

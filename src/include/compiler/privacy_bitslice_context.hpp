@@ -5,11 +5,11 @@
 // passed parameters during bitslice compilation. This reduces function parameter
 // counts and makes the code more maintainable.
 //
-// Created by refactoring pac_bitslice_compiler.cpp
+// Created by refactoring privacy_compiler.cpp
 //
 
-#ifndef PAC_BITSLICE_CONTEXT_HPP
-#define PAC_BITSLICE_CONTEXT_HPP
+#ifndef PRIVACY_BITSLICE_CONTEXT_HPP
+#define PRIVACY_BITSLICE_CONTEXT_HPP
 
 #include "duckdb.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
@@ -83,4 +83,4 @@ struct BitsliceWithPUContext {
 
 } // namespace duckdb
 
-#endif // PAC_BITSLICE_CONTEXT_HPP
+#endif // PRIVACY_BITSLICE_CONTEXT_HPP

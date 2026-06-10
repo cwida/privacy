@@ -8,8 +8,14 @@
 
 namespace duckdb {
 
-// Strategy entry points used by the unified privacy compiler.
-// Selected internally via `SET privacy_mode = 'dp_elastic'` and `SET privacy_mode = 'dp_sass'`.
+// Strategy entry points used by the unified privacy compiler, selected via `SET privacy_mode`.
+
+// dp_standard: global-sensitivity Laplace, pure ε-DP.
+void CompileDPStandardQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
+                            unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
+                            const string &query_hash);
+
+// dp_elastic: smooth elastic-sensitivity Laplace, (ε,δ)-DP.
 void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
                            unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
                            const string &query_hash);

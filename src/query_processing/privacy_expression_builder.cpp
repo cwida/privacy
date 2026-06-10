@@ -2,8 +2,8 @@
 // Created by ila on 1/6/26.
 //
 
-#include "query_processing/pac_expression_builder.hpp"
-#include "query_processing/pac_plan_traversal.hpp"
+#include "query_processing/privacy_expression_builder.hpp"
+#include "query_processing/privacy_plan_traversal.hpp"
 #include "privacy_debug.hpp"
 
 #include "duckdb/planner/operator/logical_cteref.hpp"

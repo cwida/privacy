@@ -45,7 +45,7 @@ statement ok
 SET dp_sum_bound = 100.0;
 
 # ---------------------------------------------------------------------------
-# priv_laplace_noise scalar UDF works standalone
+# dp_noise scalar UDF works standalone
 # ---------------------------------------------------------------------------
 
 statement ok
@@ -53,7 +53,7 @@ SET privacy_mode = 'pac';
 
 # Scale 0 returns value unchanged
 query I
-SELECT priv_laplace_noise(100.0, 0.0);
+SELECT dp_noise(100.0, 0.0);
 ----
 100.0
 
@@ -71,13 +71,13 @@ dp_strategy
 
 # Non-zero scale produces a noised value (exact value is seed-dependent, just check it's finite)
 query I
-SELECT abs(priv_laplace_noise(100.0, 5.0) - 100.0) < 1000;
+SELECT abs(dp_noise(100.0, 5.0) - 100.0) < 1000;
 ----
 true
 
 query II
-SELECT priv_laplace_noise(100.0, 5.0, 1::UBIGINT) = priv_laplace_noise(100.0, 5.0, 1::UBIGINT),
-       priv_laplace_noise(100.0, 5.0, 1::UBIGINT) <> priv_laplace_noise(100.0, 5.0, 2::UBIGINT);
+SELECT dp_noise(100.0, 5.0, 1::UBIGINT) = dp_noise(100.0, 5.0, 1::UBIGINT),
+       dp_noise(100.0, 5.0, 1::UBIGINT) <> dp_noise(100.0, 5.0, 2::UBIGINT);
 ----
 true	true
 

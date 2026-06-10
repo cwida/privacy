@@ -5,11 +5,11 @@
 // It handles finding which tables have FK references to privacy units, mapping connecting tables
 // to their FK tables, and finding accessible FK tables when blocked by SEMI/ANTI joins.
 //
-// Created by refactoring pac_bitslice_compiler.cpp
+// Created by refactoring privacy_compiler.cpp
 //
 
-#ifndef PAC_FK_RESOLVER_HPP
-#define PAC_FK_RESOLVER_HPP
+#ifndef PRIVACY_FK_RESOLVER_HPP
+#define PRIVACY_FK_RESOLVER_HPP
 
 #include "duckdb.hpp"
 #include "duckdb/planner/logical_operator.hpp"
@@ -54,4 +54,4 @@ AccessibleFKTableResult FindAccessibleFKTable(unique_ptr<LogicalOperator> &plan,
 
 } // namespace duckdb
 
-#endif // PAC_FK_RESOLVER_HPP
+#endif // PRIVACY_FK_RESOLVER_HPP

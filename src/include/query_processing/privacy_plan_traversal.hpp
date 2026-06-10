@@ -2,8 +2,8 @@
 // Created by ila on 1/6/26.
 //
 
-#ifndef PAC_PLAN_TRAVERSAL_HPP
-#define PAC_PLAN_TRAVERSAL_HPP
+#ifndef PRIVACY_PLAN_TRAVERSAL_HPP
+#define PRIVACY_PLAN_TRAVERSAL_HPP
 
 #include "duckdb.hpp"
 #include "duckdb/planner/logical_operator.hpp"
@@ -150,4 +150,4 @@ LogicalAggregate *FindInnerAggregateWithPUKeyGroup(LogicalAggregate *target_agg,
 
 } // namespace duckdb
 
-#endif // PAC_PLAN_TRAVERSAL_HPP
+#endif // PRIVACY_PLAN_TRAVERSAL_HPP

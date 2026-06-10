@@ -35,7 +35,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
 #include "duckdb/common/types.hpp"
-#include "query_processing/pac_plan_traversal.hpp"
+#include "query_processing/privacy_plan_traversal.hpp"
 
 namespace duckdb {
 
@@ -222,7 +222,7 @@ static inline bool IsAlreadyWrappedInPacNoised(Expression *expr) {
 	if (expr->type == ExpressionType::BOUND_FUNCTION) {
 		auto &func = expr->Cast<BoundFunctionExpression>();
 		// Check for all categorical rewrite terminal functions
-		if (StringUtil::StartsWith(func.function.name, "priv_noised") ||
+		if (func.function.name == "pac_noised" || func.function.name == "priv_noised_div" ||
 		    StringUtil::StartsWith(func.function.name, "priv_filter") ||
 		    StringUtil::StartsWith(func.function.name, "priv_select") || func.function.name == "priv_coalesce" ||
 		    func.function.name == "list_transform" || func.function.name == "list_zip") {

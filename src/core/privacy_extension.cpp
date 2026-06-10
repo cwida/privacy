@@ -308,30 +308,35 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "Mutual information bound controlling privacy-utility tradeoff (default: 1/128). "
 	    "Lower values = more noise = more privacy. Set to 0 for deterministic (no noise) mode.",
 	    LogicalType::DOUBLE, Value::DOUBLE(1.0 / 128));
-	// Privacy mechanism selector: 'pac' (default), 'dp_elastic', or experimental 'dp_sass'
+	// Privacy mechanism selector — the single setting that picks the mechanism. The four modes
+	// are 'pac' (default), 'dp_standard', 'dp_elastic', and 'dp_sass'. The dp_* settings below
+	// tune the chosen mechanism; they do not select it.
 	db.config.AddExtensionOption("privacy_mode",
-	                             "Privacy mechanism: 'pac' (default), 'dp_elastic', or experimental disabled 'dp_sass'",
+	                             "Privacy mechanism: 'pac' (default), 'dp_standard', 'dp_elastic', or 'dp_sass'",
 	                             LogicalType::VARCHAR, Value("pac"));
 	db.config.AddExtensionOption(
 	    "dp_sample_lanes", "Number of sample lanes a privacy unit contributes in privacy_mode='dp_sass'",
 	    LogicalType::INTEGER, Value::INTEGER(DP_SAMPLE_DEFAULT_LANES), ValidateDpSampleLanesSetting);
-	// Differential privacy budget (ε), used only when privacy_mode = 'dp_elastic'
-	db.config.AddExtensionOption("dp_epsilon", "Differential privacy budget (used when privacy_mode = 'dp_elastic')",
+	// Differential privacy budget (ε), used by the dp_standard / dp_elastic / dp_sass modes.
+	db.config.AddExtensionOption("dp_epsilon",
+	                             "Differential privacy budget ε (used by dp_standard, dp_elastic, and dp_sass)",
 	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));
-	// Per-tuple clipping bound for SUM/AVG in dp_elastic mode. Required when such an aggregate is present.
-	db.config.AddExtensionOption(
-	    "dp_sum_bound",
-	    "Per-tuple clipping bound for SUM/AVG in dp_elastic mode (required when such an aggregate is present)",
-	    LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
-	db.config.AddExtensionOption("dp_count_bound",
-	                             "Sample-output count bound for privacy_mode='dp_sass' COUNT and AVG components",
+	// Clipping bound for SUM/AVG, required when such an aggregate is present in any DP mode.
+	// dp_standard bounds each PU's total contribution; dp_elastic/dp_sass clip per tuple.
+	db.config.AddExtensionOption("dp_sum_bound",
+	                             "Clipping bound for SUM/AVG in DP modes, required when such an aggregate is present "
+	                             "(per-PU total for dp_standard; per-tuple for dp_elastic/dp_sass)",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
-	// Privacy failure probability δ for (ε, δ)-DP smooth sensitivity in dp_elastic mode.
-	// Required when privacy_mode = 'dp_elastic'; PRAGMA refresh_dp_stats(epsilon) can set it.
+	db.config.AddExtensionOption("dp_count_bound",
+	                             "Per-PU row-count bound: max rows one privacy unit contributes to a COUNT over a join "
+	                             "(required for dp_standard COUNT-over-join; also bounds dp_sass COUNT/AVG components)",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	// Privacy failure probability δ for (ε,δ)-DP smooth sensitivity. Required by dp_elastic and
+	// dp_sass; ignored by dp_standard, which gives pure ε-DP. PRAGMA refresh_dp_stats(epsilon) can set it.
 	db.config.AddExtensionOption(
 	    "dp_delta",
-	    "Privacy failure probability δ for (ε,δ)-DP smooth elastic sensitivity (dp_elastic mode). "
-	    "Required for dp_elastic. Use SET dp_delta=<value> or PRAGMA refresh_dp_stats(<epsilon>).",
+	    "Privacy failure probability δ for (ε,δ)-DP smooth sensitivity (dp_elastic and dp_sass; "
+	    "ignored by dp_standard). Use SET dp_delta=<value> or PRAGMA refresh_dp_stats(<epsilon>).",
 	    LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
 	// Set deterministic RNG seed for PAC functions (useful for tests)
 	db.config.AddExtensionOption("privacy_seed", "RNG seed for reproducible noised results", LogicalType::BIGINT);
@@ -459,7 +464,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register priv_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
 	RegisterPacHashFunction(loader);
 
-	// Register priv_laplace_noise scalar function (value, scale) -> value + Lap(scale)
+	// Register dp_noise scalar function (value, scale) -> value + Lap(scale)
 	RegisterDpLaplaceNoiseFunction(loader);
 	RegisterDpSmoothMedianNoiseFunction(loader);
 

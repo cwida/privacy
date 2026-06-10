@@ -2,8 +2,8 @@
 // Created by ila on 1/6/26.
 //
 
-#ifndef PAC_EXPRESSION_BUILDER_HPP
-#define PAC_EXPRESSION_BUILDER_HPP
+#ifndef PRIVACY_EXPRESSION_BUILDER_HPP
+#define PRIVACY_EXPRESSION_BUILDER_HPP
 
 #include "duckdb.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
@@ -101,4 +101,4 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 
 } // namespace duckdb
 
-#endif // PAC_EXPRESSION_BUILDER_HPP
+#endif // PRIVACY_EXPRESSION_BUILDER_HPP

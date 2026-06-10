@@ -7,7 +7,7 @@
 #include <set>
 
 #include "../include/utils/privacy_helpers.hpp"
-#include "../include/compiler/pac_compiler_helpers.hpp"
+#include "../include/compiler/privacy_compiler_helpers.hpp"
 #include "../../duckdb/src/include/duckdb/planner/operator/logical_projection.hpp"
 #include "../../duckdb/src/include/duckdb/planner/operator/logical_dummy_scan.hpp"
 #include "../../duckdb/src/include/duckdb/planner/operator/logical_get.hpp"

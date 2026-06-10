@@ -1,9 +1,9 @@
-#include "compiler/pac_bitslice_add_fkjoins.hpp"
+#include "compiler/privacy_bitslice_add_fkjoins.hpp"
 #include "privacy_debug.hpp"
 #include "utils/privacy_helpers.hpp"
 #include "metadata/privacy_compatibility_check.hpp"
-#include "compiler/pac_compiler_helpers.hpp"
-#include "query_processing/pac_plan_traversal.hpp"
+#include "compiler/privacy_compiler_helpers.hpp"
+#include "query_processing/privacy_plan_traversal.hpp"
 #include "metadata/privacy_metadata_manager.hpp"
 #include "parser/privacy_parser.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -153,7 +153,7 @@ static unique_ptr<LogicalOperator> ChainJoinsFromGetMap(const PrivacyCompatibili
 	for (auto &tbl_name : tables_to_join) {
 		unique_ptr<LogicalGet> right_op = std::move(get_map[tbl_name]);
 		if (!right_op) {
-			throw InternalException("PAC compiler: failed to transfer ownership of LogicalGet for " + tbl_name);
+			throw InternalException("Privacy compiler: failed to transfer ownership of LogicalGet for " + tbl_name);
 		}
 		result = CreateLogicalJoin(check, context, std::move(result), std::move(right_op));
 	}
@@ -176,7 +176,7 @@ CreateGetsAndChainJoins(const PrivacyCompatibilityResult &check, OptimizerExtens
 	for (auto &table : tables_to_join) {
 		auto it = check.table_metadata.find(table);
 		if (it == check.table_metadata.end()) {
-			throw InvalidInputException("PAC compiler: missing table metadata for table: " + table);
+			throw InvalidInputException("Privacy compiler: missing table metadata for table: " + table);
 		}
 		auto required_cols = GetRequiredColumnsForTable(check, table, fk_path, privacy_units);
 		idx_t local_idx = binder.GenerateTableIndex();
@@ -269,7 +269,7 @@ void AddMissingFKJoins(const PrivacyCompatibilityResult &check, OptimizerExtensi
 		if (missing_set.find(table) != missing_set.end()) {
 			auto it = check.table_metadata.find(table);
 			if (it == check.table_metadata.end()) {
-				throw InvalidInputException("PAC compiler: missing table metadata for missing GET: " + table);
+				throw InvalidInputException("Privacy compiler: missing table metadata for missing GET: " + table);
 			}
 			auto required_cols = GetRequiredColumnsForTable(check, table, fk_path, privacy_units);
 			idx_t idx = binder.GenerateTableIndex();
@@ -333,10 +333,10 @@ void AddMissingFKJoins(const PrivacyCompatibilityResult &check, OptimizerExtensi
 		}
 	}
 	if (all_connecting_nodes.empty() && !connecting_table.empty()) {
-		throw InvalidInputException("PAC compiler: could not find any LogicalGet for table " + connecting_table);
+		throw InvalidInputException("Privacy compiler: could not find any LogicalGet for table " + connecting_table);
 	}
 	if (all_connecting_nodes.empty()) {
-		throw InvalidInputException("PAC compiler: could not find any connecting table in the plan");
+		throw InvalidInputException("Privacy compiler: could not find any connecting table in the plan");
 	}
 
 	// Find the FK table that has FK to PU (e.g., orders -> customer)

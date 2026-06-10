@@ -18,10 +18,10 @@
 #include "privacy_debug.hpp"
 #include "utils/privacy_helpers.hpp"
 #include "metadata/privacy_compatibility_check.hpp"
-#include "compiler/pac_compiler_helpers.hpp"
+#include "compiler/privacy_compiler_helpers.hpp"
 #include "query_processing/pac_projection_propagation.hpp"
 #include "query_processing/pac_subquery_handler.hpp"
-#include "compiler/pac_bitslice_add_fkjoins.hpp"
+#include "compiler/privacy_bitslice_add_fkjoins.hpp"
 #include "categorical/pac_categorical_rewriter.hpp"
 #include "query_processing/pac_avg_rewriter.hpp"
 #include "parser/privacy_parser.hpp"
@@ -56,13 +56,15 @@ void CompilePrivQuery(const PrivacyCompatibilityResult &check, OptimizerExtensio
 
 	if (privacy_mode == "pac") {
 		CompilePacMechanism(check, input, plan, privacy_units, query, query_hash);
-	} else if (privacy_mode == "dp_sass") {
-		CompileDPSampleMedianQuery(check, input, plan, privacy_units, query_hash);
+	} else if (privacy_mode == "dp_standard") {
+		CompileDPStandardQuery(check, input, plan, privacy_units, query_hash);
 	} else if (privacy_mode == "dp_elastic") {
 		CompileDPElasticQuery(check, input, plan, privacy_units, query_hash);
+	} else if (privacy_mode == "dp_sass") {
+		CompileDPSampleMedianQuery(check, input, plan, privacy_units, query_hash);
 	} else {
 		throw InvalidInputException("unknown privacy_mode '" + privacy_mode +
-		                            "' (expected 'pac', 'dp_elastic', or 'dp_sass')");
+		                            "' (expected 'pac', 'dp_standard', 'dp_elastic', or 'dp_sass')");
 	}
 }
 

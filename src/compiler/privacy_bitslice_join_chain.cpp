@@ -5,17 +5,17 @@
 // this module inserts join chains for missing FK tables and builds the
 // connecting_table -> fk_table index mapping.
 //
-// Created by refactoring from pac_bitslice_compiler.cpp
+// Created by refactoring from privacy_compiler.cpp
 //
 
-#include "compiler/pac_bitslice_join_chain.hpp"
+#include "compiler/privacy_bitslice_join_chain.hpp"
 #include "privacy_debug.hpp"
 #include "utils/privacy_helpers.hpp"
 #include "parser/privacy_parser.hpp"
 #include "metadata/privacy_metadata_manager.hpp"
-#include "compiler/pac_compiler_helpers.hpp"
+#include "compiler/privacy_compiler_helpers.hpp"
 #include "query_processing/pac_join_builder.hpp"
-#include "query_processing/pac_plan_traversal.hpp"
+#include "query_processing/privacy_plan_traversal.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -217,7 +217,7 @@ ConnectingTableMap EnsureFKTablesInPlan(const PrivacyCompatibilityResult &check,
 		if (missing_set.find(table) != missing_set.end()) {
 			auto it = check.table_metadata.find(table);
 			if (it == check.table_metadata.end()) {
-				throw InvalidInputException("PAC compiler: missing table metadata for missing GET: " + table);
+				throw InvalidInputException("Privacy compiler: missing table metadata for missing GET: " + table);
 			}
 			vector<string> pks = it->second.pks;
 			// Get required columns for this table (PKs and relevant FKs)
@@ -301,11 +301,11 @@ ConnectingTableMap EnsureFKTablesInPlan(const PrivacyCompatibilityResult &check,
 	}
 
 	if (all_connecting_nodes.empty() && !connecting_table.empty()) {
-		throw InvalidInputException("PAC compiler: could not find any LogicalGet for table " + connecting_table);
+		throw InvalidInputException("Privacy compiler: could not find any LogicalGet for table " + connecting_table);
 	}
 
 	if (all_connecting_nodes.empty()) {
-		throw InvalidInputException("PAC compiler: could not find any connecting table in the plan");
+		throw InvalidInputException("Privacy compiler: could not find any connecting table in the plan");
 	}
 
 	// For each instance of the connecting table, add the join chain
@@ -420,7 +420,7 @@ ConnectingTableMap EnsureFKTablesInPlan(const PrivacyCompatibilityResult &check,
 			for (auto &table : tables_to_join_for_instance) {
 				auto it = check.table_metadata.find(table);
 				if (it == check.table_metadata.end()) {
-					throw InvalidInputException("PAC compiler: missing table metadata for table: " + table);
+					throw InvalidInputException("Privacy compiler: missing table metadata for table: " + table);
 				}
 				vector<string> pks = it->second.pks;
 				// Get required columns for this table (PKs and relevant FKs)
@@ -756,8 +756,8 @@ ConnectingTableMap EnsureFKTablesInPlan(const PrivacyCompatibilityResult &check,
 								for (auto &table_to_add : full_tables_to_add) {
 									auto it = check.table_metadata.find(table_to_add);
 									if (it == check.table_metadata.end()) {
-										throw InvalidInputException("PAC compiler: missing table metadata for table: " +
-										                            table_to_add);
+										throw InvalidInputException(
+										    "Privacy compiler: missing table metadata for table: " + table_to_add);
 									}
 
 									auto local_idx = binder.GenerateTableIndex();
@@ -812,7 +812,7 @@ ConnectingTableMap EnsureFKTablesInPlan(const PrivacyCompatibilityResult &check,
 				for (auto &table : tables_to_add) {
 					auto it = check.table_metadata.find(table);
 					if (it == check.table_metadata.end()) {
-						throw InvalidInputException("PAC compiler: missing table metadata for table: " + table);
+						throw InvalidInputException("Privacy compiler: missing table metadata for table: " + table);
 					}
 					vector<string> pks = it->second.pks;
 					// Get required columns for this table (PKs and relevant FKs)

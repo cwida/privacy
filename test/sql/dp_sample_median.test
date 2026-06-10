@@ -109,7 +109,7 @@ WITH vals AS (
 ), counters AS (
     SELECT list(v ORDER BY v) AS l FROM vals
 )
-SELECT abs(priv_smooth_median_noise(l, 10.0, 1e-6, 8)) > 10000.0
+SELECT abs(dp_smooth_median_noise(l, 10.0, 1e-6, 8)) > 10000.0
 FROM counters;
 ----
 true
@@ -124,7 +124,7 @@ WITH vals AS (
 ), counters AS (
     SELECT list(v ORDER BY v) AS l FROM vals
 )
-SELECT priv_smooth_median_noise(l, 1.0, 1e-6, 1, -10.0, 10.0) = 10.0
+SELECT dp_smooth_median_noise(l, 1.0, 1e-6, 1, -10.0, 10.0) = 10.0
 FROM counters;
 ----
 true
@@ -139,7 +139,7 @@ WITH vals AS (
 ), counters AS (
     SELECT list(v ORDER BY i) AS l FROM vals
 )
-SELECT priv_smooth_median_noise(l, 1.0, 1e-6, 1) IS NULL
+SELECT dp_smooth_median_noise(l, 1.0, 1e-6, 1) IS NULL
 FROM counters;
 ----
 true
@@ -151,7 +151,7 @@ WITH vals AS (
 ), counters AS (
     SELECT list(v ORDER BY i) AS l FROM vals
 )
-SELECT priv_smooth_median_noise(l, 1.0, 1e-6, 1) = 0.0
+SELECT dp_smooth_median_noise(l, 1.0, 1e-6, 1) = 0.0
 FROM counters;
 ----
 true
@@ -163,7 +163,7 @@ WITH vals AS (
 ), counters AS (
     SELECT list(v ORDER BY i) AS l FROM vals
 )
-SELECT priv_smooth_median_noise(l, 1.0, 1e-6, 1) = 10.0
+SELECT dp_smooth_median_noise(l, 1.0, 1e-6, 1) = 10.0
 FROM counters;
 ----
 true

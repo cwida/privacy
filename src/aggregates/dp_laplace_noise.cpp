@@ -55,11 +55,10 @@ static void DpLaplaceNoiseFunction(DataChunk &args, ExpressionState &state, Vect
 }
 
 void RegisterDpLaplaceNoiseFunction(ExtensionLoader &loader) {
-	ScalarFunctionSet set("priv_laplace_noise");
-	set.AddFunction(ScalarFunction("priv_laplace_noise", {LogicalType::DOUBLE, LogicalType::DOUBLE},
-	                               LogicalType::DOUBLE, DpLaplaceNoiseFunction));
-	set.AddFunction(ScalarFunction("priv_laplace_noise",
-	                               {LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::UBIGINT},
+	ScalarFunctionSet set("dp_noise");
+	set.AddFunction(ScalarFunction("dp_noise", {LogicalType::DOUBLE, LogicalType::DOUBLE}, LogicalType::DOUBLE,
+	                               DpLaplaceNoiseFunction));
+	set.AddFunction(ScalarFunction("dp_noise", {LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::UBIGINT},
 	                               LogicalType::DOUBLE, DpLaplaceNoiseFunction));
 	CreateScalarFunctionInfo info(set);
 	FunctionDescription desc;
@@ -236,11 +235,11 @@ static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state,
 
 void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
-	ScalarFunctionSet set("priv_smooth_median_noise");
-	set.AddFunction(ScalarFunction("priv_smooth_median_noise",
+	ScalarFunctionSet set("dp_smooth_median_noise");
+	set.AddFunction(ScalarFunction("dp_smooth_median_noise",
 	                               {list_type, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::INTEGER},
 	                               LogicalType::DOUBLE, DpSmoothMedianNoiseFunction));
-	set.AddFunction(ScalarFunction("priv_smooth_median_noise",
+	set.AddFunction(ScalarFunction("dp_smooth_median_noise",
 	                               {list_type, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::INTEGER,
 	                                LogicalType::DOUBLE, LogicalType::DOUBLE},
 	                               LogicalType::DOUBLE, DpSmoothMedianNoiseFunction));

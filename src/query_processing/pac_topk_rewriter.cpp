@@ -686,7 +686,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 #if PRIVACY_DEBUG
 						PRIVACY_DEBUG_PRINT("PACTopKRule:     A3b WRAPPING LIST colref: " + e->ToString());
 #endif
-						e = input.optimizer.BindScalarFunction("priv_noised", std::move(e));
+						e = input.optimizer.BindScalarFunction("pac_noised", std::move(e));
 						// Cast back to original aggregate type (e.g. FLOAT→DOUBLE for AVG).
 						// Trace the binding through remaining projections to identify which
 						// PAC aggregate this colref came from, then cast if types differ.
@@ -726,7 +726,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 							PRIVACY_DEBUG_PRINT("PACTopKRule:     A3b REPLACING CAST(LIST->" + target_type.ToString() +
 							                    ") with CAST(priv_noised()->" + target_type.ToString() + ")");
 #endif
-							auto noised = input.optimizer.BindScalarFunction("priv_noised", std::move(cast_expr.child));
+							auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(cast_expr.child));
 							e = BoundCastExpression::AddCastToType(input.context, std::move(noised), target_type);
 							return;
 						}
@@ -775,7 +775,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 				// PAC aggregate column: apply priv_noised to counter LIST, cast back to original type
 				auto counters_ref =
 				    make_uniq<BoundColumnRefExpression>(list_type, ColumnBinding(outermost->table_index, i));
-				auto noised = input.optimizer.BindScalarFunction("priv_noised", std::move(counters_ref));
+				auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(counters_ref));
 				auto &orig_type = pac_aggs[it_pac->second].original_type;
 				if (orig_type != noised->return_type) {
 					noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), orig_type);
@@ -856,7 +856,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 			auto it = pac_mean_column_map.find(HashBinding(binding));
 			if (it != pac_mean_column_map.end()) {
 				auto counters_ref = make_uniq<BoundColumnRefExpression>(list_type, ColumnBinding(mean_proj_idx, i));
-				auto noised = input.optimizer.BindScalarFunction("priv_noised", std::move(counters_ref));
+				auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(counters_ref));
 				// Cast back to the original aggregate return type (e.g. BIGINT for count)
 				for (auto &info : pac_aggs) {
 					if (info.agg_binding == binding && info.original_type != noised->return_type) {

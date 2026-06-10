@@ -1,13 +1,13 @@
 //
 // PAC FK Resolver - Implementation
 //
-// See pac_fk_resolver.hpp for documentation.
+// See privacy_fk_resolver.hpp for documentation.
 //
-// Created by refactoring pac_bitslice_compiler.cpp
+// Created by refactoring privacy_compiler.cpp
 //
 
-#include "query_processing/pac_fk_resolver.hpp"
-#include "query_processing/pac_plan_traversal.hpp"
+#include "query_processing/privacy_fk_resolver.hpp"
+#include "query_processing/privacy_plan_traversal.hpp"
 
 namespace duckdb {
 

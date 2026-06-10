@@ -62,15 +62,15 @@ SELECT priv_sum(nation_counters) FROM (
 
 These functions consume `LIST<FLOAT>` counter lists and produce scalar results. They are used at the boundary where PAC's 64-world representation is collapsed to a single answer.
 
-### priv_noised
+### pac_noised
 
-`priv_noised(LIST<FLOAT>) → FLOAT`
+`pac_noised(LIST<FLOAT>) → FLOAT`
 
 Applies the PAC noise mechanism to a counter list: selects counter `J`, computes variance across all counters, and adds calibrated Gaussian noise.
 
 ```sql
 -- Evaluate an expression across all 64 worlds via list_transform, then noise
-SELECT priv_noised(
+SELECT pac_noised(
     list_transform(priv_sum(priv_hash(hash(c_custkey)), c_acctbal),
                    x -> CAST(x AS DECIMAL(18,2))))
 FROM customer;
@@ -143,9 +143,9 @@ SELECT priv_select_gt(priv_hash(hash(c_custkey)), 100,
     priv_count(priv_hash(hash(c_custkey))))
 FROM customer;
 ```
-### priv_noised variants
+### priv_noised_* variants
 
-Scalar-returning convenience functions that compose a counter aggregate with `priv_noised`. These are what standard SQL aggregates (`COUNT(*)`, `SUM(x)`, etc.) get rewritten to by the PAC compiler.
+Scalar-returning convenience aggregates that fuse a counter aggregate with PAC noise (the `pac_noised` operation). These are what standard SQL aggregates (`COUNT(*)`, `SUM(x)`, etc.) get rewritten to by the PAC compiler.
 
 `priv_noised_count(UBIGINT hash) → BIGINT`
 
@@ -189,7 +189,7 @@ Element-wise division of two counter lists. Used as an intermediate step when co
 
 `priv_noised_div(LIST<FLOAT> sum_counters, LIST<FLOAT> count_counters) → FLOAT`
 
-Fused division and noise application. Divides sum counters by count counters element-wise, then applies the PAC noise mechanism, i.e. `priv_noised()`. This is what `priv_noised_avg` is rewritten to internally.
+Fused division and noise application. Divides sum counters by count counters element-wise, then applies the PAC noise mechanism, i.e. `pac_noised()`. This is what `priv_noised_avg` is rewritten to internally.
 
 ### Example
 

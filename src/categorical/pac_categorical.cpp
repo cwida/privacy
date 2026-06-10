@@ -468,7 +468,7 @@ static void RegisterPacSelectCmp(ExtensionLoader &loader, const string &name) {
 // (index 32). If every element of the window agrees, return that. Otherwise random
 // coin flip — the median itself is unstable under one-PU change. Window width tracks
 // the maximum shift one PU can induce on the sorted statistic, mirroring the smooth-
-// sensitivity bound used by priv_smooth_median_noise.
+// sensitivity bound used by dp_smooth_median_noise.
 
 // Decide a boolean filter outcome from 64 comparison booleans (already in sorted order
 // of the underlying counter values). Returns:
@@ -1405,11 +1405,11 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	priv_coalesce.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 	loader.RegisterFunction(make_scalar_info(priv_coalesce, "[INTERNAL] Replaces NULL counter list with 64 zeros."));
 
-	// priv_noised(list<PAC_FLOAT>) -> PAC_FLOAT
-	ScalarFunction priv_noised("priv_noised", {list_double_type}, PacFloatLogicalType(), PacNoisedFunction,
-	                           PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	// pac_noised(list<PAC_FLOAT>) -> PAC_FLOAT
+	ScalarFunction pac_noised("pac_noised", {list_double_type}, PacFloatLogicalType(), PacNoisedFunction,
+	                          PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
 	loader.RegisterFunction(
-	    make_scalar_info(priv_noised, "[INTERNAL] Applies PAC noise to 64-element counter list, returns scalar."));
+	    make_scalar_info(pac_noised, "[INTERNAL] Applies PAC noise to 64-element counter list, returns scalar."));
 
 	// priv_div(list<PAC_FLOAT>, list<PAC_FLOAT>) -> list<PAC_FLOAT>
 	ScalarFunction priv_div("priv_div", {list_double_type, list_double_type}, list_double_type, PacDivFunction);
