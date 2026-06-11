@@ -1,5 +1,6 @@
 #include "aggregates/dp_laplace_noise.hpp"
 #include "aggregates/pac_aggregate.hpp"
+#include "privacy_debug.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/common/vector_operations/ternary_executor.hpp"
@@ -87,17 +88,6 @@ static double MedianLocalSensitivity(const std::array<double, 64> &values, int c
 	return std::max(0.0, values[hi_idx] - values[lo_idx]);
 }
 
-static double BoundedMedianValueAt(const std::array<double, 64> &values, int idx, double lower_bound,
-                                   double upper_bound) {
-	if (idx < 0) {
-		return lower_bound;
-	}
-	if (idx >= static_cast<int>(values.size())) {
-		return upper_bound;
-	}
-	return values[idx];
-}
-
 static double SmoothMedianSensitivity(const std::array<double, 64> &values, double beta, int sample_lanes) {
 	const int step_size = sample_lanes;
 	double smooth = 0.0;
@@ -112,21 +102,69 @@ static double SmoothMedianSensitivity(const std::array<double, 64> &values, doub
 	return smooth;
 }
 
-static double BoundedSmoothMedianSensitivity(const std::array<double, 64> &values, double beta, int sample_lanes,
-                                             double lower_bound, double upper_bound) {
-	const int median_idx = 31;
-	const int step_size = sample_lanes;
-	double smooth = 0.0;
-	for (int distance = 0; distance < 64; distance++) {
-		int changed_lanes = step_size * (distance + 1);
-		int lo_idx = median_idx - changed_lanes;
-		int hi_idx = median_idx + changed_lanes;
-		double lo = BoundedMedianValueAt(values, lo_idx, lower_bound, upper_bound);
-		double hi = BoundedMedianValueAt(values, hi_idx, lower_bound, upper_bound);
-		double local = std::max(0.0, hi - lo);
-		smooth = std::max(smooth, local * std::exp(-beta * static_cast<double>(distance)));
+// Exact smooth sensitivity of the median via the Nissim-Raskhodnikova-Smith divide-and-conquer
+// algorithm (Algorithm 1 SmoothSensitivityMedian + Algorithm 2 JList). The padded array `x` holds
+// the 64 clipped+sorted sample answers in x[1..64], bracketed by domain sentinels x[0]=lower_bound
+// and x[65]=upper_bound; the median index is p = ceil(64/2) = 32 (released median = values[31]).
+// SCORE(i, j) = (x[j] - x[i]) * exp(-beta_eff * (j - i - 1)) over pairs i <= p <= j; JList exploits
+// the monotonicity of the optimal j*(b) in b to find all maximizers in O(n log n).
+namespace {
+
+constexpr int SMOOTH_MEDIAN_N = 64;
+constexpr int SMOOTH_MEDIAN_P = 32; // ceil(64/2): 1-indexed median rank
+
+// argmax_{L <= j <= U} SCORE(b, j)
+int SmoothMedianArgMax(const std::array<double, SMOOTH_MEDIAN_N + 2> &x, double beta_eff, int b, int lower, int upper) {
+	int best_j = lower;
+	double best = -1.0;
+	for (int j = lower; j <= upper; j++) {
+		double score = (x[j] - x[b]) * std::exp(-beta_eff * static_cast<double>(j - b - 1));
+		if (score > best) {
+			best = score;
+			best_j = j;
+		}
 	}
-	return smooth;
+	return best_j;
+}
+
+// JList(a, c, L, U): fills j_star[b] for b in [a, c] using the monotone search-range narrowing.
+void SmoothMedianJList(const std::array<double, SMOOTH_MEDIAN_N + 2> &x, double beta_eff,
+                       std::array<int, SMOOTH_MEDIAN_P + 1> &j_star, int a, int c, int lower, int upper) {
+	if (c < a) {
+		return;
+	}
+	int b = (a + c) / 2;
+	int jb = SmoothMedianArgMax(x, beta_eff, b, lower, upper);
+	j_star[b] = jb;
+	SmoothMedianJList(x, beta_eff, j_star, a, b - 1, lower, jb);
+	SmoothMedianJList(x, beta_eff, j_star, b + 1, c, jb, upper);
+}
+
+} // namespace
+
+static double SmoothMedianSensitivityExact(const std::array<double, 64> &values, double beta, int sample_lanes,
+                                           double lower_bound, double upper_bound) {
+	// One PU can move up to `sample_lanes` lane answers, so the element-level NRS envelope is
+	// reweighted to PU-distance via beta_eff = beta / sample_lanes (beta-smooth in PU distance).
+	double beta_eff = beta / static_cast<double>(sample_lanes);
+	std::array<double, SMOOTH_MEDIAN_N + 2> x;
+	x[0] = lower_bound;
+	for (int i = 0; i < SMOOTH_MEDIAN_N; i++) {
+		x[i + 1] = values[i];
+	}
+	x[SMOOTH_MEDIAN_N + 1] = upper_bound;
+
+	std::array<int, SMOOTH_MEDIAN_P + 1> j_star;
+	j_star.fill(SMOOTH_MEDIAN_P);
+	SmoothMedianJList(x, beta_eff, j_star, 0, SMOOTH_MEDIAN_P, SMOOTH_MEDIAN_P, SMOOTH_MEDIAN_N + 1);
+
+	double smooth = 0.0;
+	for (int i = 0; i <= SMOOTH_MEDIAN_P; i++) {
+		int j = j_star[i];
+		double score = (x[j] - x[i]) * std::exp(-beta_eff * static_cast<double>(j - i - 1));
+		smooth = std::max(smooth, score);
+	}
+	return std::max(0.0, smooth);
 }
 
 // Shared per-row core for the sample-and-aggregate median release. Validates the inputs,
@@ -172,8 +210,10 @@ static bool SmoothMedianNoiseRow(const list_entry_t &entry, const UnifiedVectorF
 		return true;
 	}
 	double beta = epsilon / (2.0 * std::log(2.0 / delta));
-	double smooth = bounded ? BoundedSmoothMedianSensitivity(values, beta, sample_lanes, lower_bound, upper_bound)
+	double smooth = bounded ? SmoothMedianSensitivityExact(values, beta, sample_lanes, lower_bound, upper_bound)
 	                        : SmoothMedianSensitivity(values, beta, sample_lanes);
+	PRIVACY_DEBUG_PRINT("dp_sass smooth-median: median=" + std::to_string(median) + " smooth_sensitivity=" +
+	                    std::to_string(smooth) + " scale=" + std::to_string((2.0 * smooth) / epsilon));
 	out = median + LaplaceNoise((2.0 * smooth) / epsilon, seed ^ (entry.offset * PAC_MAGIC_HASH));
 	return true;
 }

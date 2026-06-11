@@ -241,5 +241,43 @@ SELECT AVG(v) IS NOT NULL FROM sass_many;
 ----
 true
 
+# Smoke test: the exact SmoothSensitivityMedian (Algorithm 1 + JList) bounded path
+# with noise ON. The 64 lane values have a large gap just ABOVE the median (off-center),
+# which the exact NRS envelope charges even though a centered window could miss it. With a
+# fixed seed the released value is deterministic; we only assert it is finite (the path runs
+# and produces a sane noised scalar).
+statement ok
+SET privacy_noise = true;
+
+statement ok
+SET privacy_seed = 42;
+
+query I
+WITH vals AS (
+    SELECT CASE WHEN i < 30 THEN -5.0::FLOAT WHEN i < 34 THEN 0.0::FLOAT ELSE 500.0::FLOAT END AS v, i
+    FROM range(64) t(i)
+), counters AS (
+    SELECT list(v ORDER BY i) AS l FROM vals
+)
+SELECT isfinite(dp_smooth_median_noise(l, 1.0, 1e-6, 1, -1000.0, 1000.0))
+FROM counters;
+----
+true
+
+# End-to-end dp_sass with noise ON: confirm SUM/COUNT run through the real plan and
+# produce finite, non-null noised values via the exact bounded terminal.
+query I
+SELECT r IS NOT NULL AND isfinite(r::DOUBLE) FROM (SELECT SUM(v) AS r FROM sass_many);
+----
+true
+
+query I
+SELECT r IS NOT NULL AND isfinite(r::DOUBLE) FROM (SELECT COUNT(*) AS r FROM sass_many);
+----
+true
+
+statement ok
+SET privacy_noise = false;
+
 statement ok
 SET privacy_mode = 'dp_elastic';
