@@ -123,7 +123,7 @@ static inline LogicalType PacFloatLogicalType() {
 }
 
 // Header for privacy aggregate helpers and public declarations used across pac_* files.
-// Contains bindings and small helpers shared between pac_aggregate, priv_count and priv_sum implementations.
+// Contains bindings and small helpers shared between pac_aggregate, as_count and as_sum implementations.
 
 // ============================================================================
 // PacPState: per-query Bayesian posterior tracker for persistent secret composition
@@ -161,7 +161,7 @@ void RegisterPacAggregateFunctions(ExtensionLoader &loader);
 // Register priv_finalize scalar function (LIST<DOUBLE> -> DOUBLE, read-time noise for derived tables)
 void RegisterPacFinalizeFunction(ExtensionLoader &loader);
 
-// Declare the noisy-sample helper so other translation units (priv_count.cpp) can call it.
+// Declare the noisy-sample helper so other translation units (as_count.cpp) can call it.
 // is_null: bitmask where bit i=1 means counter i should be excluded (compacted out)
 // mi: mutual information parameter for noise calculation
 // correction: factor to multiply values by after compacting NULLs but before adding noise
@@ -206,7 +206,7 @@ struct PrivBindData; // forward declaration
 void CheckPacSampleDiversity(uint64_t key_hash, const PAC_FLOAT *buf, uint64_t update_count, const char *aggr_name,
                              PrivBindData &bind_data);
 
-// Helper function to generate a random seed (defined in pac_aggregate.cpp)
+// Helper function to generate a random seed (defined in as_aggregate.cpp)
 // This avoids including <random> in the header for std::random_device
 uint64_t PacGenerateRandomSeed();
 
@@ -229,7 +229,7 @@ struct PrivBindData : public FunctionData {
 	double correction;        // correction factor: multiplies sum/avg/count results, reduces NULL prob for min/max
 	uint64_t seed;            // RNG seed: privacy_seed setting value, or query-id if not set
 	uint64_t query_hash;      // derived from seed: used inside priv_hash() for XOR and as counter selector
-	double scale_divisor;     // for DECIMAL priv_avg: divide result by 10^scale (default 1.0)
+	double scale_divisor;     // for DECIMAL as_avg: divide result by 10^scale (default 1.0)
 	bool hash_repair;         // if true, priv_hash() repairs hash to exactly 32 bits set
 	int sample_lanes;         // SASS mode: number of sampled lanes per PU hash; 0 means identity hash
 	double utility_threshold; // z-score threshold for utility NULLing (NaN = disabled, any value = enabled)
@@ -304,7 +304,7 @@ static inline uint64_t TransformPacUpdateHash(uint64_t key_hash, int sample_lane
 }
 
 // Shared bind for SASS sample-* aggregates: no mi/correction, just the active
-// dp_sample_lanes setting. Used by priv_sample_sum, priv_sample_count, etc.
+// dp_sample_lanes setting. Used by as_sample_sum, as_sample_count, etc.
 inline unique_ptr<FunctionData> MakeDpSampleBindData(ClientContext &ctx) {
 	return make_uniq<PrivBindData>(ctx, 0.0, 1.0, 1.0, false, GetDpSampleLanes(ctx));
 }
@@ -330,7 +330,7 @@ inline unique_ptr<FunctionData> MakePrivBindData(ClientContext &ctx, vector<uniq
 	return make_uniq<PrivBindData>(ctx, mi, correction, scale_divisor);
 }
 
-// Helper to convert double to accumulator type (used by priv_sum finalizers)
+// Helper to convert double to accumulator type (used by as_sum finalizers)
 template <class T>
 static inline T FromDouble(double val) {
 	return static_cast<T>(val);

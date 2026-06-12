@@ -1,12 +1,12 @@
 //
-// priv_clip_sum: Approximate sum with per-level overflow + distinct bitmaps
+// as_clip_sum: Approximate sum with per-level overflow + distinct bitmaps
 // Always: buffered, approximate, two-sided (unsigned pos/neg), 31 levels covering 128-bit
 //
 #ifndef PAC_CLIP_SUM_HPP
 #define PAC_CLIP_SUM_HPP
 
 #include "duckdb.hpp"
-#include "pac_clip_aggr.hpp"
+#include "as_clip_aggr.hpp"
 #include <cmath>
 
 namespace duckdb {
@@ -17,7 +17,7 @@ void RegisterPacNoisedClipSumCountFunctions(ExtensionLoader &loader);
 void RegisterDpSampleClipSumFunctions(ExtensionLoader &loader);
 
 // ============================================================================
-// Sum-specific constants (shared constants in pac_clip_aggr.hpp)
+// Sum-specific constants (shared constants in as_clip_aggr.hpp)
 // ============================================================================
 constexpr int CLIP_NORMAL_SWAR = 16;       // 16 x uint64_t = 64 x uint16_t SWAR counters
 constexpr int CLIP_NORMAL_ELEMENTS = 18;   // 16 SWAR + 1 packed ptr/ec + 1 bitmap
@@ -43,7 +43,7 @@ static inline void Pac2SetOverflowPtr(uint64_t &packed, uint64_t *ptr) {
 }
 
 // ============================================================================
-// SWAR kernel — identical to priv_sum's AddToTotalsSWAR for uint16_t
+// SWAR kernel — identical to as_sum's AddToTotalsSWAR for uint16_t
 // ============================================================================
 AUTOVECTORIZE static inline void Pac2AddToTotalsSWAR16(uint64_t *PAC_RESTRICT total, uint64_t value,
                                                        uint64_t key_hash) {

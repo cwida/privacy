@@ -33,13 +33,13 @@ set(EXTENSION_SOURCES
     src/metadata/privacy_compatibility_check.cpp
     src/metadata/privacy_metadata_manager.cpp
     src/metadata/privacy_metadata_serialization.cpp
-    src/aggregates/pac_aggregate.cpp
-    src/aggregates/pac_count.cpp
-    src/aggregates/pac_min_max.cpp
-    src/aggregates/pac_sum.cpp
-    src/aggregates/pac_finalize.cpp
-    src/aggregates/pac_clip_sum.cpp
-    src/aggregates/pac_clip_min_max.cpp
+    src/aggregates/as_aggregate.cpp
+    src/aggregates/as_count.cpp
+    src/aggregates/as_min_max.cpp
+    src/aggregates/as_sum.cpp
+    src/aggregates/as_finalize.cpp
+    src/aggregates/as_clip_sum.cpp
+    src/aggregates/as_clip_min_max.cpp
     src/aggregates/dp_laplace_noise.cpp
     src/compiler/privacy_compiler.cpp
     src/compiler/privacy_mechanisms.cpp

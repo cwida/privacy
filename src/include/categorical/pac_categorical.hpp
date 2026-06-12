@@ -5,7 +5,7 @@
 // (queries that don't return aggregates but use PAC aggregates in subquery predicates).
 //
 // Problem: When an inner query has a PAC aggregate and the outer query uses it in a comparison
-// (e.g., WHERE value > priv_sum(...)), picking ONE subsample for the inner aggregate leaks privacy
+// (e.g., WHERE value > as_sum(...)), picking ONE subsample for the inner aggregate leaks privacy
 // because the outer query's filter decision is based on that specific subsample.
 //
 // Solution: The inner PAC aggregate returns ALL 64 counter values. The comparison is evaluated
@@ -30,7 +30,7 @@
 #define PAC_CATEGORICAL_HPP
 
 #include "duckdb.hpp"
-#include "aggregates/pac_aggregate.hpp"
+#include "aggregates/as_aggregate.hpp"
 
 namespace duckdb {
 
@@ -45,7 +45,7 @@ void AddPacListAggregateOverload(AggregateFunctionSet &set, const string &aggr_t
 // ============================================================================
 // PAC_COUNTERS aggregate: Returns all 64 counters as a LIST for categorical queries
 // ============================================================================
-// This is a variant of priv_sum that returns the raw counters instead of picking one.
+// This is a variant of as_sum that returns the raw counters instead of picking one.
 // Used when the aggregate result will be used in a comparison in an outer categorical query.
 
 // ============================================================================

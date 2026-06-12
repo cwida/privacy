@@ -16,12 +16,12 @@
 #include "duckdb/common/vector_operations/unary_executor.hpp"
 #include "duckdb/common/types.hpp"
 #include "core/privacy_optimizer.hpp"
-#include "aggregates/pac_aggregate.hpp"
-#include "aggregates/pac_count.hpp"
-#include "aggregates/pac_sum.hpp"
-#include "aggregates/pac_clip_sum.hpp"
-#include "aggregates/pac_min_max.hpp"
-#include "aggregates/pac_clip_min_max.hpp"
+#include "aggregates/as_aggregate.hpp"
+#include "aggregates/as_count.hpp"
+#include "aggregates/as_sum.hpp"
+#include "aggregates/as_clip_sum.hpp"
+#include "aggregates/as_min_max.hpp"
+#include "aggregates/as_clip_min_max.hpp"
 #include "aggregates/dp_laplace_noise.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "parser/privacy_parser.hpp"
@@ -280,8 +280,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	pac_topk_rule.optimizer_info = pac_info;
 	OptimizerExtension::Register(db.config, std::move(pac_topk_rule));
 
-	// Register priv_avg rewrite rule (post-optimizer: decomposes priv_noised_avg/priv_avg into sum/count + division).
-	// This post-optimizer handles user-written priv_avg() in SQL. Compiler-generated priv_noised_avg is already
+	// Register as_avg rewrite rule (post-optimizer: decomposes as_noised_avg/as_avg into sum/count + division).
+	// This post-optimizer handles user-written as_avg() in SQL. Compiler-generated as_noised_avg is already
 	// decomposed during the pre-optimizer phase (in CompilePrivQuery) so this is a no-op for those.
 	{
 		OptimizerExtension pac_avg_rule;
@@ -412,9 +412,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	db.config.AddExtensionOption("priv_clip_support",
-	                             "Dynamic outlier clipping threshold for priv_clip_sum. "
+	                             "Dynamic outlier clipping threshold for as_clip_sum. "
 	                             "Levels with fewer than this many estimated distinct contributors are zeroed out. "
-	                             "NULL (default) disables priv_clip_sum; set to e.g. 64 to enable.",
+	                             "NULL (default) disables as_clip_sum; set to e.g. 64 to enable.",
 	                             LogicalType::BIGINT, Value());
 
 	db.config.AddExtensionOption("priv_clip_scale",
@@ -422,7 +422,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "Default false (omit).",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
 
-	// Register priv_sum aggregate functions
+	// Register as_sum aggregate functions
 	RegisterPacSumFunctions(loader);
 	RegisterPacSumCountersFunctions(loader);
 	RegisterDpSampleSumFunctions(loader);
@@ -435,7 +435,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterDpSampleCountFunctions(loader);
 	RegisterPacClipCountFunctions(loader);
 	RegisterPacNoisedClipCountFunctions(loader);
-	// Register priv_min/priv_max aggregate functions
+	// Register as_min/as_max aggregate functions
 	RegisterPacMinFunctions(loader);
 	RegisterPacMaxFunctions(loader);
 	// Register _counters variants for categorical queries
@@ -449,7 +449,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacNoisedClipMinFunctions(loader);
 	RegisterPacNoisedClipMaxFunctions(loader);
 
-	// Register dummy priv_noised_avg / priv_avg (replaced by RewritePacAvgToDiv before execution)
+	// Register dummy as_noised_avg / as_avg (replaced by RewritePacAvgToDiv before execution)
 	RegisterPacAvgFunctions(loader);
 
 	// Register PAC categorical functions (priv_select, priv_filter, priv_filter_<cmp>, etc.)

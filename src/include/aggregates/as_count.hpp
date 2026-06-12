@@ -13,14 +13,14 @@
 #define PAC_NOCASCADING 1
 #endif
 
-// PAC_GODBOLT mode: cpp -DPAC_GODBOLT -P -E -w  src/include/priv_count.hpp
+// PAC_GODBOLT mode: cpp -DPAC_GODBOLT -P -E -w  src/include/as_count.hpp
 // Isolates the SIMD kernel for Godbolt analysis (-P removes line markers)
 #ifdef PAC_GODBOLT
 using uint8_t = unsigned char;
 using uint64_t = unsigned long long;
 #else
 #include "duckdb.hpp"
-#include "pac_aggregate.hpp"
+#include "as_aggregate.hpp"
 namespace duckdb {
 void RegisterPacCountFunctions(ExtensionLoader &);
 void RegisterPacCountCountersFunctions(ExtensionLoader &);

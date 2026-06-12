@@ -1,5 +1,5 @@
 #include "compiler/privacy_mechanisms.hpp"
-#include "aggregates/pac_aggregate.hpp"
+#include "aggregates/as_aggregate.hpp"
 #include "utils/privacy_helpers.hpp"
 #include "compiler/privacy_compiler.hpp"
 #include "query_processing/privacy_plan_traversal.hpp"
@@ -892,11 +892,11 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 		children.push_back(pre_agg.pu_hash_ref->Copy());
 		children.push_back(std::move(lower_ref));
 		auto &original = agg->expressions[ai]->Cast<BoundAggregateExpression>();
-		string sample_name = "priv_sample_sum";
+		string sample_name = "as_sample_sum";
 		if (original.function.name == "min") {
-			sample_name = "priv_sample_min";
+			sample_name = "as_sample_min";
 		} else if (original.function.name == "max") {
-			sample_name = "priv_sample_max";
+			sample_name = "as_sample_max";
 		}
 		PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] rewrite " + original.function.name + " -> " + sample_name);
 		agg->expressions[ai] = BindPlainAggregate(input, sample_name, std::move(children));

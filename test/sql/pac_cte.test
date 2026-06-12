@@ -357,7 +357,7 @@ statement ok
 INSERT INTO scores VALUES (1, 1, 10), (2, 1, 20), (3, 2, 30), (4, 2, 40);
 
 # CTE only selects grp and value — PRIVACY_KEY 'id' is NOT projected.
-# The aggregate should still be noised (priv_noised_sum) after CTE expansion.
+# The aggregate should still be noised (as_noised_sum) after CTE expansion.
 query II
 WITH data AS (
     SELECT grp, value FROM scores

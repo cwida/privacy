@@ -1,4 +1,4 @@
-#include "aggregates/pac_aggregate.hpp"
+#include "aggregates/as_aggregate.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
@@ -12,7 +12,7 @@ namespace duckdb {
 // ============================================================================
 // priv_finalize(LIST<FLOAT>) -> FLOAT
 // Takes 64 subsample counters and returns a noised scalar value.
-// Counters already include 2x correction from priv_sum/priv_count finalize.
+// Counters already include 2x correction from as_sum/as_count finalize.
 // ============================================================================
 static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &context = state.GetContext();

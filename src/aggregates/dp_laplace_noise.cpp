@@ -1,5 +1,5 @@
 #include "aggregates/dp_laplace_noise.hpp"
-#include "aggregates/pac_aggregate.hpp"
+#include "aggregates/as_aggregate.hpp"
 #include "privacy_debug.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/function/scalar_function.hpp"

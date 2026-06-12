@@ -10,8 +10,8 @@
 // - Adds priv_filter at the outermost filter to make final probabilistic decision
 //
 // Example transformation for TPC-H Q20:
-//   BEFORE: ps_availqty > (SELECT 0.5 * priv_sum(hash, l_quantity) FROM ...)
-//   AFTER:  priv_filter(pac_gt(ps_availqty, (SELECT 0.5 * priv_sum(hash, l_quantity) FROM ...)))
+//   BEFORE: ps_availqty > (SELECT 0.5 * as_sum(hash, l_quantity) FROM ...)
+//   AFTER:  priv_filter(pac_gt(ps_availqty, (SELECT 0.5 * as_sum(hash, l_quantity) FROM ...)))
 //
 // Created by ila on 1/23/26.
 //
@@ -33,7 +33,7 @@ namespace duckdb {
 
 // The kind of wrapping to apply after BuildCounterListTransform
 enum class PacWrapKind {
-	PAC_NOISED, // Projection: list_transform -> priv_noised -> optional cast
+	PAC_NOISED, // Projection: list_transform -> as_noised -> optional cast
 	PAC_FILTER, // Filter/Join: list_transform -> priv_filter
 	PAC_SELECT  // Filter/Join with outer PAC aggregate: priv_select_<cmp> or priv_select(hash, list<bool>)
 };

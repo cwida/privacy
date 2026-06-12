@@ -3,7 +3,7 @@
 //
 
 #include "core/privacy_optimizer.hpp"
-#include "aggregates/pac_aggregate.hpp"
+#include "aggregates/as_aggregate.hpp"
 #include "privacy_debug.hpp"
 #include <string>
 #include <algorithm>
@@ -467,7 +467,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	// active_query is NULL. DuckDB's GetCurrentQuery() dereferences that unique_ptr
 	// and throws InternalException. The query string is only used for the compiled-
 	// file hash, so we fall back to a fixed string to let privacy compilation proceed
-	// (needed so delta queries get priv_noised_sum / priv_hash rewrites).
+	// (needed so delta queries get as_noised_sum / priv_hash rewrites).
 	string current_query;
 	try {
 		current_query = input.context.GetCurrentQuery();
@@ -532,7 +532,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 			ReplanGuard scoped2(pac_info);
 			CompilePrivQuery(check, input, target_plan, privacy_units, normalized, query_hash);
 
-			// For DML targeting derived_pu tables: convert priv_noised_* → priv_* counter variants
+			// For DML targeting derived_pu tables: convert as_noised_* → as_* counter variants
 			// so the table stores raw 64-element counter lists instead of noised scalars.
 			// Check the DML TARGET table (not source tables) for derived_pu.
 			// PropagateCTASMetadata already ran (line 276) and set derived_pu on the target.

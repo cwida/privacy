@@ -6,7 +6,7 @@
 // Created by ila on 1/23/26.
 //
 #include "categorical/pac_categorical_lambdas.hpp"
-#include "aggregates/pac_aggregate.hpp"
+#include "aggregates/as_aggregate.hpp"
 #include "utils/privacy_helpers.hpp"
 #include "duckdb/optimizer/column_binding_replacer.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
@@ -208,7 +208,7 @@ RewriteExpressionWithCounters(OptimizerExtensionInput &input, const vector<PacBi
 	    BuildCategoricalLambdas(input, pac_bindings, expr_for_lambda, counter_bindings, result_element_type);
 	if (list_expr) {
 		if (wrap_kind == PacWrapKind::PAC_NOISED) {
-			auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(list_expr));
+			auto noised = input.optimizer.BindScalarFunction("as_noised", std::move(list_expr));
 			if (target_type != PacFloatLogicalType()) {
 				noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), target_type);
 			}
@@ -300,10 +300,10 @@ static void ExpandProjectionRefsInExpression(unique_ptr<Expression> &expr, Logic
 	});
 }
 
-// Wrap counter column references with priv_noised.
-// After converting priv_noised_sum → priv_sum (LIST<FLOAT> output),
+// Wrap counter column references with as_noised.
+// After converting as_noised_sum → as_sum (LIST<FLOAT> output),
 // expressions may still reference the aggregate with the original type (e.g. DECIMAL).
-// This wraps those references with priv_noised() to convert back to scalar, then casts to original type.
+// This wraps those references with as_noised() to convert back to scalar, then casts to original type.
 static void WrapCounterRefsWithNoised(unique_ptr<Expression> &expr,
                                       const unordered_map<uint64_t, ColumnBinding> &counter_bindings,
                                       OptimizerExtensionInput &input) {
@@ -313,11 +313,11 @@ static void WrapCounterRefsWithNoised(unique_ptr<Expression> &expr,
 			auto original_type = col_ref.return_type;
 			auto list_type = LogicalType::LIST(PacFloatLogicalType());
 			// If the universal type fix already changed the col_ref to LIST<FLOAT>,
-			// we can't cast back to it — just use priv_noised's natural scalar return type.
+			// we can't cast back to it — just use as_noised's natural scalar return type.
 			bool needs_cast = (original_type != PacFloatLogicalType() && original_type != list_type);
-			// Ensure col_ref type is LIST<FLOAT> for correct priv_noised binding.
+			// Ensure col_ref type is LIST<FLOAT> for correct as_noised binding.
 			col_ref.return_type = list_type;
-			unique_ptr<Expression> noised = input.optimizer.BindScalarFunction("pac_noised", expr->Copy());
+			unique_ptr<Expression> noised = input.optimizer.BindScalarFunction("as_noised", expr->Copy());
 			if (needs_cast) {
 				noised = BoundCastExpression::AddDefaultCastToType(std::move(noised), original_type);
 			}
@@ -329,7 +329,7 @@ static void WrapCounterRefsWithNoised(unique_ptr<Expression> &expr,
 	    *expr, [&](unique_ptr<Expression> &child) { WrapCounterRefsWithNoised(child, counter_bindings, input); });
 }
 
-// Rewrite a single projection expression: update col_ref types, build list_transform + priv_noised terminal.
+// Rewrite a single projection expression: update col_ref types, build list_transform + as_noised terminal.
 // Only called for non-filter-pattern projections (filter patterns are handled by the parent filter/join).
 // Returns true if the slot remains a counter binding (non-terminal pass-through).
 static bool RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalProjection &proj, idx_t i,
@@ -349,7 +349,7 @@ static bool RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalP
 	if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
 		auto original_type = (i < proj.types.size()) ? proj.types[i] : expr->return_type;
 		if (is_terminal) {
-			unique_ptr<Expression> result = input.optimizer.BindScalarFunction("pac_noised", expr->Copy());
+			unique_ptr<Expression> result = input.optimizer.BindScalarFunction("as_noised", expr->Copy());
 			if (original_type != PacFloatLogicalType()) {
 				result = BoundCastExpression::AddDefaultCastToType(std::move(result), original_type);
 			}
@@ -365,7 +365,7 @@ static bool RewriteProjectionExpression(OptimizerExtensionInput &input, LogicalP
 		WrapCounterRefsWithNoised(expr, counter_bindings, input);
 		return false;
 	}
-	// Arithmetic over PAC aggregates: build list_transform + priv_noised terminal.
+	// Arithmetic over PAC aggregates: build list_transform + as_noised terminal.
 	Expression *expr_to_clone = expr.get();
 	if (expr->type == ExpressionType::OPERATOR_CAST &&
 	    expr->Cast<BoundCastExpression>().return_type != PacFloatLogicalType()) {
@@ -437,8 +437,8 @@ static ColumnBinding InsertPacSelectProjection(OptimizerExtensionInput &input, u
 
 // Single bottom-up rewrite pass.
 // Processes children first, then current operator. Handles:
-// - AGGREGATE: convert priv_noised_sum → priv_sum (counters), then aggregate-over-counters → priv_sum (list)
-// - PROJECTION: update simple col_ref types, build list_transform + priv_noised for arithmetic
+// - AGGREGATE: convert as_noised_sum → as_sum (counters), then aggregate-over-counters → as_sum (list)
+// - PROJECTION: update simple col_ref types, build list_transform + as_noised for arithmetic
 // - FILTER (in rewrite_map): build list_transform + priv_filter
 // - JOIN (in rewrite_map): rewrite conditions (two-list → CROSS_PRODUCT+FILTER, single-list → double-lambda)
 static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtensionInput &input,
@@ -480,7 +480,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 	LogicalOperator *plan_root = plan.get();
 	// Handle non-categorical FILTER (HAVING) BEFORE the universal type fix,
 	// so col_ref types still hold the original scalar type (e.g. DECIMAL).
-	// WrapCounterRefsWithNoised will set the col_ref type to LIST<FLOAT> for priv_noised binding,
+	// WrapCounterRefsWithNoised will set the col_ref type to LIST<FLOAT> for as_noised binding,
 	// then cast the result back to the original scalar type so the parent comparison stays valid.
 	if (op->type == LogicalOperatorType::LOGICAL_FILTER && !inside_cte_definition && !counter_bindings.empty()) {
 		auto it = pattern_lookup.find(op);
@@ -496,7 +496,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 	// to counters, output types change (e.g. DECIMAL → LIST<FLOAT>). Expressions in all operators
 	// may reference the old types. Fix them before operator-specific semantic work.
 	// Skip universal type fix for ordering/limit operators — they need scalar types.
-	// The terminal projection below them handles priv_noised wrapping.
+	// The terminal projection below them handles as_noised wrapping.
 	bool skip_type_fix =
 	    (op->type == LogicalOperatorType::LOGICAL_ORDER_BY || op->type == LogicalOperatorType::LOGICAL_TOP_N ||
 	     op->type == LogicalOperatorType::LOGICAL_LIMIT);
@@ -604,7 +604,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 				}
 			}
 		} else {
-			// Normal projection: full PAC rewriting with priv_noised terminal.
+			// Normal projection: full PAC rewriting with as_noised terminal.
 			bool is_terminal = (op == plan_root);
 			if (!is_terminal) {
 				auto *root = plan_root;
@@ -678,7 +678,7 @@ static void RewriteBottomUp(unique_ptr<LogicalOperator> &op_ptr, OptimizerExtens
 	           !inside_cte_definition && !counter_bindings.empty()) {
 		// ORDER BY / TOP N that references counter bindings need scalar values.
 		// col_ref types are still scalar (skip_type_fix), so WrapCounterRefsWithNoised
-		// fixes types to LIST<FLOAT> for priv_noised binding and casts back to the original type.
+		// fixes types to LIST<FLOAT> for as_noised binding and casts back to the original type.
 		if (op->type == LogicalOperatorType::LOGICAL_ORDER_BY) {
 			auto &order = op->Cast<LogicalOrder>();
 			for (auto &o : order.orders) {
@@ -835,8 +835,8 @@ void RewriteCategoricalQuery(OptimizerExtensionInput &input, unique_ptr<LogicalO
 		}
 	}
 	// Bottom-up rewrite pass
-	// - Aggregates: priv_noised_sum → priv_sum (counters), then aggregate-over-counters → priv_sum (list)
-	// - Projections: update col_ref types, build list_transform + priv_noised/pass-through
+	// - Aggregates: as_noised_sum → as_sum (counters), then aggregate-over-counters → as_sum (list)
+	// - Projections: update col_ref types, build list_transform + as_noised/pass-through
 	// - Filters: build list_transform + priv_filter
 	// - Joins: rewrite conditions (two-list → CROSS_PRODUCT+FILTER, single-list → double-lambda)
 	unordered_set<uint64_t> replaced_mark_bindings;

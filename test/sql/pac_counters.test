@@ -51,31 +51,31 @@ pac_sum
 
 # Basic test - returns LIST<FLOAT>
 query I
-SELECT typeof(priv_count(priv_hash(hash(rowid)::UBIGINT))) FROM test_data
+SELECT typeof(as_count(priv_hash(hash(rowid)::UBIGINT))) FROM test_data
 ----
 FLOAT[]
 
 # Returns exactly 64 elements
 query I
-SELECT length(priv_count(priv_hash(hash(rowid)::UBIGINT))) FROM test_data
+SELECT length(as_count(priv_hash(hash(rowid)::UBIGINT))) FROM test_data
 ----
 64
 
 # Show first 5 counter values (doubled to compensate for 50% sampling)
 query IIIII
 SELECT
-    priv_count(priv_hash(hash(rowid)::UBIGINT))[1]::INTEGER,
-    priv_count(priv_hash(hash(rowid)::UBIGINT))[2]::INTEGER,
-    priv_count(priv_hash(hash(rowid)::UBIGINT))[3]::INTEGER,
-    priv_count(priv_hash(hash(rowid)::UBIGINT))[4]::INTEGER,
-    priv_count(priv_hash(hash(rowid)::UBIGINT))[5]::INTEGER
+    as_count(priv_hash(hash(rowid)::UBIGINT))[1]::INTEGER,
+    as_count(priv_hash(hash(rowid)::UBIGINT))[2]::INTEGER,
+    as_count(priv_hash(hash(rowid)::UBIGINT))[3]::INTEGER,
+    as_count(priv_hash(hash(rowid)::UBIGINT))[4]::INTEGER,
+    as_count(priv_hash(hash(rowid)::UBIGINT))[5]::INTEGER
 FROM test_data
 ----
 10	12	16	10	10
 
-# Grouped priv_count - show first counter per group (NULL where key_hash bit 0 is not set)
+# Grouped as_count - show first counter per group (NULL where key_hash bit 0 is not set)
 query II
-SELECT group_id, priv_count(priv_hash(hash(rowid)::UBIGINT))[1]::INTEGER AS counter1
+SELECT group_id, as_count(priv_hash(hash(rowid)::UBIGINT))[1]::INTEGER AS counter1
 FROM test_data
 GROUP BY group_id
 ORDER BY group_id
@@ -86,7 +86,7 @@ ORDER BY group_id
 
 # With column parameter (doubled)
 query I
-SELECT priv_count(priv_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER FROM test_data
+SELECT as_count(priv_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER FROM test_data
 ----
 10
 
@@ -96,31 +96,31 @@ SELECT priv_count(priv_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER FROM test_
 
 # Basic test - returns LIST<DOUBLE>
 query I
-SELECT typeof(priv_sum(priv_hash(hash(rowid)::UBIGINT), value)) FROM test_data
+SELECT typeof(as_sum(priv_hash(hash(rowid)::UBIGINT), value)) FROM test_data
 ----
 FLOAT[]
 
 # Returns exactly 64 elements
 query I
-SELECT length(priv_sum(priv_hash(hash(rowid)::UBIGINT), value)) FROM test_data
+SELECT length(as_sum(priv_hash(hash(rowid)::UBIGINT), value)) FROM test_data
 ----
 64
 
 # Show first 5 sum counter values (doubled to compensate for 50% sampling)
 query IIIII
 SELECT
-    priv_sum(priv_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER,
-    priv_sum(priv_hash(hash(rowid)::UBIGINT), value)[2]::INTEGER,
-    priv_sum(priv_hash(hash(rowid)::UBIGINT), value)[3]::INTEGER,
-    priv_sum(priv_hash(hash(rowid)::UBIGINT), value)[4]::INTEGER,
-    priv_sum(priv_hash(hash(rowid)::UBIGINT), value)[5]::INTEGER
+    as_sum(priv_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER,
+    as_sum(priv_hash(hash(rowid)::UBIGINT), value)[2]::INTEGER,
+    as_sum(priv_hash(hash(rowid)::UBIGINT), value)[3]::INTEGER,
+    as_sum(priv_hash(hash(rowid)::UBIGINT), value)[4]::INTEGER,
+    as_sum(priv_hash(hash(rowid)::UBIGINT), value)[5]::INTEGER
 FROM test_data
 ----
 400	580	680	580	520
 
-# Grouped priv_sum - show first counter per group (NULL where key_hash bit 0 is not set)
+# Grouped as_sum - show first counter per group (NULL where key_hash bit 0 is not set)
 query II
-SELECT group_id, priv_sum(priv_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER AS sum1
+SELECT group_id, as_sum(priv_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER AS sum1
 FROM test_data
 GROUP BY group_id
 ORDER BY group_id
@@ -130,9 +130,9 @@ ORDER BY group_id
 2	200
 
 # ============================================================================
-# NOTE: priv_avg has been removed. avg() is decomposed into
-# priv_sum(hash,col) + priv_count(hash,col) + priv_noised_div by the bitslice compiler.
-# The categorical rewriter swaps priv_noised_div → priv_div for the filter/join path.
+# NOTE: as_avg has been removed. avg() is decomposed into
+# as_sum(hash,col) + as_count(hash,col) + as_noised_div by the bitslice compiler.
+# The categorical rewriter swaps as_noised_div → priv_div for the filter/join path.
 # ============================================================================
 
 # ============================================================================
@@ -141,31 +141,31 @@ ORDER BY group_id
 
 # Basic test - returns LIST<DOUBLE>
 query I
-SELECT typeof(priv_min(priv_hash(hash(rowid)::UBIGINT), value)) FROM test_data
+SELECT typeof(as_min(priv_hash(hash(rowid)::UBIGINT), value)) FROM test_data
 ----
 FLOAT[]
 
 # Returns exactly 64 elements
 query I
-SELECT length(priv_min(priv_hash(hash(rowid)::UBIGINT), value)) FROM test_data
+SELECT length(as_min(priv_hash(hash(rowid)::UBIGINT), value)) FROM test_data
 ----
 64
 
 # Show first 5 min counter values (no scaling for min/max)
 query IIIII
 SELECT
-    priv_min(priv_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER,
-    priv_min(priv_hash(hash(rowid)::UBIGINT), value)[2]::INTEGER,
-    priv_min(priv_hash(hash(rowid)::UBIGINT), value)[3]::INTEGER,
-    priv_min(priv_hash(hash(rowid)::UBIGINT), value)[4]::INTEGER,
-    priv_min(priv_hash(hash(rowid)::UBIGINT), value)[5]::INTEGER
+    as_min(priv_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER,
+    as_min(priv_hash(hash(rowid)::UBIGINT), value)[2]::INTEGER,
+    as_min(priv_hash(hash(rowid)::UBIGINT), value)[3]::INTEGER,
+    as_min(priv_hash(hash(rowid)::UBIGINT), value)[4]::INTEGER,
+    as_min(priv_hash(hash(rowid)::UBIGINT), value)[5]::INTEGER
 FROM test_data
 ----
 0	10	0	20	10
 
-# Grouped priv_min - show first counter per group
+# Grouped as_min - show first counter per group
 query II
-SELECT group_id, priv_min(priv_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER AS min1
+SELECT group_id, as_min(priv_hash(hash(rowid)::UBIGINT), value)[1]::INTEGER AS min1
 FROM test_data
 GROUP BY group_id
 ORDER BY group_id
@@ -180,13 +180,13 @@ ORDER BY group_id
 
 # Basic test - returns LIST<DOUBLE>
 query I
-SELECT typeof(priv_max(priv_hash(hash(rowid)::UBIGINT), value)) FROM test_data
+SELECT typeof(as_max(priv_hash(hash(rowid)::UBIGINT), value)) FROM test_data
 ----
 FLOAT[]
 
 # Returns exactly 64 elements
 query I
-SELECT length(priv_max(priv_hash(hash(rowid)::UBIGINT), value)) FROM test_data
+SELECT length(as_max(priv_hash(hash(rowid)::UBIGINT), value)) FROM test_data
 ----
 64
 

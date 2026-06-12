@@ -476,15 +476,15 @@ unique_ptr<Expression> BindBitOrAggregate(OptimizerExtensionInput &input, unique
 static string GetPacAggregateFunctionName(const string &function_name, ClientContext *ctx = nullptr) {
 	string pac_function_name;
 	if (function_name == "sum" || function_name == "sum_no_overflow") {
-		pac_function_name = "priv_noised_sum";
+		pac_function_name = "as_noised_sum";
 	} else if (function_name == "count" || function_name == "count_star") {
-		pac_function_name = "priv_noised_count";
+		pac_function_name = "as_noised_count";
 	} else if (function_name == "min") {
-		pac_function_name = "priv_noised_min";
+		pac_function_name = "as_noised_min";
 	} else if (function_name == "max") {
-		pac_function_name = "priv_noised_max";
+		pac_function_name = "as_noised_max";
 	} else if (function_name == "avg") {
-		pac_function_name = "priv_noised_avg";
+		pac_function_name = "as_noised_avg";
 	} else {
 		throw NotImplementedException("Privacy compiler: unsupported aggregate function " + function_name);
 	}
@@ -493,10 +493,10 @@ static string GetPacAggregateFunctionName(const string &function_name, ClientCon
 
 // Insert a pre-aggregation step for DISTINCT aggregates.
 // Instead of pac_*_distinct (custom hash map), this leverages DuckDB's native GROUP BY
-// to deduplicate values, then feeds bit_or(hash) results into standard priv_count/priv_sum/priv_avg.
+// to deduplicate values, then feeds bit_or(hash) results into standard as_count/as_sum/as_avg.
 //
 // Plan transformation for COUNT(DISTINCT col) GROUP BY [g1]:
-//   AGGREGATE [priv_count(combined_hash, 1)] GROUP BY [g1]
+//   AGGREGATE [as_count(combined_hash, 1)] GROUP BY [g1]
 //     AGGREGATE [bit_or(hash) FILTER (col IS NOT NULL)] GROUP BY [g1, hash(col)]
 //       <original child>
 //
@@ -962,7 +962,7 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
  * ModifyAggregatesWithPacFunctions: Transforms regular aggregate expressions to PAC aggregate expressions
  *
  * Purpose: This is the core transformation function that replaces standard aggregates (SUM, AVG, COUNT, MIN, MAX)
- * with their PAC equivalents (priv_sum, priv_avg, priv_count, priv_min, priv_max) by adding the hash expression
+ * with their PAC equivalents (as_sum, as_avg, as_count, as_min, as_max) by adding the hash expression
  * as the first argument.
  *
  * Arguments:
@@ -976,7 +976,7 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
  *    - Extract the value expression (the data being aggregated)
  *      * For COUNT(*), create a constant 1 expression
  *      * For others (SUM(val), AVG(val)), use the existing child expression
- *    - Map to the PAC function name (sum -> priv_sum, avg -> priv_avg, etc.)
+ *    - Map to the PAC function name (sum -> as_sum, avg -> as_avg, etc.)
  *    - Bind the PAC aggregate function with two arguments:
  *      * First argument: hash expression (identifies which PU each row belongs to)
  *      * Second argument: value expression (the data to aggregate per PU)
@@ -985,10 +985,10 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
  * 2. Resolve operator types to ensure the plan is valid
  *
  * Transformation Examples:
- * - SUM(l_extendedprice) -> priv_sum(hash(c_custkey), l_extendedprice)
- * - AVG(l_quantity) -> priv_avg(hash(c_custkey), l_quantity)
- * - COUNT(*) -> priv_count(hash(c_custkey), 1)
- * - COUNT(DISTINCT l_orderkey) -> priv_count(hash(c_custkey), l_orderkey) with DISTINCT flag
+ * - SUM(l_extendedprice) -> as_sum(hash(c_custkey), l_extendedprice)
+ * - AVG(l_quantity) -> as_avg(hash(c_custkey), l_quantity)
+ * - COUNT(*) -> as_count(hash(c_custkey), 1)
+ * - COUNT(DISTINCT l_orderkey) -> as_count(hash(c_custkey), l_orderkey) with DISTINCT flag
  *
  * Nested Aggregate Handling (IMPORTANT):
  * This function is only called on aggregates that were filtered by the calling code to have
@@ -1001,12 +1001,12 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
  *
  * Example 1 - Both aggregates have PU tables (user's TPC-H Q17 example):
  *   SELECT sum(l_extendedprice) / 7.0 FROM lineitem WHERE l_quantity < (SELECT avg(l_quantity) FROM lineitem WHERE ...)
- *   - Inner: Has lineitem -> priv_avg(hash(rowid), l_quantity)
- *   - Outer: Also has lineitem -> priv_sum(hash(rowid), l_extendedprice)
+ *   - Inner: Has lineitem -> as_avg(hash(rowid), l_quantity)
+ *   - Outer: Also has lineitem -> as_sum(hash(rowid), l_extendedprice)
  *
  * Example 2 - Only inner has PU tables:
  *   SELECT sum(inner_result) FROM (SELECT sum(customer_col) FROM customer) AS subq
- *   - Inner: Has customer -> priv_sum(hash(c_custkey), customer_col)
+ *   - Inner: Has customer -> as_sum(hash(c_custkey), customer_col)
  *   - Outer: No PU tables -> Regular sum(inner_result), NOT transformed
  */
 void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAggregate *agg,
@@ -1069,7 +1069,7 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 	// === DISTINCT pre-aggregation ===
 	// When ALL aggregates are DISTINCT on the same column, use DuckDB's native GROUP BY
 	// for deduplication: an inner aggregate groups by the distinct column and ORs the
-	// privacy-unit hashes with bit_or, then an outer priv_count/priv_sum operates on the result.
+	// privacy-unit hashes with bit_or, then an outer as_count/as_sum operates on the result.
 	{
 		bool has_any_distinct = false;
 		bool has_any_non_distinct = false;
@@ -1140,12 +1140,12 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 }
 
 // ============================================================================
-// Clip aggregate rewrite: priv_noised_* → priv_noised_clip_* / priv_clip_*
+// Clip aggregate rewrite: as_noised_* → as_noised_clip_* / as_clip_*
 // with optional lower aggregate insertion for per-PU pre-aggregation
 // ============================================================================
 
 // Map pac function names to their clip variants by inserting "_clip" before the last "_"
-// e.g. priv_noised_sum → priv_noised_clip_sum, priv_sum → priv_clip_sum
+// e.g. as_noised_sum → as_noised_clip_sum, as_sum → as_clip_sum
 static string GetClipVariant(const string &name) {
 	auto pos = name.rfind('_');
 	if (pos == string::npos || name.find("priv_") != 0) {
@@ -1155,7 +1155,7 @@ static string GetClipVariant(const string &name) {
 }
 
 // Map pac function names to their original DuckDB aggregate by extracting the suffix after the last "_"
-// e.g. priv_noised_sum → sum, priv_count → count
+// e.g. as_noised_sum → sum, as_count → count
 static string GetOriginalAggregate(const string &name) {
 	if (name.find("priv_") != 0) {
 		return "";
@@ -1167,9 +1167,9 @@ static string GetOriginalAggregate(const string &name) {
 	return name.substr(pos + 1);
 }
 
-// Is this a noised (scalar) variant? If so, top aggregate uses priv_noised_clip_*
+// Is this a noised (scalar) variant? If so, top aggregate uses as_noised_clip_*
 static bool IsNoisedVariant(const string &name) {
-	return name.find("priv_noised_") == 0;
+	return name.find("as_noised_") == 0;
 }
 
 // Bind a plain DuckDB aggregate function (sum, count, min, max)
@@ -1200,7 +1200,7 @@ unique_ptr<Expression> BindPlainAggregate(OptimizerExtensionInput &input, const 
 	return BindPlainAggregate(input, func_name, std::move(children), aggr_type);
 }
 
-// Check if an aggregate contains priv_noised_* or pac_* (counters) expressions
+// Check if an aggregate contains as_noised_* or pac_* (counters) expressions
 static bool IsPacAggregate(LogicalAggregate *agg) {
 	for (auto &expr : agg->expressions) {
 		if (expr->GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {
@@ -1234,7 +1234,7 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 			}
 		}
 		if (child_groups_by_pu) {
-			// Q13 exception: just rename priv_noised_* → priv_noised_clip_* in place
+			// Q13 exception: just rename as_noised_* → as_noised_clip_* in place
 			for (idx_t i = 0; i < agg->expressions.size(); i++) {
 				if (agg->expressions[i]->GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {
 					continue;
@@ -1281,8 +1281,8 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 
 			vector<unique_ptr<Expression>> plain_children;
 			if (orig_name == "count" && (aggr.children.size() <= 1)) {
-				// priv_noised_count(hash) or priv_count(hash) → count_star()
-				// priv_noised_count(hash, col) → count(col) — but children[1] might be constant 1
+				// as_noised_count(hash) or as_count(hash) → count_star()
+				// as_noised_count(hash, col) → count(col) — but children[1] might be constant 1
 				if (aggr.children.size() >= 2) {
 					auto &val_child = aggr.children[1];
 					// Check if it's a constant 1 (from count_star rewrite)
@@ -1325,7 +1325,7 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 			unique_ptr<Expression> lower_ref =
 			    make_uniq<BoundColumnRefExpression>(lower_type, ColumnBinding(pre_agg.lower_agg_index, i));
 
-			// priv_clip_sum has integer + DECIMAL overloads but no FLOAT/DOUBLE.
+			// as_clip_sum has integer + DECIMAL overloads but no FLOAT/DOUBLE.
 			// Cast FLOAT/DOUBLE to BIGINT so binding succeeds.
 			if ((orig == "sum" || orig == "count") &&
 			    (lower_type.id() == LogicalTypeId::FLOAT || lower_type.id() == LogicalTypeId::DOUBLE)) {
@@ -1335,7 +1335,7 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 			// count → sumcount (preserves BIGINT return type), others → clip variant
 			string clip_func;
 			if (orig == "count") {
-				clip_func = noised ? "priv_noised_clip_sumcount" : "priv_clip_sum";
+				clip_func = noised ? "as_noised_clip_sumcount" : "as_clip_sum";
 			} else {
 				clip_func = GetClipVariant(pac_name);
 			}

@@ -49,32 +49,32 @@ statement ok
 SET dp_sample_lanes = 1;
 
 query II
-SELECT priv_sample_sum(0::UBIGINT, 1.0)[1]::INTEGER,
-       priv_sample_sum(0::UBIGINT, 1.0)[2]::INTEGER;
+SELECT as_sample_sum(0::UBIGINT, 1.0)[1]::INTEGER,
+       as_sample_sum(0::UBIGINT, 1.0)[2]::INTEGER;
 ----
 64	0
 
 query II
-SELECT priv_sample_min(0::UBIGINT, 7.0::DOUBLE)[1]::INTEGER,
-       priv_sample_min(0::UBIGINT, 7.0::DOUBLE)[2] IS NULL;
+SELECT as_sample_min(0::UBIGINT, 7.0::DOUBLE)[1]::INTEGER,
+       as_sample_min(0::UBIGINT, 7.0::DOUBLE)[2] IS NULL;
 ----
 7	true
 
 query II
-SELECT priv_sample_max(0::UBIGINT, 7.0::DOUBLE)[1]::INTEGER,
-       priv_sample_max(0::UBIGINT, 7.0::DOUBLE)[2] IS NULL;
+SELECT as_sample_max(0::UBIGINT, 7.0::DOUBLE)[1]::INTEGER,
+       as_sample_max(0::UBIGINT, 7.0::DOUBLE)[2] IS NULL;
 ----
 7	true
 
 query II
-SELECT abs(priv_sample_min(0::UBIGINT, 7.25::DECIMAL(10,2))[1] - 7.25) < 1e-5,
-       priv_sample_min(0::UBIGINT, 7.25::DECIMAL(10,2))[2] IS NULL;
+SELECT abs(as_sample_min(0::UBIGINT, 7.25::DECIMAL(10,2))[1] - 7.25) < 1e-5,
+       as_sample_min(0::UBIGINT, 7.25::DECIMAL(10,2))[2] IS NULL;
 ----
 true	true
 
 query II
-SELECT priv_sample_min(0::UBIGINT, 0.0::DOUBLE)[1] = 0.0,
-       priv_sample_min(0::UBIGINT, 0.0::DOUBLE)[2] IS NULL;
+SELECT as_sample_min(0::UBIGINT, 0.0::DOUBLE)[1] = 0.0,
+       as_sample_min(0::UBIGINT, 0.0::DOUBLE)[2] IS NULL;
 ----
 true	true
 
@@ -82,9 +82,9 @@ statement ok
 SET dp_sample_lanes = 2;
 
 query III
-SELECT abs(priv_sample_sum(64::UBIGINT, 1.0)[1] - (4096.0 / 127.0)) < 1e-5,
-       abs(priv_sample_sum(64::UBIGINT, 1.0)[2] - (4096.0 / 127.0)) < 1e-5,
-       priv_sample_sum(64::UBIGINT, 1.0)[3] = 0;
+SELECT abs(as_sample_sum(64::UBIGINT, 1.0)[1] - (4096.0 / 127.0)) < 1e-5,
+       abs(as_sample_sum(64::UBIGINT, 1.0)[2] - (4096.0 / 127.0)) < 1e-5,
+       as_sample_sum(64::UBIGINT, 1.0)[3] = 0;
 ----
 true	true	true
 

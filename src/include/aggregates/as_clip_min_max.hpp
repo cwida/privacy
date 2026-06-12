@@ -6,8 +6,8 @@
 #define PAC_CLIP_MIN_MAX_HPP
 
 #include "duckdb.hpp"
-#include "pac_clip_aggr.hpp"
-#include "pac_min_max.hpp" // for UpdateExtremesSIMD
+#include "as_clip_aggr.hpp"
+#include "as_min_max.hpp" // for UpdateExtremesSIMD
 
 namespace duckdb {
 
@@ -17,7 +17,7 @@ void RegisterPacNoisedClipMinFunctions(ExtensionLoader &loader);
 void RegisterPacNoisedClipMaxFunctions(ExtensionLoader &loader);
 
 // ============================================================================
-// Min/max-specific constants (shared constants in pac_clip_aggr.hpp)
+// Min/max-specific constants (shared constants in as_clip_aggr.hpp)
 // ============================================================================
 constexpr int PCMM_SWAR = 8;     // 8 × uint64_t = 64 × uint8_t extremes (SWAR packed)
 constexpr int PCMM_ELEMENTS = 9; // 8 SWAR + 1 bitmap
@@ -120,7 +120,7 @@ struct PacClipMinMaxIntState {
 	}
 
 	// ========================================================================
-	// UpdateExtreme: reuse the SIMD kernel from pac_min_max.hpp
+	// UpdateExtreme: reuse the SIMD kernel from as_min_max.hpp
 	// uint8_t: SHIFTS=8, MASK=0x0101..., SIGNED=false, FLOAT=false
 	// ========================================================================
 	inline void UpdateExtreme(uint64_t *buf, uint8_t shifted_val, uint64_t kh) {
@@ -131,7 +131,7 @@ struct PacClipMinMaxIntState {
 
 	// ========================================================================
 	// GetTotals: non-mutating finalization — reconstruct unsigned extremes
-	// Uses same boundary logic as clip_sum (shared helpers in pac_clip_aggr.hpp)
+	// Uses same boundary logic as clip_sum (shared helpers in as_clip_aggr.hpp)
 	// ========================================================================
 	void GetTotals(PAC_FLOAT *dst, int clip_support_threshold = 0, bool clip_scale = false) const {
 		memset(dst, 0, 64 * sizeof(PAC_FLOAT));
