@@ -14,6 +14,8 @@
 
 namespace duckdb {
 
+class BoundAggregateExpression;
+
 // Ensure a column is projected in a LogicalGet and return its projection index
 // Returns DConstants::INVALID_INDEX if the column cannot be found
 idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name);
@@ -73,6 +75,47 @@ struct PuPreAggregationInfo {
 	idx_t lower_agg_index;
 	unique_ptr<Expression> pu_hash_ref;
 };
+
+struct DistinctAggregateBranchResult {
+	unique_ptr<LogicalOperator> subtree;
+	idx_t group_index;
+	idx_t agg_index;
+	vector<idx_t> original_agg_indices;
+	vector<LogicalType> aggregate_types;
+};
+
+struct JoinedDistinctAggregateBranches {
+	unique_ptr<LogicalOperator> joined;
+	idx_t left_group_index;
+	vector<DistinctAggregateBranchResult> branches;
+	std::unordered_map<idx_t, std::pair<idx_t, idx_t>> aggregate_map;
+};
+
+class DistinctAggregateBranchBuilder {
+public:
+	virtual ~DistinctAggregateBranchBuilder() {
+	}
+
+	virtual unique_ptr<LogicalOperator>
+	BuildDistinctBranch(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> child,
+	                    const vector<unique_ptr<Expression>> &groups, unique_ptr<Expression> hash_expr,
+	                    unique_ptr<Expression> distinct_expr, const vector<std::pair<idx_t, string>> &agg_specs,
+	                    const std::unordered_map<idx_t, idx_t> *index_map, idx_t &out_group_index,
+	                    idx_t &out_agg_index) = 0;
+
+	virtual unique_ptr<LogicalOperator> BuildNonDistinctBranch(
+	    OptimizerExtensionInput &input, unique_ptr<LogicalOperator> child, const vector<unique_ptr<Expression>> &groups,
+	    unique_ptr<Expression> hash_expr, const vector<std::pair<idx_t, const BoundAggregateExpression *>> &agg_specs,
+	    const std::unordered_map<idx_t, idx_t> *index_map, idx_t &out_group_index, idx_t &out_agg_index) = 0;
+};
+
+// Build the shared multi-branch shape for mixed/multiple DISTINCT aggregates.
+// Mechanism-specific callers provide branch builders for the aggregate expressions themselves.
+JoinedDistinctAggregateBranches BuildJoinedDistinctAggregateBranches(OptimizerExtensionInput &input,
+                                                                     unique_ptr<LogicalOperator> &plan,
+                                                                     LogicalAggregate *agg,
+                                                                     unique_ptr<Expression> hash_expr,
+                                                                     DistinctAggregateBranchBuilder &builder);
 
 // Insert a lower aggregate grouped by [original groups..., PU hash], move the current aggregate child below it,
 // and rewrite the top aggregate's groups to reference the lower group output. The caller owns aggregate-specific

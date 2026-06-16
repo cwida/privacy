@@ -55,6 +55,18 @@ SELECT as_sample_sum(0::UBIGINT, 1.0)[1]::INTEGER,
 64	0
 
 query II
+SELECT as_sample_avg(0::UBIGINT, 10.0, 2.0)[1]::INTEGER,
+       as_sample_avg(0::UBIGINT, 10.0, 2.0)[2] IS NULL;
+----
+5	true
+
+query I
+SELECT abs(as_sample_avg(0::UBIGINT, sum_v, cnt_v)[1] - 7.5) < 1e-5
+FROM (VALUES (10.0, 2.0), (20.0, 2.0)) t(sum_v, cnt_v);
+----
+true
+
+query II
 SELECT as_sample_min(0::UBIGINT, 7.0::DOUBLE)[1]::INTEGER,
        as_sample_min(0::UBIGINT, 7.0::DOUBLE)[2] IS NULL;
 ----
@@ -144,6 +156,329 @@ FROM counters;
 ----
 true
 
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+CREATE TABLE _sass_part (
+    p_partkey INTEGER,
+    p_brand VARCHAR,
+    p_type VARCHAR,
+    p_size INTEGER
+);
+
+statement ok
+CREATE TABLE _sass_partsupp (
+    ps_partkey INTEGER,
+    ps_suppkey INTEGER
+);
+
+statement ok
+CREATE TABLE _sass_supplier (
+    s_suppkey INTEGER,
+    s_comment VARCHAR
+);
+
+statement ok
+INSERT INTO _sass_part
+SELECT i, 'Brand#11', 'SMALL BRUSHED TIN', 49
+FROM range(64) t(i);
+
+statement ok
+INSERT INTO _sass_partsupp
+SELECT i, i
+FROM range(64) t(i);
+
+statement ok
+INSERT INTO _sass_supplier
+SELECT i, 'ok'
+FROM range(64) t(i);
+
+statement ok
+ALTER TABLE _sass_part ADD PRIVACY_KEY (p_partkey);
+
+statement ok
+ALTER TABLE _sass_part SET PU;
+
+statement ok
+ALTER PU TABLE _sass_part ADD PROTECTED (p_partkey);
+
+statement ok
+ALTER TABLE _sass_supplier ADD PRIVACY_KEY (s_suppkey);
+
+statement ok
+ALTER TABLE _sass_partsupp ADD PRIVACY_LINK (ps_partkey) REFERENCES _sass_part(p_partkey);
+
+statement ok
+SET privacy_mode = 'dp_sass';
+
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET dp_sample_lanes = 8;
+
+statement ok
+SET dp_count_bound = 1000;
+
+query I nosort explain_sass_distinct_count
+EXPLAIN SELECT p_brand, p_type, p_size, COUNT(DISTINCT ps_suppkey) AS supplier_cnt
+FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
+GROUP BY p_brand, p_type, p_size;
+----
+as_sample_count_mask
+
+query I
+SELECT supplier_cnt > 0
+FROM (
+    SELECT p_brand, p_type, p_size, COUNT(DISTINCT ps_suppkey) AS supplier_cnt
+    FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
+    GROUP BY p_brand, p_type, p_size
+) q;
+----
+true
+
+statement error
+SELECT COUNT(*)
+FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
+WHERE ps_suppkey NOT IN (
+    SELECT s_suppkey
+    FROM _sass_supplier
+    WHERE s_comment LIKE '%Customer%Complaints%'
+);
+----
+has no PRIVACY_LINK path
+
+query I nosort explain_sass_mixed_distinct_count
+EXPLAIN SELECT p_brand, COUNT(DISTINCT ps_suppkey), COUNT(*)
+FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
+GROUP BY p_brand;
+----
+as_sample_count_mask
+
+query II
+SELECT supplier_cnt IS NOT NULL, row_cnt IS NOT NULL
+FROM (
+    SELECT p_brand, COUNT(DISTINCT ps_suppkey) AS supplier_cnt, COUNT(*) AS row_cnt
+    FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
+    GROUP BY p_brand
+) q;
+----
+true	true
+
+statement ok
+SET dp_count_bound = NULL;
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+CREATE TABLE _sass_q13_customer (
+    c_custkey INTEGER
+);
+
+statement ok
+CREATE TABLE _sass_q13_orders (
+    o_orderkey INTEGER,
+    o_custkey INTEGER,
+    o_comment VARCHAR
+);
+
+statement ok
+INSERT INTO _sass_q13_customer
+SELECT i::INTEGER
+FROM range(64) t(i);
+
+statement ok
+INSERT INTO _sass_q13_orders
+SELECT i::INTEGER, i::INTEGER, 'ok'
+FROM range(64) t(i);
+
+statement ok
+ALTER TABLE _sass_q13_customer ADD PRIVACY_KEY (c_custkey);
+
+statement ok
+ALTER TABLE _sass_q13_customer SET PU;
+
+statement ok
+ALTER TABLE _sass_q13_orders ADD PRIVACY_LINK (o_custkey) REFERENCES _sass_q13_customer(c_custkey);
+
+statement ok
+SET dp_count_bound = 1000;
+
+query I nosort explain_sass_q13_nested_count
+EXPLAIN SELECT c_count, COUNT(*) AS custdist
+FROM (
+    SELECT c_custkey, COUNT(o_orderkey) AS c_count
+    FROM _sass_q13_customer
+    LEFT OUTER JOIN _sass_q13_orders
+      ON c_custkey = o_custkey
+     AND o_comment NOT LIKE '%special%requests%'
+    GROUP BY c_custkey
+) AS c_orders
+GROUP BY c_count;
+----
+as_sample_sum
+
+query I
+SELECT custdist > 0
+FROM (
+    SELECT c_count, COUNT(*) AS custdist
+    FROM (
+        SELECT c_custkey, COUNT(o_orderkey) AS c_count
+        FROM _sass_q13_customer
+        LEFT OUTER JOIN _sass_q13_orders
+          ON c_custkey = o_custkey
+         AND o_comment NOT LIKE '%special%requests%'
+        GROUP BY c_custkey
+    ) AS c_orders
+    GROUP BY c_count
+) q;
+----
+true
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+CREATE TABLE _sass_q21_customer (
+    c_custkey INTEGER
+);
+
+statement ok
+CREATE TABLE _sass_q21_orders (
+    o_orderkey INTEGER,
+    o_custkey INTEGER,
+    o_orderstatus VARCHAR
+);
+
+statement ok
+CREATE TABLE _sass_q21_lineitem (
+    l_orderkey INTEGER,
+    l_suppkey INTEGER,
+    l_commitdate DATE,
+    l_receiptdate DATE
+);
+
+statement ok
+CREATE TABLE _sass_q21_supplier (
+    s_suppkey INTEGER,
+    s_nationkey INTEGER,
+    s_name VARCHAR
+);
+
+statement ok
+CREATE TABLE _sass_q21_nation (
+    n_nationkey INTEGER,
+    n_name VARCHAR
+);
+
+statement ok
+INSERT INTO _sass_q21_customer
+SELECT i::INTEGER
+FROM range(64) t(i);
+
+statement ok
+INSERT INTO _sass_q21_orders
+SELECT i::INTEGER, i::INTEGER, 'F'
+FROM range(64) t(i);
+
+statement ok
+INSERT INTO _sass_q21_lineitem
+SELECT i::INTEGER, 1, DATE '2020-01-01', DATE '2020-01-02'
+FROM range(64) t(i);
+
+statement ok
+INSERT INTO _sass_q21_lineitem
+SELECT i::INTEGER, 2, DATE '2020-01-01', DATE '2020-01-01'
+FROM range(64) t(i);
+
+statement ok
+INSERT INTO _sass_q21_supplier VALUES
+    (1, 1, 'Supplier#1'),
+    (2, 1, 'Supplier#2');
+
+statement ok
+INSERT INTO _sass_q21_nation VALUES (1, 'SAUDI ARABIA');
+
+statement ok
+ALTER TABLE _sass_q21_customer ADD PRIVACY_KEY (c_custkey);
+
+statement ok
+ALTER TABLE _sass_q21_customer SET PU;
+
+statement ok
+ALTER TABLE _sass_q21_orders ADD PRIVACY_LINK (o_custkey) REFERENCES _sass_q21_customer(c_custkey);
+
+statement ok
+ALTER TABLE _sass_q21_lineitem ADD PRIVACY_LINK (l_orderkey) REFERENCES _sass_q21_orders(o_orderkey);
+
+statement ok
+ALTER TABLE _sass_q21_supplier ADD PRIVACY_KEY (s_suppkey);
+
+statement ok
+ALTER TABLE _sass_q21_nation ADD PRIVACY_KEY (n_nationkey);
+
+query I nosort explain_sass_q21_self_join
+EXPLAIN SELECT l1.l_suppkey, COUNT(*) AS numwait
+FROM _sass_q21_lineitem l1, _sass_q21_orders
+WHERE o_orderkey = l1.l_orderkey
+  AND o_orderstatus = 'F'
+  AND l1.l_receiptdate > l1.l_commitdate
+  AND EXISTS (
+    SELECT *
+    FROM _sass_q21_lineitem l2
+    WHERE l2.l_orderkey = l1.l_orderkey
+      AND l2.l_suppkey <> l1.l_suppkey
+  )
+  AND NOT EXISTS (
+    SELECT *
+    FROM _sass_q21_lineitem l3
+    WHERE l3.l_orderkey = l1.l_orderkey
+      AND l3.l_suppkey <> l1.l_suppkey
+      AND l3.l_receiptdate > l3.l_commitdate
+  )
+GROUP BY l1.l_suppkey;
+----
+as_sample_sum
+
+query I
+SELECT numwait > 0
+FROM (
+    SELECT l1.l_suppkey, COUNT(*) AS numwait
+    FROM _sass_q21_lineitem l1, _sass_q21_orders
+    WHERE o_orderkey = l1.l_orderkey
+      AND o_orderstatus = 'F'
+      AND l1.l_receiptdate > l1.l_commitdate
+      AND EXISTS (
+        SELECT *
+        FROM _sass_q21_lineitem l2
+        WHERE l2.l_orderkey = l1.l_orderkey
+          AND l2.l_suppkey <> l1.l_suppkey
+      )
+      AND NOT EXISTS (
+        SELECT *
+        FROM _sass_q21_lineitem l3
+        WHERE l3.l_orderkey = l1.l_orderkey
+          AND l3.l_suppkey <> l1.l_suppkey
+          AND l3.l_receiptdate > l3.l_commitdate
+      )
+    GROUP BY l1.l_suppkey
+) q;
+----
+true
+
+statement error
+SELECT COUNT(*)
+FROM _sass_q21_lineitem a
+JOIN _sass_q21_lineitem b
+  ON a.l_orderkey = b.l_orderkey;
+----
+self-joins are only supported
+
+statement ok
+SET dp_count_bound = NULL;
+
 query I
 WITH vals AS (
     SELECT CASE WHEN i < 32 THEN NULL::FLOAT ELSE 0.0::FLOAT END AS v, i
@@ -188,10 +523,13 @@ dp_sum_bound
 statement ok
 SET dp_sum_bound = 500.0;
 
-statement error
-SELECT AVG(v) FROM sass_users;
+statement ok
+SET dp_count_bound = NULL;
+
+query I
+SELECT AVG(v) IS NULL FROM sass_users;
 ----
-dp_count_bound
+true
 
 statement ok
 SET dp_count_bound = -1.0;
@@ -225,6 +563,14 @@ CREATE PU TABLE sass_many(uid INTEGER, v DOUBLE, PRIVACY_KEY(uid));
 statement ok
 INSERT INTO sass_many
 SELECT i, i::DOUBLE FROM range(200) t(i);
+
+statement ok
+SET dp_count_bound = NULL;
+
+query I nosort explain_sass_avg
+EXPLAIN SELECT AVG(v) FROM sass_many;
+----
+as_sample_avg
 
 query I
 SELECT MIN(v) IS NOT NULL FROM sass_many;
@@ -270,6 +616,9 @@ query I
 SELECT r IS NOT NULL AND isfinite(r::DOUBLE) FROM (SELECT SUM(v) AS r FROM sass_many);
 ----
 true
+
+statement ok
+SET dp_count_bound = 10.0;
 
 query I
 SELECT r IS NOT NULL AND isfinite(r::DOUBLE) FROM (SELECT COUNT(*) AS r FROM sass_many);

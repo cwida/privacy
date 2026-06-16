@@ -747,9 +747,8 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 	CreateAggregateFunctionInfo info(fcn_set);
 	FunctionDescription desc;
 	desc.description = "Privacy-preserving SUM. Automatically injected by PAC for protected columns.";
-	desc.examples = {
-	    "SELECT c_mktsegment, as_noised_sum(priv_hash(hash(c_custkey)), c_acctbal) FROM customer GROUP BY "
-	    "c_mktsegment"};
+	desc.examples = {"SELECT c_mktsegment, as_noised_sum(priv_hash(hash(c_custkey)), c_acctbal) FROM customer GROUP BY "
+	                 "c_mktsegment"};
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 }
@@ -870,9 +869,9 @@ static void AddCountersFcn(AggregateFunctionSet &set, const LogicalType &value_t
                            aggregate_initialize_t init, aggregate_update_t scatter, aggregate_combine_t combine,
                            aggregate_finalize_t finalize, aggregate_simple_update_t update) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	set.AddFunction(AggregateFunction("as_sum", {LogicalType::UBIGINT, value_type}, list_double_type, state_size,
-	                                  init, scatter, combine, finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                                  update, PacSumBind));
+	set.AddFunction(AggregateFunction("as_sum", {LogicalType::UBIGINT, value_type}, list_double_type, state_size, init,
+	                                  scatter, combine, finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING, update,
+	                                  PacSumBind));
 	set.AddFunction(AggregateFunction("as_sum", {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE},
 	                                  list_double_type, state_size, init, scatter, combine, finalize,
 	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind));
@@ -951,6 +950,144 @@ void RegisterDpSampleSumFunctions(ExtensionLoader &loader) {
 	CreateAggregateFunctionInfo info(set);
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Returns 64 sample-median DP counters for SUM-like values.";
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
+}
+
+struct DpSampleAvgState {
+	PAC_FLOAT sums[64];
+	PAC_FLOAT counts[64];
+};
+
+static idx_t DpSampleAvgStateSize(const AggregateFunction &) {
+	return sizeof(DpSampleAvgState);
+}
+
+static void DpSampleAvgInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
+	memset(state_ptr, 0, sizeof(DpSampleAvgState));
+}
+
+static void DpSampleAvgUpdateOne(DpSampleAvgState &state, uint64_t key_hash, double sum_value, double count_value) {
+	for (int j = 0; j < 64; j++) {
+		if ((key_hash >> j) & 1ULL) {
+			state.sums[j] += static_cast<PAC_FLOAT>(sum_value);
+			state.counts[j] += static_cast<PAC_FLOAT>(count_value);
+		}
+	}
+}
+
+static void DpSampleAvgUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr, idx_t count) {
+	auto &state = *reinterpret_cast<DpSampleAvgState *>(state_ptr);
+	int sample_lanes = GetPrivSampleLanes(aggr);
+
+	UnifiedVectorFormat hash_data, sum_data, count_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, sum_data);
+	inputs[2].ToUnifiedFormat(count, count_data);
+
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto sums = UnifiedVectorFormat::GetData<double>(sum_data);
+	auto counts = UnifiedVectorFormat::GetData<double>(count_data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto s_idx = sum_data.sel->get_index(i);
+		auto c_idx = count_data.sel->get_index(i);
+		if (!hash_data.validity.RowIsValid(h_idx) || !sum_data.validity.RowIsValid(s_idx) ||
+		    !count_data.validity.RowIsValid(c_idx)) {
+			continue;
+		}
+		auto key_hash = TransformPacUpdateHash(hashes[h_idx], sample_lanes);
+		DpSampleAvgUpdateOne(state, key_hash, sums[s_idx], counts[c_idx]);
+	}
+}
+
+static void DpSampleAvgScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
+	int sample_lanes = GetPrivSampleLanes(aggr);
+
+	UnifiedVectorFormat hash_data, sum_data, count_data, state_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, sum_data);
+	inputs[2].ToUnifiedFormat(count, count_data);
+	states.ToUnifiedFormat(count, state_data);
+
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto sums = UnifiedVectorFormat::GetData<double>(sum_data);
+	auto counts = UnifiedVectorFormat::GetData<double>(count_data);
+	auto state_ptrs = UnifiedVectorFormat::GetData<DpSampleAvgState *>(state_data);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto s_idx = sum_data.sel->get_index(i);
+		auto c_idx = count_data.sel->get_index(i);
+		if (!hash_data.validity.RowIsValid(h_idx) || !sum_data.validity.RowIsValid(s_idx) ||
+		    !count_data.validity.RowIsValid(c_idx)) {
+			continue;
+		}
+		auto *state = state_ptrs[state_data.sel->get_index(i)];
+		auto key_hash = TransformPacUpdateHash(hashes[h_idx], sample_lanes);
+		DpSampleAvgUpdateOne(*state, key_hash, sums[s_idx], counts[c_idx]);
+	}
+}
+
+static void DpSampleAvgCombine(Vector &src, Vector &dst, AggregateInputData &, idx_t count) {
+	auto src_states = FlatVector::GetData<DpSampleAvgState *>(src);
+	auto dst_states = FlatVector::GetData<DpSampleAvgState *>(dst);
+	for (idx_t i = 0; i < count; i++) {
+		auto *s = src_states[i];
+		auto *d = dst_states[i];
+		for (int j = 0; j < 64; j++) {
+			d->sums[j] += s->sums[j];
+			d->counts[j] += s->counts[j];
+		}
+	}
+}
+
+static void DpSampleAvgFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+	auto state_ptrs = FlatVector::GetData<DpSampleAvgState *>(states);
+	auto list_entries = FlatVector::GetData<list_entry_t>(result);
+	auto &child_vec = ListVector::GetEntry(result);
+
+	idx_t total_elements = count * 64;
+	ListVector::Reserve(result, total_elements);
+	ListVector::SetListSize(result, total_elements);
+
+	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
+	auto &child_validity = FlatVector::Validity(child_vec);
+	child_validity.SetAllValid(total_elements);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto *state = state_ptrs[i];
+		idx_t base = i * 64;
+		list_entries[offset + i].offset = base;
+		list_entries[offset + i].length = 64;
+
+		for (int j = 0; j < 64; j++) {
+			if (state->counts[j] > 0.0) {
+				child_data[base + j] = static_cast<PAC_FLOAT>(state->sums[j] / state->counts[j]);
+			} else {
+				child_data[base + j] = 0.0;
+				child_validity.SetInvalid(base + j);
+			}
+		}
+	}
+}
+
+static unique_ptr<FunctionData> DpSampleAvgBind(ClientContext &ctx, AggregateFunction &,
+                                                vector<unique_ptr<Expression>> &) {
+	return MakeDpSampleBindData(ctx);
+}
+
+void RegisterDpSampleAvgFunctions(ExtensionLoader &loader) {
+	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+	AggregateFunctionSet set("as_sample_avg");
+	set.AddFunction(AggregateFunction("as_sample_avg", {LogicalType::UBIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE},
+	                                  list_type, DpSampleAvgStateSize, DpSampleAvgInitialize, DpSampleAvgScatterUpdate,
+	                                  DpSampleAvgCombine, DpSampleAvgFinalize,
+	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, DpSampleAvgUpdate, DpSampleAvgBind));
+	CreateAggregateFunctionInfo info(set);
+	FunctionDescription desc;
+	desc.description = "[INTERNAL] Returns 64 sample-median DP counters for AVG-like values.";
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 }

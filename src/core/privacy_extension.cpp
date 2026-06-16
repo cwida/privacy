@@ -426,6 +426,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacSumFunctions(loader);
 	RegisterPacSumCountersFunctions(loader);
 	RegisterDpSampleSumFunctions(loader);
+	RegisterDpSampleAvgFunctions(loader);
 	RegisterPacClipSumFunctions(loader);
 	RegisterPacNoisedClipSumFunctions(loader);
 	RegisterPacNoisedClipSumCountFunctions(loader);

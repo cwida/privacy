@@ -436,6 +436,16 @@ ALTER TABLE link_test ADD PRIVACY_LINK (ref_id) REFERENCES target_b(id);
 ----
 Column(s) already have a PRIVACY_LINK defined
 
+# Test 32b: Conflicting PRIVACY_LINKs in the same batch should fail before ambiguous metadata is stored
+statement ok
+CREATE TABLE link_batch_test (id INTEGER, ref_id INTEGER, data VARCHAR);
+
+statement error
+ALTER TABLE link_batch_test ADD PRIVACY_LINK (ref_id) REFERENCES target_a(id);
+ALTER TABLE link_batch_test ADD PRIVACY_LINK (ref_id) REFERENCES target_b(id);
+----
+Column(s) already have a PRIVACY_LINK defined
+
 # Test 33: Same PRIVACY_LINK twice should be idempotent (no error)
 statement ok
 ALTER TABLE link_test ADD PRIVACY_LINK (ref_id) REFERENCES target_a(id);

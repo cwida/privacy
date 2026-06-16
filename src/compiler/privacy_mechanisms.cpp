@@ -7,6 +7,7 @@
 #include "privacy_debug.hpp"
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
 #include "duckdb/common/constants.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/optional_idx.hpp"
@@ -24,6 +25,7 @@
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 
 #include <cmath>
@@ -63,6 +65,26 @@ static unique_ptr<Expression> BindScalarLocal(OptimizerExtensionInput &input, co
 	return expr;
 }
 
+static unique_ptr<Expression> BindAggregateLocal(OptimizerExtensionInput &input, const string &func_name,
+                                                 vector<unique_ptr<Expression>> children) {
+	FunctionBinder function_binder(input.context);
+	ErrorData error;
+	vector<LogicalType> arg_types;
+	arg_types.reserve(children.size());
+	for (auto &child : children) {
+		arg_types.push_back(child->return_type);
+	}
+
+	auto &entry = Catalog::GetSystemCatalog(input.context)
+	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, func_name);
+	auto best = function_binder.BindFunction(entry.name, entry.functions, arg_types, error);
+	if (!best.IsValid()) {
+		throw InternalException("dp: failed to bind aggregate function '" + func_name + "': " + error.Message());
+	}
+	auto func = entry.functions.GetFunctionByOffset(best.GetIndex());
+	return function_binder.BindAggregateFunction(func, std::move(children), nullptr, AggregateType::NON_DISTINCT);
+}
+
 // Replace each AVG(x) with SUM(x) in-place and append a COUNT(*) at the end.
 // Returns info pairing each (sum_pos, count_pos) for post-processing.
 static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, LogicalAggregate *agg) {
@@ -100,17 +122,19 @@ static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, Logi
 // ----------------------------------------------------------------------------
 
 static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const vector<LogicalGet *> &gets,
-                                const vector<string> &privacy_units, bool include_fk_cols) {
+                                const vector<string> &privacy_units, bool include_fk_cols, bool allow_self_joins) {
 	(void)privacy_units;
 
 	// Self-join check: no table name may appear more than once in the plan
-	std::unordered_map<string, int> name_count;
-	for (auto *g : gets) {
-		string name = StringUtil::Lower(g->GetTable()->name);
-		name_count[name]++;
-		if (name_count[name] > 1) {
-			throw InvalidInputException("dp: self-joins are not supported (table '" + g->GetTable()->name +
-			                            "' appears more than once)");
+	if (!allow_self_joins) {
+		std::unordered_map<string, int> name_count;
+		for (auto *g : gets) {
+			string name = StringUtil::Lower(g->GetTable()->name);
+			name_count[name]++;
+			if (name_count[name] > 1) {
+				throw InvalidInputException("dp: self-joins are not supported (table '" + g->GetTable()->name +
+				                            "' appears more than once)");
+			}
 		}
 	}
 
@@ -144,6 +168,7 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 	for (auto &non_pu : check.scanned_non_pu_tables) {
 		auto it = check.fk_paths.find(non_pu);
 		if (it == check.fk_paths.end() || it->second.empty()) {
+			PRIVACY_DEBUG_PRINT("[DP] rejecting unlinked non-PU table '" + non_pu + "'");
 			throw InvalidInputException("dp: table '" + non_pu +
 			                            "' has no PRIVACY_LINK path to a privacy unit table. "
 			                            "Declare the link with ALTER TABLE ADD PRIVACY_LINK.");
@@ -152,7 +177,10 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 			longest_path = &it->second;
 		}
 	}
-	D_ASSERT(longest_path);
+	if (!longest_path) {
+		throw InvalidInputException("dp: query scans non-PU tables but none has a PRIVACY_LINK path to a privacy "
+		                            "unit table. Declare the link with ALTER TABLE ADD PRIVACY_LINK.");
+	}
 
 	// Build a set of tables in the longest path for membership checks
 	std::unordered_set<string> path_set;
@@ -162,6 +190,13 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 
 	// All non-PU scanned tables must appear in the longest path (linear chain requirement)
 	for (auto &non_pu : check.scanned_non_pu_tables) {
+		auto path_it = check.fk_paths.find(non_pu);
+		if (path_it == check.fk_paths.end() || path_it->second.empty()) {
+			PRIVACY_DEBUG_PRINT("[DP] rejecting unlinked non-PU table '" + non_pu + "'");
+			throw InvalidInputException("dp: table '" + non_pu +
+			                            "' has no PRIVACY_LINK path to a privacy unit table. "
+			                            "Declare the link with ALTER TABLE ADD PRIVACY_LINK.");
+		}
 		if (path_set.find(StringUtil::Lower(non_pu)) == path_set.end()) {
 			throw InvalidInputException("dp: star/diamond joins are not yet supported. Table '" + non_pu +
 			                            "' is not in the linear FK chain to the privacy unit. "
@@ -204,6 +239,44 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 	return chain;
 }
 
+static void CheckDPAggregateNode(LogicalAggregate *agg, const string &mechanism_name, bool allow_min_max);
+static bool IsCountAggregate(const BoundAggregateExpression &aggr);
+
+struct DPAggregateTarget {
+	LogicalAggregate *agg;
+	bool nested_pu_histogram;
+};
+
+static vector<string> BuildDPRelevantTables(const PrivacyCompatibilityResult &check,
+                                            const vector<string> &privacy_units) {
+	vector<string> relevant_tables;
+	std::unordered_set<string> seen;
+	for (auto &pu : privacy_units) {
+		if (seen.insert(pu).second) {
+			relevant_tables.push_back(pu);
+		}
+	}
+
+	vector<string> sorted_fk_path_keys;
+	for (auto &kv : check.fk_paths) {
+		sorted_fk_path_keys.push_back(kv.first);
+	}
+	std::sort(sorted_fk_path_keys.begin(), sorted_fk_path_keys.end());
+
+	for (auto &fk_key : sorted_fk_path_keys) {
+		if (seen.insert(fk_key).second) {
+			relevant_tables.push_back(fk_key);
+		}
+		auto &path = check.fk_paths.at(fk_key);
+		for (auto &table : path) {
+			if (seen.insert(table).second) {
+				relevant_tables.push_back(table);
+			}
+		}
+	}
+	return relevant_tables;
+}
+
 static LogicalAggregate *CheckDPAggregates(unique_ptr<LogicalOperator> &plan, const string &mechanism_name) {
 	bool allow_min_max = mechanism_name == "dp_sass";
 	vector<LogicalAggregate *> aggs;
@@ -213,16 +286,61 @@ static LogicalAggregate *CheckDPAggregates(unique_ptr<LogicalOperator> &plan, co
 		                            std::to_string(aggs.size()));
 	}
 	auto *agg = aggs[0];
+	CheckDPAggregateNode(agg, mechanism_name, allow_min_max);
+	return agg;
+}
+
+static DPAggregateTarget CheckDPElasticAggregates(unique_ptr<LogicalOperator> &plan,
+                                                  const PrivacyCompatibilityResult &check,
+                                                  const vector<string> &privacy_units) {
+	vector<LogicalAggregate *> aggs;
+	FindAllAggregates(plan, aggs);
+	if (aggs.empty()) {
+		throw InvalidInputException("dp_elastic: expected exactly one aggregate, found 0");
+	}
+	if (aggs.size() == 1) {
+		CheckDPAggregateNode(aggs[0], "dp_elastic", false);
+		return {aggs[0], false};
+	}
+
+	auto cte_map = BuildAndResolveCTETableMap(plan.get());
+	auto relevant_tables = BuildDPRelevantTables(check, privacy_units);
+	auto targets = FilterTargetAggregatesWithPUKeyCheck(aggs, relevant_tables, check, privacy_units, cte_map);
+	if (targets.size() != 1) {
+		throw InvalidInputException("dp_elastic: expected exactly one privacy-unit aggregate, found " +
+		                            std::to_string(targets.size()));
+	}
+
+	auto *target = targets[0];
+	auto *inner = FindFirstChildAggregate(target);
+	if (!inner) {
+		throw InvalidInputException("dp_elastic: nested aggregates are only supported for PU-key histograms");
+	}
+	CheckDPAggregateNode(target, "dp_elastic", false);
+	for (auto &expr : target->expressions) {
+		auto &aggr = expr->Cast<BoundAggregateExpression>();
+		if (!IsCountAggregate(aggr) || aggr.IsDistinct()) {
+			throw InvalidInputException("dp_elastic: nested PU-key histograms only support COUNT aggregates");
+		}
+	}
+	return {target, true};
+}
+
+static void CheckDPAggregateNode(LogicalAggregate *agg, const string &mechanism_name, bool allow_min_max) {
 	for (auto &expr : agg->expressions) {
 		if (expr->GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {
 			throw InvalidInputException(mechanism_name + ": unsupported non-aggregate expression in aggregate node");
 		}
 		auto &aggr = expr->Cast<BoundAggregateExpression>();
-		if (aggr.IsDistinct()) {
-			throw InvalidInputException(mechanism_name + ": DISTINCT aggregates are not supported");
-		}
 		string name = StringUtil::Lower(aggr.function.name);
 		bool is_count = name == "count" || name == "count_star";
+		if (aggr.IsDistinct()) {
+			if ((mechanism_name != "dp_sass" && mechanism_name != "dp_elastic") || !is_count ||
+			    aggr.children.size() != 1 || aggr.filter) {
+				throw InvalidInputException(mechanism_name + ": only COUNT(DISTINCT x) is supported for DISTINCT");
+			}
+			continue;
+		}
 		bool is_sum_avg = name == "sum" || name == "avg";
 		bool is_min_max = name == "min" || name == "max";
 		if (!is_count && !is_sum_avg && !(allow_min_max && is_min_max)) {
@@ -238,21 +356,86 @@ static LogicalAggregate *CheckDPAggregates(unique_ptr<LogicalOperator> &plan, co
 			                            aggr.children[0]->return_type.ToString() + "')");
 		}
 	}
-	return agg;
 }
 
 static DPFKChain ExtractDPFKChain(unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                                  const PrivacyCompatibilityResult &check) {
+                                  const PrivacyCompatibilityResult &check, bool allow_self_joins = false) {
 	vector<LogicalGet *> gets;
 	FindAllGetNodes(plan.get(), gets);
-	return ExtractFKChain(check, gets, privacy_units, true);
+	return ExtractFKChain(check, gets, privacy_units, true, allow_self_joins);
 }
 
 static void CheckDPFKChainShape(unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                                const PrivacyCompatibilityResult &check) {
+                                const PrivacyCompatibilityResult &check, bool allow_self_joins = false) {
 	vector<LogicalGet *> gets;
 	FindAllGetNodes(plan.get(), gets);
-	ExtractFKChain(check, gets, privacy_units, false);
+	ExtractFKChain(check, gets, privacy_units, false, allow_self_joins);
+}
+
+static bool IsRightSideHiddenJoin(JoinType join_type) {
+	return join_type == JoinType::MARK || join_type == JoinType::SEMI || join_type == JoinType::ANTI ||
+	       join_type == JoinType::SINGLE;
+}
+
+static bool IsLeftSideHiddenJoin(JoinType join_type) {
+	return join_type == JoinType::RIGHT_SEMI || join_type == JoinType::RIGHT_ANTI;
+}
+
+static void CountAccessibleTableScans(LogicalOperator *op, std::unordered_map<string, idx_t> &counts) {
+	if (!op) {
+		return;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op->Cast<LogicalGet>();
+		counts[StringUtil::Lower(get.GetTable()->name)]++;
+		return;
+	}
+
+	if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+	    op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN || op->type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+		auto &join = op->Cast<LogicalJoin>();
+		if (IsRightSideHiddenJoin(join.join_type)) {
+			if (!op->children.empty()) {
+				CountAccessibleTableScans(op->children[0].get(), counts);
+			}
+			return;
+		}
+		if (IsLeftSideHiddenJoin(join.join_type)) {
+			if (op->children.size() >= 2) {
+				CountAccessibleTableScans(op->children[1].get(), counts);
+			}
+			return;
+		}
+	}
+
+	for (auto &child : op->children) {
+		CountAccessibleTableScans(child.get(), counts);
+	}
+}
+
+static double ValidateDPSelfJoins(unique_ptr<LogicalOperator> &plan, const string &mech) {
+	vector<LogicalGet *> gets;
+	FindAllGetNodes(plan.get(), gets);
+	std::unordered_map<string, idx_t> all_counts;
+	for (auto *get : gets) {
+		all_counts[StringUtil::Lower(get->GetTable()->name)]++;
+	}
+
+	std::unordered_map<string, idx_t> accessible_counts;
+	CountAccessibleTableScans(plan.get(), accessible_counts);
+
+	idx_t max_duplicate_count = 1;
+	for (auto &kv : all_counts) {
+		if (kv.second <= 1) {
+			continue;
+		}
+		max_duplicate_count = std::max(max_duplicate_count, kv.second);
+		if (accessible_counts[kv.first] > 1) {
+			throw InvalidInputException(mech +
+			                            ": self-joins are only supported inside SEMI/ANTI/MARK subquery branches");
+		}
+	}
+	return static_cast<double>(max_duplicate_count);
 }
 
 // ----------------------------------------------------------------------------
@@ -854,52 +1037,392 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 	                                "dp_sample_median: could not locate aggregate slot for median projection");
 }
 
+static bool IsDpSampleCountDistinct(const LogicalAggregate *agg) {
+	if (agg->expressions.size() != 1 || agg->expressions[0]->GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {
+		return false;
+	}
+	auto &aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
+	string name = StringUtil::Lower(aggr.function.name);
+	return aggr.IsDistinct() && (name == "count" || name == "count_star") && aggr.children.size() == 1;
+}
+
+static bool HasDistinctAggregate(const LogicalAggregate *agg) {
+	for (auto &expr : agg->expressions) {
+		if (expr->GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {
+			continue;
+		}
+		if (expr->Cast<BoundAggregateExpression>().IsDistinct()) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, LogicalAggregate *agg,
+                                               unique_ptr<Expression> pu_hash_expr) {
+	auto &binder = input.optimizer.binder;
+	auto &old_aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
+	auto distinct_value = old_aggr.children[0]->Copy();
+
+	vector<unique_ptr<Expression>> mask_children;
+	mask_children.push_back(std::move(pu_hash_expr));
+	auto sample_mask = BindScalarLocal(input, "dp_sample_mask", std::move(mask_children));
+	auto bit_or_expr = BindBitOrAggregate(input, std::move(sample_mask), distinct_value->Copy());
+
+	idx_t inner_group_index = binder.GenerateTableIndex();
+	idx_t inner_agg_index = binder.GenerateTableIndex();
+	vector<unique_ptr<Expression>> inner_expressions;
+	inner_expressions.push_back(std::move(bit_or_expr));
+	auto inner_agg = make_uniq<LogicalAggregate>(inner_group_index, inner_agg_index, std::move(inner_expressions));
+
+	idx_t num_original_groups = agg->groups.size();
+	for (auto &group : agg->groups) {
+		inner_agg->groups.push_back(group->Copy());
+	}
+	inner_agg->groups.push_back(std::move(distinct_value));
+	inner_agg->children.push_back(std::move(agg->children[0]));
+	inner_agg->ResolveOperatorTypes();
+
+	for (idx_t gi = 0; gi < num_original_groups; gi++) {
+		agg->groups[gi] =
+		    make_uniq<BoundColumnRefExpression>(inner_agg->types[gi], ColumnBinding(inner_group_index, gi));
+	}
+
+	auto mask_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, ColumnBinding(inner_agg_index, 0));
+	agg->children[0] = std::move(inner_agg);
+	agg->expressions[0] = BindPlainAggregate(input, "as_sample_count_mask", std::move(mask_ref));
+	agg->ResolveOperatorTypes();
+}
+
+static void RemapExpressionBindingsLocal(Expression &e, const std::unordered_map<idx_t, idx_t> &map) {
+	if (e.type == ExpressionType::BOUND_COLUMN_REF) {
+		auto &col_ref = e.Cast<BoundColumnRefExpression>();
+		auto it = map.find(col_ref.binding.table_index);
+		if (it != map.end()) {
+			col_ref.binding.table_index = it->second;
+		}
+	}
+	ExpressionIterator::EnumerateChildren(e, [&](Expression &child) { RemapExpressionBindingsLocal(child, map); });
+}
+
+static unique_ptr<Expression> CopyMaybeRemapped(const Expression &expr,
+                                                const std::unordered_map<idx_t, idx_t> *index_map) {
+	auto result = expr.Copy();
+	if (index_map) {
+		RemapExpressionBindingsLocal(*result, *index_map);
+	}
+	return result;
+}
+
+static unique_ptr<Expression> CopyFilterMaybeRemapped(const BoundAggregateExpression &aggr,
+                                                      const std::unordered_map<idx_t, idx_t> *index_map) {
+	if (!aggr.filter) {
+		return nullptr;
+	}
+	return CopyMaybeRemapped(*aggr.filter, index_map);
+}
+
+struct SampleAggregateRewrite {
+	string sample_name;
+	idx_t lower_value_pos;
+	optional_idx lower_count_pos;
+};
+
+static void BuildSampleMedianLowerExpression(OptimizerExtensionInput &input, const BoundAggregateExpression &aggr,
+                                             const std::unordered_map<idx_t, idx_t> *index_map,
+                                             vector<unique_ptr<Expression>> &lower_expressions,
+                                             vector<SampleAggregateRewrite> &rewrites) {
+	string name = StringUtil::Lower(aggr.function.name);
+	vector<unique_ptr<Expression>> children;
+	idx_t lower_value_pos = lower_expressions.size();
+	if (name == "count_star") {
+		lower_expressions.push_back(BindPlainAggregate(input, "count_star", std::move(children)));
+		rewrites.push_back({"as_sample_sum", lower_value_pos, optional_idx()});
+	} else if (name == "count") {
+		if (!aggr.children.empty()) {
+			children.push_back(CopyMaybeRemapped(*aggr.children[0], index_map));
+		}
+		lower_expressions.push_back(BindPlainAggregate(input, "count", std::move(children)));
+		rewrites.push_back({"as_sample_sum", lower_value_pos, optional_idx()});
+	} else if (name == "sum") {
+		children.push_back(CopyMaybeRemapped(*aggr.children[0], index_map));
+		lower_expressions.push_back(BindPlainAggregate(input, "sum", std::move(children)));
+		rewrites.push_back({"as_sample_sum", lower_value_pos, optional_idx()});
+	} else if (name == "avg") {
+		auto sum_arg = CopyMaybeRemapped(*aggr.children[0], index_map);
+		auto count_arg = CopyMaybeRemapped(*aggr.children[0], index_map);
+		auto filter_for_sum = CopyFilterMaybeRemapped(aggr, index_map);
+		auto filter_for_count = CopyFilterMaybeRemapped(aggr, index_map);
+
+		lower_expressions.push_back(BindPlainAggregate(input, "sum", std::move(sum_arg)));
+		lower_expressions.back()->Cast<BoundAggregateExpression>().filter = std::move(filter_for_sum);
+
+		idx_t lower_count_pos = lower_expressions.size();
+		lower_expressions.push_back(BindPlainAggregate(input, "count", std::move(count_arg)));
+		lower_expressions.back()->Cast<BoundAggregateExpression>().filter = std::move(filter_for_count);
+		rewrites.push_back({"as_sample_avg", lower_value_pos, optional_idx(lower_count_pos)});
+		return;
+	} else if (name == "min" || name == "max") {
+		children.push_back(CopyMaybeRemapped(*aggr.children[0], index_map));
+		lower_expressions.push_back(BindPlainAggregate(input, name, std::move(children)));
+		rewrites.push_back({name == "min" ? "as_sample_min" : "as_sample_max", lower_value_pos, optional_idx()});
+	} else {
+		throw InvalidInputException("dp_sample_median: only COUNT, SUM, AVG, MIN, and MAX aggregates are supported");
+	}
+	lower_expressions.back()->Cast<BoundAggregateExpression>().filter = CopyFilterMaybeRemapped(aggr, index_map);
+}
+
+static unique_ptr<Expression> BuildSampleMedianAggregateRef(OptimizerExtensionInput &input,
+                                                            const PuPreAggregationInfo &pre_agg,
+                                                            const SampleAggregateRewrite &rewrite) {
+	auto lower_type = pre_agg.lower_agg->types[pre_agg.num_original_groups + 1 + rewrite.lower_value_pos];
+	unique_ptr<Expression> lower_ref = make_uniq<BoundColumnRefExpression>(
+	    lower_type, ColumnBinding(pre_agg.lower_agg_index, rewrite.lower_value_pos));
+	lower_ref = BoundCastExpression::AddCastToType(input.context, std::move(lower_ref), LogicalType::DOUBLE);
+
+	vector<unique_ptr<Expression>> children;
+	children.push_back(pre_agg.pu_hash_ref->Copy());
+	children.push_back(std::move(lower_ref));
+	if (rewrite.lower_count_pos.IsValid()) {
+		auto lower_count_type =
+		    pre_agg.lower_agg->types[pre_agg.num_original_groups + 1 + rewrite.lower_count_pos.GetIndex()];
+		unique_ptr<Expression> lower_count_ref = make_uniq<BoundColumnRefExpression>(
+		    lower_count_type, ColumnBinding(pre_agg.lower_agg_index, rewrite.lower_count_pos.GetIndex()));
+		children.push_back(
+		    BoundCastExpression::AddCastToType(input.context, std::move(lower_count_ref), LogicalType::DOUBLE));
+	}
+	return BindAggregateLocal(input, rewrite.sample_name, std::move(children));
+}
+
+static unique_ptr<LogicalOperator> BuildSampleMedianNonDistinctBranch(
+    OptimizerExtensionInput &input, unique_ptr<LogicalOperator> child, const vector<unique_ptr<Expression>> &groups,
+    unique_ptr<Expression> pu_hash_expr, const vector<std::pair<idx_t, const BoundAggregateExpression *>> &specs,
+    const std::unordered_map<idx_t, idx_t> *index_map, idx_t &out_group_index, idx_t &out_agg_index) {
+	vector<unique_ptr<Expression>> lower_expressions;
+	vector<SampleAggregateRewrite> rewrites;
+	lower_expressions.reserve(specs.size());
+	rewrites.reserve(specs.size());
+	for (auto &spec : specs) {
+		BuildSampleMedianLowerExpression(input, *spec.second, index_map, lower_expressions, rewrites);
+	}
+
+	auto &binder = input.optimizer.binder;
+	idx_t lower_group_index = binder.GenerateTableIndex();
+	idx_t lower_agg_index = binder.GenerateTableIndex();
+	idx_t num_groups = groups.size();
+	auto lower_agg = make_uniq<LogicalAggregate>(lower_group_index, lower_agg_index, std::move(lower_expressions));
+	for (auto &group : groups) {
+		lower_agg->groups.push_back(group->Copy());
+	}
+	lower_agg->groups.push_back(std::move(pu_hash_expr));
+	lower_agg->children.push_back(std::move(child));
+	lower_agg->ResolveOperatorTypes();
+
+	vector<unique_ptr<Expression>> outer_expressions;
+	outer_expressions.reserve(specs.size());
+	auto pu_hash_ref =
+	    make_uniq<BoundColumnRefExpression>(lower_agg->types[num_groups], ColumnBinding(lower_group_index, num_groups));
+	PuPreAggregationInfo pre_info {lower_agg.get(), num_groups, lower_agg_index, std::move(pu_hash_ref)};
+	for (auto &rewrite : rewrites) {
+		outer_expressions.push_back(BuildSampleMedianAggregateRef(input, pre_info, rewrite));
+	}
+
+	out_group_index = binder.GenerateTableIndex();
+	out_agg_index = binder.GenerateTableIndex();
+	auto outer_agg = make_uniq<LogicalAggregate>(out_group_index, out_agg_index, std::move(outer_expressions));
+	for (idx_t gi = 0; gi < num_groups; gi++) {
+		outer_agg->groups.push_back(
+		    make_uniq<BoundColumnRefExpression>(lower_agg->types[gi], ColumnBinding(lower_group_index, gi)));
+	}
+	outer_agg->children.push_back(std::move(lower_agg));
+	outer_agg->ResolveOperatorTypes();
+	return outer_agg;
+}
+
+static unique_ptr<LogicalOperator>
+BuildSampleMedianDistinctCountBranch(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> child,
+                                     const vector<unique_ptr<Expression>> &groups, unique_ptr<Expression> pu_hash_expr,
+                                     unique_ptr<Expression> distinct_value_expr, idx_t num_outputs,
+                                     idx_t &out_group_index, idx_t &out_agg_index) {
+	auto &binder = input.optimizer.binder;
+	idx_t inner_group_index = binder.GenerateTableIndex();
+	idx_t inner_agg_index = binder.GenerateTableIndex();
+	idx_t num_groups = groups.size();
+
+	vector<unique_ptr<Expression>> mask_children;
+	mask_children.push_back(std::move(pu_hash_expr));
+	auto sample_mask = BindScalarLocal(input, "dp_sample_mask", std::move(mask_children));
+	auto bit_or_expr = BindBitOrAggregate(input, std::move(sample_mask), distinct_value_expr->Copy());
+
+	vector<unique_ptr<Expression>> inner_expressions;
+	inner_expressions.push_back(std::move(bit_or_expr));
+	auto inner_agg = make_uniq<LogicalAggregate>(inner_group_index, inner_agg_index, std::move(inner_expressions));
+	for (auto &group : groups) {
+		inner_agg->groups.push_back(group->Copy());
+	}
+	inner_agg->groups.push_back(std::move(distinct_value_expr));
+	inner_agg->children.push_back(std::move(child));
+	inner_agg->ResolveOperatorTypes();
+
+	vector<unique_ptr<Expression>> outer_expressions;
+	outer_expressions.reserve(num_outputs);
+	for (idx_t i = 0; i < num_outputs; i++) {
+		auto mask_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, ColumnBinding(inner_agg_index, 0));
+		outer_expressions.push_back(BindPlainAggregate(input, "as_sample_count_mask", std::move(mask_ref)));
+	}
+
+	out_group_index = binder.GenerateTableIndex();
+	out_agg_index = binder.GenerateTableIndex();
+	auto outer_agg = make_uniq<LogicalAggregate>(out_group_index, out_agg_index, std::move(outer_expressions));
+	for (idx_t gi = 0; gi < num_groups; gi++) {
+		outer_agg->groups.push_back(
+		    make_uniq<BoundColumnRefExpression>(inner_agg->types[gi], ColumnBinding(inner_group_index, gi)));
+	}
+	outer_agg->children.push_back(std::move(inner_agg));
+	outer_agg->ResolveOperatorTypes();
+	return outer_agg;
+}
+
+static unique_ptr<Expression> WrapSampleMedianListRef(OptimizerExtensionInput &input, unique_ptr<Expression> list_ref,
+                                                      double epsilon, double delta, const LogicalType &output_type,
+                                                      double lower_bound, double upper_bound) {
+	vector<unique_ptr<Expression>> children;
+	children.push_back(std::move(list_ref));
+	children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(epsilon)));
+	children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(delta)));
+	children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(GetDpSampleLanes(input.context))));
+	children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(lower_bound)));
+	children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(upper_bound)));
+	auto noised = BindScalarLocal(input, "dp_smooth_median_noise", std::move(children));
+	if (output_type != LogicalType::DOUBLE) {
+		noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), output_type);
+	}
+	return noised;
+}
+
+static bool RewriteMixedDistinctAggregateToSampleMedianProjection(
+    OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan, LogicalAggregate *agg,
+    unique_ptr<Expression> pu_hash_expr, const vector<double> &epsilons, const vector<double> &deltas,
+    const vector<LogicalType> &output_types, const vector<double> &lower_bounds, const vector<double> &upper_bounds) {
+	if (!HasDistinctAggregate(agg) || IsDpSampleCountDistinct(agg)) {
+		return false;
+	}
+
+	double support_threshold = 0.0;
+	if (TryGetPrivacyMinGroupCount(input.context, support_threshold)) {
+		throw InvalidInputException(
+		    "dp_sample_median: privacy_min_group_count is not supported with mixed COUNT(DISTINCT) aggregates");
+	}
+
+	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
+		auto &aggr = agg->expressions[ai]->Cast<BoundAggregateExpression>();
+		if (aggr.IsDistinct()) {
+			string name = StringUtil::Lower(aggr.function.name);
+			if ((name != "count" && name != "count_star") || aggr.children.size() != 1) {
+				throw InvalidInputException("dp_sample_median: only COUNT(DISTINCT x) is supported for DISTINCT");
+			}
+		}
+	}
+
+	class SampleMedianBranchBuilder : public DistinctAggregateBranchBuilder {
+	public:
+		unique_ptr<LogicalOperator>
+		BuildDistinctBranch(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> child,
+		                    const vector<unique_ptr<Expression>> &groups, unique_ptr<Expression> hash_expr,
+		                    unique_ptr<Expression> distinct_expr, const vector<std::pair<idx_t, string>> &agg_specs,
+		                    const std::unordered_map<idx_t, idx_t> *index_map, idx_t &out_group_index,
+		                    idx_t &out_agg_index) override {
+			(void)index_map;
+			return BuildSampleMedianDistinctCountBranch(input, std::move(child), groups, std::move(hash_expr),
+			                                            std::move(distinct_expr), agg_specs.size(), out_group_index,
+			                                            out_agg_index);
+		}
+
+		unique_ptr<LogicalOperator>
+		BuildNonDistinctBranch(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> child,
+		                       const vector<unique_ptr<Expression>> &groups, unique_ptr<Expression> hash_expr,
+		                       const vector<std::pair<idx_t, const BoundAggregateExpression *>> &agg_specs,
+		                       const std::unordered_map<idx_t, idx_t> *index_map, idx_t &out_group_index,
+		                       idx_t &out_agg_index) override {
+			return BuildSampleMedianNonDistinctBranch(input, std::move(child), groups, std::move(hash_expr), agg_specs,
+			                                          index_map, out_group_index, out_agg_index);
+		}
+	};
+
+	SampleMedianBranchBuilder builder;
+	auto branch_plan = BuildJoinedDistinctAggregateBranches(input, plan, agg, std::move(pu_hash_expr), builder);
+
+	idx_t proj_idx = input.optimizer.binder.GenerateTableIndex();
+	vector<unique_ptr<Expression>> proj_exprs;
+	idx_t num_groups = agg->groups.size();
+	for (idx_t gi = 0; gi < num_groups; gi++) {
+		proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(agg->groups[gi]->return_type,
+		                                                         ColumnBinding(branch_plan.left_group_index, gi)));
+	}
+	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
+		auto it = branch_plan.aggregate_map.find(ai);
+		if (it == branch_plan.aggregate_map.end()) {
+			throw InternalException("dp_sample_median: missing mixed DISTINCT aggregate branch");
+		}
+		idx_t branch_idx = it->second.first;
+		idx_t pos = it->second.second;
+		auto &branch = branch_plan.branches[branch_idx];
+		auto list_ref =
+		    make_uniq<BoundColumnRefExpression>(branch.aggregate_types[pos], ColumnBinding(branch.agg_index, pos));
+		proj_exprs.push_back(WrapSampleMedianListRef(input, std::move(list_ref), epsilons[ai], deltas[ai],
+		                                             output_types[ai], lower_bounds[ai], upper_bounds[ai]));
+	}
+
+	auto projection = make_uniq<LogicalProjection>(proj_idx, std::move(proj_exprs));
+	projection->children.push_back(std::move(branch_plan.joined));
+	projection->ResolveOperatorTypes();
+
+	auto *agg_slot = FindOperatorSlotByPointer(plan, agg);
+	if (!agg_slot) {
+		throw InternalException("dp_sample_median: could not replace mixed DISTINCT aggregate");
+	}
+
+	idx_t old_group_index = agg->group_index;
+	idx_t old_agg_index = agg->aggregate_index;
+	LogicalOperator *projection_ptr = projection.get();
+	*agg_slot = std::move(projection);
+
+	ColumnBindingReplacer replacer;
+	for (idx_t gi = 0; gi < num_groups; gi++) {
+		replacer.replacement_bindings.emplace_back(ColumnBinding(old_group_index, gi), ColumnBinding(proj_idx, gi));
+	}
+	for (idx_t ai = 0; ai < branch_plan.aggregate_map.size(); ai++) {
+		replacer.replacement_bindings.emplace_back(ColumnBinding(old_agg_index, ai),
+		                                           ColumnBinding(proj_idx, num_groups + ai));
+	}
+	replacer.stop_operator = projection_ptr;
+	replacer.VisitOperator(*plan);
+	return true;
+}
+
 static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, LogicalAggregate *agg,
                                            unique_ptr<Expression> pu_hash_expr) {
+	if (IsDpSampleCountDistinct(agg)) {
+		RewriteDistinctCountToSampleMedian(input, agg, std::move(pu_hash_expr));
+		return;
+	}
+
 	vector<unique_ptr<Expression>> lower_expressions;
 	lower_expressions.reserve(agg->expressions.size());
+	vector<SampleAggregateRewrite> rewrites;
+	rewrites.reserve(agg->expressions.size());
 	for (auto &expr : agg->expressions) {
 		auto &aggr = expr->Cast<BoundAggregateExpression>();
-		vector<unique_ptr<Expression>> children;
-		if (aggr.function.name == "count_star") {
-			lower_expressions.push_back(BindPlainAggregate(input, "count_star", std::move(children)));
-		} else if (aggr.function.name == "count") {
-			if (!aggr.children.empty()) {
-				children.push_back(aggr.children[0]->Copy());
-			}
-			lower_expressions.push_back(BindPlainAggregate(input, "count", std::move(children)));
-		} else if (aggr.function.name == "sum") {
-			children.push_back(aggr.children[0]->Copy());
-			lower_expressions.push_back(BindPlainAggregate(input, "sum", std::move(children)));
-		} else if (aggr.function.name == "min" || aggr.function.name == "max") {
-			children.push_back(aggr.children[0]->Copy());
-			lower_expressions.push_back(BindPlainAggregate(input, aggr.function.name, std::move(children)));
-		} else {
-			throw InvalidInputException("dp_sample_median: only COUNT, SUM, MIN, and MAX aggregates are supported");
-		}
-		lower_expressions.back()->Cast<BoundAggregateExpression>().filter = aggr.filter ? aggr.filter->Copy() : nullptr;
+		BuildSampleMedianLowerExpression(input, aggr, nullptr, lower_expressions, rewrites);
 	}
 
 	auto pre_agg = InsertPuPreAggregation(input, agg, std::move(lower_expressions), std::move(pu_hash_expr));
 
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
-		auto lower_type = pre_agg.lower_agg->types[pre_agg.num_original_groups + 1 + ai];
-		unique_ptr<Expression> lower_ref =
-		    make_uniq<BoundColumnRefExpression>(lower_type, ColumnBinding(pre_agg.lower_agg_index, ai));
-		lower_ref = BoundCastExpression::AddCastToType(input.context, std::move(lower_ref), LogicalType::DOUBLE);
-
-		vector<unique_ptr<Expression>> children;
-		children.push_back(pre_agg.pu_hash_ref->Copy());
-		children.push_back(std::move(lower_ref));
+		auto &rewrite = rewrites[ai];
 		auto &original = agg->expressions[ai]->Cast<BoundAggregateExpression>();
-		string sample_name = "as_sample_sum";
-		if (original.function.name == "min") {
-			sample_name = "as_sample_min";
-		} else if (original.function.name == "max") {
-			sample_name = "as_sample_max";
-		}
-		PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] rewrite " + original.function.name + " -> " + sample_name);
-		agg->expressions[ai] = BindPlainAggregate(input, sample_name, std::move(children));
+		PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] rewrite " + original.function.name + " -> " + rewrite.sample_name);
+		agg->expressions[ai] = BuildSampleMedianAggregateRef(input, pre_agg, rewrite);
 	}
 	agg->ResolveOperatorTypes();
 }
@@ -913,7 +1436,19 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 // pre-aggregation was inserted (so the support aggregate counts PU groups).
 static vector<double> ClipAndComputeSensitivities(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                                   LogicalAggregate *agg, const DPFKChain &chain, const string &mech,
-                                                  DPSensitivityKind kind, double epsilon, bool &per_pu) {
+                                                  DPSensitivityKind kind, double epsilon, bool &per_pu,
+                                                  double self_join_factor, bool nested_pu_histogram) {
+	if (nested_pu_histogram) {
+		// The child of the outer histogram aggregate is the inner PU-key aggregate,
+		// so each input row already represents one privacy unit.
+		per_pu = true;
+		vector<double> sens;
+		sens.reserve(agg->expressions.size());
+		for (idx_t i = 0; i < agg->expressions.size(); i++) {
+			sens.push_back(2.0);
+		}
+		return sens;
+	}
 	if (kind == DPSensitivityKind::GLOBAL) {
 		// Standard DP: per-PU contribution clipping → sensitivity = the bound (data-independent).
 		return ApplyPerPuClipping(input, plan, agg, chain, mech, per_pu);
@@ -926,6 +1461,7 @@ static vector<double> ClipAndComputeSensitivities(OptimizerExtensionInput &input
 		ClipSumInputs(input, agg, sum_bound);
 	}
 	double es = ComputeElasticSensitivity(input.context, chain, epsilon);
+	es *= self_join_factor;
 	vector<double> sens;
 	sens.reserve(agg->expressions.size());
 	for (auto &expr : agg->expressions) {
@@ -1014,8 +1550,17 @@ static void CompileDPLaplaceQuery(const PrivacyCompatibilityResult &check, Optim
 
 	double epsilon = GetValidatedDpEpsilon(input.context, mech);
 
-	auto fk_chain = ExtractDPFKChain(plan, privacy_units, check);
-	auto *agg = CheckDPAggregates(plan, mech);
+	double self_join_factor = 1.0;
+	bool allow_self_joins = false;
+	if (mech == "dp_elastic") {
+		self_join_factor = ValidateDPSelfJoins(plan, mech);
+		allow_self_joins = self_join_factor > 1.0;
+	}
+
+	auto fk_chain = ExtractDPFKChain(plan, privacy_units, check, allow_self_joins);
+	DPAggregateTarget target = mech == "dp_elastic" ? CheckDPElasticAggregates(plan, check, privacy_units)
+	                                                : DPAggregateTarget {CheckDPAggregates(plan, mech), false};
+	auto *agg = target.agg;
 
 	// Rewrite AVG(x) → SUM(x) + COUNT(*) before bound/clipping checks.
 	// Each AVG uses ε/2 per component so the combined cost is still ε-DP.
@@ -1039,7 +1584,8 @@ static void CompileDPLaplaceQuery(const PrivacyCompatibilityResult &check, Optim
 	bool noise_enabled = IsPacNoiseEnabled(input.context, true);
 
 	bool per_pu = false;
-	auto agg_sens = ClipAndComputeSensitivities(input, plan, agg, fk_chain, mech, kind, epsilon, per_pu);
+	auto agg_sens = ClipAndComputeSensitivities(input, plan, agg, fk_chain, mech, kind, epsilon, per_pu,
+	                                            self_join_factor, target.nested_pu_histogram);
 
 	// Pure ε-DP (dp_standard / GLOBAL) cannot do data-dependent group suppression — see FinalizeDPLaplace.
 	bool allow_group_suppression = kind != DPSensitivityKind::GLOBAL;
@@ -1076,16 +1622,24 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		throw InvalidInputException("dp_sample_median: dp_delta must be in (0, 0.5)");
 	}
 
-	CheckDPFKChainShape(plan, privacy_units, check);
-	auto *agg = CheckDPAggregates(plan, "dp_sass");
+	bool allow_self_joins = ValidateDPSelfJoins(plan, "dp_sample_median") > 1.0;
+	CheckDPFKChainShape(plan, privacy_units, check, allow_self_joins);
+	auto pu_setup = PreparePlanForPUHashing(check, input, plan, privacy_units);
+	auto hash_infos = BuildPUHashExpressionsForAggregates(input, plan, pu_setup.pu_names, check, pu_setup.cte_map);
+	if (hash_infos.empty()) {
+		throw InvalidInputException("dp_sample_median: no aggregate with a reachable privacy-unit hash found");
+	}
+	if (hash_infos.size() != 1) {
+		throw InvalidInputException("dp_sample_median: expected exactly one privacy-unit aggregate");
+	}
+	auto *agg = hash_infos[0].aggregate;
+	CheckDPAggregateNode(agg, "dp_sass", true);
 
-	auto avg_infos = RewriteAvgAggregates(input, agg);
-	idx_t n_original_aggs = agg->expressions.size() - avg_infos.size();
+	idx_t n_original_aggs = agg->expressions.size();
 	idx_t n_groups = agg->groups.size();
 
 	vector<LogicalType> output_types;
 	output_types.reserve(agg->expressions.size());
-	auto avg_components = BuildAvgComponentSet(avg_infos);
 	double sum_bound = 0.0;
 	double count_bound = 0.0;
 	bool has_sum_bound = false;
@@ -1102,7 +1656,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
 		auto &aggr = agg->expressions[ai]->Cast<BoundAggregateExpression>();
 		string name = StringUtil::Lower(aggr.function.name);
-		output_types.push_back(avg_components.count(ai) ? LogicalType::DOUBLE : aggr.return_type);
+		output_types.push_back(name == "avg" ? LogicalType::DOUBLE : aggr.return_type);
 		if (name == "count" || name == "count_star") {
 			if (!has_count_bound) {
 				count_bound = GetRequiredDpBound(input.context, "dp_count_bound", "dp_sass");
@@ -1118,19 +1672,20 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 			lower_bounds.push_back(-sum_bound);
 			upper_bounds.push_back(sum_bound);
 		}
-		double split = avg_components.count(ai) ? (2.0 * k) : k;
-		epsilons.push_back(epsilon / split);
-		deltas.push_back(delta / split);
+		epsilons.push_back(epsilon / k);
+		deltas.push_back(delta / k);
 	}
 
-	auto pu_setup = PreparePlanForPUHashing(check, input, plan, privacy_units);
-	auto hash_infos = BuildPUHashExpressionsForAggregates(input, plan, pu_setup.pu_names, check, pu_setup.cte_map);
-	if (hash_infos.empty()) {
-		throw InvalidInputException("dp_sample_median: no aggregate with a reachable privacy-unit hash found");
+	bool mixed_distinct_rewritten = RewriteMixedDistinctAggregateToSampleMedianProjection(
+	    input, plan, agg, hash_infos[0].hash_expr->Copy(), epsilons, deltas, output_types, lower_bounds, upper_bounds);
+	if (mixed_distinct_rewritten) {
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("=== PLAN AFTER DP_SAMPLE_MEDIAN MIXED DISTINCT TRANSFORMATION ===");
+		plan->Print();
+#endif
+		return;
 	}
-	if (hash_infos.size() != 1 || hash_infos[0].aggregate != agg) {
-		throw InvalidInputException("dp_sample_median: expected exactly one privacy-unit aggregate");
-	}
+
 	RewriteAggregateToSampleMedian(input, agg, std::move(hash_infos[0].hash_expr));
 
 	LogicalOperator *projection_anchor = agg;
@@ -1145,10 +1700,9 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 
 	auto noise_proj = WrapSampleMedianProjection(input, plan, agg, epsilons, deltas, output_types, lower_bounds,
 	                                             upper_bounds, projection_anchor);
-	if (!avg_infos.empty()) {
-		WrapAvgRatioProjection(input, plan, noise_proj, avg_infos, n_groups, n_original_aggs, noise_proj.proj_ptr,
-		                       true);
-	}
+	(void)noise_proj;
+	(void)n_groups;
+	(void)n_original_aggs;
 
 #if PRIVACY_DEBUG
 	PRIVACY_DEBUG_PRINT("=== PLAN AFTER DP_SAMPLE_MEDIAN TRANSFORMATION ===");

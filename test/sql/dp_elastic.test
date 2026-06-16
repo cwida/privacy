@@ -620,7 +620,302 @@ statement ok
 SET privacy_noise = true;
 
 # ---------------------------------------------------------------------------
-# Phase G: AVG via SUM/COUNT decomposition with ε/2 budget split
+# Phase G: TPC-H count-query shapes required by the utility benchmark
+# ---------------------------------------------------------------------------
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET privacy_mode = 'dp_elastic';
+
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET dp_epsilon = 1.0;
+
+statement ok
+SET dp_delta = 1e-6;
+
+statement ok
+CREATE TABLE _dp_q13_customer (
+    c_custkey INTEGER
+);
+
+statement ok
+CREATE TABLE _dp_q13_orders (
+    o_orderkey INTEGER,
+    o_custkey INTEGER,
+    o_comment VARCHAR
+);
+
+statement ok
+INSERT INTO _dp_q13_customer VALUES (1), (2), (3), (4);
+
+statement ok
+INSERT INTO _dp_q13_orders VALUES
+    (10, 1, 'ok'),
+    (11, 2, 'ok');
+
+statement ok
+ALTER TABLE _dp_q13_customer ADD PRIVACY_KEY (c_custkey);
+
+statement ok
+ALTER TABLE _dp_q13_customer SET PU;
+
+statement ok
+ALTER TABLE _dp_q13_orders ADD PRIVACY_LINK (o_custkey) REFERENCES _dp_q13_customer(c_custkey);
+
+query II rowsort
+SELECT c_count, custdist
+FROM (
+    SELECT c_count, COUNT(*) AS custdist
+    FROM (
+        SELECT c_custkey, COUNT(o_orderkey) AS c_count
+        FROM _dp_q13_customer
+        LEFT OUTER JOIN _dp_q13_orders
+          ON c_custkey = o_custkey
+         AND o_comment NOT LIKE '%special%requests%'
+        GROUP BY c_custkey
+    ) AS c_orders
+    GROUP BY c_count
+) q;
+----
+0	2
+1	2
+
+statement ok
+SET privacy_min_group_count = 2;
+
+query II rowsort
+SELECT c_count, custdist
+FROM (
+    SELECT c_count, COUNT(*) AS custdist
+    FROM (
+        SELECT c_custkey, COUNT(o_orderkey) AS c_count
+        FROM _dp_q13_customer
+        LEFT OUTER JOIN _dp_q13_orders
+          ON c_custkey = o_custkey
+         AND o_comment NOT LIKE '%special%requests%'
+        GROUP BY c_custkey
+    ) AS c_orders
+    GROUP BY c_count
+) q;
+----
+0	2
+1	2
+
+statement ok
+RESET privacy_min_group_count;
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+CREATE TABLE _dp_q16_part (
+    p_partkey INTEGER,
+    p_brand VARCHAR,
+    p_type VARCHAR,
+    p_size INTEGER
+);
+
+statement ok
+CREATE TABLE _dp_q16_partsupp (
+    ps_partkey INTEGER,
+    ps_suppkey INTEGER
+);
+
+statement ok
+CREATE TABLE _dp_q16_supplier (
+    s_suppkey INTEGER,
+    s_comment VARCHAR
+);
+
+statement ok
+INSERT INTO _dp_q16_part VALUES
+    (1, 'Brand#11', 'SMALL BRUSHED TIN', 49),
+    (2, 'Brand#11', 'SMALL BRUSHED TIN', 49);
+
+statement ok
+INSERT INTO _dp_q16_partsupp VALUES
+    (1, 10),
+    (1, 11),
+    (2, 10),
+    (2, 12);
+
+statement ok
+INSERT INTO _dp_q16_supplier VALUES
+    (10, 'ok'),
+    (11, 'ok'),
+    (12, 'ok');
+
+statement ok
+ALTER TABLE _dp_q16_part ADD PRIVACY_KEY (p_partkey);
+
+statement ok
+ALTER TABLE _dp_q16_part SET PU;
+
+statement ok
+ALTER PU TABLE _dp_q16_part ADD PROTECTED (p_partkey);
+
+statement ok
+ALTER TABLE _dp_q16_supplier ADD PRIVACY_KEY (s_suppkey);
+
+statement ok
+ALTER TABLE _dp_q16_partsupp ADD PRIVACY_LINK (ps_partkey) REFERENCES _dp_q16_part(p_partkey);
+
+query IIII
+SELECT p_brand, p_type, p_size, COUNT(DISTINCT ps_suppkey) AS supplier_cnt
+FROM _dp_q16_partsupp, _dp_q16_part
+WHERE p_partkey = ps_partkey
+  AND p_brand <> 'Brand#45'
+  AND p_type NOT LIKE 'MEDIUM POLISHED%'
+  AND p_size IN (49, 14)
+GROUP BY p_brand, p_type, p_size;
+----
+Brand#11	SMALL BRUSHED TIN	49	3
+
+statement error
+SELECT COUNT(*)
+FROM _dp_q16_partsupp, _dp_q16_part
+WHERE p_partkey = ps_partkey
+  AND ps_suppkey NOT IN (
+    SELECT s_suppkey
+    FROM _dp_q16_supplier
+    WHERE s_comment LIKE '%Customer%Complaints%'
+  );
+----
+has no PRIVACY_LINK path
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+CREATE TABLE _dp_q21_customer (
+    c_custkey INTEGER
+);
+
+statement ok
+CREATE TABLE _dp_q21_orders (
+    o_orderkey INTEGER,
+    o_custkey INTEGER,
+    o_orderstatus VARCHAR
+);
+
+statement ok
+CREATE TABLE _dp_q21_lineitem (
+    l_orderkey INTEGER,
+    l_suppkey INTEGER,
+    l_commitdate DATE,
+    l_receiptdate DATE
+);
+
+statement ok
+CREATE TABLE _dp_q21_supplier (
+    s_suppkey INTEGER,
+    s_nationkey INTEGER,
+    s_name VARCHAR
+);
+
+statement ok
+CREATE TABLE _dp_q21_nation (
+    n_nationkey INTEGER,
+    n_name VARCHAR
+);
+
+statement ok
+INSERT INTO _dp_q21_customer VALUES (1), (2);
+
+statement ok
+INSERT INTO _dp_q21_orders VALUES
+    (10, 1, 'F'),
+    (11, 2, 'F');
+
+statement ok
+INSERT INTO _dp_q21_lineitem VALUES
+    (10, 1, DATE '2020-01-01', DATE '2020-01-02'),
+    (10, 2, DATE '2020-01-01', DATE '2020-01-01'),
+    (11, 1, DATE '2020-01-01', DATE '2020-01-02'),
+    (11, 2, DATE '2020-01-01', DATE '2020-01-01');
+
+statement ok
+INSERT INTO _dp_q21_supplier VALUES
+    (1, 1, 'Supplier#1'),
+    (2, 1, 'Supplier#2');
+
+statement ok
+INSERT INTO _dp_q21_nation VALUES (1, 'SAUDI ARABIA');
+
+statement ok
+ALTER TABLE _dp_q21_customer ADD PRIVACY_KEY (c_custkey);
+
+statement ok
+ALTER TABLE _dp_q21_customer SET PU;
+
+statement ok
+ALTER TABLE _dp_q21_orders ADD PRIVACY_LINK (o_custkey) REFERENCES _dp_q21_customer(c_custkey);
+
+statement ok
+ALTER TABLE _dp_q21_lineitem ADD PRIVACY_LINK (l_orderkey) REFERENCES _dp_q21_orders(o_orderkey);
+
+statement ok
+ALTER TABLE _dp_q21_supplier ADD PRIVACY_KEY (s_suppkey);
+
+statement ok
+ALTER TABLE _dp_q21_nation ADD PRIVACY_KEY (n_nationkey);
+
+query II
+SELECT suppkey, numwait
+FROM (
+    SELECT l1.l_suppkey AS suppkey, COUNT(*) AS numwait
+    FROM _dp_q21_lineitem l1, _dp_q21_orders
+    WHERE o_orderkey = l1.l_orderkey
+      AND o_orderstatus = 'F'
+      AND l1.l_receiptdate > l1.l_commitdate
+      AND EXISTS (
+        SELECT *
+        FROM _dp_q21_lineitem l2
+        WHERE l2.l_orderkey = l1.l_orderkey
+          AND l2.l_suppkey <> l1.l_suppkey
+      )
+      AND NOT EXISTS (
+        SELECT *
+        FROM _dp_q21_lineitem l3
+        WHERE l3.l_orderkey = l1.l_orderkey
+          AND l3.l_suppkey <> l1.l_suppkey
+          AND l3.l_receiptdate > l3.l_commitdate
+      )
+    GROUP BY l1.l_suppkey
+) q;
+----
+1	2
+
+statement error
+SELECT COUNT(*)
+FROM _dp_q21_lineitem a
+JOIN _dp_q21_lineitem b
+  ON a.l_orderkey = b.l_orderkey;
+----
+self-joins are only supported
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+ALTER TABLE u ADD PRIVACY_KEY (id);
+
+statement ok
+ALTER TABLE u SET PU;
+
+statement ok
+ALTER PU TABLE u ADD PROTECTED (region);
+
+statement ok
+ALTER TABLE orders ADD PRIVACY_LINK (uid) REFERENCES u(id);
+
+# ---------------------------------------------------------------------------
+# Phase H: AVG via SUM/COUNT decomposition with ε/2 budget split
 # ---------------------------------------------------------------------------
 # AVG(x) = noised_SUM(clipped(x)) / max(1, noised_COUNT). Each component uses
 # ε/2 → combined cost is still ε-DP. Output type is DOUBLE.

@@ -103,6 +103,68 @@ static void ValidateColumnsExist(const TableCatalogEntry &table, const vector<st
 	}
 }
 
+static bool ContainsColumnCaseInsensitive(const vector<string> &columns, const string &column) {
+	for (const auto &existing : columns) {
+		if (StringUtil::Lower(existing) == StringUtil::Lower(column)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void MergeColumnList(vector<string> &target, const vector<string> &source) {
+	for (const auto &column : source) {
+		if (!ContainsColumnCaseInsensitive(target, column)) {
+			target.push_back(column);
+		}
+	}
+}
+
+static bool SameLink(const PACLink &left, const PACLink &right) {
+	return StringUtil::CIEquals(StringUtil::Join(left.local_columns, ","),
+	                            StringUtil::Join(right.local_columns, ",")) &&
+	       StringUtil::Lower(left.referenced_table) == StringUtil::Lower(right.referenced_table) &&
+	       StringUtil::CIEquals(StringUtil::Join(left.referenced_columns, ","),
+	                            StringUtil::Join(right.referenced_columns, ","));
+}
+
+static bool SameLocalColumns(const PACLink &left, const PACLink &right) {
+	return StringUtil::CIEquals(StringUtil::Join(left.local_columns, ","), StringUtil::Join(right.local_columns, ","));
+}
+
+static void MergeLinks(vector<PACLink> &target, const vector<PACLink> &source) {
+	for (const auto &link : source) {
+		bool exists = false;
+		for (const auto &existing : target) {
+			if (SameLink(existing, link)) {
+				exists = true;
+				break;
+			}
+			if (SameLocalColumns(existing, link)) {
+				throw ParserException("Column(s) already have a PRIVACY_LINK defined. A column or set of columns "
+				                      "can only reference one target.");
+			}
+		}
+		if (!exists) {
+			target.push_back(link);
+		}
+	}
+}
+
+static PrivacyTableMetadata MergeMetadata(const PrivacyTableMetadata &current, const PrivacyTableMetadata &incoming) {
+	PrivacyTableMetadata merged = current;
+	merged.table_name = incoming.table_name.empty() ? current.table_name : incoming.table_name;
+	MergeColumnList(merged.primary_key_columns, incoming.primary_key_columns);
+	MergeLinks(merged.links, incoming.links);
+	MergeColumnList(merged.protected_columns, incoming.protected_columns);
+	MergeColumnList(merged.counter_columns, incoming.counter_columns);
+	merged.is_privacy_unit = current.is_privacy_unit || incoming.is_privacy_unit;
+	merged.derived_pu = current.derived_pu || incoming.derived_pu;
+	merged.is_set_pu_op = false;
+	merged.merge_existing = false;
+	return merged;
+}
+
 // ============================================================================
 // Custom FunctionData for PAC DDL execution
 // ============================================================================
@@ -323,6 +385,15 @@ ParserExtensionPlanResult PrivacyParserExtension::PACPlanFunction(ParserExtensio
 						throw CatalogException("ALTER TABLE SET PU requires a PRIVACY_KEY. "
 						                       "First run: ALTER TABLE " +
 						                       pac_data.metadata.table_name + " ADD PRIVACY_KEY (column_name)");
+					}
+					pac_data.metadata.is_set_pu_op = false;
+					pac_data.metadata.merge_existing = false;
+				} else if (pac_data.metadata.merge_existing) {
+					auto current = PrivacyMetadataManager::Get().GetTableMetadata(pac_data.metadata.table_name);
+					if (current) {
+						pac_data.metadata = MergeMetadata(*current, pac_data.metadata);
+					} else {
+						pac_data.metadata.merge_existing = false;
 					}
 				}
 
