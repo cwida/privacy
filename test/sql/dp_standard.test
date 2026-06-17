@@ -168,6 +168,25 @@ SET dp_sum_bound = 1000.0;
 statement ok
 SET dp_count_bound = 10.0;
 
+# Google-style pure-epsilon grouped queries need a public/data-independent partition domain.
+statement error
+SELECT store, COUNT(*) FROM orders GROUP BY store;
+----
+dp_public_partitions
+
+statement ok
+SET dp_public_partitions = 'assert';
+
+# Grouped joins require an L0 group-contribution bound: one PU may affect multiple
+# output groups, so Google-style bounded-contribution DP must charge that vector sensitivity.
+statement error
+SELECT store, COUNT(*) FROM orders GROUP BY store;
+----
+dp_max_groups_contributed
+
+statement ok
+SET dp_max_groups_contributed = 4.0;
+
 # Even a threshold far above any group's PU support leaves all 4 groups present.
 statement ok
 SET privacy_min_group_count = 100000.0;
@@ -182,6 +201,92 @@ s3	125
 
 statement ok
 SET privacy_min_group_count = NULL;
+
+# Nested PU-key histogram, like TPC-H Q13, with public bins 0..6 and an overflow bin at 6.
+# Each PU contributes to exactly one public bin, and the outer histogram receives DP noise.
+query II rowsort
+WITH public_bins(order_count) AS (
+  SELECT i FROM range(0, 7) t(i)
+),
+per_user AS (
+  SELECT id, least(COUNT(uid), 6) AS order_count
+  FROM u
+  LEFT JOIN orders ON id = uid
+  GROUP BY id
+)
+SELECT public_bins.order_count, COUNT(per_user.id)
+FROM public_bins
+LEFT JOIN per_user ON public_bins.order_count = per_user.order_count
+GROUP BY public_bins.order_count;
+----
+0	0
+1	0
+2	0
+3	0
+4	0
+5	100
+6	0
+
+# L0 contribution bounding: two PUs each touch three groups, but max groups is two.
+statement ok
+CREATE TABLE orders_l0 (uid BIGINT, store VARCHAR);
+
+statement ok
+INSERT INTO orders_l0 VALUES (0, 'a'), (0, 'b'), (0, 'c'), (1, 'a'), (1, 'b'), (1, 'c');
+
+statement ok
+ALTER TABLE orders_l0 ADD PRIVACY_LINK (uid) REFERENCES u(id);
+
+statement ok
+SET dp_count_bound = 1.0;
+
+statement ok
+SET dp_max_groups_contributed = 2.0;
+
+query II rowsort
+SELECT store, COUNT(*) AS cnt
+FROM orders_l0
+GROUP BY store;
+----
+b	2
+c	2
+
+# Public side tables are allowed in Google-style DP. COUNT(DISTINCT) is computed per PU
+# before clipping, then summed.
+statement ok
+CREATE TABLE public_store (store VARCHAR, label VARCHAR);
+
+statement ok
+INSERT INTO public_store VALUES ('s0', 'even'), ('s1', 'odd'), ('s2', 'even'), ('s3', 'odd');
+
+statement ok
+SET dp_count_bound = 10.0;
+
+statement ok
+SET dp_max_groups_contributed = 2.0;
+
+query II rowsort
+SELECT public_store.label, COUNT(DISTINCT orders.uid)
+FROM orders
+JOIN public_store ON orders.store = public_store.store
+GROUP BY public_store.label;
+----
+even	50
+odd	50
+
+# Hidden self-joins from EXISTS/NOT EXISTS filters are allowed; explicit accessible
+# self-joins remain rejected by the validator.
+query I
+SELECT COUNT(*)
+FROM orders_l0 o1
+WHERE EXISTS (
+  SELECT *
+  FROM orders_l0 o2
+  WHERE o2.uid = o1.uid
+    AND o2.store <> o1.store
+);
+----
+6
 
 statement ok
 SET privacy_noise = true;

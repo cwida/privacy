@@ -105,6 +105,10 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
     add_executable(pac_tpch_compiler_benchmark benchmark/tpch/pac_tpch_compiler_benchmark.cpp)
     target_link_libraries(pac_tpch_compiler_benchmark ${PRIVACY_LINK_LIBS})
 
+    # TPCH SASS-DP utility benchmark runner
+    add_executable(dp_sass_tpch_utility benchmark/tpch/dp_sass_tpch_utility.cpp)
+    target_link_libraries(dp_sass_tpch_utility ${PRIVACY_LINK_LIBS})
+
     # ClickHouse/ClickBench benchmark runner
     add_executable(pac_clickhouse_benchmark benchmark/clickbench/pac_clickhouse_benchmark.cpp)
     target_link_libraries(pac_clickhouse_benchmark ${PRIVACY_LINK_LIBS})

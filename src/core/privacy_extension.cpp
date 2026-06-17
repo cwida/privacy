@@ -322,15 +322,36 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "Differential privacy budget ε (used by dp_standard, dp_elastic, and dp_sass)",
 	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));
 	// Clipping bound for SUM/AVG, required when such an aggregate is present in any DP mode.
-	// dp_standard bounds each PU's total contribution; dp_elastic/dp_sass clip per tuple.
+	// dp_standard/dp_sass bound each PU's total contribution; dp_elastic clips per tuple.
 	db.config.AddExtensionOption("dp_sum_bound",
 	                             "Clipping bound for SUM/AVG in DP modes, required when such an aggregate is present "
-	                             "(per-PU total for dp_standard; per-tuple for dp_elastic/dp_sass)",
+	                             "(per-PU total for dp_standard/dp_sass; per-tuple for dp_elastic)",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
 	db.config.AddExtensionOption("dp_count_bound",
 	                             "Per-PU row-count bound: max rows one privacy unit contributes to a COUNT over a join "
-	                             "(required for dp_standard COUNT-over-join; also bounds dp_sass COUNT/AVG components)",
+	                             "(required for dp_standard/dp_sass COUNT-over-join; also bounds AVG components)",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_max_groups_contributed",
+	                             "Per-PU group contribution bound for dp_standard/dp_sass grouped joins. "
+	                             "This is the max number of output groups one privacy unit may affect.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sass_count_output_bound",
+	                             "Public output-domain upper bound for dp_sass COUNT/COUNT(DISTINCT) sample answers.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sass_sum_output_bound",
+	                             "Public symmetric output-domain bound for dp_sass SUM sample answers.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sass_avg_lower_bound",
+	                             "Public output-domain lower bound for dp_sass AVG sample answers.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sass_avg_upper_bound",
+	                             "Public output-domain upper bound for dp_sass AVG sample answers.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_public_partitions",
+	                             "Assertion for privacy_mode='dp_standard' grouped queries. Set to 'assert' when "
+	                             "GROUP BY partitions are public/data-independent, matching Google DP public "
+	                             "partitions semantics.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 	// Privacy failure probability δ for (ε,δ)-DP smooth sensitivity. Required by dp_elastic and
 	// dp_sass; ignored by dp_standard, which gives pure ε-DP. PRAGMA refresh_dp_stats(epsilon) can set it.
 	db.config.AddExtensionOption(

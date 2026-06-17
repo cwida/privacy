@@ -641,6 +641,10 @@ bool TryGetDpCountBound(ClientContext &context, double &out) {
 	return TryGetDoubleSetting(context, "dp_count_bound", out);
 }
 
+bool TryGetDpMaxGroupsContributed(ClientContext &context, double &out) {
+	return TryGetDoubleSetting(context, "dp_max_groups_contributed", out);
+}
+
 bool TryGetDpDelta(ClientContext &context, double &out) {
 	return TryGetDoubleSetting(context, "dp_delta", out);
 }

@@ -28,9 +28,8 @@
 namespace duckdb {
 
 static bool IsPacAggregate(const string &func) {
-	static const std::unordered_set<string> pac_aggs = {"as_noised_sum", "as_noised_count", "as_noised_min",
-	                                                    "as_noised_max", "as_sum",          "as_count",
-	                                                    "as_min",        "as_max"};
+	static const std::unordered_set<string> pac_aggs = {
+	    "as_noised_sum", "as_noised_count", "as_noised_min", "as_noised_max", "as_sum", "as_count", "as_min", "as_max"};
 	string lower_func = func;
 	std::transform(lower_func.begin(), lower_func.end(), lower_func.begin(), ::tolower);
 	return pac_aggs.count(lower_func) > 0;

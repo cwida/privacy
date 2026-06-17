@@ -195,6 +195,16 @@ SELECT i, 'ok'
 FROM range(64) t(i);
 
 statement ok
+INSERT INTO _sass_part
+SELECT i + 1000, 'Brand#22', 'SMALL BRUSHED TIN', 49
+FROM range(64) t(i);
+
+statement ok
+INSERT INTO _sass_partsupp
+SELECT i + 1000, 777
+FROM range(64) t(i);
+
+statement ok
 ALTER TABLE _sass_part ADD PRIVACY_KEY (p_partkey);
 
 statement ok
@@ -221,6 +231,12 @@ SET dp_sample_lanes = 8;
 statement ok
 SET dp_count_bound = 1000;
 
+statement ok
+SET dp_max_groups_contributed = 1;
+
+statement ok
+SET dp_sass_count_output_bound = 1000;
+
 query I nosort explain_sass_distinct_count
 EXPLAIN SELECT p_brand, p_type, p_size, COUNT(DISTINCT ps_suppkey) AS supplier_cnt
 FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
@@ -229,14 +245,26 @@ GROUP BY p_brand, p_type, p_size;
 as_sample_count_mask
 
 query I
-SELECT supplier_cnt > 0
+SELECT COUNT(*)
 FROM (
     SELECT p_brand, p_type, p_size, COUNT(DISTINCT ps_suppkey) AS supplier_cnt
     FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
     GROUP BY p_brand, p_type, p_size
-) q;
+) q
+WHERE supplier_cnt > 0;
 ----
-true
+2
+
+query I
+SELECT supplier_cnt
+FROM (
+    SELECT p_brand, p_type, p_size, COUNT(DISTINCT ps_suppkey) AS supplier_cnt
+    FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
+    GROUP BY p_brand, p_type, p_size
+) q
+WHERE p_brand = 'Brand#22';
+----
+1
 
 statement error
 SELECT COUNT(*)
@@ -249,22 +277,19 @@ WHERE ps_suppkey NOT IN (
 ----
 has no PRIVACY_LINK path
 
-query I nosort explain_sass_mixed_distinct_count
+statement error
 EXPLAIN SELECT p_brand, COUNT(DISTINCT ps_suppkey), COUNT(*)
 FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
 GROUP BY p_brand;
 ----
-as_sample_count_mask
+mixed DISTINCT
 
-query II
-SELECT supplier_cnt IS NOT NULL, row_cnt IS NOT NULL
-FROM (
-    SELECT p_brand, COUNT(DISTINCT ps_suppkey) AS supplier_cnt, COUNT(*) AS row_cnt
-    FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
-    GROUP BY p_brand
-) q;
+statement error
+SELECT p_brand, COUNT(DISTINCT ps_suppkey) AS supplier_cnt, COUNT(*) AS row_cnt
+FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
+GROUP BY p_brand;
 ----
-true	true
+mixed DISTINCT
 
 statement ok
 SET dp_count_bound = NULL;
@@ -305,6 +330,12 @@ ALTER TABLE _sass_q13_orders ADD PRIVACY_LINK (o_custkey) REFERENCES _sass_q13_c
 
 statement ok
 SET dp_count_bound = 1000;
+
+statement ok
+SET dp_max_groups_contributed = 1;
+
+statement ok
+SET dp_sass_count_output_bound = 1000;
 
 query I nosort explain_sass_q13_nested_count
 EXPLAIN SELECT c_count, COUNT(*) AS custdist
@@ -419,6 +450,15 @@ ALTER TABLE _sass_q21_supplier ADD PRIVACY_KEY (s_suppkey);
 statement ok
 ALTER TABLE _sass_q21_nation ADD PRIVACY_KEY (n_nationkey);
 
+statement ok
+SET dp_count_bound = 1000;
+
+statement ok
+SET dp_max_groups_contributed = 1;
+
+statement ok
+SET dp_sass_count_output_bound = 1000;
+
 query I nosort explain_sass_q21_self_join
 EXPLAIN SELECT l1.l_suppkey, COUNT(*) AS numwait
 FROM _sass_q21_lineitem l1, _sass_q21_orders
@@ -526,10 +566,10 @@ SET dp_sum_bound = 500.0;
 statement ok
 SET dp_count_bound = NULL;
 
-query I
-SELECT AVG(v) IS NULL FROM sass_users;
+statement error
+SELECT AVG(v) FROM sass_users;
 ----
-true
+dp_count_bound
 
 statement ok
 SET dp_count_bound = -1.0;
@@ -542,15 +582,27 @@ dp_count_bound
 statement ok
 SET dp_count_bound = 10.0;
 
+statement ok
+SET dp_sass_count_output_bound = 10.0;
+
 query I
 SELECT COUNT(*) IS NOT NULL FROM sass_users;
 ----
 true
 
+statement ok
+SET dp_sass_sum_output_bound = 500.0;
+
 query I
 SELECT SUM(v) IS NOT NULL FROM sass_users;
 ----
 true
+
+statement ok
+SET dp_sass_avg_lower_bound = 0.0;
+
+statement ok
+SET dp_sass_avg_upper_bound = 500.0;
 
 query I
 SELECT AVG(v) IS NULL FROM sass_users;
@@ -567,20 +619,38 @@ SELECT i, i::DOUBLE FROM range(200) t(i);
 statement ok
 SET dp_count_bound = NULL;
 
+statement ok
+SET dp_count_bound = 10.0;
+
+statement ok
+SET dp_sum_bound = 500.0;
+
+statement ok
+SET dp_sass_count_output_bound = 200.0;
+
+statement ok
+SET dp_sass_sum_output_bound = 20000.0;
+
+statement ok
+SET dp_sass_avg_lower_bound = 0.0;
+
+statement ok
+SET dp_sass_avg_upper_bound = 200.0;
+
 query I nosort explain_sass_avg
 EXPLAIN SELECT AVG(v) FROM sass_many;
 ----
 as_sample_avg
 
-query I
-SELECT MIN(v) IS NOT NULL FROM sass_many;
+statement error
+SELECT MIN(v) FROM sass_many;
 ----
-true
+MIN/MAX
 
-query I
-SELECT MAX(v) IS NOT NULL FROM sass_many;
+statement error
+SELECT MAX(v) FROM sass_many;
 ----
-true
+MIN/MAX
 
 query I
 SELECT AVG(v) IS NOT NULL FROM sass_many;

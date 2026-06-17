@@ -118,6 +118,43 @@ void PacCountColumnScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_
 	}
 }
 
+static void DpSampleCountMaskUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr,
+                                    idx_t count) {
+	ScatterState &agg = *reinterpret_cast<ScatterState *>(state_ptr);
+	UnifiedVectorFormat idata;
+	inputs[0].ToUnifiedFormat(count, idata);
+	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
+	for (idx_t i = 0; i < count; i++) {
+		auto idx = idata.sel->get_index(i);
+		if (idata.validity.RowIsValid(idx)) {
+#if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
+			PacCountUpdateOne(agg, input_data[idx], aggr.allocator);
+#else
+			PacCountBufferOrUpdateOne(agg, input_data[idx], aggr.allocator);
+#endif
+		}
+	}
+}
+
+static void DpSampleCountMaskScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
+                                           idx_t count) {
+	UnifiedVectorFormat idata, sdata;
+	inputs[0].ToUnifiedFormat(count, idata);
+	states.ToUnifiedFormat(count, sdata);
+	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
+	auto state_p = UnifiedVectorFormat::GetData<ScatterState *>(sdata);
+	for (idx_t i = 0; i < count; i++) {
+		auto idx = idata.sel->get_index(i);
+		if (idata.validity.RowIsValid(idx)) {
+#if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
+			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], input_data[idx], aggr.allocator);
+#else
+			PacCountBufferOrUpdateOne(*state_p[sdata.sel->get_index(i)], input_data[idx], aggr.allocator);
+#endif
+		}
+	}
+}
+
 // Combine - flush src's buffer into dst (don't allocate src), then merge states
 void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
 	auto sa = FlatVector::GetData<ScatterState *>(src);
@@ -333,6 +370,41 @@ static void DpSampleCountFinalizeCounters(Vector &states, AggregateInputData &in
 	}
 }
 
+static void DpSampleCountMaskFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                              idx_t offset) {
+	auto aggs = FlatVector::GetData<ScatterState *>(states);
+	auto list_entries = FlatVector::GetData<list_entry_t>(result);
+	auto &child_vec = ListVector::GetEntry(result);
+
+	idx_t total_elements = count * 64;
+	ListVector::Reserve(result, total_elements);
+	ListVector::SetListSize(result, total_elements);
+
+	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
+	PAC_FLOAT buf[64];
+
+	for (idx_t i = 0; i < count; i++) {
+#if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
+		aggs[i]->FlushBuffer(*aggs[i], input.allocator);
+#endif
+		PacCountState *s = aggs[i]->GetState();
+
+		list_entries[offset + i].offset = i * 64;
+		list_entries[offset + i].length = 64;
+
+		idx_t base = i * 64;
+		if (!s) {
+			memset(child_data + base, 0, 64 * sizeof(PAC_FLOAT));
+			continue;
+		}
+
+		s->GetTotalsWithSWAR(buf);
+		for (int j = 0; j < 64; j++) {
+			child_data[base + j] = buf[j];
+		}
+	}
+}
+
 static unique_ptr<FunctionData> DpSampleCountBind(ClientContext &ctx, AggregateFunction &,
                                                   vector<unique_ptr<Expression>> &) {
 	return MakeDpSampleBindData(ctx);
@@ -354,6 +426,17 @@ void RegisterDpSampleCountFunctions(ExtensionLoader &loader) {
 	desc.description = "[INTERNAL] Returns 64 sample-median DP counters for COUNT-like values.";
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
+
+	AggregateFunctionSet mask_set("as_sample_count_mask");
+	mask_set.AddFunction(AggregateFunction(
+	    "as_sample_count_mask", {LogicalType::UBIGINT}, list_type, PacCountStateSize, PacCountInitialize,
+	    DpSampleCountMaskScatterUpdate, PacCountCombine, DpSampleCountMaskFinalizeCounters,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, DpSampleCountMaskUpdate, DpSampleCountBind));
+	CreateAggregateFunctionInfo mask_info(mask_set);
+	FunctionDescription mask_desc;
+	mask_desc.description = "[INTERNAL] Returns 64 sample-median DP counters from precomputed sample masks.";
+	mask_info.descriptions.push_back(std::move(mask_desc));
+	loader.RegisterFunction(std::move(mask_info));
 }
 
 // ============================================================================
@@ -363,10 +446,10 @@ void RegisterPacCountCountersFunctions(ExtensionLoader &loader) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
 	AggregateFunctionSet counters_set("as_count");
 
-	counters_set.AddFunction(
-	    AggregateFunction("as_count", {LogicalType::UBIGINT}, list_double_type, PacCountStateSize, PacCountInitialize,
-	                      PacCountScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
-	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate, PacCountBind));
+	counters_set.AddFunction(AggregateFunction("as_count", {LogicalType::UBIGINT}, list_double_type, PacCountStateSize,
+	                                           PacCountInitialize, PacCountScatterUpdate, PacCountCombine,
+	                                           PacCountFinalizeCounters, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	                                           PacCountUpdate, PacCountBind));
 
 	counters_set.AddFunction(
 	    AggregateFunction("as_count", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, PacCountStateSize,
@@ -457,8 +540,8 @@ void RegisterPacClipCountFunctions(ExtensionLoader &loader) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
 	AggregateFunctionSet fcn_set("as_clip_count");
 
-	fcn_set.AddFunction(AggregateFunction("as_clip_count", {LogicalType::UBIGINT}, list_double_type,
-	                                      PacCountStateSize, PacCountInitialize, PacCountScatterUpdate, PacCountCombine,
+	fcn_set.AddFunction(AggregateFunction("as_clip_count", {LogicalType::UBIGINT}, list_double_type, PacCountStateSize,
+	                                      PacCountInitialize, PacCountScatterUpdate, PacCountCombine,
 	                                      PacCountFinalizeCounters, FunctionNullHandling::DEFAULT_NULL_HANDLING,
 	                                      PacCountUpdate, PacCountBind));
 	fcn_set.AddFunction(AggregateFunction(

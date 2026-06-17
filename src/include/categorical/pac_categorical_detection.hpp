@@ -139,8 +139,8 @@ static inline string GetBasePacAggregateName(const string &name) {
 static inline string GetListAggregateVariant(const string &name, const string &privacy_mode = "pac") {
 	bool sass = privacy_mode == "dp_sass";
 	for (auto &aggr : {"sum", "count", "min", "max", "avg"}) {
-		bool matches = name == string(aggr) || name == string("as_noised_") + aggr ||
-		               name == string("as_") + aggr || name == string("as_sample_") + aggr;
+		bool matches = name == string(aggr) || name == string("as_noised_") + aggr || name == string("as_") + aggr ||
+		               name == string("as_sample_") + aggr;
 		if (!matches) {
 			continue;
 		}

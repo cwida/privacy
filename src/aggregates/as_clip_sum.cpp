@@ -964,23 +964,21 @@ void RegisterPacClipSumFunctions(ExtensionLoader &loader) {
 
 	// FLOAT/DOUBLE overloads (scale to int64 internally)
 	fcn_set.AddFunction(AggregateFunction(
-	    "as_clip_sum", {LogicalType::UBIGINT, LogicalType::FLOAT}, list_type, PacClipSumStateSize,
+	    "as_clip_sum", {LogicalType::UBIGINT, LogicalType::FLOAT}, list_type, PacClipSumStateSize, PacClipSumInitialize,
+	    PacClipSumScatterUpdateSingleFloat, PacClipSumCombine, PacClipSumFinalizeCountersSigned,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleFloat, PacClipBindFloat));
+	fcn_set.AddFunction(AggregateFunction(
+	    "as_clip_sum", {LogicalType::UBIGINT, LogicalType::FLOAT, LogicalType::DOUBLE}, list_type, PacClipSumStateSize,
 	    PacClipSumInitialize, PacClipSumScatterUpdateSingleFloat, PacClipSumCombine, PacClipSumFinalizeCountersSigned,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleFloat, PacClipBindFloat));
-	fcn_set.AddFunction(
-	    AggregateFunction("as_clip_sum", {LogicalType::UBIGINT, LogicalType::FLOAT, LogicalType::DOUBLE}, list_type,
-	                      PacClipSumStateSize, PacClipSumInitialize, PacClipSumScatterUpdateSingleFloat,
-	                      PacClipSumCombine, PacClipSumFinalizeCountersSigned,
-	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleFloat, PacClipBindFloat));
 	fcn_set.AddFunction(AggregateFunction(
 	    "as_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE}, list_type, PacClipSumStateSize,
 	    PacClipSumInitialize, PacClipSumScatterUpdateSingleDouble, PacClipSumCombine, PacClipSumFinalizeCountersSigned,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleDouble, PacClipBindDouble));
 	fcn_set.AddFunction(AggregateFunction(
-	    "as_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE}, list_type,
-	    PacClipSumStateSize, PacClipSumInitialize, PacClipSumScatterUpdateSingleDouble, PacClipSumCombine,
-	    PacClipSumFinalizeCountersSigned, FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleDouble,
-	    PacClipBindDouble));
+	    "as_clip_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE}, list_type, PacClipSumStateSize,
+	    PacClipSumInitialize, PacClipSumScatterUpdateSingleDouble, PacClipSumCombine, PacClipSumFinalizeCountersSigned,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateSingleDouble, PacClipBindDouble));
 
 	// Add list aggregate overload (LIST<FLOAT> → LIST<FLOAT>) for categorical/subquery
 	AddPacListAggregateOverload(fcn_set, "clip_sum");

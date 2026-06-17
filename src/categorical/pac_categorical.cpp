@@ -1407,7 +1407,7 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 
 	// as_noised(list<PAC_FLOAT>) -> PAC_FLOAT
 	ScalarFunction as_noised("as_noised", {list_double_type}, PacFloatLogicalType(), PacNoisedFunction,
-	                          PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	                         PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
 	loader.RegisterFunction(
 	    make_scalar_info(as_noised, "[INTERNAL] Applies PAC noise to 64-element counter list, returns scalar."));
 
@@ -1417,9 +1417,8 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 
 	// as_noised_div(list<PAC_FLOAT> sum, list<PAC_FLOAT> cnt) -> DOUBLE
 	ScalarFunction as_noised_div("as_noised_div", {list_double_type, list_double_type}, LogicalType::DOUBLE,
-	                               PacNoisedDivFunction, PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
-	loader.RegisterFunction(
-	    make_scalar_info(as_noised_div, "[INTERNAL] Fused counter-list division + noise for AVG."));
+	                             PacNoisedDivFunction, PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	loader.RegisterFunction(make_scalar_info(as_noised_div, "[INTERNAL] Fused counter-list division + noise for AVG."));
 
 	// priv_filter_<cmp>: optimized comparison + filter in a single pass
 	RegisterPacFilterCmp<PacFilterCmpOp::GT>(loader, "priv_filter_gt");

@@ -4,6 +4,7 @@
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/common/vector_operations/ternary_executor.hpp"
+#include "duckdb/common/vector_operations/unary_executor.hpp"
 
 #include <algorithm>
 #include <array>
@@ -11,6 +12,13 @@
 #include <random>
 
 namespace duckdb {
+
+static void DpSampleMaskFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	int sample_lanes = GetDpSampleLanes(state.GetContext());
+	auto count = args.size();
+	UnaryExecutor::Execute<uint64_t, uint64_t>(
+	    args.data[0], result, count, [sample_lanes](uint64_t hash) { return DpSampleHash(hash, sample_lanes); });
+}
 
 static uint64_t GetDpNoiseSeed(ClientContext &context) {
 	Value seed_val;
@@ -357,6 +365,13 @@ static void DpAggregateFunction(DataChunk &args, ExpressionState &state, Vector 
 }
 
 void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
+	ScalarFunction mask_function("dp_sample_mask", {LogicalType::UBIGINT}, LogicalType::UBIGINT, DpSampleMaskFunction);
+	CreateScalarFunctionInfo mask_info(mask_function);
+	FunctionDescription mask_desc;
+	mask_desc.description = "[INTERNAL] Maps a PU hash to the 64-bit SASS sample-lane mask.";
+	mask_info.descriptions.push_back(std::move(mask_desc));
+	loader.RegisterFunction(std::move(mask_info));
+
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
 	ScalarFunctionSet set("dp_smooth_median_noise");
 	set.AddFunction(ScalarFunction("dp_smooth_median_noise",
