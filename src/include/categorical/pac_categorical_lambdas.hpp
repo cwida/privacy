@@ -19,7 +19,7 @@ namespace duckdb {
 // For single binding: list_transform(counters, elem -> body(elem))
 // For multiple bindings: list_transform(list_zip(c1, c2, ...), elem -> body(elem.a, elem.b, ...))
 // Returns the list_transform expression, or nullptr on failure.
-// The caller wraps with priv_noised or priv_filter as needed.
+// The caller wraps with as_noised or priv_filter as needed.
 unique_ptr<Expression> BuildCategoricalLambdas(OptimizerExtensionInput &input,
                                                const vector<PacBindingInfo> &pac_bindings,
                                                Expression *expr_to_transform,

@@ -9,7 +9,7 @@
 #include "privacy_debug.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "utils/privacy_helpers.hpp"
-#include "aggregates/pac_aggregate.hpp"
+#include "aggregates/as_aggregate.hpp"
 #include "categorical/pac_categorical_rewriter.hpp"
 
 #include "duckdb/planner/operator/logical_top_n.hpp"
@@ -101,7 +101,7 @@ void RegisterPacMeanFunction(ExtensionLoader &loader) {
 // Information about a PAC aggregate expression that was rewritten to _counters
 struct PacTopKAggInfo {
 	idx_t agg_index;           // Index in LogicalAggregate::expressions
-	string original_name;      // e.g., "priv_noised_sum"
+	string original_name;      // e.g., "as_noised_sum"
 	LogicalType original_type; // Return type before converting to LIST
 	ColumnBinding agg_binding; // Binding in the aggregate's output (aggregate_index, agg_index)
 };
@@ -320,7 +320,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	// parent sees its child's updated GetColumnBindings() result.
 	//
 	// IMPORTANT: For materialized CTEs, skip the CTE definition child (children[0]).
-	// TopK rewrites aggregate types (e.g., priv_noised_sum → priv_sum counters), which changes
+	// TopK rewrites aggregate types (e.g., as_noised_sum → as_sum counters), which changes
 	// the CTE's output type. Any CTE_SCAN referencing this CTE would then receive
 	// FLOAT[] instead of the expected scalar type, causing execution crashes.
 	// Only recurse into the consumer child (children[1]).
@@ -686,7 +686,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 #if PRIVACY_DEBUG
 						PRIVACY_DEBUG_PRINT("PACTopKRule:     A3b WRAPPING LIST colref: " + e->ToString());
 #endif
-						e = input.optimizer.BindScalarFunction("pac_noised", std::move(e));
+						e = input.optimizer.BindScalarFunction("as_noised", std::move(e));
 						// Cast back to original aggregate type (e.g. FLOAT→DOUBLE for AVG).
 						// Trace the binding through remaining projections to identify which
 						// PAC aggregate this colref came from, then cast if types differ.
@@ -716,7 +716,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 					}
 					// If this is a CAST whose child is a LIST colref, replace the
 					// entire CAST so the bound cast function matches the new source
-					// type (FLOAT from priv_noised instead of original INT64/DECIMAL).
+					// type (FLOAT from as_noised instead of original INT64/DECIMAL).
 					if (e->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
 						auto &cast_expr = e->Cast<BoundCastExpression>();
 						if (cast_expr.child->type == ExpressionType::BOUND_COLUMN_REF &&
@@ -724,9 +724,9 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 							auto target_type = cast_expr.return_type;
 #if PRIVACY_DEBUG
 							PRIVACY_DEBUG_PRINT("PACTopKRule:     A3b REPLACING CAST(LIST->" + target_type.ToString() +
-							                    ") with CAST(priv_noised()->" + target_type.ToString() + ")");
+							                    ") with CAST(as_noised()->" + target_type.ToString() + ")");
 #endif
-							auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(cast_expr.child));
+							auto noised = input.optimizer.BindScalarFunction("as_noised", std::move(cast_expr.child));
 							e = BoundCastExpression::AddCastToType(input.context, std::move(noised), target_type);
 							return;
 						}
@@ -772,10 +772,10 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		for (idx_t i = 0; i < original_outermost_col_count; i++) {
 			auto it_pac = outermost_pac_col_map.find(i);
 			if (it_pac != outermost_pac_col_map.end()) {
-				// PAC aggregate column: apply priv_noised to counter LIST, cast back to original type
+				// PAC aggregate column: apply as_noised to counter LIST, cast back to original type
 				auto counters_ref =
 				    make_uniq<BoundColumnRefExpression>(list_type, ColumnBinding(outermost->table_index, i));
-				auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(counters_ref));
+				auto noised = input.optimizer.BindScalarFunction("as_noised", std::move(counters_ref));
 				auto &orig_type = pac_aggs[it_pac->second].original_type;
 				if (orig_type != noised->return_type) {
 					noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), orig_type);
@@ -856,7 +856,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 			auto it = pac_mean_column_map.find(HashBinding(binding));
 			if (it != pac_mean_column_map.end()) {
 				auto counters_ref = make_uniq<BoundColumnRefExpression>(list_type, ColumnBinding(mean_proj_idx, i));
-				auto noised = input.optimizer.BindScalarFunction("pac_noised", std::move(counters_ref));
+				auto noised = input.optimizer.BindScalarFunction("as_noised", std::move(counters_ref));
 				// Cast back to the original aggregate return type (e.g. BIGINT for count)
 				for (auto &info : pac_aggs) {
 					if (info.agg_binding == binding && info.original_type != noised->return_type) {

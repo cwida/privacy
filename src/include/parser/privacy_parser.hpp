@@ -41,6 +41,7 @@ struct PrivacyTableMetadata {
 	bool is_privacy_unit = false;   // True if created with CREATE PU TABLE or SET PAC
 	bool derived_pu = false;        // True if created via CTAS from a PU or derived_pu table
 	bool is_set_pu_op = false;      // Transient: SET PU op needs plan-time key validation (not serialized)
+	bool merge_existing = false;    // Transient: additive ALTER should merge with plan-time metadata
 
 	PrivacyTableMetadata() = default;
 	explicit PrivacyTableMetadata(string name) : table_name(std::move(name)) {

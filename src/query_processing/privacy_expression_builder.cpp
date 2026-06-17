@@ -476,15 +476,15 @@ unique_ptr<Expression> BindBitOrAggregate(OptimizerExtensionInput &input, unique
 static string GetPacAggregateFunctionName(const string &function_name, ClientContext *ctx = nullptr) {
 	string pac_function_name;
 	if (function_name == "sum" || function_name == "sum_no_overflow") {
-		pac_function_name = "priv_noised_sum";
+		pac_function_name = "as_noised_sum";
 	} else if (function_name == "count" || function_name == "count_star") {
-		pac_function_name = "priv_noised_count";
+		pac_function_name = "as_noised_count";
 	} else if (function_name == "min") {
-		pac_function_name = "priv_noised_min";
+		pac_function_name = "as_noised_min";
 	} else if (function_name == "max") {
-		pac_function_name = "priv_noised_max";
+		pac_function_name = "as_noised_max";
 	} else if (function_name == "avg") {
-		pac_function_name = "priv_noised_avg";
+		pac_function_name = "as_noised_avg";
 	} else {
 		throw NotImplementedException("Privacy compiler: unsupported aggregate function " + function_name);
 	}
@@ -493,10 +493,10 @@ static string GetPacAggregateFunctionName(const string &function_name, ClientCon
 
 // Insert a pre-aggregation step for DISTINCT aggregates.
 // Instead of pac_*_distinct (custom hash map), this leverages DuckDB's native GROUP BY
-// to deduplicate values, then feeds bit_or(hash) results into standard priv_count/priv_sum/priv_avg.
+// to deduplicate values, then feeds bit_or(hash) results into standard as_count/as_sum/as_avg.
 //
 // Plan transformation for COUNT(DISTINCT col) GROUP BY [g1]:
-//   AGGREGATE [priv_count(combined_hash, 1)] GROUP BY [g1]
+//   AGGREGATE [as_count(combined_hash, 1)] GROUP BY [g1]
 //     AGGREGATE [bit_or(hash) FILTER (col IS NOT NULL)] GROUP BY [g1, hash(col)]
 //       <original child>
 //
@@ -684,23 +684,33 @@ static void RemapExpressionBindings(Expression &e, const std::unordered_map<idx_
 	ExpressionIterator::EnumerateChildren(e, [&](Expression &child) { RemapExpressionBindings(child, map); });
 }
 
-// Orchestrator: splits a mixed/multi-DISTINCT aggregate into N branches joined together.
-static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                            LogicalAggregate *agg, unique_ptr<Expression> &hash_input_expr) {
-	auto &binder = input.optimizer.binder;
-	bool has_groups = !agg->groups.empty();
+static unique_ptr<Expression> CopyBranchExpression(const Expression &expr,
+                                                   const std::unordered_map<idx_t, idx_t> *index_map) {
+	auto result = expr.Copy();
+	if (index_map) {
+		RemapExpressionBindings(*result, *index_map);
+	}
+	return result;
+}
 
-	// 1. Classify aggregates by distinct column (or non-distinct)
+JoinedDistinctAggregateBranches BuildJoinedDistinctAggregateBranches(OptimizerExtensionInput &input,
+                                                                     unique_ptr<LogicalOperator> &plan,
+                                                                     LogicalAggregate *agg,
+                                                                     unique_ptr<Expression> hash_expr,
+                                                                     DistinctAggregateBranchBuilder &builder) {
+	auto &binder = input.optimizer.binder;
+
 	struct BranchInfo {
 		bool is_distinct;
 		string distinct_col_str;
 		unique_ptr<Expression> distinct_col_expr;
 		vector<std::pair<idx_t, string>> distinct_agg_specs;
 		vector<std::pair<idx_t, const BoundAggregateExpression *>> non_distinct_specs;
+		vector<idx_t> original_agg_indices;
 	};
+
 	vector<BranchInfo> branches;
 	std::unordered_map<string, idx_t> distinct_col_to_branch;
-
 	for (idx_t i = 0; i < agg->expressions.size(); i++) {
 		auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
 		bool is_distinct = aggr.IsDistinct() && !aggr.children.empty();
@@ -710,20 +720,23 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 			auto it = distinct_col_to_branch.find(col_str);
 			if (it != distinct_col_to_branch.end()) {
 				branches[it->second].distinct_agg_specs.emplace_back(i, aggr.function.name);
+				branches[it->second].original_agg_indices.push_back(i);
 			} else {
 				BranchInfo info;
 				info.is_distinct = true;
 				info.distinct_col_str = col_str;
 				info.distinct_col_expr = aggr.children[0]->Copy();
 				info.distinct_agg_specs.emplace_back(i, aggr.function.name);
+				info.original_agg_indices.push_back(i);
 				distinct_col_to_branch[col_str] = branches.size();
 				branches.push_back(std::move(info));
 			}
 		} else {
 			bool found = false;
-			for (auto &b : branches) {
-				if (!b.is_distinct) {
-					b.non_distinct_specs.emplace_back(i, &aggr);
+			for (auto &branch : branches) {
+				if (!branch.is_distinct) {
+					branch.non_distinct_specs.emplace_back(i, &aggr);
+					branch.original_agg_indices.push_back(i);
 					found = true;
 					break;
 				}
@@ -732,16 +745,15 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 				BranchInfo info;
 				info.is_distinct = false;
 				info.non_distinct_specs.emplace_back(i, &aggr);
+				info.original_agg_indices.push_back(i);
 				branches.push_back(std::move(info));
 			}
 		}
 	}
 
-	// 2. Prepare per-branch inputs: copy child subtrees and remap expressions
 	std::unordered_set<idx_t> all_plan_indices;
 	CollectTableIndicesRecursive(plan.get(), all_plan_indices);
 
-	// Make N-1 copies first (while original child is still alive), save index maps
 	vector<unique_ptr<LogicalOperator>> child_copies;
 	vector<std::unordered_map<idx_t, idx_t>> index_maps;
 	for (idx_t bi = 1; bi < branches.size(); bi++) {
@@ -754,117 +766,44 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 		index_maps.push_back(std::move(imap));
 	}
 
-	// 3. Build each branch
-	struct BuiltBranch {
-		unique_ptr<LogicalOperator> subtree;
-		idx_t group_index;
-		idx_t agg_index;
-		vector<idx_t> original_agg_indices;
-	};
-	vector<BuiltBranch> built_branches;
-
+	vector<DistinctAggregateBranchResult> built_branches;
+	built_branches.reserve(branches.size());
 	for (idx_t bi = 0; bi < branches.size(); bi++) {
 		auto &branch = branches[bi];
+		const auto *index_map = bi == 0 ? nullptr : &index_maps[bi - 1];
+		unique_ptr<LogicalOperator> child = bi == 0 ? std::move(agg->children[0]) : std::move(child_copies[bi - 1]);
 
-		// Get child and prepare remapped expressions
-		unique_ptr<LogicalOperator> child;
-		unique_ptr<Expression> branch_hash;
+		auto branch_hash = CopyBranchExpression(*hash_expr, index_map);
 		vector<unique_ptr<Expression>> branch_groups;
-
-		if (bi == 0) {
-			child = std::move(agg->children[0]);
-			branch_hash = hash_input_expr->Copy();
-			for (auto &g : agg->groups) {
-				branch_groups.push_back(g->Copy());
-			}
-		} else {
-			child = std::move(child_copies[bi - 1]);
-			auto &imap = index_maps[bi - 1];
-
-			branch_hash = hash_input_expr->Copy();
-			RemapExpressionBindings(*branch_hash, imap);
-
-			for (auto &g : agg->groups) {
-				auto gcopy = g->Copy();
-				RemapExpressionBindings(*gcopy, imap);
-				branch_groups.push_back(std::move(gcopy));
-			}
+		branch_groups.reserve(agg->groups.size());
+		for (auto &group : agg->groups) {
+			branch_groups.push_back(CopyBranchExpression(*group, index_map));
 		}
 
-		BuiltBranch bb;
+		DistinctAggregateBranchResult built;
+		built.original_agg_indices = branch.original_agg_indices;
 		if (branch.is_distinct) {
-			for (auto &s : branch.distinct_agg_specs) {
-				bb.original_agg_indices.push_back(s.first);
-			}
-			auto distinct_col = branch.distinct_col_expr->Copy();
-			if (bi > 0) {
-				RemapExpressionBindings(*distinct_col, index_maps[bi - 1]);
-			}
-			bb.subtree =
-			    BuildDistinctBranch(input, std::move(child), branch_groups, std::move(branch_hash),
-			                        std::move(distinct_col), branch.distinct_agg_specs, bb.group_index, bb.agg_index);
+			auto distinct_col = CopyBranchExpression(*branch.distinct_col_expr, index_map);
+			built.subtree = builder.BuildDistinctBranch(input, std::move(child), branch_groups, std::move(branch_hash),
+			                                            std::move(distinct_col), branch.distinct_agg_specs, index_map,
+			                                            built.group_index, built.agg_index);
 		} else {
-			for (auto &s : branch.non_distinct_specs) {
-				bb.original_agg_indices.push_back(s.first);
-			}
-			// For non-distinct on copies, remap the value expressions too
-			if (bi > 0) {
-				auto &imap = index_maps[bi - 1];
-				// Create remapped non_distinct_specs with updated value expressions
-				vector<std::pair<idx_t, const BoundAggregateExpression *>> specs_copy;
-				for (auto &s : branch.non_distinct_specs) {
-					specs_copy.push_back(s);
-				}
-				// BuildNonDistinctBranch copies the children from the specs, so we need
-				// the expressions to still reference original bindings. But wait — the child
-				// subtree is remapped, so the aggregate value expressions (which reference the
-				// child's output) need remapping too.
-				// Since BuildNonDistinctBranch copies old_aggr.children[0], and those children
-				// still reference the ORIGINAL indices, we need to remap them after building.
-				// Actually, let's just build with original specs and then fix up.
-				// A simpler approach: BuildNonDistinctBranch takes the specs and copies children
-				// from the BoundAggregateExpression pointers. Those still reference original indices.
-				// We need to remap the aggregate value children too.
-				// Let's handle this in BuildNonDistinctBranch by accepting pre-built value expressions.
-				// For now, use a workaround: build a temporary vector of remapped value expressions.
-				bb.subtree = BuildNonDistinctBranch(input, std::move(child), branch_groups, std::move(branch_hash),
-				                                    branch.non_distinct_specs, bb.group_index, bb.agg_index);
-				// Fix up: remap value expression bindings inside the built branch's aggregate expressions
-				auto &branch_agg = bb.subtree->Cast<LogicalAggregate>();
-				for (auto &expr : branch_agg.expressions) {
-					auto &bound_agg = expr->Cast<BoundAggregateExpression>();
-					// Child 0 is hash (already from fresh branch_hash), child 1 is the value
-					if (bound_agg.children.size() > 1) {
-						RemapExpressionBindings(*bound_agg.children[1], imap);
-					}
-				}
-				bb.subtree->ResolveOperatorTypes();
-			} else {
-				bb.subtree = BuildNonDistinctBranch(input, std::move(child), branch_groups, std::move(branch_hash),
-				                                    branch.non_distinct_specs, bb.group_index, bb.agg_index);
-			}
+			built.subtree = builder.BuildNonDistinctBranch(input, std::move(child), branch_groups,
+			                                               std::move(branch_hash), branch.non_distinct_specs, index_map,
+			                                               built.group_index, built.agg_index);
 		}
-		built_branches.push_back(std::move(bb));
-	}
-
-	// Save branch expression types before step 4 moves subtrees
-	vector<vector<LogicalType>> branch_expr_types;
-	for (auto &bb : built_branches) {
-		auto &branch_agg = bb.subtree->Cast<LogicalAggregate>();
-		vector<LogicalType> types;
+		auto &branch_agg = built.subtree->Cast<LogicalAggregate>();
 		for (auto &expr : branch_agg.expressions) {
-			types.push_back(expr->return_type);
+			built.aggregate_types.push_back(expr->return_type);
 		}
-		branch_expr_types.push_back(std::move(types));
+		built_branches.push_back(std::move(built));
 	}
 
-	// 4. Join branches together
+	bool has_groups = !agg->groups.empty();
 	unique_ptr<LogicalOperator> joined = std::move(built_branches[0].subtree);
 	idx_t left_group_index = built_branches[0].group_index;
-
 	for (idx_t bi = 1; bi < built_branches.size(); bi++) {
 		auto &right = built_branches[bi];
-
 		if (has_groups) {
 			auto join = make_uniq<LogicalComparisonJoin>(JoinType::INNER);
 			for (idx_t gi = 0; gi < agg->groups.size(); gi++) {
@@ -886,17 +825,6 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 		}
 	}
 
-	// 5. Create output projection
-	idx_t proj_table_index = binder.GenerateTableIndex();
-	vector<unique_ptr<Expression>> proj_expressions;
-
-	idx_t num_groups = agg->groups.size();
-	for (idx_t gi = 0; gi < num_groups; gi++) {
-		proj_expressions.push_back(
-		    make_uniq<BoundColumnRefExpression>(agg->groups[gi]->return_type, ColumnBinding(left_group_index, gi)));
-	}
-
-	// Build lookup: original_agg_idx → (branch_idx, position_within_branch)
 	std::unordered_map<idx_t, std::pair<idx_t, idx_t>> agg_idx_to_branch;
 	for (idx_t bi = 0; bi < built_branches.size(); bi++) {
 		for (idx_t pos = 0; pos < built_branches[bi].original_agg_indices.size(); pos++) {
@@ -904,17 +832,75 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 		}
 	}
 
+	JoinedDistinctAggregateBranches result;
+	result.joined = std::move(joined);
+	result.left_group_index = left_group_index;
+	result.branches = std::move(built_branches);
+	result.aggregate_map = std::move(agg_idx_to_branch);
+	return result;
+}
+
+// Orchestrator: splits a mixed/multi-DISTINCT aggregate into N branches joined together.
+static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                            LogicalAggregate *agg, unique_ptr<Expression> &hash_input_expr) {
+	class PacBranchBuilder : public DistinctAggregateBranchBuilder {
+	public:
+		unique_ptr<LogicalOperator>
+		BuildDistinctBranch(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> child,
+		                    const vector<unique_ptr<Expression>> &groups, unique_ptr<Expression> hash_expr,
+		                    unique_ptr<Expression> distinct_expr, const vector<std::pair<idx_t, string>> &agg_specs,
+		                    const std::unordered_map<idx_t, idx_t> *index_map, idx_t &out_group_index,
+		                    idx_t &out_agg_index) override {
+			(void)index_map;
+			return duckdb::BuildDistinctBranch(input, std::move(child), groups, std::move(hash_expr),
+			                                   std::move(distinct_expr), agg_specs, out_group_index, out_agg_index);
+		}
+
+		unique_ptr<LogicalOperator>
+		BuildNonDistinctBranch(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> child,
+		                       const vector<unique_ptr<Expression>> &groups, unique_ptr<Expression> hash_expr,
+		                       const vector<std::pair<idx_t, const BoundAggregateExpression *>> &agg_specs,
+		                       const std::unordered_map<idx_t, idx_t> *index_map, idx_t &out_group_index,
+		                       idx_t &out_agg_index) override {
+			auto subtree = duckdb::BuildNonDistinctBranch(input, std::move(child), groups, std::move(hash_expr),
+			                                              agg_specs, out_group_index, out_agg_index);
+			if (index_map) {
+				auto &branch_agg = subtree->Cast<LogicalAggregate>();
+				for (auto &expr : branch_agg.expressions) {
+					auto &bound_agg = expr->Cast<BoundAggregateExpression>();
+					if (bound_agg.children.size() > 1) {
+						RemapExpressionBindings(*bound_agg.children[1], *index_map);
+					}
+				}
+				subtree->ResolveOperatorTypes();
+			}
+			return subtree;
+		}
+	};
+
+	PacBranchBuilder builder;
+	auto branch_plan = BuildJoinedDistinctAggregateBranches(input, plan, agg, hash_input_expr->Copy(), builder);
+
+	idx_t proj_table_index = input.optimizer.binder.GenerateTableIndex();
+	vector<unique_ptr<Expression>> proj_expressions;
+
+	idx_t num_groups = agg->groups.size();
+	for (idx_t gi = 0; gi < num_groups; gi++) {
+		proj_expressions.push_back(make_uniq<BoundColumnRefExpression>(
+		    agg->groups[gi]->return_type, ColumnBinding(branch_plan.left_group_index, gi)));
+	}
+
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
-		auto it = agg_idx_to_branch.find(ai);
-		if (it == agg_idx_to_branch.end()) {
+		auto it = branch_plan.aggregate_map.find(ai);
+		if (it == branch_plan.aggregate_map.end()) {
 			throw InternalException("Privacy compiler: multi-branch could not find aggregate " + std::to_string(ai));
 		}
 		idx_t branch_idx = it->second.first;
 		idx_t pos_in_branch = it->second.second;
-		auto &branch = built_branches[branch_idx];
+		auto &branch = branch_plan.branches[branch_idx];
 
 		auto original_type = agg->expressions[ai]->return_type;
-		auto branch_type = branch_expr_types[branch_idx][pos_in_branch];
+		auto branch_type = branch.aggregate_types[pos_in_branch];
 
 		PRIVACY_DEBUG_PRINT("MultiBranch output: ai=" + std::to_string(ai) + " branch=" + std::to_string(branch_idx) +
 		                    " pos=" + std::to_string(pos_in_branch) + " agg_index=" + std::to_string(branch.agg_index) +
@@ -929,10 +915,9 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 	}
 
 	auto projection = make_uniq<LogicalProjection>(proj_table_index, std::move(proj_expressions));
-	projection->children.push_back(std::move(joined));
+	projection->children.push_back(std::move(branch_plan.joined));
 	projection->ResolveOperatorTypes();
 
-	// 6. Replace the aggregate node in the plan tree
 	auto *agg_slot = FindOperatorSlotByPointer(plan, agg);
 	if (!agg_slot) {
 		throw InternalException("Privacy compiler: InsertMultiBranchPreAggregation could not find aggregate in plan");
@@ -962,7 +947,7 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
  * ModifyAggregatesWithPacFunctions: Transforms regular aggregate expressions to PAC aggregate expressions
  *
  * Purpose: This is the core transformation function that replaces standard aggregates (SUM, AVG, COUNT, MIN, MAX)
- * with their PAC equivalents (priv_sum, priv_avg, priv_count, priv_min, priv_max) by adding the hash expression
+ * with their PAC equivalents (as_sum, as_avg, as_count, as_min, as_max) by adding the hash expression
  * as the first argument.
  *
  * Arguments:
@@ -976,7 +961,7 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
  *    - Extract the value expression (the data being aggregated)
  *      * For COUNT(*), create a constant 1 expression
  *      * For others (SUM(val), AVG(val)), use the existing child expression
- *    - Map to the PAC function name (sum -> priv_sum, avg -> priv_avg, etc.)
+ *    - Map to the PAC function name (sum -> as_sum, avg -> as_avg, etc.)
  *    - Bind the PAC aggregate function with two arguments:
  *      * First argument: hash expression (identifies which PU each row belongs to)
  *      * Second argument: value expression (the data to aggregate per PU)
@@ -985,10 +970,10 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
  * 2. Resolve operator types to ensure the plan is valid
  *
  * Transformation Examples:
- * - SUM(l_extendedprice) -> priv_sum(hash(c_custkey), l_extendedprice)
- * - AVG(l_quantity) -> priv_avg(hash(c_custkey), l_quantity)
- * - COUNT(*) -> priv_count(hash(c_custkey), 1)
- * - COUNT(DISTINCT l_orderkey) -> priv_count(hash(c_custkey), l_orderkey) with DISTINCT flag
+ * - SUM(l_extendedprice) -> as_sum(hash(c_custkey), l_extendedprice)
+ * - AVG(l_quantity) -> as_avg(hash(c_custkey), l_quantity)
+ * - COUNT(*) -> as_count(hash(c_custkey), 1)
+ * - COUNT(DISTINCT l_orderkey) -> as_count(hash(c_custkey), l_orderkey) with DISTINCT flag
  *
  * Nested Aggregate Handling (IMPORTANT):
  * This function is only called on aggregates that were filtered by the calling code to have
@@ -1001,12 +986,12 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
  *
  * Example 1 - Both aggregates have PU tables (user's TPC-H Q17 example):
  *   SELECT sum(l_extendedprice) / 7.0 FROM lineitem WHERE l_quantity < (SELECT avg(l_quantity) FROM lineitem WHERE ...)
- *   - Inner: Has lineitem -> priv_avg(hash(rowid), l_quantity)
- *   - Outer: Also has lineitem -> priv_sum(hash(rowid), l_extendedprice)
+ *   - Inner: Has lineitem -> as_avg(hash(rowid), l_quantity)
+ *   - Outer: Also has lineitem -> as_sum(hash(rowid), l_extendedprice)
  *
  * Example 2 - Only inner has PU tables:
  *   SELECT sum(inner_result) FROM (SELECT sum(customer_col) FROM customer) AS subq
- *   - Inner: Has customer -> priv_sum(hash(c_custkey), customer_col)
+ *   - Inner: Has customer -> as_sum(hash(c_custkey), customer_col)
  *   - Outer: No PU tables -> Regular sum(inner_result), NOT transformed
  */
 void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAggregate *agg,
@@ -1069,7 +1054,7 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 	// === DISTINCT pre-aggregation ===
 	// When ALL aggregates are DISTINCT on the same column, use DuckDB's native GROUP BY
 	// for deduplication: an inner aggregate groups by the distinct column and ORs the
-	// privacy-unit hashes with bit_or, then an outer priv_count/priv_sum operates on the result.
+	// privacy-unit hashes with bit_or, then an outer as_count/as_sum operates on the result.
 	{
 		bool has_any_distinct = false;
 		bool has_any_non_distinct = false;
@@ -1140,12 +1125,12 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 }
 
 // ============================================================================
-// Clip aggregate rewrite: priv_noised_* → priv_noised_clip_* / priv_clip_*
+// Clip aggregate rewrite: as_noised_* → as_noised_clip_* / as_clip_*
 // with optional lower aggregate insertion for per-PU pre-aggregation
 // ============================================================================
 
 // Map pac function names to their clip variants by inserting "_clip" before the last "_"
-// e.g. priv_noised_sum → priv_noised_clip_sum, priv_sum → priv_clip_sum
+// e.g. as_noised_sum → as_noised_clip_sum, as_sum → as_clip_sum
 static string GetClipVariant(const string &name) {
 	auto pos = name.rfind('_');
 	if (pos == string::npos || name.find("priv_") != 0) {
@@ -1155,7 +1140,7 @@ static string GetClipVariant(const string &name) {
 }
 
 // Map pac function names to their original DuckDB aggregate by extracting the suffix after the last "_"
-// e.g. priv_noised_sum → sum, priv_count → count
+// e.g. as_noised_sum → sum, as_count → count
 static string GetOriginalAggregate(const string &name) {
 	if (name.find("priv_") != 0) {
 		return "";
@@ -1167,9 +1152,9 @@ static string GetOriginalAggregate(const string &name) {
 	return name.substr(pos + 1);
 }
 
-// Is this a noised (scalar) variant? If so, top aggregate uses priv_noised_clip_*
+// Is this a noised (scalar) variant? If so, top aggregate uses as_noised_clip_*
 static bool IsNoisedVariant(const string &name) {
-	return name.find("priv_noised_") == 0;
+	return name.find("as_noised_") == 0;
 }
 
 // Bind a plain DuckDB aggregate function (sum, count, min, max)
@@ -1200,7 +1185,7 @@ unique_ptr<Expression> BindPlainAggregate(OptimizerExtensionInput &input, const 
 	return BindPlainAggregate(input, func_name, std::move(children), aggr_type);
 }
 
-// Check if an aggregate contains priv_noised_* or pac_* (counters) expressions
+// Check if an aggregate contains as_noised_* or pac_* (counters) expressions
 static bool IsPacAggregate(LogicalAggregate *agg) {
 	for (auto &expr : agg->expressions) {
 		if (expr->GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {
@@ -1234,7 +1219,7 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 			}
 		}
 		if (child_groups_by_pu) {
-			// Q13 exception: just rename priv_noised_* → priv_noised_clip_* in place
+			// Q13 exception: just rename as_noised_* → as_noised_clip_* in place
 			for (idx_t i = 0; i < agg->expressions.size(); i++) {
 				if (agg->expressions[i]->GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {
 					continue;
@@ -1281,8 +1266,8 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 
 			vector<unique_ptr<Expression>> plain_children;
 			if (orig_name == "count" && (aggr.children.size() <= 1)) {
-				// priv_noised_count(hash) or priv_count(hash) → count_star()
-				// priv_noised_count(hash, col) → count(col) — but children[1] might be constant 1
+				// as_noised_count(hash) or as_count(hash) → count_star()
+				// as_noised_count(hash, col) → count(col) — but children[1] might be constant 1
 				if (aggr.children.size() >= 2) {
 					auto &val_child = aggr.children[1];
 					// Check if it's a constant 1 (from count_star rewrite)
@@ -1325,7 +1310,7 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 			unique_ptr<Expression> lower_ref =
 			    make_uniq<BoundColumnRefExpression>(lower_type, ColumnBinding(pre_agg.lower_agg_index, i));
 
-			// priv_clip_sum has integer + DECIMAL overloads but no FLOAT/DOUBLE.
+			// as_clip_sum has integer + DECIMAL overloads but no FLOAT/DOUBLE.
 			// Cast FLOAT/DOUBLE to BIGINT so binding succeeds.
 			if ((orig == "sum" || orig == "count") &&
 			    (lower_type.id() == LogicalTypeId::FLOAT || lower_type.id() == LogicalTypeId::DOUBLE)) {
@@ -1335,7 +1320,7 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 			// count → sumcount (preserves BIGINT return type), others → clip variant
 			string clip_func;
 			if (orig == "count") {
-				clip_func = noised ? "priv_noised_clip_sumcount" : "priv_clip_sum";
+				clip_func = noised ? "as_noised_clip_sumcount" : "as_clip_sum";
 			} else {
 				clip_func = GetClipVariant(pac_name);
 			}

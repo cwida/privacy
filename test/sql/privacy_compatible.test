@@ -157,7 +157,7 @@ SELECT SUM(t1a.b + t1b.b) FROM t1 t1a JOIN t1 t1b ON t1a.a = t1b.a;
 640
 
 # Test same table in main query and subquery (different scopes)
-# Categorical rewrite: priv_select_gt filters rows, priv_noised_sum aggregates survivors
+# Categorical rewrite: priv_select_gt filters rows, as_noised_sum aggregates survivors
 query I
 SELECT SUM(b) FROM t1 WHERE a > (SELECT AVG(b) FROM t1);
 ----
@@ -688,15 +688,15 @@ INSERT INTO dp_check_users VALUES (1, 10), (2, 20), (3, 30);
 statement error
 SELECT MIN(v) IS NULL, MAX(v) IS NULL FROM dp_check_users;
 ----
-dp_sum_bound
+MIN/MAX
 
 statement ok
 SET dp_sum_bound = 100.0;
 
-query II
-SELECT MIN(v) IS NULL, MAX(v) IS NULL FROM dp_check_users;
+statement error
+SELECT MIN(v), MAX(v) FROM dp_check_users;
 ----
-true	true
+MIN/MAX
 
 statement ok
 SET privacy_mode = 'pac';

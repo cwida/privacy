@@ -1,4 +1,4 @@
-#include "aggregates/pac_aggregate.hpp"
+#include "aggregates/as_aggregate.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
@@ -100,7 +100,7 @@ void CheckPacSampleDiversity(uint64_t key_hash, const PAC_FLOAT *buf, uint64_t u
 }
 
 // ============================================================================
-// NOTE: priv_count implementation was moved to src/priv_count.cpp / src/include/priv_count.hpp.
+// NOTE: as_count implementation was moved to src/as_count.cpp / src/include/as_count.hpp.
 // The noisy-sample computation used by multiple aggregates is kept here and exported.
 // ============================================================================
 
@@ -337,7 +337,7 @@ static uint64_t hash32_32(uint64_t num) {
 // it selects counter J (deterministic from query_hash), computes the empirical
 // (second-moment) variance over the subsample answers, and adds Gaussian noise
 // calibrated to that variance and the per-row mutual-information budget `mi`.
-// The fused/vectorized counterpart is priv_noised_sum/priv_noised_count.
+// The fused/vectorized counterpart is as_noised_sum/as_noised_count.
 //
 // Signature: pac_aggregate(LIST<vals>, LIST<cnts>, DOUBLE mi, INTEGER k) -> DOUBLE
 //   vals  : per-subsample aggregate answers (up to 64 worlds, padded to 64)

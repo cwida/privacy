@@ -1,12 +1,12 @@
 //
-// pac_clip_aggr.hpp: Shared constants, helpers, and bind data for clip aggregates
-// (priv_clip_sum, priv_clip_min, priv_clip_max)
+// as_clip_aggr.hpp: Shared constants, helpers, and bind data for clip aggregates
+// (as_clip_sum, as_clip_min, as_clip_max)
 //
 #ifndef PAC_CLIP_AGGR_HPP
 #define PAC_CLIP_AGGR_HPP
 
 #include "duckdb.hpp"
-#include "pac_aggregate.hpp"
+#include "as_aggregate.hpp"
 #include <cmath>
 #include <climits>
 
@@ -153,17 +153,17 @@ static unique_ptr<FunctionData> PacClipBindWithScale(ClientContext &ctx, vector<
 
 static unique_ptr<FunctionData> PacClipBind(ClientContext &ctx, AggregateFunction &,
                                             vector<unique_ptr<Expression>> &args) {
-	return PacClipBindWithScale(ctx, args, "priv_clip");
+	return PacClipBindWithScale(ctx, args, "as_clip");
 }
 
 static unique_ptr<FunctionData> PacClipBindFloat(ClientContext &ctx, AggregateFunction &,
                                                  vector<unique_ptr<Expression>> &args) {
-	return PacClipBindWithScale(ctx, args, "priv_clip", CLIP_FLOAT_SCALE);
+	return PacClipBindWithScale(ctx, args, "as_clip", CLIP_FLOAT_SCALE);
 }
 
 static unique_ptr<FunctionData> PacClipBindDouble(ClientContext &ctx, AggregateFunction &,
                                                   vector<unique_ptr<Expression>> &args) {
-	return PacClipBindWithScale(ctx, args, "priv_clip", CLIP_DOUBLE_SCALE);
+	return PacClipBindWithScale(ctx, args, "as_clip", CLIP_DOUBLE_SCALE);
 }
 
 } // namespace duckdb

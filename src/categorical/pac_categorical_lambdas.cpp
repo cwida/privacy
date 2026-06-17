@@ -6,7 +6,7 @@
 // Created by ila on 3/13/26.
 //
 #include "categorical/pac_categorical_lambdas.hpp"
-#include "aggregates/pac_aggregate.hpp"
+#include "aggregates/as_aggregate.hpp"
 #include "utils/privacy_helpers.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 

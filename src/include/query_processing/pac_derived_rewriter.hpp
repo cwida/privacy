@@ -6,7 +6,7 @@
 
 namespace duckdb {
 
-// Write path: convert priv_noised_* → priv_* counter variants for DML targeting derived_pu tables.
+// Write path: convert as_noised_* → as_* counter variants for DML targeting derived_pu tables.
 void ConvertDerivedPuToCounters(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan);
 
 // Read path: inject priv_finalize for LIST<FLOAT> columns from derived_pu tables.

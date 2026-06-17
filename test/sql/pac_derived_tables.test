@@ -130,7 +130,7 @@ DROP TABLE ctas_agg_src;
 # ============================================================================
 # Test 4: INSERT with aggregate into derived_pu table gets PAC noise
 # Tests: INSERT INTO derived_table SELECT ... GROUP BY reads from the source
-# PU table — the aggregate should be noised (priv_noised_sum).
+# PU table — the aggregate should be noised (as_noised_sum).
 # ============================================================================
 
 statement ok

@@ -9,7 +9,7 @@
 #include "categorical/pac_categorical.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "privacy_debug.hpp"
-#include "aggregates/pac_aggregate.hpp"
+#include "aggregates/as_aggregate.hpp"
 
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
@@ -774,10 +774,10 @@ static void PacCoalesceFunction(DataChunk &args, ExpressionState &state, Vector 
 // ============================================================================
 // PAC_NOISED: Apply noise to a list of 64 counter values
 // ============================================================================
-// priv_noised(list<double> counters) -> DOUBLE
+// as_noised(list<double> counters) -> DOUBLE
 // Takes a list of 64 counter values, reconstructs key_hash from NULL/non-NULL pattern,
 // and returns a single noised value using PacNoisySampleFrom64Counters.
-// This is essentially what priv_sum/avg/count/min/max aggregates do in their finalize.
+// This is essentially what as_sum/avg/count/min/max aggregates do in their finalize.
 static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &list_vec = args.data[0];
 	idx_t count = args.size();
@@ -914,8 +914,8 @@ static void PacDivFunction(DataChunk &args, ExpressionState &state, Vector &resu
 // ============================================================================
 // PAC_NOISED_DIV: Fused sum/count division + noise in a single pass
 // ============================================================================
-// priv_noised_div(list<PAC_FLOAT> sum_counters, list<PAC_FLOAT> count_counters) -> DOUBLE
-// Equivalent to priv_noised(list_transform(list_zip(sum, cnt), x -> x.a / x.b))
+// as_noised_div(list<PAC_FLOAT> sum_counters, list<PAC_FLOAT> count_counters) -> DOUBLE
+// Equivalent to as_noised(list_transform(list_zip(sum, cnt), x -> x.a / x.b))
 // but avoids the lambda/list_zip/list_transform overhead.
 // Returns DOUBLE (not PAC_FLOAT) because avg() returns DOUBLE in SQL.
 static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -1405,21 +1405,20 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	priv_coalesce.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 	loader.RegisterFunction(make_scalar_info(priv_coalesce, "[INTERNAL] Replaces NULL counter list with 64 zeros."));
 
-	// pac_noised(list<PAC_FLOAT>) -> PAC_FLOAT
-	ScalarFunction pac_noised("pac_noised", {list_double_type}, PacFloatLogicalType(), PacNoisedFunction,
-	                          PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	// as_noised(list<PAC_FLOAT>) -> PAC_FLOAT
+	ScalarFunction as_noised("as_noised", {list_double_type}, PacFloatLogicalType(), PacNoisedFunction,
+	                         PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
 	loader.RegisterFunction(
-	    make_scalar_info(pac_noised, "[INTERNAL] Applies PAC noise to 64-element counter list, returns scalar."));
+	    make_scalar_info(as_noised, "[INTERNAL] Applies PAC noise to 64-element counter list, returns scalar."));
 
 	// priv_div(list<PAC_FLOAT>, list<PAC_FLOAT>) -> list<PAC_FLOAT>
 	ScalarFunction priv_div("priv_div", {list_double_type, list_double_type}, list_double_type, PacDivFunction);
 	loader.RegisterFunction(make_scalar_info(priv_div, "[INTERNAL] Element-wise division of two counter lists."));
 
-	// priv_noised_div(list<PAC_FLOAT> sum, list<PAC_FLOAT> cnt) -> DOUBLE
-	ScalarFunction priv_noised_div("priv_noised_div", {list_double_type, list_double_type}, LogicalType::DOUBLE,
-	                               PacNoisedDivFunction, PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
-	loader.RegisterFunction(
-	    make_scalar_info(priv_noised_div, "[INTERNAL] Fused counter-list division + noise for AVG."));
+	// as_noised_div(list<PAC_FLOAT> sum, list<PAC_FLOAT> cnt) -> DOUBLE
+	ScalarFunction as_noised_div("as_noised_div", {list_double_type, list_double_type}, LogicalType::DOUBLE,
+	                             PacNoisedDivFunction, PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	loader.RegisterFunction(make_scalar_info(as_noised_div, "[INTERNAL] Fused counter-list division + noise for AVG."));
 
 	// priv_filter_<cmp>: optimized comparison + filter in a single pass
 	RegisterPacFilterCmp<PacFilterCmpOp::GT>(loader, "priv_filter_gt");
@@ -1451,7 +1450,7 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	RegisterPrivSelectSassCmp<PacFilterCmpOp::EQ>(loader, "priv_select_sass_eq");
 	RegisterPrivSelectSassCmp<PacFilterCmpOp::NEQ>(loader, "priv_select_sass_neq");
 
-	// List aggregates are now registered as overloads of priv_sum/priv_count/priv_min/priv_max
+	// List aggregates are now registered as overloads of as_sum/as_count/as_min/as_max
 	// alongside the counters variants, via AddPacListAggregateOverload() called from each
 	// Register*CountersFunctions() function.
 }

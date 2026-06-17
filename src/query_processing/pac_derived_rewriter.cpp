@@ -5,7 +5,7 @@
 // Derived_pu tables store PAC counter lists (LIST<FLOAT>, 64 elements) instead of scalar values.
 //
 // Write path (ConvertDerivedPuToCounters):
-//   Converts priv_noised_* aggregates to priv_* counter variants in INSERT/CTAS plans,
+//   Converts as_noised_* aggregates to as_* counter variants in INSERT/CTAS plans,
 //   so the table stores raw counter lists instead of finalized noised scalars.
 //
 // Read path (InjectPacFinalizeForDerivedPu):
@@ -27,7 +27,7 @@
 
 #include "query_processing/pac_derived_rewriter.hpp"
 
-#include "aggregates/pac_aggregate.hpp"
+#include "aggregates/as_aggregate.hpp"
 #include "categorical/pac_categorical_detection.hpp"
 #include "categorical/pac_categorical_rewriter.hpp"
 #include "metadata/privacy_metadata_manager.hpp"
@@ -74,7 +74,7 @@ static bool ExpressionContainsPacFinalize(Expression &e) {
 }
 
 // ============================================================================
-// Write path: convert priv_noised_* → priv_* counter variants for derived_pu DML
+// Write path: convert as_noised_* → as_* counter variants for derived_pu DML
 // ============================================================================
 
 static void ConvertAggregatesRecursive(OptimizerExtensionInput &input, LogicalOperator *op,

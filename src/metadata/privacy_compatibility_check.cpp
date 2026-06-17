@@ -28,9 +28,8 @@
 namespace duckdb {
 
 static bool IsPacAggregate(const string &func) {
-	static const std::unordered_set<string> pac_aggs = {"priv_noised_sum", "priv_noised_count", "priv_noised_min",
-	                                                    "priv_noised_max", "priv_sum",          "priv_count",
-	                                                    "priv_min",        "priv_max"};
+	static const std::unordered_set<string> pac_aggs = {
+	    "as_noised_sum", "as_noised_count", "as_noised_min", "as_noised_max", "as_sum", "as_count", "as_min", "as_max"};
 	string lower_func = func;
 	std::transform(lower_func.begin(), lower_func.end(), lower_func.begin(), ::tolower);
 	return pac_aggs.count(lower_func) > 0;
@@ -225,14 +224,14 @@ static bool CheckPacAggregatesHaveProperJoins(const LogicalOperator &op,
 			// 1. PU table is directly scanned, OR
 			// 2. A scanned table has an FK path to the PU
 			if (!has_pu_table && !has_fk_to_pu) {
-				throw InvalidInputException("PAC rewrite: PAC aggregates (priv_sum, priv_count, etc.) must be joined "
+				throw InvalidInputException("PAC rewrite: PAC aggregates (as_sum, as_count, etc.) must be joined "
 				                            "with the privacy unit table "
 				                            "or a table that has a foreign key path to the privacy unit");
 			}
 		}
 
 		// If this aggregate has regular aggregates wrapping PAC results, check children for PAC aggregates
-		// This handles cases like COUNT(...) on top of a subquery with priv_count(...)
+		// This handles cases like COUNT(...) on top of a subquery with as_count(...)
 		if (has_regular_aggregate) {
 			// Recursively check children - they might contain PAC aggregates in subqueries
 			for (auto &child : op.children) {
@@ -1059,7 +1058,7 @@ PrivacyCompatibilityResult PrivRewriteQueryCheck(unique_ptr<LogicalOperator> &pl
 		}
 
 		// Check that PAC aggregates are properly joined with PU or FK path tables
-		// This validates that priv_sum, priv_count, etc. have access to the privacy unit
+		// This validates that as_sum, as_count, etc. have access to the privacy unit
 		// Returns true if PAC aggregates were found
 		bool has_pac_aggregates = false;
 		if (!all_privacy_units.empty()) {

@@ -369,6 +369,7 @@ bool PrivacyParserExtension::ParseAlterTableAddPAC(const string &query, string &
 		std::cerr << "[PAC DEBUG] ParseAlterTableAddPAC: No existing metadata for " << metadata.table_name << "\n";
 #endif
 	}
+	metadata.merge_existing = true;
 
 	// Check for PAC-related keywords (needed before the PU keyword validation below)
 	bool has_privacy_key = query_lower.find("privacy_key") != string::npos;
@@ -536,6 +537,7 @@ bool PrivacyParserExtension::ParseAlterTableDropPAC(const string &query, string 
 		// before planning any: ADD PRIVACY_KEY's metadata isn't in PrivacyMetadataManager yet.
 		metadata.is_set_pu_op = true;
 		metadata.is_privacy_unit = true;
+		metadata.merge_existing = true;
 
 		// Metadata-only operation
 		stripped_sql = "";

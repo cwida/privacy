@@ -1,5 +1,5 @@
 #include <locale>
-#include "aggregates/pac_count.hpp"
+#include "aggregates/as_count.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "duckdb/parser/parsed_data/create_aggregate_function_info.hpp"
 
@@ -15,7 +15,7 @@ static unique_ptr<FunctionData> PacCountBind(ClientContext &ctx, AggregateFuncti
 			corr_idx = args.size() - 1;
 		}
 	}
-	return MakePrivBindData(ctx, args, corr_idx, "priv_noised_count");
+	return MakePrivBindData(ctx, args, corr_idx, "as_noised_count");
 }
 
 // State types: simple (non-scatter) always uses PacCountState directly
@@ -118,6 +118,43 @@ void PacCountColumnScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_
 	}
 }
 
+static void DpSampleCountMaskUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr,
+                                    idx_t count) {
+	ScatterState &agg = *reinterpret_cast<ScatterState *>(state_ptr);
+	UnifiedVectorFormat idata;
+	inputs[0].ToUnifiedFormat(count, idata);
+	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
+	for (idx_t i = 0; i < count; i++) {
+		auto idx = idata.sel->get_index(i);
+		if (idata.validity.RowIsValid(idx)) {
+#if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
+			PacCountUpdateOne(agg, input_data[idx], aggr.allocator);
+#else
+			PacCountBufferOrUpdateOne(agg, input_data[idx], aggr.allocator);
+#endif
+		}
+	}
+}
+
+static void DpSampleCountMaskScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
+                                           idx_t count) {
+	UnifiedVectorFormat idata, sdata;
+	inputs[0].ToUnifiedFormat(count, idata);
+	states.ToUnifiedFormat(count, sdata);
+	auto input_data = UnifiedVectorFormat::GetData<uint64_t>(idata);
+	auto state_p = UnifiedVectorFormat::GetData<ScatterState *>(sdata);
+	for (idx_t i = 0; i < count; i++) {
+		auto idx = idata.sel->get_index(i);
+		if (idata.validity.RowIsValid(idx)) {
+#if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
+			PacCountUpdateOne(*state_p[sdata.sel->get_index(i)], input_data[idx], aggr.allocator);
+#else
+			PacCountBufferOrUpdateOne(*state_p[sdata.sel->get_index(i)], input_data[idx], aggr.allocator);
+#endif
+		}
+	}
+}
+
 // Combine - flush src's buffer into dst (don't allocate src), then merge states
 void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
 	auto sa = FlatVector::GetData<ScatterState *>(src);
@@ -178,7 +215,7 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 		} else {
 			memset(buf, 0, sizeof(buf));
 		}
-		CheckPacSampleDiversity(key_hash, buf, s ? s->GetUpdateCount() : 0, "priv_noised_count",
+		CheckPacSampleDiversity(key_hash, buf, s ? s->GetUpdateCount() : 0, "as_noised_count",
 		                        input.bind_data->Cast<PrivBindData>());
 		// Multiply by 2 to compensate for 50% sampling, then apply correction
 		double noise_var = 0.0;
@@ -240,7 +277,7 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 
 		uint64_t key_hash = s->key_hash;
 		s->GetTotalsWithSWAR(buf);
-		CheckPacSampleDiversity(key_hash, buf, s->GetUpdateCount(), "priv_noised_count",
+		CheckPacSampleDiversity(key_hash, buf, s->GetUpdateCount(), "as_noised_count",
 		                        input.bind_data->Cast<PrivBindData>());
 
 		// Copy counters to list: 0 where key_hash bit is 0, value * 2 * correction otherwise
@@ -258,25 +295,25 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 }
 
 void RegisterPacCountFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("priv_noised_count");
+	AggregateFunctionSet fcn_set("as_noised_count");
 
-	fcn_set.AddFunction(AggregateFunction("priv_noised_count", {LogicalType::UBIGINT}, LogicalType::BIGINT,
+	fcn_set.AddFunction(AggregateFunction("as_noised_count", {LogicalType::UBIGINT}, LogicalType::BIGINT,
 	                                      PacCountStateSize, PacCountInitialize, PacCountScatterUpdate, PacCountCombine,
 	                                      PacCountFinalize, FunctionNullHandling::SPECIAL_HANDLING, PacCountUpdate,
 	                                      PacCountBind));
 
-	fcn_set.AddFunction(AggregateFunction("priv_noised_count", {LogicalType::UBIGINT, LogicalType::DOUBLE},
+	fcn_set.AddFunction(AggregateFunction("as_noised_count", {LogicalType::UBIGINT, LogicalType::DOUBLE},
 	                                      LogicalType::BIGINT, PacCountStateSize, PacCountInitialize,
 	                                      PacCountScatterUpdate, PacCountCombine, PacCountFinalize,
 	                                      FunctionNullHandling::SPECIAL_HANDLING, PacCountUpdate, PacCountBind));
 
-	fcn_set.AddFunction(AggregateFunction("priv_noised_count", {LogicalType::UBIGINT, LogicalType::ANY},
+	fcn_set.AddFunction(AggregateFunction("as_noised_count", {LogicalType::UBIGINT, LogicalType::ANY},
 	                                      LogicalType::BIGINT, PacCountStateSize, PacCountInitialize,
 	                                      PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
 	                                      FunctionNullHandling::SPECIAL_HANDLING, PacCountColumnUpdate, PacCountBind));
 
 	fcn_set.AddFunction(AggregateFunction(
-	    "priv_noised_count", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::BIGINT,
+	    "as_noised_count", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::BIGINT,
 	    PacCountStateSize, PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
 	    FunctionNullHandling::SPECIAL_HANDLING, PacCountColumnUpdate, PacCountBind));
 
@@ -284,7 +321,7 @@ void RegisterPacCountFunctions(ExtensionLoader &loader) {
 	FunctionDescription desc;
 	desc.description = "Privacy-preserving COUNT. Automatically injected by PAC for protected columns.";
 	desc.examples = {
-	    "SELECT c_mktsegment, priv_noised_count(priv_hash(hash(c_custkey))) FROM customer GROUP BY c_mktsegment"};
+	    "SELECT c_mktsegment, as_noised_count(priv_hash(hash(c_custkey))) FROM customer GROUP BY c_mktsegment"};
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 }
@@ -333,6 +370,41 @@ static void DpSampleCountFinalizeCounters(Vector &states, AggregateInputData &in
 	}
 }
 
+static void DpSampleCountMaskFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                              idx_t offset) {
+	auto aggs = FlatVector::GetData<ScatterState *>(states);
+	auto list_entries = FlatVector::GetData<list_entry_t>(result);
+	auto &child_vec = ListVector::GetEntry(result);
+
+	idx_t total_elements = count * 64;
+	ListVector::Reserve(result, total_elements);
+	ListVector::SetListSize(result, total_elements);
+
+	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
+	PAC_FLOAT buf[64];
+
+	for (idx_t i = 0; i < count; i++) {
+#if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
+		aggs[i]->FlushBuffer(*aggs[i], input.allocator);
+#endif
+		PacCountState *s = aggs[i]->GetState();
+
+		list_entries[offset + i].offset = i * 64;
+		list_entries[offset + i].length = 64;
+
+		idx_t base = i * 64;
+		if (!s) {
+			memset(child_data + base, 0, 64 * sizeof(PAC_FLOAT));
+			continue;
+		}
+
+		s->GetTotalsWithSWAR(buf);
+		for (int j = 0; j < 64; j++) {
+			child_data[base + j] = buf[j];
+		}
+	}
+}
+
 static unique_ptr<FunctionData> DpSampleCountBind(ClientContext &ctx, AggregateFunction &,
                                                   vector<unique_ptr<Expression>> &) {
 	return MakeDpSampleBindData(ctx);
@@ -340,13 +412,13 @@ static unique_ptr<FunctionData> DpSampleCountBind(ClientContext &ctx, AggregateF
 
 void RegisterDpSampleCountFunctions(ExtensionLoader &loader) {
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
-	AggregateFunctionSet set("priv_sample_count");
-	set.AddFunction(AggregateFunction("priv_sample_count", {LogicalType::UBIGINT}, list_type, PacCountStateSize,
+	AggregateFunctionSet set("as_sample_count");
+	set.AddFunction(AggregateFunction("as_sample_count", {LogicalType::UBIGINT}, list_type, PacCountStateSize,
 	                                  PacCountInitialize, PacCountScatterUpdate, PacCountCombine,
 	                                  DpSampleCountFinalizeCounters, FunctionNullHandling::DEFAULT_NULL_HANDLING,
 	                                  PacCountUpdate, DpSampleCountBind));
 	set.AddFunction(AggregateFunction(
-	    "priv_sample_count", {LogicalType::UBIGINT, LogicalType::ANY}, list_type, PacCountStateSize, PacCountInitialize,
+	    "as_sample_count", {LogicalType::UBIGINT, LogicalType::ANY}, list_type, PacCountStateSize, PacCountInitialize,
 	    PacCountColumnScatterUpdate, PacCountCombine, DpSampleCountFinalizeCounters,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, DpSampleCountBind));
 	CreateAggregateFunctionInfo info(set);
@@ -354,6 +426,17 @@ void RegisterDpSampleCountFunctions(ExtensionLoader &loader) {
 	desc.description = "[INTERNAL] Returns 64 sample-median DP counters for COUNT-like values.";
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
+
+	AggregateFunctionSet mask_set("as_sample_count_mask");
+	mask_set.AddFunction(AggregateFunction(
+	    "as_sample_count_mask", {LogicalType::UBIGINT}, list_type, PacCountStateSize, PacCountInitialize,
+	    DpSampleCountMaskScatterUpdate, PacCountCombine, DpSampleCountMaskFinalizeCounters,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, DpSampleCountMaskUpdate, DpSampleCountBind));
+	CreateAggregateFunctionInfo mask_info(mask_set);
+	FunctionDescription mask_desc;
+	mask_desc.description = "[INTERNAL] Returns 64 sample-median DP counters from precomputed sample masks.";
+	mask_info.descriptions.push_back(std::move(mask_desc));
+	loader.RegisterFunction(std::move(mask_info));
 }
 
 // ============================================================================
@@ -361,15 +444,15 @@ void RegisterDpSampleCountFunctions(ExtensionLoader &loader) {
 // ============================================================================
 void RegisterPacCountCountersFunctions(ExtensionLoader &loader) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	AggregateFunctionSet counters_set("priv_count");
+	AggregateFunctionSet counters_set("as_count");
+
+	counters_set.AddFunction(AggregateFunction("as_count", {LogicalType::UBIGINT}, list_double_type, PacCountStateSize,
+	                                           PacCountInitialize, PacCountScatterUpdate, PacCountCombine,
+	                                           PacCountFinalizeCounters, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	                                           PacCountUpdate, PacCountBind));
 
 	counters_set.AddFunction(
-	    AggregateFunction("priv_count", {LogicalType::UBIGINT}, list_double_type, PacCountStateSize, PacCountInitialize,
-	                      PacCountScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
-	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountUpdate, PacCountBind));
-
-	counters_set.AddFunction(
-	    AggregateFunction("priv_count", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, PacCountStateSize,
+	    AggregateFunction("as_count", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, PacCountStateSize,
 	                      PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
 	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
 
@@ -384,38 +467,38 @@ void RegisterPacCountCountersFunctions(ExtensionLoader &loader) {
 }
 
 // ============================================================================
-// priv_noised_avg / priv_avg: reuse priv_noised_count / priv_count implementations.
+// as_noised_avg / as_avg: reuse as_noised_count / as_count implementations.
 // RewritePacAvgToDiv replaces these with sum/count + division before execution.
 // ============================================================================
 void RegisterPacAvgFunctions(ExtensionLoader &loader) {
-	// priv_noised_avg(UBIGINT, value_type[, correction]) → DOUBLE — same implementation as priv_noised_count(UBIGINT,
+	// as_noised_avg(UBIGINT, value_type[, correction]) → DOUBLE — same implementation as as_noised_count(UBIGINT,
 	// ANY)
-	AggregateFunctionSet noised_set("priv_noised_avg");
+	AggregateFunctionSet noised_set("as_noised_avg");
 	noised_set.AddFunction(AggregateFunction(
-	    "priv_noised_avg", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::DOUBLE, PacCountStateSize,
+	    "as_noised_avg", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::DOUBLE, PacCountStateSize,
 	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
 	noised_set.AddFunction(AggregateFunction(
-	    "priv_noised_avg", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::DOUBLE,
+	    "as_noised_avg", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::DOUBLE,
 	    PacCountStateSize, PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
 	CreateAggregateFunctionInfo avg_info(noised_set);
 	FunctionDescription avg_desc;
 	avg_desc.description = "Privacy-preserving AVG. Automatically injected by PAC for protected columns.";
-	avg_desc.examples = {"SELECT c_mktsegment, priv_noised_avg(priv_hash(hash(c_custkey)), c_acctbal) FROM customer "
+	avg_desc.examples = {"SELECT c_mktsegment, as_noised_avg(priv_hash(hash(c_custkey)), c_acctbal) FROM customer "
 	                     "GROUP BY c_mktsegment"};
 	avg_info.descriptions.push_back(std::move(avg_desc));
 	loader.RegisterFunction(std::move(avg_info));
 
-	// priv_avg(UBIGINT, value_type[, correction]) → LIST<FLOAT> — same implementation as priv_count(UBIGINT, ANY)
+	// as_avg(UBIGINT, value_type[, correction]) → LIST<FLOAT> — same implementation as as_count(UBIGINT, ANY)
 	auto list_float_type = LogicalType::LIST(PacFloatLogicalType());
-	AggregateFunctionSet counters_set("priv_avg");
+	AggregateFunctionSet counters_set("as_avg");
 	counters_set.AddFunction(
-	    AggregateFunction("priv_avg", {LogicalType::UBIGINT, LogicalType::ANY}, list_float_type, PacCountStateSize,
+	    AggregateFunction("as_avg", {LogicalType::UBIGINT, LogicalType::ANY}, list_float_type, PacCountStateSize,
 	                      PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
 	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
 	counters_set.AddFunction(AggregateFunction(
-	    "priv_avg", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, list_float_type, PacCountStateSize,
+	    "as_avg", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, list_float_type, PacCountStateSize,
 	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
 	CreateAggregateFunctionInfo avg_counters_info(counters_set);
@@ -426,26 +509,26 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader) {
 }
 
 // ============================================================================
-// Clip synonyms: priv_noised_clip_count = priv_noised_count,
-//                priv_clip_count = priv_count
+// Clip synonyms: as_noised_clip_count = as_noised_count,
+//                as_clip_count = as_count
 // ============================================================================
 void RegisterPacNoisedClipCountFunctions(ExtensionLoader &loader) {
-	AggregateFunctionSet fcn_set("priv_noised_clip_count");
+	AggregateFunctionSet fcn_set("as_noised_clip_count");
 
-	fcn_set.AddFunction(AggregateFunction("priv_noised_clip_count", {LogicalType::UBIGINT}, LogicalType::BIGINT,
+	fcn_set.AddFunction(AggregateFunction("as_noised_clip_count", {LogicalType::UBIGINT}, LogicalType::BIGINT,
 	                                      PacCountStateSize, PacCountInitialize, PacCountScatterUpdate, PacCountCombine,
 	                                      PacCountFinalize, FunctionNullHandling::SPECIAL_HANDLING, PacCountUpdate,
 	                                      PacCountBind));
-	fcn_set.AddFunction(AggregateFunction("priv_noised_clip_count", {LogicalType::UBIGINT, LogicalType::DOUBLE},
+	fcn_set.AddFunction(AggregateFunction("as_noised_clip_count", {LogicalType::UBIGINT, LogicalType::DOUBLE},
 	                                      LogicalType::BIGINT, PacCountStateSize, PacCountInitialize,
 	                                      PacCountScatterUpdate, PacCountCombine, PacCountFinalize,
 	                                      FunctionNullHandling::SPECIAL_HANDLING, PacCountUpdate, PacCountBind));
-	fcn_set.AddFunction(AggregateFunction("priv_noised_clip_count", {LogicalType::UBIGINT, LogicalType::ANY},
+	fcn_set.AddFunction(AggregateFunction("as_noised_clip_count", {LogicalType::UBIGINT, LogicalType::ANY},
 	                                      LogicalType::BIGINT, PacCountStateSize, PacCountInitialize,
 	                                      PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
 	                                      FunctionNullHandling::SPECIAL_HANDLING, PacCountColumnUpdate, PacCountBind));
 	fcn_set.AddFunction(AggregateFunction(
-	    "priv_noised_clip_count", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::BIGINT,
+	    "as_noised_clip_count", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::BIGINT,
 	    PacCountStateSize, PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
 	    FunctionNullHandling::SPECIAL_HANDLING, PacCountColumnUpdate, PacCountBind));
 
@@ -455,14 +538,14 @@ void RegisterPacNoisedClipCountFunctions(ExtensionLoader &loader) {
 
 void RegisterPacClipCountFunctions(ExtensionLoader &loader) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	AggregateFunctionSet fcn_set("priv_clip_count");
+	AggregateFunctionSet fcn_set("as_clip_count");
 
-	fcn_set.AddFunction(AggregateFunction("priv_clip_count", {LogicalType::UBIGINT}, list_double_type,
-	                                      PacCountStateSize, PacCountInitialize, PacCountScatterUpdate, PacCountCombine,
+	fcn_set.AddFunction(AggregateFunction("as_clip_count", {LogicalType::UBIGINT}, list_double_type, PacCountStateSize,
+	                                      PacCountInitialize, PacCountScatterUpdate, PacCountCombine,
 	                                      PacCountFinalizeCounters, FunctionNullHandling::DEFAULT_NULL_HANDLING,
 	                                      PacCountUpdate, PacCountBind));
 	fcn_set.AddFunction(AggregateFunction(
-	    "priv_clip_count", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, PacCountStateSize,
+	    "as_clip_count", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, PacCountStateSize,
 	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
 	AddPacListAggregateOverload(fcn_set, "clip_count");

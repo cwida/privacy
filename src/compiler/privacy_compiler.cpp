@@ -158,7 +158,7 @@ static unique_ptr<Expression> HandlePassthroughDeepHash(OptimizerExtensionInput 
  * - If the PU table appears in BOTH outer query and subquery, we transform aggregates in BOTH
  * - Each aggregate gets its own hash expression from the PU instance in its subtree
  * - Example: Query with outer aggregate on customer and subquery aggregate on customer:
- *   * Both aggregates are transformed with priv_sum(hash(c_custkey), value)
+ *   * Both aggregates are transformed with as_sum(hash(c_custkey), value)
  *   * Each uses its respective customer table instance
  *
  * Nested Aggregate Rules (IMPORTANT):
@@ -174,13 +174,13 @@ static unique_ptr<Expression> HandlePassthroughDeepHash(OptimizerExtensionInput 
  *   WHERE p_partkey = l_partkey AND ... AND l_quantity < (SELECT 0.2 * avg(l_quantity) FROM lineitem WHERE ...)
  *
  * Transformation:
- *   - Inner aggregate (avg in subquery): Has lineitem (PU table) -> priv_avg(hash(pac_key), l_quantity)
- *   - Outer aggregate (sum): Also has lineitem (PU table) -> priv_sum(hash(pac_key), l_extendedprice)
+ *   - Inner aggregate (avg in subquery): Has lineitem (PU table) -> as_avg(hash(pac_key), l_quantity)
+ *   - Outer aggregate (sum): Also has lineitem (PU table) -> as_sum(hash(pac_key), l_extendedprice)
  *   - Division by 7.0 happens AFTER PAC aggregation, not transformed
  *
  * Counter-example where outer is NOT transformed:
  *   SELECT sum(inner_sum) FROM (SELECT sum(customer_col) FROM customer) AS subq
- *   - Inner: Has customer (PU) -> priv_sum(hash(c_custkey), customer_col)
+ *   - Inner: Has customer (PU) -> as_sum(hash(c_custkey), customer_col)
  *   - Outer: No PU tables, only depends on subquery result -> Regular sum(), NOT transformed
  */
 
@@ -915,14 +915,14 @@ static void CompilePacMechanism(const PrivacyCompatibilityResult &check, Optimiz
 		RewriteCategoricalQuery(input, plan, priv_agg_info);
 	}
 
-	// Decompose priv_noised_avg / priv_avg into sum/count + division NOW, in the
+	// Decompose as_noised_avg / as_avg into sum/count + division NOW, in the
 	// pre-optimizer phase.  This must happen before DuckDB's built-in optimizers
 	// (COLUMN_LIFETIME, COMPRESSED_MATERIALIZATION, etc.) run, because those
 	// optimizers may insert thin projections that only pass through columns
 	// currently referenced.  If we defer decomposition to the post-optimizer
 	// (RewritePacAvgToDiv), the newly-appended count column won't be visible
 	// through those thin projections, causing "Failed to bind column reference"
-	// errors.  The post-optimizer still handles user-written priv_avg() in SQL.
+	// errors.  The post-optimizer still handles user-written as_avg() in SQL.
 	RewritePacAvgToDiv(input, plan);
 
 	// Clip rewrite: when priv_clip_support is set, refine PAC aggregates to use

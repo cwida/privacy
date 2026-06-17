@@ -1,5 +1,5 @@
 # name: test/sql/pac_min_max.test
-# description: Test priv_min and priv_max aggregate functions
+# description: Test as_min and as_max aggregate functions
 # group: [sql]
 
 require privacy
@@ -21,166 +21,166 @@ statement ok
 SET pac_mi = 0
 
 # =============================================================================
-# priv_max tests
+# as_max tests
 # =============================================================================
 
-# Test priv_max with TINYINT (INT8)
+# Test as_max with TINYINT (INT8)
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), i::tinyint) FROM range(1, 50) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), i::tinyint) FROM range(1, 50) t(i);
 ----
 48
 
-# Test priv_max with SMALLINT (INT16)
+# Test as_max with SMALLINT (INT16)
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), i::smallint) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), i::smallint) FROM range(1, 100) t(i);
 ----
 97
 
-# Test priv_max with INTEGER (INT32)
+# Test as_max with INTEGER (INT32)
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), i::integer) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), i::integer) FROM range(1, 100) t(i);
 ----
 97
 
-# Test priv_max with BIGINT (INT64)
+# Test as_max with BIGINT (INT64)
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), i::bigint) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), i::bigint) FROM range(1, 100) t(i);
 ----
 97
 
-# Test priv_max with UTINYINT (UINT8)
+# Test as_max with UTINYINT (UINT8)
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), i::utinyint) FROM range(1, 50) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), i::utinyint) FROM range(1, 50) t(i);
 ----
 48
 
-# Test priv_max with USMALLINT (UINT16)
+# Test as_max with USMALLINT (UINT16)
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), i::usmallint) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), i::usmallint) FROM range(1, 100) t(i);
 ----
 97
 
-# Test priv_max with UINTEGER (UINT32)
+# Test as_max with UINTEGER (UINT32)
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), i::uinteger) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), i::uinteger) FROM range(1, 100) t(i);
 ----
 97
 
-# Test priv_max with UBIGINT (UINT64)
+# Test as_max with UBIGINT (UINT64)
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), i::ubigint) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), i::ubigint) FROM range(1, 100) t(i);
 ----
 97
 
-# Test priv_max with FLOAT
+# Test as_max with FLOAT
 query R
-SELECT round(priv_noised_max(priv_hash(hash('key' || i::varchar)), i::float), 1) FROM range(1, 100) t(i);
+SELECT round(as_noised_max(priv_hash(hash('key' || i::varchar)), i::float), 1) FROM range(1, 100) t(i);
 ----
 97.0
 
-# Test priv_max with DOUBLE
+# Test as_max with DOUBLE
 query R
-SELECT round(priv_noised_max(priv_hash(hash('key' || i::varchar)), i::double), 1) FROM range(1, 100) t(i);
+SELECT round(as_noised_max(priv_hash(hash('key' || i::varchar)), i::double), 1) FROM range(1, 100) t(i);
 ----
 97.0
 
-# Test priv_max with negative values (signed types)
+# Test as_max with negative values (signed types)
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), i::integer) FROM range(-50, 50) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), i::integer) FROM range(-50, 50) t(i);
 ----
 48
 
-# Test priv_max with non-zero mi parameter (deterministic results due to privacy_seed)
+# Test as_max with non-zero mi parameter (deterministic results due to privacy_seed)
 statement ok
 SET pac_mi = 128
 
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), i::integer) IS NOT NULL FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), i::integer) IS NOT NULL FROM range(1, 100) t(i);
 ----
 true
 
 statement ok
 SET pac_mi = 0
 
-# Test priv_max with mi parameter (0.0 for no noise)
+# Test as_max with mi parameter (0.0 for no noise)
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), i::integer) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), i::integer) FROM range(1, 100) t(i);
 ----
 97
 
 # =============================================================================
-# priv_min tests
+# as_min tests
 # =============================================================================
 
-# Test priv_min with TINYINT (INT8)
+# Test as_min with TINYINT (INT8)
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), i::tinyint) FROM range(1, 50) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), i::tinyint) FROM range(1, 50) t(i);
 ----
 4
 
-# Test priv_min with SMALLINT (INT16)
+# Test as_min with SMALLINT (INT16)
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), i::smallint) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), i::smallint) FROM range(1, 100) t(i);
 ----
 4
 
-# Test priv_min with INTEGER (INT32)
+# Test as_min with INTEGER (INT32)
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), i::integer) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), i::integer) FROM range(1, 100) t(i);
 ----
 4
 
-# Test priv_min with BIGINT (INT64)
+# Test as_min with BIGINT (INT64)
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), i::bigint) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), i::bigint) FROM range(1, 100) t(i);
 ----
 4
 
-# Test priv_min with UTINYINT (UINT8)
+# Test as_min with UTINYINT (UINT8)
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), i::utinyint) FROM range(1, 50) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), i::utinyint) FROM range(1, 50) t(i);
 ----
 4
 
-# Test priv_min with USMALLINT (UINT16)
+# Test as_min with USMALLINT (UINT16)
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), i::usmallint) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), i::usmallint) FROM range(1, 100) t(i);
 ----
 4
 
-# Test priv_min with UINTEGER (UINT32)
+# Test as_min with UINTEGER (UINT32)
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), i::uinteger) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), i::uinteger) FROM range(1, 100) t(i);
 ----
 4
 
-# Test priv_min with UBIGINT (UINT64)
+# Test as_min with UBIGINT (UINT64)
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), i::ubigint) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), i::ubigint) FROM range(1, 100) t(i);
 ----
 4
 
-# Test priv_min with FLOAT
+# Test as_min with FLOAT
 query R
-SELECT round(priv_noised_min(priv_hash(hash('key' || i::varchar)), i::float), 1) FROM range(1, 100) t(i);
+SELECT round(as_noised_min(priv_hash(hash('key' || i::varchar)), i::float), 1) FROM range(1, 100) t(i);
 ----
 4.0
 
-# Test priv_min with DOUBLE
+# Test as_min with DOUBLE
 query R
-SELECT round(priv_noised_min(priv_hash(hash('key' || i::varchar)), i::double), 1) FROM range(1, 100) t(i);
+SELECT round(as_noised_min(priv_hash(hash('key' || i::varchar)), i::double), 1) FROM range(1, 100) t(i);
 ----
 4.0
 
-# Test priv_min with negative values (signed types)
+# Test as_min with negative values (signed types)
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), i::integer) FROM range(-50, 50) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), i::integer) FROM range(-50, 50) t(i);
 ----
 -49
 
-# Test priv_min with mi parameter (0.0 for deterministic results)
+# Test as_min with mi parameter (0.0 for deterministic results)
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), i::integer) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), i::integer) FROM range(1, 100) t(i);
 ----
 4
 
@@ -188,9 +188,9 @@ SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), i::integer) FROM ra
 # GROUP BY tests
 # =============================================================================
 
-# Test priv_max with GROUP BY (mi=0 returns actual values, not NULL)
+# Test as_max with GROUP BY (mi=0 returns actual values, not NULL)
 query II rowsort
-SELECT i % 3 as grp, priv_noised_max(priv_hash(hash('key' || i::varchar)), i::integer)
+SELECT i % 3 as grp, as_noised_max(priv_hash(hash('key' || i::varchar)), i::integer)
 FROM range(1, 100) t(i)
 GROUP BY grp;
 ----
@@ -198,9 +198,9 @@ GROUP BY grp;
 1	97
 2	92
 
-# Test priv_min with GROUP BY (mi=0 returns actual values, not NULL)
+# Test as_min with GROUP BY (mi=0 returns actual values, not NULL)
 query II rowsort
-SELECT i % 3 as grp, priv_noised_min(priv_hash(hash('key' || i::varchar)), i::integer)
+SELECT i % 3 as grp, as_noised_min(priv_hash(hash('key' || i::varchar)), i::integer)
 FROM range(1, 100) t(i)
 GROUP BY grp;
 ----
@@ -214,63 +214,63 @@ GROUP BY grp;
 
 # Test with single value (mi=0 returns actual value)
 query I
-SELECT priv_noised_max(1::UBIGINT, 42::integer);
+SELECT as_noised_max(1::UBIGINT, 42::integer);
 ----
 42
 
 query I
-SELECT priv_noised_min(1::UBIGINT, 42::integer);
+SELECT as_noised_min(1::UBIGINT, 42::integer);
 ----
 42
 
 # Test with large values (BIGINT)
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), (i * 1000000000)::bigint) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), (i * 1000000000)::bigint) FROM range(1, 100) t(i);
 ----
 96999997440
 
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), (i * 1000000000)::bigint) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), (i * 1000000000)::bigint) FROM range(1, 100) t(i);
 ----
 4000000000
 
 # Test with small range
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), i::integer) FROM range(1, 10) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), i::integer) FROM range(1, 10) t(i);
 ----
 9
 
 # Test with scaled values
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), (i * 100)::integer) FROM range(1, 10) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), (i * 100)::integer) FROM range(1, 10) t(i);
 ----
 900
 
 # Test with larger scaled values
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), (i * 100000)::integer) FROM range(1, 10) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), (i * 100000)::integer) FROM range(1, 10) t(i);
 ----
 900000
 
 # Test float with scaling
 query R
-SELECT round(priv_noised_max(priv_hash(hash('key' || i::varchar)), (i * 100.0)::double), 1) FROM range(1, 100) t(i);
+SELECT round(as_noised_max(priv_hash(hash('key' || i::varchar)), (i * 100.0)::double), 1) FROM range(1, 100) t(i);
 ----
 9700.0
 
 query R
-SELECT round(priv_noised_min(priv_hash(hash('key' || i::varchar)), (i * 100.0)::double), 1) FROM range(1, 100) t(i);
+SELECT round(as_noised_min(priv_hash(hash('key' || i::varchar)), (i * 100.0)::double), 1) FROM range(1, 100) t(i);
 ----
 400.0
 
 # Test double with large values
 query R
-SELECT round(priv_noised_max(priv_hash(hash('key' || i::varchar)), (i * 2000000.0)::double), 0) FROM range(1, 100) t(i);
+SELECT round(as_noised_max(priv_hash(hash('key' || i::varchar)), (i * 2000000.0)::double), 0) FROM range(1, 100) t(i);
 ----
 194000000.0
 
 query R
-SELECT round(priv_noised_min(priv_hash(hash('key' || i::varchar)), (i * 2000000.0)::double), 0) FROM range(1, 100) t(i);
+SELECT round(as_noised_min(priv_hash(hash('key' || i::varchar)), (i * 2000000.0)::double), 0) FROM range(1, 100) t(i);
 ----
 8000000.0
 
@@ -278,39 +278,39 @@ SELECT round(priv_noised_min(priv_hash(hash('key' || i::varchar)), (i * 2000000.
 # HUGEINT tests
 # =============================================================================
 
-# Test priv_max with HUGEINT
+# Test as_max with HUGEINT
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), i::hugeint) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), i::hugeint) FROM range(1, 100) t(i);
 ----
 97
 
-# Test priv_min with HUGEINT
+# Test as_min with HUGEINT
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), i::hugeint) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), i::hugeint) FROM range(1, 100) t(i);
 ----
 4
 
-# Test priv_max with large HUGEINT values (multiplied by large factor)
+# Test as_max with large HUGEINT values (multiplied by large factor)
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), (i::hugeint * 10000000000000::hugeint)) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), (i::hugeint * 10000000000000::hugeint)) FROM range(1, 100) t(i);
 ----
 969999975972864
 
-# Test priv_min with large HUGEINT values
+# Test as_min with large HUGEINT values
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), (i::hugeint * 10000000000000::hugeint)) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), (i::hugeint * 10000000000000::hugeint)) FROM range(1, 100) t(i);
 ----
 39999999311872
 
-# Test priv_max with negative HUGEINT values
+# Test as_max with negative HUGEINT values
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), i::hugeint) FROM range(-50, 50) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), i::hugeint) FROM range(-50, 50) t(i);
 ----
 48
 
-# Test priv_min with negative HUGEINT values
+# Test as_min with negative HUGEINT values
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), i::hugeint) FROM range(-50, 50) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), i::hugeint) FROM range(-50, 50) t(i);
 ----
 -49
 
@@ -318,27 +318,27 @@ SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), i::hugeint) FROM ra
 # UHUGEINT tests
 # =============================================================================
 
-# Test priv_max with UHUGEINT
+# Test as_max with UHUGEINT
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), i::uhugeint) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), i::uhugeint) FROM range(1, 100) t(i);
 ----
 97
 
-# Test priv_min with UHUGEINT
+# Test as_min with UHUGEINT
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), i::uhugeint) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), i::uhugeint) FROM range(1, 100) t(i);
 ----
 4
 
-# Test priv_max with large UHUGEINT values
+# Test as_max with large UHUGEINT values
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), (i::uhugeint * 10000000000000::uhugeint)) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), (i::uhugeint * 10000000000000::uhugeint)) FROM range(1, 100) t(i);
 ----
 969999975972864
 
-# Test priv_min with large UHUGEINT values
+# Test as_min with large UHUGEINT values
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), (i::uhugeint * 10000000000000::uhugeint)) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), (i::uhugeint * 10000000000000::uhugeint)) FROM range(1, 100) t(i);
 ----
 39999999311872
 
@@ -346,15 +346,15 @@ SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), (i::uhugeint * 1000
 # DATE tests
 # =============================================================================
 
-# Test priv_max with DATE
+# Test as_max with DATE
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), ('2020-01-01'::date + i::integer)::date) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), ('2020-01-01'::date + i::integer)::date) FROM range(1, 100) t(i);
 ----
 2020-04-07
 
-# Test priv_min with DATE
+# Test as_min with DATE
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), ('2020-01-01'::date + i::integer)::date) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), ('2020-01-01'::date + i::integer)::date) FROM range(1, 100) t(i);
 ----
 2020-01-05
 
@@ -362,15 +362,15 @@ SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), ('2020-01-01'::date
 # TIME tests
 # =============================================================================
 
-# Test priv_max with TIME
+# Test as_max with TIME
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), ('00:00:00'::time + (i * interval '1 minute'))::time) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), ('00:00:00'::time + (i * interval '1 minute'))::time) FROM range(1, 100) t(i);
 ----
 01:37:00.000256
 
-# Test priv_min with TIME
+# Test as_min with TIME
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), ('00:00:00'::time + (i * interval '1 minute'))::time) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), ('00:00:00'::time + (i * interval '1 minute'))::time) FROM range(1, 100) t(i);
 ----
 00:04:00
 
@@ -378,15 +378,15 @@ SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), ('00:00:00'::time +
 # TIMESTAMP tests
 # =============================================================================
 
-# Test priv_max with TIMESTAMP
+# Test as_max with TIMESTAMP
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), ('2020-01-01 00:00:00'::timestamp + (i * interval '1 day'))::timestamp) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), ('2020-01-01 00:00:00'::timestamp + (i * interval '1 day'))::timestamp) FROM range(1, 100) t(i);
 ----
 2020-04-06 23:59:50.194176
 
-# Test priv_min with TIMESTAMP
+# Test as_min with TIMESTAMP
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), ('2020-01-01 00:00:00'::timestamp + (i * interval '1 day'))::timestamp) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), ('2020-01-01 00:00:00'::timestamp + (i * interval '1 day'))::timestamp) FROM range(1, 100) t(i);
 ----
 2020-01-04 23:59:37.472
 
@@ -394,15 +394,15 @@ SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), ('2020-01-01 00:00:
 # TIMESTAMP WITH TIME ZONE tests
 # =============================================================================
 
-# Test priv_max with TIMESTAMPTZ
+# Test as_max with TIMESTAMPTZ
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), (('2020-01-01 00:00:00'::timestamp + (i * interval '1 day'))::timestamptz)) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), (('2020-01-01 00:00:00'::timestamp + (i * interval '1 day'))::timestamptz)) FROM range(1, 100) t(i);
 ----
 2020-04-06 23:59:50.194176+00
 
-# Test priv_min with TIMESTAMPTZ
+# Test as_min with TIMESTAMPTZ
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), (('2020-01-01 00:00:00'::timestamp + (i * interval '1 day'))::timestamptz)) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), (('2020-01-01 00:00:00'::timestamp + (i * interval '1 day'))::timestamptz)) FROM range(1, 100) t(i);
 ----
 2020-01-04 23:59:37.472+00
 
@@ -410,51 +410,51 @@ SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), (('2020-01-01 00:00
 # DECIMAL tests
 # =============================================================================
 
-# Test priv_max with DECIMAL(4,2) - maps to INT16
+# Test as_max with DECIMAL(4,2) - maps to INT16
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), (i * 0.5)::decimal(4,2)) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), (i * 0.5)::decimal(4,2)) FROM range(1, 100) t(i);
 ----
 48.50
 
-# Test priv_min with DECIMAL(4,2)
+# Test as_min with DECIMAL(4,2)
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), (i * 0.5)::decimal(4,2)) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), (i * 0.5)::decimal(4,2)) FROM range(1, 100) t(i);
 ----
 2.00
 
-# Test priv_max with DECIMAL(9,2) - maps to INT32
+# Test as_max with DECIMAL(9,2) - maps to INT32
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), (i * 1.5)::decimal(9,2)) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), (i * 1.5)::decimal(9,2)) FROM range(1, 100) t(i);
 ----
 145.50
 
-# Test priv_min with DECIMAL(9,2)
+# Test as_min with DECIMAL(9,2)
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), (i * 1.5)::decimal(9,2)) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), (i * 1.5)::decimal(9,2)) FROM range(1, 100) t(i);
 ----
 6.00
 
-# Test priv_max with DECIMAL(18,2) - maps to INT64
+# Test as_max with DECIMAL(18,2) - maps to INT64
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), (i * 1.5)::decimal(18,2)) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), (i * 1.5)::decimal(18,2)) FROM range(1, 100) t(i);
 ----
 145.50
 
-# Test priv_min with DECIMAL(18,2)
+# Test as_min with DECIMAL(18,2)
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), (i * 1.5)::decimal(18,2)) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), (i * 1.5)::decimal(18,2)) FROM range(1, 100) t(i);
 ----
 6.00
 
-# Test priv_max with DECIMAL(38,2) - maps to HUGEINT
+# Test as_max with DECIMAL(38,2) - maps to HUGEINT
 query I
-SELECT priv_noised_max(priv_hash(hash('key' || i::varchar)), (i * 1.5)::decimal(38,2)) FROM range(1, 100) t(i);
+SELECT as_noised_max(priv_hash(hash('key' || i::varchar)), (i * 1.5)::decimal(38,2)) FROM range(1, 100) t(i);
 ----
 145.50
 
-# Test priv_min with DECIMAL(38,2)
+# Test as_min with DECIMAL(38,2)
 query I
-SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), (i * 1.5)::decimal(38,2)) FROM range(1, 100) t(i);
+SELECT as_noised_min(priv_hash(hash('key' || i::varchar)), (i * 1.5)::decimal(38,2)) FROM range(1, 100) t(i);
 ----
 6.00
 
@@ -462,27 +462,27 @@ SELECT priv_noised_min(priv_hash(hash('key' || i::varchar)), (i * 1.5)::decimal(
 # Sample diversity check tests
 # ============================================================================
 
-# Ungrouped priv_max: all rows hash to the same privacy unit → should trigger diversity error
+# Ungrouped as_max: all rows hash to the same privacy unit → should trigger diversity error
 statement error
-SELECT priv_noised_max(hash(5)::UBIGINT, 1.0) FROM range(1000) t(i)
+SELECT as_noised_max(hash(5)::UBIGINT, 1.0) FROM range(1000) t(i)
 ----
 detected absence of sample diversity
 
-# Grouped priv_max: each group has rows from the same privacy unit → should trigger diversity error
+# Grouped as_max: each group has rows from the same privacy unit → should trigger diversity error
 statement error
-SELECT key, priv_noised_max(hash(5)::UBIGINT, 1.0) FROM (SELECT i % 3 AS key FROM range(3000) t(i)) sub GROUP BY key
+SELECT key, as_noised_max(hash(5)::UBIGINT, 1.0) FROM (SELECT i % 3 AS key FROM range(3000) t(i)) sub GROUP BY key
 ----
 detected absence of sample diversity
 
-# Ungrouped priv_min: all rows hash to the same privacy unit → should trigger diversity error
+# Ungrouped as_min: all rows hash to the same privacy unit → should trigger diversity error
 statement error
-SELECT priv_noised_min(hash(5)::UBIGINT, 1.0) FROM range(1000) t(i)
+SELECT as_noised_min(hash(5)::UBIGINT, 1.0) FROM range(1000) t(i)
 ----
 detected absence of sample diversity
 
-# Grouped priv_min: each group has rows from the same privacy unit → should trigger diversity error
+# Grouped as_min: each group has rows from the same privacy unit → should trigger diversity error
 statement error
-SELECT key, priv_noised_min(hash(5)::UBIGINT, 1.0) FROM (SELECT i % 3 AS key FROM range(3000) t(i)) sub GROUP BY key
+SELECT key, as_noised_min(hash(5)::UBIGINT, 1.0) FROM (SELECT i % 3 AS key FROM range(3000) t(i)) sub GROUP BY key
 ----
 detected absence of sample diversity
 

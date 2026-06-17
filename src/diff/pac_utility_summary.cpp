@@ -11,6 +11,7 @@
 #include "duckdb/common/printer.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 
@@ -54,6 +55,7 @@ struct PacUtilitySummaryGlobalState : public GlobalOperatorState {
 	// Per measure column (columns after key columns): accumulate relative error %
 	vector<double> utility_sum;
 	vector<idx_t> utility_count;
+	vector<double> cell_errors;
 };
 
 // ============================================================================
@@ -130,6 +132,9 @@ OperatorResultType PhysicalPacUtilitySummary::Execute(ExecutionContext &context,
 			idx_t idx = m - num_key_cols;
 			gstate.utility_sum[idx] += dbl_val;
 			gstate.utility_count[idx]++;
+			if (std::isfinite(dbl_val)) {
+				gstate.cell_errors.push_back(dbl_val);
+			}
 		}
 	}
 	// Pass through unchanged
@@ -166,19 +171,32 @@ OperatorFinalResultType PhysicalPacUtilitySummary::OperatorFinalize(Pipeline &pi
 	if (cols_with_data > 0) {
 		utility /= static_cast<double>(cols_with_data);
 	}
+	double median_error_pct = 0.0;
+	if (!gstate.cell_errors.empty()) {
+		auto &errors = gstate.cell_errors;
+		auto mid = errors.begin() + static_cast<ptrdiff_t>(errors.size() / 2);
+		std::nth_element(errors.begin(), mid, errors.end());
+		median_error_pct = *mid;
+		if (errors.size() % 2 == 0) {
+			auto lower_mid = errors.begin() + static_cast<ptrdiff_t>((errors.size() / 2) - 1);
+			std::nth_element(errors.begin(), lower_mid, mid);
+			median_error_pct = (*lower_mid + *mid) / 2.0;
+		}
+	}
 	// Output results
 	if (!output_path.empty()) {
 		// Append to CSV file
 		std::ofstream out(output_path, std::ios::app);
 		if (out.is_open()) {
-			out << utility << "," << recall << "," << precision << "\n";
+			out << utility << "," << recall << "," << precision << "," << median_error_pct << "\n";
 			out.close();
 		}
 	}
 	// Print to stderr
 	string msg = "utility=" + std::to_string(utility) + " recall=" + std::to_string(recall) +
-	             " precision=" + std::to_string(precision) + " (=" + std::to_string(gstate.matched_rows) + " -" +
-	             std::to_string(gstate.missing_rows) + " +" + std::to_string(gstate.pac_only_rows) + ")";
+	             " precision=" + std::to_string(precision) + " median_error_pct=" + std::to_string(median_error_pct) +
+	             " (=" + std::to_string(gstate.matched_rows) + " -" + std::to_string(gstate.missing_rows) + " +" +
+	             std::to_string(gstate.pac_only_rows) + ")";
 	Printer::Print(msg);
 	return OperatorFinalResultType::FINISHED;
 }

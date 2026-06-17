@@ -16,12 +16,12 @@
 #include "duckdb/common/vector_operations/unary_executor.hpp"
 #include "duckdb/common/types.hpp"
 #include "core/privacy_optimizer.hpp"
-#include "aggregates/pac_aggregate.hpp"
-#include "aggregates/pac_count.hpp"
-#include "aggregates/pac_sum.hpp"
-#include "aggregates/pac_clip_sum.hpp"
-#include "aggregates/pac_min_max.hpp"
-#include "aggregates/pac_clip_min_max.hpp"
+#include "aggregates/as_aggregate.hpp"
+#include "aggregates/as_count.hpp"
+#include "aggregates/as_sum.hpp"
+#include "aggregates/as_clip_sum.hpp"
+#include "aggregates/as_min_max.hpp"
+#include "aggregates/as_clip_min_max.hpp"
 #include "aggregates/dp_laplace_noise.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "parser/privacy_parser.hpp"
@@ -280,8 +280,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	pac_topk_rule.optimizer_info = pac_info;
 	OptimizerExtension::Register(db.config, std::move(pac_topk_rule));
 
-	// Register priv_avg rewrite rule (post-optimizer: decomposes priv_noised_avg/priv_avg into sum/count + division).
-	// This post-optimizer handles user-written priv_avg() in SQL. Compiler-generated priv_noised_avg is already
+	// Register as_avg rewrite rule (post-optimizer: decomposes as_noised_avg/as_avg into sum/count + division).
+	// This post-optimizer handles user-written as_avg() in SQL. Compiler-generated as_noised_avg is already
 	// decomposed during the pre-optimizer phase (in CompilePrivQuery) so this is a no-op for those.
 	{
 		OptimizerExtension pac_avg_rule;
@@ -322,15 +322,36 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "Differential privacy budget ε (used by dp_standard, dp_elastic, and dp_sass)",
 	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));
 	// Clipping bound for SUM/AVG, required when such an aggregate is present in any DP mode.
-	// dp_standard bounds each PU's total contribution; dp_elastic/dp_sass clip per tuple.
+	// dp_standard/dp_sass bound each PU's total contribution; dp_elastic clips per tuple.
 	db.config.AddExtensionOption("dp_sum_bound",
 	                             "Clipping bound for SUM/AVG in DP modes, required when such an aggregate is present "
-	                             "(per-PU total for dp_standard; per-tuple for dp_elastic/dp_sass)",
+	                             "(per-PU total for dp_standard/dp_sass; per-tuple for dp_elastic)",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
 	db.config.AddExtensionOption("dp_count_bound",
 	                             "Per-PU row-count bound: max rows one privacy unit contributes to a COUNT over a join "
-	                             "(required for dp_standard COUNT-over-join; also bounds dp_sass COUNT/AVG components)",
+	                             "(required for dp_standard/dp_sass COUNT-over-join; also bounds AVG components)",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_max_groups_contributed",
+	                             "Per-PU group contribution bound for dp_standard/dp_sass grouped joins. "
+	                             "This is the max number of output groups one privacy unit may affect.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sass_count_output_bound",
+	                             "Public output-domain upper bound for dp_sass COUNT/COUNT(DISTINCT) sample answers.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sass_sum_output_bound",
+	                             "Public symmetric output-domain bound for dp_sass SUM sample answers.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sass_avg_lower_bound",
+	                             "Public output-domain lower bound for dp_sass AVG sample answers.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sass_avg_upper_bound",
+	                             "Public output-domain upper bound for dp_sass AVG sample answers.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_public_partitions",
+	                             "Assertion for privacy_mode='dp_standard' grouped queries. Set to 'assert' when "
+	                             "GROUP BY partitions are public/data-independent, matching Google DP public "
+	                             "partitions semantics.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 	// Privacy failure probability δ for (ε,δ)-DP smooth sensitivity. Required by dp_elastic and
 	// dp_sass; ignored by dp_standard, which gives pure ε-DP. PRAGMA refresh_dp_stats(epsilon) can set it.
 	db.config.AddExtensionOption(
@@ -412,9 +433,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	db.config.AddExtensionOption("priv_clip_support",
-	                             "Dynamic outlier clipping threshold for priv_clip_sum. "
+	                             "Dynamic outlier clipping threshold for as_clip_sum. "
 	                             "Levels with fewer than this many estimated distinct contributors are zeroed out. "
-	                             "NULL (default) disables priv_clip_sum; set to e.g. 64 to enable.",
+	                             "NULL (default) disables as_clip_sum; set to e.g. 64 to enable.",
 	                             LogicalType::BIGINT, Value());
 
 	db.config.AddExtensionOption("priv_clip_scale",
@@ -422,10 +443,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "Default false (omit).",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
 
-	// Register priv_sum aggregate functions
+	// Register as_sum aggregate functions
 	RegisterPacSumFunctions(loader);
 	RegisterPacSumCountersFunctions(loader);
 	RegisterDpSampleSumFunctions(loader);
+	RegisterDpSampleAvgFunctions(loader);
 	RegisterPacClipSumFunctions(loader);
 	RegisterPacNoisedClipSumFunctions(loader);
 	RegisterPacNoisedClipSumCountFunctions(loader);
@@ -435,7 +457,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterDpSampleCountFunctions(loader);
 	RegisterPacClipCountFunctions(loader);
 	RegisterPacNoisedClipCountFunctions(loader);
-	// Register priv_min/priv_max aggregate functions
+	// Register as_min/as_max aggregate functions
 	RegisterPacMinFunctions(loader);
 	RegisterPacMaxFunctions(loader);
 	// Register _counters variants for categorical queries
@@ -449,7 +471,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacNoisedClipMinFunctions(loader);
 	RegisterPacNoisedClipMaxFunctions(loader);
 
-	// Register dummy priv_noised_avg / priv_avg (replaced by RewritePacAvgToDiv before execution)
+	// Register dummy as_noised_avg / as_avg (replaced by RewritePacAvgToDiv before execution)
 	RegisterPacAvgFunctions(loader);
 
 	// Register PAC categorical functions (priv_select, priv_filter, priv_filter_<cmp>, etc.)

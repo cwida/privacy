@@ -143,7 +143,7 @@ ORDER BY
 3-MEDIUM	2
 
 # Test Top-K pushdown with correlated EXISTS subquery (Q4 + LIMIT)
-# The top-k optimizer should rewrite priv_count to list-returning priv_count,
+# The top-k optimizer should rewrite as_count to list-returning as_count,
 # insert priv_mean for ordering, and apply priv_mean to the final top-k rows
 query II
 SELECT
