@@ -37,6 +37,7 @@ struct QuerySpec {
 
 struct Config {
 	double scale_factor = 1.0;
+	string dataset = "tpch"; // 'tpch' (standard) or 'jcch' (skewed: heavy-tailed per-customer volume)
 	string db_path;
 	string out_path;
 	string mode = "dp_sass";
@@ -199,14 +200,32 @@ static void LoadTpch(Connection &con) {
 	RunStatement(con, "LOAD tpch");
 }
 
-static void EnsureTpchData(Connection &con, double scale_factor) {
+// JCC-H-style skew (in-DuckDB approximation of the JCC-H benchmark, Boncz et al.): concentrate a
+// fraction of orders onto a small set of "whale" customers, giving a heavy-tailed per-customer
+// (and, via the orders->lineitem chain, per-customer lineitem) volume. This stresses the per-PU
+// contribution bound that worst-case global-sensitivity DP must cover. Deterministic (no RNG),
+// schema-preserving (only o_custkey is reassigned to existing whale custkeys).
+static void GenerateJcchSkew(Connection &con, double scale_factor) {
+	// Whales = first ~0.1% of customers (at least 10). ~30% of orders are reassigned to them.
+	int64_t n_whales = std::max<int64_t>(10, static_cast<int64_t>(150.0 * scale_factor));
+	Log("Applying JCC-H skew: concentrating ~30% of orders onto " + std::to_string(n_whales) +
+	    " whale customers (c_custkey 1.." + std::to_string(n_whales) + ")");
+	RunStatement(con, "UPDATE orders SET o_custkey = 1 + (o_orderkey % " + std::to_string(n_whales) +
+	                      ") WHERE o_orderkey % 10 < 3");
+	RunStatement(con, "CHECKPOINT");
+}
+
+static void EnsureTpchData(Connection &con, double scale_factor, const string &dataset) {
 	LoadTpch(con);
 	if (TableHasRows(con, "customer")) {
-		Log("TPC-H tables already exist, skipping dbgen.");
+		Log(dataset + " tables already exist, skipping dbgen.");
 		return;
 	}
 	Log("Generating TPC-H data at SF " + FormatNumber(scale_factor));
 	RunStatement(con, "CALL dbgen(sf=" + FormatNumber(scale_factor) + ")");
+	if (dataset == "jcch") {
+		GenerateJcchSkew(con, scale_factor);
+	}
 }
 
 static double ReadScalarDouble(Connection &con, const string &sql) {
@@ -745,12 +764,12 @@ ORDER BY public_bins.c_count_bucket)";
 	return query.sql;
 }
 
-static string DefaultDbPath(double sf) {
-	return "tpch_sass_sf" + FormatNumber(sf) + ".db";
+static string DefaultDbPath(double sf, const string &dataset) {
+	return dataset + "_sass_sf" + FormatNumber(sf) + ".db";
 }
 
-static string DefaultOutPath(double sf) {
-	return "benchmark/tpch/dp_sass_tpch_utility_sf" + FormatNumber(sf) + ".csv";
+static string DefaultOutPath(double sf, const string &dataset) {
+	return "benchmark/tpch/dp_sass_" + dataset + "_utility_sf" + FormatNumber(sf) + ".csv";
 }
 
 static string BenchmarkProfileName(BenchmarkProfile profile) {
@@ -772,6 +791,11 @@ static Config ParseArgs(int argc, char **argv) {
 		string value = eq == string::npos ? "" : arg.substr(eq + 1);
 		if (key == "--sf") {
 			config.scale_factor = std::stod(value);
+		} else if (key == "--dataset") {
+			if (value != "tpch" && value != "jcch") {
+				throw std::runtime_error("--dataset must be 'tpch' or 'jcch'");
+			}
+			config.dataset = value;
 		} else if (key == "--db") {
 			config.db_path = value;
 		} else if (key == "--out") {
@@ -821,8 +845,9 @@ static Config ParseArgs(int argc, char **argv) {
 			          << "                            [--runs=N] [--epsilon=E] [--delta=D]\n"
 			          << "                            [--sample-lanes=N] [--threads=N] [--profile=PROFILE]\n"
 			          << "                            [--bound-sweep=CSV] [--count-bound=N] [--group-bound=N]\n"
-			          << "                            [--release=median|average|both]\n"
+			          << "                            [--release=median|average|both] [--dataset=tpch|jcch]\n"
 			          << "  MODE is dp_sass, dp_elastic, dp_standard, all, or a comma-separated list\n"
+			          << "  --dataset=jcch applies JCC-H-style skew (heavy-tailed per-customer volume)\n"
 			          << "  --release selects the dp_sass release method(s); 'both' compares median vs average\n";
 			std::cout << "  PROFILE is entity or flex-row\n";
 			std::cout << "  --bound-sweep multiplies public count bounds, e.g. 1,2,5,10,100\n";
@@ -832,10 +857,10 @@ static Config ParseArgs(int argc, char **argv) {
 		}
 	}
 	if (config.db_path.empty()) {
-		config.db_path = DefaultDbPath(config.scale_factor);
+		config.db_path = DefaultDbPath(config.scale_factor, config.dataset);
 	}
 	if (config.out_path.empty()) {
-		config.out_path = DefaultOutPath(config.scale_factor);
+		config.out_path = DefaultOutPath(config.scale_factor, config.dataset);
 	}
 	if (config.public_count_bound <= 0.0 || !std::isfinite(config.public_count_bound)) {
 		throw std::runtime_error("--count-bound must be a positive finite number");
@@ -866,7 +891,7 @@ static int Main(int argc, char **argv) {
 	DuckDB db(config.db_path);
 	Connection con(db);
 
-	EnsureTpchData(con, config.scale_factor);
+	EnsureTpchData(con, config.scale_factor, config.dataset);
 	RunStatement(con, "LOAD privacy");
 	RunStatement(con, "SET threads=" + std::to_string(config.threads));
 	RunStatement(con, "SET privacy_noise=true");
@@ -885,6 +910,7 @@ static int Main(int argc, char **argv) {
 		sass_output_bounds[i] = PublicCountOutputBound(queries[i], config.scale_factor);
 		Log(queries[i].name + " public dp_sass_count_output_bound=" + FormatNumber(sass_output_bounds[i]));
 	}
+	Log("dataset=" + config.dataset);
 	Log("privacy_mode=" + config.mode);
 	Log("benchmark_profile=" + BenchmarkProfileName(config.profile));
 	Log("dp_epsilon=" + FormatNumber(config.epsilon));
