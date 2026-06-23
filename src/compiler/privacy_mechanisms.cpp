@@ -674,7 +674,7 @@ static double GetRequiredFiniteSetting(ClientContext &context, const string &set
 	return bound;
 }
 
-static bool IsDpPublicPartitionsAsserted(ClientContext &context) {
+static bool IsDpPublicPartitionsAsserted(ClientContext &context, const string &mechanism_name) {
 	Value v;
 	if (!context.TryGetCurrentSetting("dp_public_partitions", v) || v.IsNull()) {
 		return false;
@@ -688,19 +688,38 @@ static bool IsDpPublicPartitionsAsserted(ClientContext &context) {
 	}
 	setting = setting.substr(begin, end - begin + 1);
 	if (setting != "assert") {
-		throw InvalidInputException("dp_standard: dp_public_partitions must be NULL or 'assert' (got '" + setting +
-		                            "')");
+		throw InvalidInputException(mechanism_name + ": dp_public_partitions must be NULL or 'assert' (got '" +
+		                            setting + "')");
 	}
 	return true;
 }
 
 static void RequirePublicPartitionsForGroupedStandard(ClientContext &context, idx_t n_groups) {
-	if (n_groups == 0 || IsDpPublicPartitionsAsserted(context)) {
+	if (n_groups == 0 || IsDpPublicPartitionsAsserted(context, "dp_standard")) {
 		return;
 	}
 	throw InvalidInputException("dp_standard: GROUP BY queries require public/data-independent partitions. "
 	                            "Set dp_public_partitions='assert' after providing a public partition domain, "
 	                            "or use an (epsilon,delta) mode with partition selection.");
+}
+
+static double ComputeTauThreshold(double epsilon, double delta, int64_t max_groups_contributed) {
+	if (epsilon <= 0.0 || !std::isfinite(epsilon)) {
+		throw InvalidInputException("dp_sass: partition-selection epsilon must be positive and finite");
+	}
+	if (delta <= 0.0 || delta >= 1.0 || !std::isfinite(delta)) {
+		throw InvalidInputException("dp_sass: partition selection requires dp_delta in (0, 1)");
+	}
+	if (max_groups_contributed <= 0) {
+		throw InvalidInputException("dp_sass: dp_max_groups_contributed must be positive");
+	}
+	double c_u = static_cast<double>(max_groups_contributed);
+	double log_one_minus_delta_over_c = std::log1p(-delta) / c_u;
+	double threshold_term = -2.0 * std::expm1(log_one_minus_delta_over_c);
+	if (threshold_term <= 0.0 || !std::isfinite(threshold_term)) {
+		throw InvalidInputException("dp_sass: could not compute a finite partition-selection threshold");
+	}
+	return 1.0 - (c_u * std::log(threshold_term)) / epsilon;
 }
 
 // Elastic Laplace scale = sensitivity / epsilon; sensitivity = es for COUNT, es * sum_bound for SUM
@@ -972,14 +991,31 @@ static optional_idx AddSupportAggregate(OptimizerExtensionInput &input, unique_p
 }
 
 static LogicalFilter *ApplySupportFilter(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                         LogicalAggregate *agg, idx_t support_pos, double threshold) {
+                                         LogicalAggregate *agg, idx_t support_pos, double threshold,
+                                         double noise_scale = 0.0) {
 	auto support_ref = make_uniq<BoundColumnRefExpression>(agg->types[agg->groups.size() + support_pos],
 	                                                       ColumnBinding(agg->aggregate_index, support_pos));
-	auto support_double =
+	unique_ptr<Expression> support_expr =
 	    BoundCastExpression::AddCastToType(input.context, std::move(support_ref), LogicalType::DOUBLE);
+	if (noise_scale > 0.0 && std::isfinite(noise_scale)) {
+		unique_ptr<Expression> nonce = make_uniq<BoundConstantExpression>(
+		    Value::UBIGINT(PAC_MAGIC_HASH ^ (static_cast<uint64_t>(agg->aggregate_index) * PAC_MAGIC_HASH) ^
+		                   static_cast<uint64_t>(support_pos + 1)));
+		for (idx_t gi = 0; gi < agg->groups.size(); gi++) {
+			unique_ptr<Expression> group_ref =
+			    make_uniq<BoundColumnRefExpression>(agg->types[gi], ColumnBinding(agg->group_index, gi));
+			auto group_hash = input.optimizer.BindScalarFunction("hash", std::move(group_ref));
+			nonce = input.optimizer.BindScalarFunction("xor", std::move(nonce), std::move(group_hash));
+		}
+		vector<unique_ptr<Expression>> noise_children;
+		noise_children.push_back(std::move(support_expr));
+		noise_children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(noise_scale)));
+		noise_children.push_back(std::move(nonce));
+		support_expr = BindScalarLocal(input, "dp_noise", std::move(noise_children));
+	}
 	auto threshold_const = make_uniq<BoundConstantExpression>(Value::DOUBLE(threshold));
 	auto condition = make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_GREATERTHANOREQUALTO,
-	                                                      std::move(support_double), std::move(threshold_const));
+	                                                      std::move(support_expr), std::move(threshold_const));
 
 	auto filter = make_uniq<LogicalFilter>();
 	filter->expressions.push_back(std::move(condition));
@@ -1830,6 +1866,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	idx_t n_original_aggs = agg->expressions.size();
 	idx_t n_groups = agg->groups.size();
 	auto contribution_bounds = GetDpSassContributionBounds(input.context, agg);
+	bool private_partition_selection = n_groups > 0 && !IsDpPublicPartitionsAsserted(input.context, "dp_sass");
 
 	vector<LogicalType> output_types;
 	output_types.reserve(agg->expressions.size());
@@ -1844,6 +1881,18 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	// Ungrouped queries have C_u = 1. This makes C_u enter the guarantee, not just filter rows.
 	int64_t group_bound =
 	    n_groups > 0 ? GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", "dp_sass") : 1;
+	if (private_partition_selection && delta == 0.0) {
+		if (!TryGetDpDelta(input.context, delta)) {
+			throw InvalidInputException("dp_sass: grouped private partitions require dp_delta for tau-thresholding");
+		}
+		if (delta <= 0.0 || delta >= 0.5 || !std::isfinite(delta)) {
+			throw InvalidInputException("dp_sass: dp_delta must be in (0, 0.5)");
+		}
+	}
+	double release_epsilon = private_partition_selection ? epsilon * 0.5 : epsilon;
+	double partition_epsilon = private_partition_selection ? epsilon - release_epsilon : 0.0;
+	double release_delta = private_partition_selection ? delta * 0.5 : delta;
+	double partition_delta = private_partition_selection ? delta - release_delta : 0.0;
 	double budget_divisor = k * static_cast<double>(group_bound);
 	vector<double> epsilons;
 	vector<double> deltas;
@@ -1880,25 +1929,37 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 			lower_bounds.push_back(-output_bound);
 			upper_bounds.push_back(output_bound);
 		}
-		epsilons.push_back(epsilon / budget_divisor);
-		deltas.push_back(delta / budget_divisor);
+		epsilons.push_back(release_epsilon / budget_divisor);
+		deltas.push_back(release_delta / budget_divisor);
 	}
 
 	if (HasDistinctAggregate(agg) && !IsDpSampleCountDistinct(agg)) {
 		throw InvalidInputException("dp_sass: clipped COUNT(DISTINCT) is supported only as a single aggregate; "
 		                            "mixed DISTINCT aggregate lists are not supported yet");
 	}
+	if (private_partition_selection && IsDpSampleCountDistinct(agg)) {
+		throw InvalidInputException("dp_sass: grouped COUNT(DISTINCT) over private partitions is not supported yet; "
+		                            "partition selection must count contributing privacy units");
+	}
 
 	RewriteAggregateToSampleMedian(input, agg, std::move(hash_infos[0].hash_expr), contribution_bounds);
 
 	LogicalOperator *projection_anchor = agg;
-	double support_threshold = 0.0;
-	bool apply_support_filter = TryGetPrivacyMinGroupCount(input.context, support_threshold);
+	double support_threshold =
+	    private_partition_selection ? ComputeTauThreshold(partition_epsilon, partition_delta, group_bound) : 0.0;
+	double requested_support_threshold = 0.0;
+	if (TryGetPrivacyMinGroupCount(input.context, requested_support_threshold)) {
+		support_threshold = std::max(support_threshold, requested_support_threshold);
+	}
+	bool apply_support_filter = support_threshold > 0.0 && std::isfinite(support_threshold);
 	if (apply_support_filter) {
 		idx_t support_pos = agg->expressions.size();
 		agg->expressions.push_back(BindPlainAggregate(input, "count_star", nullptr));
 		agg->ResolveOperatorTypes();
-		projection_anchor = ApplySupportFilter(input, plan, agg, support_pos, support_threshold);
+		bool noise_enabled = IsPacNoiseEnabled(input.context, true);
+		double support_scale =
+		    private_partition_selection && noise_enabled ? static_cast<double>(group_bound) / partition_epsilon : 0.0;
+		projection_anchor = ApplySupportFilter(input, plan, agg, support_pos, support_threshold, support_scale);
 	}
 
 	auto noise_proj = WrapSampleMedianProjection(input, plan, agg, epsilons, deltas, output_types, lower_bounds,

@@ -235,6 +235,9 @@ statement ok
 SET dp_max_groups_contributed = 1;
 
 statement ok
+SET dp_public_partitions = 'assert';
+
+statement ok
 SET dp_sass_count_output_bound = 1000;
 
 query I nosort explain_sass_distinct_count
@@ -265,6 +268,22 @@ FROM (
 WHERE p_brand = 'Brand#22';
 ----
 1
+
+statement ok
+SET dp_public_partitions = NULL;
+
+statement ok
+SET dp_delta = 1e-6;
+
+statement error
+SELECT p_brand, p_type, p_size, COUNT(DISTINCT ps_suppkey) AS supplier_cnt
+FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
+GROUP BY p_brand, p_type, p_size;
+----
+partition selection must count contributing privacy units
+
+statement ok
+SET dp_public_partitions = 'assert';
 
 statement error
 SELECT COUNT(*)
@@ -333,6 +352,9 @@ SET dp_count_bound = 1000;
 
 statement ok
 SET dp_max_groups_contributed = 1;
+
+statement ok
+SET dp_public_partitions = 'assert';
 
 statement ok
 SET dp_sass_count_output_bound = 1000;
@@ -455,6 +477,9 @@ SET dp_count_bound = 1000;
 
 statement ok
 SET dp_max_groups_contributed = 1;
+
+statement ok
+SET dp_public_partitions = 'assert';
 
 statement ok
 SET dp_sass_count_output_bound = 1000;
@@ -714,6 +739,67 @@ dp_sass_private_range currently requires dp_sass_release='average'
 
 statement ok
 SET dp_sass_private_range = false;
+
+statement ok
+CREATE PU TABLE sass_group_users(uid INTEGER, PRIVACY_KEY(uid));
+
+statement ok
+CREATE TABLE sass_group_events(uid INTEGER, g INTEGER);
+
+statement ok
+INSERT INTO sass_group_users
+SELECT i FROM range(200) t(i);
+
+statement ok
+INSERT INTO sass_group_events
+SELECT i, CASE WHEN i < 40 THEN 0 ELSE i END
+FROM range(200) t(i);
+
+statement ok
+ALTER TABLE sass_group_events ADD PRIVACY_LINK (uid) REFERENCES sass_group_users(uid);
+
+# Grouped private partitions use automatic tau-thresholding. The average release is pure-epsilon
+# for values, but private partition selection still needs delta.
+statement ok
+SET dp_public_partitions = NULL;
+
+statement ok
+SET dp_sass_release = 'average';
+
+statement ok
+SET dp_delta = NULL;
+
+statement error
+SELECT g, COUNT(*)
+FROM sass_group_events
+GROUP BY g;
+----
+dp_delta
+
+statement ok
+SET dp_sass_release = 'median';
+
+statement ok
+SET dp_delta = 1e-6;
+
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET dp_max_groups_contributed = 1;
+
+statement ok
+SET privacy_min_group_count = NULL;
+
+query II rowsort
+SELECT g, CAST(c IS NOT NULL AS INTEGER)
+FROM (
+    SELECT g, COUNT(*) AS c
+    FROM sass_group_events
+    GROUP BY g
+);
+----
+0	1
 
 # Smoke test: the exact SmoothSensitivityMedian (Algorithm 1 + JList) bounded path
 # with noise ON. The 64 lane values have a large gap just ABOVE the median (off-center),

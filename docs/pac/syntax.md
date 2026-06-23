@@ -156,5 +156,5 @@ There is some preliminary support for using multiple PU tables inside the same s
 | `privacy_seed` | random | Fix seed for reproducible results |
 | `privacy_noise` | `true` | Toggle noise injection |
 | `privacy_diffcols` | `NULL` | [Utility diff](docs/pac/utility.md): compare noised vs exact results |
-| `privacy_min_group_count` | `NULL` (disabled) | In `dp_elastic`, suppress groups with fewer than this many contributing privacy units before value noise. In PAC aggregates, this remains the z-score threshold for [utility NULLing](runtime_checks.md#utility-nulling). |
+| `privacy_min_group_count` | `NULL` (disabled) | Manual minimum support threshold for DP groups. In `dp_sass`, grouped private partitions use at least the automatic tau threshold. In PAC aggregates, this remains the z-score threshold for [utility NULLing](runtime_checks.md#utility-nulling). |
 | `priv_clip_support` | `NULL` (disabled) | Enable clipping: aggregate per-PU values with outlier elimination at the given support threshold |

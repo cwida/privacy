@@ -358,8 +358,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "'average' (GUPT-style mean, pure ε-DP).",
 	                             LogicalType::VARCHAR, Value("median"));
 	db.config.AddExtensionOption("dp_sass_private_range",
-	                             "dp_sass: when true, privately estimate the per-aggregate output range (pure-ε "
-	                             "quantiles) instead of requiring public dp_sass_*_output_bound settings.",
+	                             "dp_sass: when true, privately estimate a tighter per-aggregate output range "
+	                             "(pure-ε quantiles) within the public dp_sass_*_output_bound envelope.",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	db.config.AddExtensionOption("dp_sass_range_budget_fraction",
 	                             "dp_sass: fraction of each aggregate's ε budget spent on private range estimation "
@@ -394,8 +394,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// unless they have at least this many contributing privacy units.
 	// PAC aggregate functions still interpret this as their low-SNR utility NULLing threshold.
 	db.config.AddExtensionOption("privacy_min_group_count",
-	                             "Minimum privacy-unit support threshold for dp_elastic groups. "
-	                             "PAC uses this setting as its low-SNR utility NULLing threshold. NULL disables.",
+	                             "Minimum privacy-unit support threshold for DP groups. In dp_sass, grouped private "
+	                             "partitions use at least the automatic tau threshold. PAC uses this setting as its "
+	                             "low-SNR utility NULLing threshold. NULL disables manual thresholding.",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
 
 	// ---- Internal settings ----

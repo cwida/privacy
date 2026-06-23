@@ -363,6 +363,13 @@ by running many independent SQL queries.
 - `dp_sum_bound` and `dp_count_bound` are required user-provided bounds.
 - MIN and MAX are supported only as bounded-domain sample medians; utility may be
   poor.
-- Group release still needs careful treatment when group keys come from private
-  domains. `privacy_min_group_count` is a utility/suppression control, not the
-  same as the threshold formula in bounded-contribution SQL DP systems.
+- Grouped private partitions use automatic tau-thresholding. If
+  `privacy_min_group_count` is set, the compiler uses the larger of the manual
+  threshold and the automatic tau threshold.
+- Grouped `COUNT(DISTINCT)` currently requires public partitions under
+  `dp_sass`. The private-partition tau filter must count contributing privacy
+  units, and the current distinct-count rewrite collapses rows by distinct value
+  before the final aggregate.
+- Private range estimation narrows the effective range inside public
+  `dp_sass_*_output_bound` settings. It is not an unbounded-domain range
+  discovery mechanism.

@@ -642,9 +642,11 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
                     vector<double> pac_times_ms;
                     bool pac_failed = false;
                     for (int run = 1; run <= 5; ++run) {
+                        con.Query("SET priv_rewrite=false;");
                         auto t0 = std::chrono::steady_clock::now();
                         auto r_pac = con.Query(pac_sql);
                         auto t1 = std::chrono::steady_clock::now();
+                        con.Query("SET priv_rewrite=true;");
                         double pac_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
                         if (r_pac && r_pac->HasError()) {
                             Log("PAC (" + mode_str + ") " + entry.label + " run " + std::to_string(run) + " error: " + r_pac->GetError());
