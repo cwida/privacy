@@ -1216,7 +1216,7 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
                                                   const vector<double> &deltas, const vector<LogicalType> &output_types,
                                                   const vector<double> &lower_bounds,
                                                   const vector<double> &upper_bounds, LogicalOperator *insert_above,
-                                                  const string &release_method) {
+                                                  const string &release_method, double range_fraction) {
 	idx_t n_groups = agg->groups.size();
 	idx_t n_aggs = output_types.size();
 	D_ASSERT(epsilons.size() == n_aggs);
@@ -1241,10 +1241,13 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 			// median path: dp_smooth_median_noise(list, ε, δ, lanes, lower, upper)
 			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(deltas[ai])));
 		}
-		// average path: dp_gupt_mean_noise(list, ε, lanes, lower, upper) — pure ε, no δ.
+		// average path: dp_gupt_mean_noise(list, ε, lanes, lower, upper, range_fraction) — pure ε, no δ.
 		children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(sample_lanes)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(lower_bounds[ai])));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(upper_bounds[ai])));
+		if (average_release) {
+			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(range_fraction)));
+		}
 		const char *terminal = average_release ? "dp_gupt_mean_noise" : "dp_smooth_median_noise";
 		unique_ptr<Expression> noised = BindScalarLocal(input, terminal, std::move(children));
 		if (output_types[ai] != LogicalType::DOUBLE) {
@@ -1792,6 +1795,25 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		}
 	}
 
+	// Pure-ε private range estimation (only for the 'average' release): spend a fraction of each
+	// aggregate's ε estimating the clip range from the lane answers, within the public envelope.
+	double range_fraction = 0.0;
+	{
+		Value pr;
+		bool private_range =
+		    input.context.TryGetCurrentSetting("dp_sass_private_range", pr) && !pr.IsNull() && pr.GetValue<bool>();
+		if (private_range) {
+			if (release_method != "average") {
+				throw InvalidInputException(
+				    "dp_sass: dp_sass_private_range currently requires dp_sass_release='average'");
+			}
+			range_fraction = GetRequiredFiniteSetting(input.context, "dp_sass_range_budget_fraction", "dp_sass");
+			if (range_fraction <= 0.0 || range_fraction >= 1.0) {
+				throw InvalidInputException("dp_sass: dp_sass_range_budget_fraction must be in (0, 1)");
+			}
+		}
+	}
+
 	bool allow_self_joins = ValidateDPSelfJoins(plan, "dp_sample_median") > 1.0;
 	CheckDPFKChainShape(plan, privacy_units, check, allow_self_joins);
 	auto pu_setup = PreparePlanForPUHashing(check, input, plan, privacy_units);
@@ -1880,7 +1902,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	}
 
 	auto noise_proj = WrapSampleMedianProjection(input, plan, agg, epsilons, deltas, output_types, lower_bounds,
-	                                             upper_bounds, projection_anchor, release_method);
+	                                             upper_bounds, projection_anchor, release_method, range_fraction);
 	(void)noise_proj;
 
 #if PRIVACY_DEBUG

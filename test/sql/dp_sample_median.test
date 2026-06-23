@@ -673,6 +673,48 @@ SELECT AVG(v) IS NOT NULL FROM sass_many;
 ----
 true
 
+# GUPT-style mean release (pure-ε; no delta required).
+statement ok
+SET dp_sass_release = 'average';
+
+statement ok
+SET dp_delta = NULL;
+
+query I nosort explain_gupt_mean
+EXPLAIN SELECT COUNT(*) FROM sass_many;
+----
+dp_gupt_mean_noise
+
+query I
+SELECT COUNT(*) IS NOT NULL FROM sass_many;
+----
+true
+
+# Pure-ε private range estimation under the average release.
+statement ok
+SET dp_sass_private_range = true;
+
+statement ok
+SET dp_sass_range_budget_fraction = 0.25;
+
+statement ok
+SELECT COUNT(*) FROM sass_many;
+
+# Private range estimation requires the average release.
+statement ok
+SET dp_sass_release = 'median';
+
+statement ok
+SET dp_delta = 1e-6;
+
+statement error
+SELECT COUNT(*) FROM sass_many;
+----
+dp_sass_private_range currently requires dp_sass_release='average'
+
+statement ok
+SET dp_sass_private_range = false;
+
 # Smoke test: the exact SmoothSensitivityMedian (Algorithm 1 + JList) bounded path
 # with noise ON. The 64 lane values have a large gap just ABOVE the median (off-center),
 # which the exact NRS envelope charges even though a centered window could miss it. With a

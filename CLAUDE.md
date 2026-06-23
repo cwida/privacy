@@ -27,7 +27,7 @@ Never execute git commands that could lose code. Always ask the user for permiss
 - **`pac`** (default): PAC Privacy — empirical MIA resistance. Maintains 64 parallel counters per aggregate (one per "world" bit), adds noise calibrated to the query variance across sub-samples. Provides theoretical mutual-information bounds. Not differential privacy.
 - **`dp_standard`**: Global-sensitivity DP — formal pure ε-DP. Bounds each privacy unit's *total* contribution to a fixed constant (per-PU contribution clipping), so global sensitivity equals that constant — data-independent, no `dp_delta`. On a single PU table this is per-row clipping (COUNT sensitivity = 1, SUM = `dp_sum_bound`); on a join it pre-aggregates per PU (grouping by the PU-adjacent FK), clips each PU's partial to `dp_sum_bound`/`dp_count_bound`, then sums — so a join with COUNT requires `dp_count_bound`. Laplace noise calibrated to `bound/epsilon`.
 - **`dp_elastic`**: Elastic sensitivity DP — formal (ε,δ)-DP. Same Laplace pipeline as `dp_standard` but uses per-row clipping and the smoothed join-frequency envelope (`2·SES_β`, β derived from ε,δ) for sensitivity. Requires `dp_delta`.
-- **`dp_sass`**: Sample-and-aggregate with smooth sensitivity — formal (ε,δ)-DP. Computes 64 sample aggregates and releases the median plus Laplace noise calibrated to smooth sensitivity. Requires `dp_delta`, `dp_sum_bound`/`dp_count_bound`.
+- **`dp_sass`**: Sample-and-aggregate. Computes 64 sample (lane) aggregates per privacy unit and releases either the **median** (`dp_sass_release='median'`, default; smooth-sensitivity Laplace, (ε,δ)-DP, requires `dp_delta`) or the **mean** (`dp_sass_release='average'`; GUPT-style, pure ε-DP, no `dp_delta`). Per-PU contribution is clipped (`dp_count_bound`/`dp_sum_bound`); the cross-group bound `dp_max_groups_contributed` (C_u) splits each aggregate's budget `ε/(k·C_u)` (so it enters the guarantee, not just row-filtering). The released value is clamped to a public output domain (`dp_sass_count_output_bound`, `dp_sass_sum_output_bound`, `dp_sass_avg_lower/upper_bound`, `dp_sass_minmax_lower/upper_bound`); with `dp_sass_private_range=true` (average release only) a fraction `dp_sass_range_budget_fraction` of ε privately estimates that range (pure-ε exp-mechanism quantiles). Supports COUNT, COUNT(DISTINCT), SUM, AVG, MIN, MAX.
 
 `dp_standard` and `dp_elastic` share one code path (`CompileDPLaplaceQuery` in `privacy_mechanisms.cpp`); they differ only in how contributions are clipped and how sensitivity is derived (`ClipAndComputeSensitivities`). All four modes share the same DDL (`PRIVACY_KEY`, `PRIVACY_LINK`, `PROTECTED`) and rewrite aggregate plans transparently — users write normal SQL.
 
@@ -140,6 +140,18 @@ SET dp_epsilon = 1.0;
 SET dp_delta = 1e-6;
 SET dp_sum_bound = 1000;             -- required for SUM: max abs value per PU
 SET privacy_min_group_count = 4;     -- τ-thresholding for GROUP BY
+
+-- DP-sass mode (sample-and-aggregate)
+SET privacy_mode = 'dp_sass';
+SET dp_epsilon = 1.0;
+SET dp_count_bound = 50;             -- per-PU contribution clip (COUNT/AVG)
+SET dp_max_groups_contributed = 10;  -- C_u: groups one PU may affect (grouped queries)
+SET dp_sass_count_output_bound = 1000000;  -- public output domain (per agg kind)
+SET dp_sass_release = 'median';      -- 'median' (needs dp_delta) or 'average' (GUPT, pure-ε)
+SET dp_delta = 1e-6;                 -- required only for 'median'
+-- GUPT mean release + private range estimation (pure-ε):
+-- SET dp_sass_release = 'average'; SET dp_delta = NULL;
+-- SET dp_sass_private_range = true; SET dp_sass_range_budget_fraction = 0.25;
 ```
 
 ## Code style (clang-tidy)

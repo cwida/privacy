@@ -9,7 +9,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <random>
+#include <vector>
 
 namespace duckdb {
 
@@ -370,9 +372,84 @@ static void DpAggregateFunction(DataChunk &args, ExpressionState &state, Vector 
 // `valid_count` lanes therefore has global sensitivity sample_lanes*(upper-lower)/valid_count, and
 // the Laplace scale is that divided by ε. (This is the overlapping-subsample analogue of GUPT's
 // disjoint-block mean, mirroring how the median path uses beta_eff = beta/sample_lanes.)
+// Pure-ε exponential-mechanism quantile: estimate the value at order rank `target_rank` (0..n) of
+// `sorted` (ascending, already clamped to [lo,hi]) over the continuous domain [lo,hi]. A candidate
+// in gap j (between the j-th and (j+1)-th order statistic, with lo/hi as sentinels) has rank j, so
+// its utility is u_j = -|j - target_rank|. One PU can move up to `sample_lanes` lane answers, so the
+// rank/utility sensitivity is `sample_lanes`; the exponential weight is exp(ε·u_j/(2·sample_lanes))
+// times the gap width. Samples a gap, then a uniform point inside it.
+static double PrivateQuantileExpMech(const std::vector<double> &sorted, double lo, double hi, double target_rank,
+                                     double epsilon, int sample_lanes, std::mt19937_64 &gen) {
+	int n = static_cast<int>(sorted.size());
+	std::vector<double> e;
+	e.reserve(n + 2);
+	e.push_back(lo);
+	for (double v : sorted) {
+		e.push_back(std::min(hi, std::max(lo, v)));
+	}
+	e.push_back(hi);
+	double alpha = epsilon / (2.0 * static_cast<double>(sample_lanes));
+	auto log_weight = [&](int j) {
+		double width = e[j + 1] - e[j];
+		if (width <= 0.0) {
+			return -std::numeric_limits<double>::infinity();
+		}
+		return std::log(width) + alpha * (-std::fabs(static_cast<double>(j) - target_rank));
+	};
+	double best_logw = -std::numeric_limits<double>::infinity();
+	for (int j = 0; j <= n; j++) {
+		best_logw = std::max(best_logw, log_weight(j));
+	}
+	if (!std::isfinite(best_logw)) {
+		return 0.5 * (lo + hi); // all gaps zero-width → degenerate
+	}
+	double total = 0.0;
+	std::vector<std::pair<int, double>> cumulative; // (gap index, cumulative unnormalized weight)
+	for (int j = 0; j <= n; j++) {
+		double logw = log_weight(j);
+		if (!std::isfinite(logw)) {
+			continue;
+		}
+		total += std::exp(logw - best_logw);
+		cumulative.emplace_back(j, total);
+	}
+	std::uniform_real_distribution<double> unif(0.0, 1.0);
+	double r = unif(gen) * total;
+	int chosen = cumulative.back().first;
+	for (auto &c : cumulative) {
+		if (r <= c.second) {
+			chosen = c.first;
+			break;
+		}
+	}
+	std::uniform_real_distribution<double> within(e[chosen], e[chosen + 1]);
+	return within(gen);
+}
+
+// Privately estimate a data-covering range [out_lo,out_hi] within the public envelope [pub_lo,pub_hi]
+// by spending `epsilon_range` total across a min-rank and max-rank exponential-mechanism quantile
+// (ε_range/2 each). Returns false (caller falls back to the public envelope) if the estimate is
+// degenerate or inverted.
+static bool PrivateRangeEstimate(const std::vector<double> &sorted, double pub_lo, double pub_hi, double epsilon_range,
+                                 int sample_lanes, std::mt19937_64 &gen, double &out_lo, double &out_hi) {
+	if (sorted.empty() || epsilon_range <= 0.0 || !std::isfinite(epsilon_range)) {
+		return false;
+	}
+	double eq = epsilon_range / 2.0;
+	double n = static_cast<double>(sorted.size());
+	out_lo = PrivateQuantileExpMech(sorted, pub_lo, pub_hi, 0.0, eq, sample_lanes, gen);
+	out_hi = PrivateQuantileExpMech(sorted, pub_lo, pub_hi, n, eq, sample_lanes, gen);
+	return out_lo < out_hi;
+}
+
+// GUPT mean release with optional pure-ε private range estimation. `range_fraction` ∈ [0,1): when
+// >0, that fraction of ε is spent privately estimating the clip range from the lane answers (within
+// the public [lower_bound,upper_bound] envelope); the remaining ε calibrates the mean's Laplace
+// noise. The whole path stays pure ε-DP.
 static bool GuptMeanNoiseRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
                              const PAC_FLOAT *child_values, double epsilon, int sample_lanes_raw, double lower_bound,
-                             double upper_bound, bool noise_enabled, uint64_t seed, double &out) {
+                             double upper_bound, double range_fraction, bool noise_enabled, uint64_t seed,
+                             double &out) {
 	if (entry.length != 64) {
 		return false;
 	}
@@ -383,34 +460,56 @@ static bool GuptMeanNoiseRow(const list_entry_t &entry, const UnifiedVectorForma
 	if (!std::isfinite(lower_bound) || !std::isfinite(upper_bound) || lower_bound >= upper_bound) {
 		return false;
 	}
-	double sum = 0.0;
-	idx_t valid_count = 0;
+	std::vector<double> vals;
+	vals.reserve(64);
 	for (idx_t j = 0; j < 64; j++) {
 		auto child_idx = child_data.sel->get_index(entry.offset + j);
 		if (child_data.validity.RowIsValid(child_idx)) {
 			double value = static_cast<double>(child_values[child_idx]);
-			value = std::max(lower_bound, std::min(upper_bound, value));
-			sum += value;
-			valid_count++;
+			vals.push_back(std::max(lower_bound, std::min(upper_bound, value)));
 		}
 	}
-	if (valid_count < 32) {
+	if (vals.size() < 32) {
 		return false;
 	}
-	double mean = sum / static_cast<double>(valid_count);
+
+	double eff_lo = lower_bound;
+	double eff_hi = upper_bound;
+	double release_eps = epsilon;
+	if (noise_enabled && range_fraction > 0.0) {
+		std::sort(vals.begin(), vals.end());
+		std::mt19937_64 gen(seed ^ (entry.offset * 0x9E3779B97F4A7C15ULL));
+		double est_lo = eff_lo;
+		double est_hi = eff_hi;
+		if (PrivateRangeEstimate(vals, lower_bound, upper_bound, range_fraction * epsilon, sample_lanes, gen, est_lo,
+		                         est_hi)) {
+			eff_lo = est_lo;
+			eff_hi = est_hi;
+			release_eps = epsilon * (1.0 - range_fraction);
+		}
+	}
+
+	double sum = 0.0;
+	for (double v : vals) {
+		sum += std::max(eff_lo, std::min(eff_hi, v));
+	}
+	double mean = sum / static_cast<double>(vals.size());
 	if (!noise_enabled) {
 		out = mean;
 		return true;
 	}
-	double scale = (static_cast<double>(sample_lanes) * (upper_bound - lower_bound)) /
-	               (static_cast<double>(valid_count) * epsilon);
-	PRIVACY_DEBUG_PRINT("dp_sass gupt-mean: mean=" + std::to_string(mean) + " scale=" + std::to_string(scale));
+	double scale =
+	    (static_cast<double>(sample_lanes) * (eff_hi - eff_lo)) / (static_cast<double>(vals.size()) * release_eps);
+	PRIVACY_DEBUG_PRINT("dp_sass gupt-mean: mean=" + std::to_string(mean) + " range=[" + std::to_string(eff_lo) + "," +
+	                    std::to_string(eff_hi) + "] scale=" + std::to_string(scale));
 	out = mean + LaplaceNoise(scale, seed ^ (entry.offset * PAC_MAGIC_HASH));
 	return true;
 }
 
 // Signature: dp_gupt_mean_noise(LIST<FLOAT> samples, DOUBLE epsilon, INTEGER lanes, DOUBLE lower,
-//                               DOUBLE upper) -> DOUBLE. Pure ε-DP (no delta).
+//                               DOUBLE upper, DOUBLE range_fraction) -> DOUBLE. Pure ε-DP (no delta).
+// range_fraction=0 uses the public [lower,upper]; >0 spends that fraction of ε on private range
+// estimation within the public envelope.
 static void DpGuptMeanNoiseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &context = state.GetContext();
 	Value seed_val;
@@ -428,12 +527,13 @@ static void DpGuptMeanNoiseFunction(DataChunk &args, ExpressionState &state, Vec
 
 	idx_t count = args.size();
 	auto &list_vec = args.data[0];
-	UnifiedVectorFormat list_data, epsilon_data, sample_lanes_data, lower_data, upper_data;
+	UnifiedVectorFormat list_data, epsilon_data, sample_lanes_data, lower_data, upper_data, range_data;
 	list_vec.ToUnifiedFormat(count, list_data);
 	args.data[1].ToUnifiedFormat(count, epsilon_data);
 	args.data[2].ToUnifiedFormat(count, sample_lanes_data);
 	args.data[3].ToUnifiedFormat(count, lower_data);
 	args.data[4].ToUnifiedFormat(count, upper_data);
+	args.data[5].ToUnifiedFormat(count, range_data);
 
 	auto &child_vec = ListVector::GetEntry(list_vec);
 	UnifiedVectorFormat child_data;
@@ -444,6 +544,7 @@ static void DpGuptMeanNoiseFunction(DataChunk &args, ExpressionState &state, Vec
 	auto sample_lanes_values = UnifiedVectorFormat::GetData<int32_t>(sample_lanes_data);
 	auto lower_values = UnifiedVectorFormat::GetData<double>(lower_data);
 	auto upper_values = UnifiedVectorFormat::GetData<double>(upper_data);
+	auto range_values = UnifiedVectorFormat::GetData<double>(range_data);
 	auto result_data = FlatVector::GetData<double>(result);
 	auto &result_validity = FlatVector::Validity(result);
 
@@ -453,16 +554,17 @@ static void DpGuptMeanNoiseFunction(DataChunk &args, ExpressionState &state, Vec
 		auto sample_lanes_idx = sample_lanes_data.sel->get_index(i);
 		auto lower_idx = lower_data.sel->get_index(i);
 		auto upper_idx = upper_data.sel->get_index(i);
+		auto range_idx = range_data.sel->get_index(i);
 		if (!list_data.validity.RowIsValid(list_idx) || !epsilon_data.validity.RowIsValid(eps_idx) ||
 		    !sample_lanes_data.validity.RowIsValid(sample_lanes_idx) || !lower_data.validity.RowIsValid(lower_idx) ||
-		    !upper_data.validity.RowIsValid(upper_idx)) {
+		    !upper_data.validity.RowIsValid(upper_idx) || !range_data.validity.RowIsValid(range_idx)) {
 			result_validity.SetInvalid(i);
 			continue;
 		}
 		double released = 0.0;
 		if (GuptMeanNoiseRow(list_entries[list_idx], child_data, child_values, epsilons[eps_idx],
 		                     sample_lanes_values[sample_lanes_idx], lower_values[lower_idx], upper_values[upper_idx],
-		                     noise_enabled, seed, released)) {
+		                     range_values[range_idx], noise_enabled, seed, released)) {
 			result_data[i] = released;
 		} else {
 			result_validity.SetInvalid(i);
@@ -494,10 +596,10 @@ void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
 	loader.RegisterFunction(std::move(info));
 
 	// GUPT-style mean release: mean of the 64 lane answers + pure-ε Laplace noise. No delta.
-	ScalarFunction gupt_mean(
-	    "dp_gupt_mean_noise",
-	    {list_type, LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::DOUBLE, LogicalType::DOUBLE},
-	    LogicalType::DOUBLE, DpGuptMeanNoiseFunction);
+	ScalarFunction gupt_mean("dp_gupt_mean_noise",
+	                         {list_type, LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::DOUBLE,
+	                          LogicalType::DOUBLE, LogicalType::DOUBLE},
+	                         LogicalType::DOUBLE, DpGuptMeanNoiseFunction);
 	CreateScalarFunctionInfo gupt_info(gupt_mean);
 	FunctionDescription gupt_desc;
 	gupt_desc.description = "Applies GUPT-style mean release (pure-ε Laplace) to 64 sample lane answers.";
