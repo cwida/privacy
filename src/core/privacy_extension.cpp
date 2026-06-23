@@ -347,6 +347,24 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("dp_sass_avg_upper_bound",
 	                             "Public output-domain upper bound for dp_sass AVG sample answers.",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sass_minmax_lower_bound",
+	                             "Public output-domain lower bound for dp_sass MIN/MAX sample answers.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sass_minmax_upper_bound",
+	                             "Public output-domain upper bound for dp_sass MIN/MAX sample answers.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sass_release",
+	                             "dp_sass release method: 'median' (smooth-sensitivity median, (ε,δ)-DP) or "
+	                             "'average' (GUPT-style mean, pure ε-DP).",
+	                             LogicalType::VARCHAR, Value("median"));
+	db.config.AddExtensionOption("dp_sass_private_range",
+	                             "dp_sass: when true, privately estimate the per-aggregate output range (pure-ε "
+	                             "quantiles) instead of requiring public dp_sass_*_output_bound settings.",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	db.config.AddExtensionOption("dp_sass_range_budget_fraction",
+	                             "dp_sass: fraction of each aggregate's ε budget spent on private range estimation "
+	                             "when dp_sass_private_range=true (default 0.25).",
+	                             LogicalType::DOUBLE, Value::DOUBLE(0.25));
 	db.config.AddExtensionOption("dp_public_partitions",
 	                             "Assertion for privacy_mode='dp_standard' grouped queries. Set to 'assert' when "
 	                             "GROUP BY partitions are public/data-independent, matching Google DP public "

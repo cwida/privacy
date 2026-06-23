@@ -50,6 +50,7 @@ struct Config {
 	vector<double> bound_multipliers = {1.0};
 	double public_count_bound = 1000.0;
 	double public_group_bound = 10.0;
+	string sass_release = "median"; // dp_sass release method: 'median' or 'average' (GUPT)
 };
 
 static string Timestamp() {
@@ -68,13 +69,18 @@ static string FormatNumber(double v) {
 	std::ostringstream oss;
 	oss << std::setprecision(15) << std::defaultfloat << v;
 	string s = oss.str();
-	auto pos = s.find('.');
-	if (pos != string::npos) {
-		while (!s.empty() && s.back() == '0') {
-			s.pop_back();
-		}
-		if (!s.empty() && s.back() == '.') {
-			s.pop_back();
+	// Only trim trailing zeros from a plain decimal fraction. In scientific notation a
+	// trailing '0' belongs to the exponent (e.g. 7.2e-10), so stripping it would corrupt
+	// the value (7.2e-10 -> 7.2e-1).
+	if (s.find('e') == string::npos && s.find('E') == string::npos) {
+		auto pos = s.find('.');
+		if (pos != string::npos) {
+			while (!s.empty() && s.back() == '0') {
+				s.pop_back();
+			}
+			if (!s.empty() && s.back() == '.') {
+				s.pop_back();
+			}
 		}
 	}
 	return s;
@@ -802,6 +808,11 @@ static Config ParseArgs(int argc, char **argv) {
 			config.public_count_bound = std::stod(value);
 		} else if (key == "--group-bound") {
 			config.public_group_bound = std::stod(value);
+		} else if (key == "--release") {
+			if (value != "median" && value != "average") {
+				throw std::runtime_error("--release must be 'median' or 'average'");
+			}
+			config.sass_release = value;
 		} else if (arg == "--help" || arg == "-h") {
 			std::cout << "Usage: dp_sass_tpch_utility [--sf=N] [--db=PATH] [--out=PATH] [--mode=MODE]\n"
 			          << "                            [--runs=N] [--epsilon=E] [--delta=D]\n"
@@ -920,6 +931,11 @@ static int Main(int argc, char **argv) {
 								RunStatement(con, "SET dp_max_groups_contributed=" + FormatNumber(group_bound));
 								RunStatement(con,
 								             "SET dp_sass_count_output_bound=" + FormatNumber(sass_output_bounds[qi]));
+								RunStatement(con, "SET dp_sass_release='" + config.sass_release + "'");
+								if (config.sass_release == "average") {
+									// GUPT mean release is pure ε-DP — no δ needed.
+									RunStatement(con, "SET dp_delta=NULL");
+								}
 							} else {
 								RunStatement(con, "SET dp_count_bound=NULL");
 							}

@@ -685,18 +685,26 @@ CREATE PU TABLE dp_check_users(id INTEGER, v INTEGER, PRIVACY_KEY (id));
 statement ok
 INSERT INTO dp_check_users VALUES (1, 10), (2, 20), (3, 30);
 
+# MIN/MAX are now supported under dp_sass; they require public output-domain bounds.
 statement error
-SELECT MIN(v) IS NULL, MAX(v) IS NULL FROM dp_check_users;
+SELECT MIN(v) FROM dp_check_users;
 ----
-MIN/MAX
+dp_sass_minmax_lower_bound
 
 statement ok
 SET dp_sum_bound = 100.0;
 
-statement error
-SELECT MIN(v), MAX(v) FROM dp_check_users;
-----
-MIN/MAX
+statement ok
+SET dp_sass_minmax_lower_bound = 0.0;
+
+statement ok
+SET dp_sass_minmax_upper_bound = 100.0;
+
+statement ok
+SELECT MIN(v) FROM dp_check_users;
+
+statement ok
+SELECT MAX(v) FROM dp_check_users;
 
 statement ok
 SET privacy_mode = 'pac';

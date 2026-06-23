@@ -642,15 +642,31 @@ EXPLAIN SELECT AVG(v) FROM sass_many;
 ----
 as_sample_avg
 
-statement error
-SELECT MIN(v) FROM sass_many;
-----
-MIN/MAX
+statement ok
+SET dp_sass_minmax_lower_bound = 0.0;
 
-statement error
-SELECT MAX(v) FROM sass_many;
+statement ok
+SET dp_sass_minmax_upper_bound = 200.0;
+
+query I nosort explain_sass_min
+EXPLAIN SELECT MIN(v) FROM sass_many;
 ----
-MIN/MAX
+as_sample_min
+
+query I nosort explain_sass_max
+EXPLAIN SELECT MAX(v) FROM sass_many;
+----
+as_sample_max
+
+query I
+SELECT MIN(v) IS NOT NULL FROM sass_many;
+----
+true
+
+query I
+SELECT MAX(v) IS NOT NULL FROM sass_many;
+----
+true
 
 query I
 SELECT AVG(v) IS NOT NULL FROM sass_many;

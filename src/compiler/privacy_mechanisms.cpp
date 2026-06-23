@@ -1199,17 +1199,31 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 	return {inserted.proj_idx, inserted.proj_ptr};
 }
 
+static string GetDpSassReleaseMethod(ClientContext &context) {
+	Value v;
+	if (!context.TryGetCurrentSetting("dp_sass_release", v) || v.IsNull()) {
+		return "median";
+	}
+	string method = StringUtil::Lower(v.ToString());
+	if (method != "median" && method != "average") {
+		throw InvalidInputException("dp_sass: dp_sass_release must be 'median' or 'average' (got '" + method + "')");
+	}
+	return method;
+}
+
 static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                                   LogicalAggregate *agg, const vector<double> &epsilons,
                                                   const vector<double> &deltas, const vector<LogicalType> &output_types,
                                                   const vector<double> &lower_bounds,
-                                                  const vector<double> &upper_bounds, LogicalOperator *insert_above) {
+                                                  const vector<double> &upper_bounds, LogicalOperator *insert_above,
+                                                  const string &release_method) {
 	idx_t n_groups = agg->groups.size();
 	idx_t n_aggs = output_types.size();
 	D_ASSERT(epsilons.size() == n_aggs);
 	D_ASSERT(deltas.size() == n_aggs);
 	D_ASSERT(lower_bounds.size() == n_aggs);
 	D_ASSERT(upper_bounds.size() == n_aggs);
+	bool average_release = release_method == "average";
 
 	vector<unique_ptr<Expression>> proj_exprs;
 	proj_exprs.reserve(n_groups + n_aggs);
@@ -1223,11 +1237,16 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 		children.push_back(
 		    make_uniq<BoundColumnRefExpression>(agg->types[n_groups + ai], ColumnBinding(agg->aggregate_index, ai)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(epsilons[ai])));
-		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(deltas[ai])));
+		if (!average_release) {
+			// median path: dp_smooth_median_noise(list, ε, δ, lanes, lower, upper)
+			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(deltas[ai])));
+		}
+		// average path: dp_gupt_mean_noise(list, ε, lanes, lower, upper) — pure ε, no δ.
 		children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(sample_lanes)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(lower_bounds[ai])));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(upper_bounds[ai])));
-		unique_ptr<Expression> noised = BindScalarLocal(input, "dp_smooth_median_noise", std::move(children));
+		const char *terminal = average_release ? "dp_gupt_mean_noise" : "dp_smooth_median_noise";
+		unique_ptr<Expression> noised = BindScalarLocal(input, terminal, std::move(children));
 		if (output_types[ai] != LogicalType::DOUBLE) {
 			noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), output_types[ai]);
 		}
@@ -1487,8 +1506,13 @@ static void BuildSampleMedianLowerExpression(OptimizerExtensionInput &input, con
 		                    bounds.sum_bound, true, bounds.count_bound});
 		return;
 	} else if (name == "min" || name == "max") {
-		throw InvalidInputException("dp_sass: clipped sample-and-aggregate currently supports COUNT, COUNT(DISTINCT), "
-		                            "SUM, and AVG, but not MIN/MAX");
+		// Per-PU MIN/MAX of the value; per-lane sample MIN/MAX then median/mean release. No per-lane
+		// magnitude clip — the release terminal already clamps each lane answer to the public
+		// [dp_sass_minmax_lower_bound, dp_sass_minmax_upper_bound] output domain.
+		children.push_back(CopyMaybeRemapped(*aggr.children[0], index_map));
+		lower_expressions.push_back(BindPlainAggregate(input, name, std::move(children)));
+		rewrites.push_back({name == "min" ? "as_sample_min" : "as_sample_max", lower_value_pos, optional_idx(), false,
+		                    0.0, 0.0, false, 0.0});
 	} else {
 		throw InvalidInputException("dp_sample_median: only COUNT, COUNT(DISTINCT), SUM, and AVG aggregates are "
 		                            "supported");
@@ -1754,13 +1778,18 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] CompileDPSampleMedianQuery: start");
 
 	double epsilon = GetValidatedDpEpsilon(input.context, "dp_sample_median");
+	string release_method = GetDpSassReleaseMethod(input.context);
+	// The GUPT-style mean release ('average') is pure ε-DP and needs no δ. The smooth-sensitivity
+	// median release ('median') is (ε,δ)-DP and requires δ ∈ (0, 0.5).
 	double delta = 0.0;
-	if (!TryGetDpDelta(input.context, delta)) {
-		throw InvalidInputException(
-		    "dp_sample_median: dp_delta must be set. Use SET dp_delta=<value> or PRAGMA refresh_dp_stats(<epsilon>).");
-	}
-	if (delta <= 0.0 || delta >= 0.5 || !std::isfinite(delta)) {
-		throw InvalidInputException("dp_sample_median: dp_delta must be in (0, 0.5)");
+	if (release_method != "average") {
+		if (!TryGetDpDelta(input.context, delta)) {
+			throw InvalidInputException("dp_sample_median: dp_delta must be set. Use SET dp_delta=<value> or PRAGMA "
+			                            "refresh_dp_stats(<epsilon>).");
+		}
+		if (delta <= 0.0 || delta >= 0.5 || !std::isfinite(delta)) {
+			throw InvalidInputException("dp_sample_median: dp_delta must be in (0, 0.5)");
+		}
 	}
 
 	bool allow_self_joins = ValidateDPSelfJoins(plan, "dp_sample_median") > 1.0;
@@ -1787,6 +1816,13 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	lower_bounds.reserve(agg->expressions.size());
 	upper_bounds.reserve(agg->expressions.size());
 	double k = static_cast<double>(n_original_aggs);
+	// Cross-group contribution bound C_u (dp_max_groups_contributed): one PU may affect up to
+	// C_u output groups, each released independently. By sequential composition that costs the PU
+	// C_u · (per-aggregate budget), so we split each aggregate's budget by C_u as well as by k.
+	// Ungrouped queries have C_u = 1. This makes C_u enter the guarantee, not just filter rows.
+	int64_t group_bound =
+	    n_groups > 0 ? GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", "dp_sass") : 1;
+	double budget_divisor = k * static_cast<double>(group_bound);
 	vector<double> epsilons;
 	vector<double> deltas;
 	epsilons.reserve(agg->expressions.size());
@@ -1794,10 +1830,6 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
 		auto &aggr = agg->expressions[ai]->Cast<BoundAggregateExpression>();
 		string name = StringUtil::Lower(aggr.function.name);
-		if (name == "min" || name == "max") {
-			throw InvalidInputException("dp_sass: clipped sample-and-aggregate currently supports COUNT, "
-			                            "COUNT(DISTINCT), SUM, and AVG, but not MIN/MAX");
-		}
 		output_types.push_back(name == "avg" ? LogicalType::DOUBLE : aggr.return_type);
 		if (name == "count" || name == "count_star") {
 			double output_bound = GetRequiredDpBound(input.context, "dp_sass_count_output_bound", "dp_sass");
@@ -1812,13 +1844,22 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 			}
 			lower_bounds.push_back(avg_lower);
 			upper_bounds.push_back(avg_upper);
+		} else if (name == "min" || name == "max") {
+			double mm_lower = GetRequiredFiniteSetting(input.context, "dp_sass_minmax_lower_bound", "dp_sass");
+			double mm_upper = GetRequiredFiniteSetting(input.context, "dp_sass_minmax_upper_bound", "dp_sass");
+			if (mm_lower >= mm_upper) {
+				throw InvalidInputException("dp_sass: dp_sass_minmax_lower_bound must be smaller than "
+				                            "dp_sass_minmax_upper_bound");
+			}
+			lower_bounds.push_back(mm_lower);
+			upper_bounds.push_back(mm_upper);
 		} else {
 			double output_bound = GetRequiredDpBound(input.context, "dp_sass_sum_output_bound", "dp_sass");
 			lower_bounds.push_back(-output_bound);
 			upper_bounds.push_back(output_bound);
 		}
-		epsilons.push_back(epsilon / k);
-		deltas.push_back(delta / k);
+		epsilons.push_back(epsilon / budget_divisor);
+		deltas.push_back(delta / budget_divisor);
 	}
 
 	if (HasDistinctAggregate(agg) && !IsDpSampleCountDistinct(agg)) {
@@ -1839,7 +1880,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	}
 
 	auto noise_proj = WrapSampleMedianProjection(input, plan, agg, epsilons, deltas, output_types, lower_bounds,
-	                                             upper_bounds, projection_anchor);
+	                                             upper_bounds, projection_anchor, release_method);
 	(void)noise_proj;
 
 #if PRIVACY_DEBUG
