@@ -50,7 +50,7 @@ struct Config {
 	vector<double> bound_multipliers = {1.0};
 	double public_count_bound = 1000.0;
 	double public_group_bound = 10.0;
-	string sass_release = "median"; // dp_sass release method: 'median' or 'average' (GUPT)
+	vector<string> sass_releases = {"median"}; // dp_sass release methods to sweep: median and/or average (GUPT)
 };
 
 static string Timestamp() {
@@ -809,16 +809,21 @@ static Config ParseArgs(int argc, char **argv) {
 		} else if (key == "--group-bound") {
 			config.public_group_bound = std::stod(value);
 		} else if (key == "--release") {
-			if (value != "median" && value != "average") {
-				throw std::runtime_error("--release must be 'median' or 'average'");
+			if (value == "both") {
+				config.sass_releases = {"median", "average"};
+			} else if (value == "median" || value == "average") {
+				config.sass_releases = {value};
+			} else {
+				throw std::runtime_error("--release must be 'median', 'average', or 'both'");
 			}
-			config.sass_release = value;
 		} else if (arg == "--help" || arg == "-h") {
 			std::cout << "Usage: dp_sass_tpch_utility [--sf=N] [--db=PATH] [--out=PATH] [--mode=MODE]\n"
 			          << "                            [--runs=N] [--epsilon=E] [--delta=D]\n"
 			          << "                            [--sample-lanes=N] [--threads=N] [--profile=PROFILE]\n"
 			          << "                            [--bound-sweep=CSV] [--count-bound=N] [--group-bound=N]\n"
-			          << "  MODE is dp_sass, dp_elastic, dp_standard, all, or a comma-separated list\n";
+			          << "                            [--release=median|average|both]\n"
+			          << "  MODE is dp_sass, dp_elastic, dp_standard, all, or a comma-separated list\n"
+			          << "  --release selects the dp_sass release method(s); 'both' compares median vs average\n";
 			std::cout << "  PROFILE is entity or flex-row\n";
 			std::cout << "  --bound-sweep multiplies public count bounds, e.g. 1,2,5,10,100\n";
 			std::exit(0);
@@ -845,11 +850,12 @@ static void WriteResult(std::ofstream &csv, const QuerySpec &query, idx_t run, b
                         const string &utility, const string &recall, const string &precision,
                         const string &median_error_pct, double time_ms, double epsilon, double delta,
                         double count_bound, double group_bound, double sass_count_output_bound, double bound_multiplier,
-                        const string &mode, const string &profile, int sample_lanes, uint64_t seed) {
-	csv << query.name << "," << mode << "," << profile << "," << CsvQuote(query.description) << "," << query.key_cols
-	    << "," << run << "," << (success ? "true" : "false") << "," << CsvQuote(error) << "," << utility << ","
-	    << recall << "," << precision << "," << median_error_pct << "," << FormatNumber(time_ms) << ","
-	    << FormatNumber(epsilon) << "," << FormatNumber(delta) << "," << FormatNumber(count_bound) << ","
+                        const string &mode, const string &release, const string &profile, int sample_lanes,
+                        uint64_t seed) {
+	csv << query.name << "," << mode << "," << release << "," << profile << "," << CsvQuote(query.description) << ","
+	    << query.key_cols << "," << run << "," << (success ? "true" : "false") << "," << CsvQuote(error) << ","
+	    << utility << "," << recall << "," << precision << "," << median_error_pct << "," << FormatNumber(time_ms)
+	    << "," << FormatNumber(epsilon) << "," << FormatNumber(delta) << "," << FormatNumber(count_bound) << ","
 	    << FormatNumber(group_bound) << "," << FormatNumber(sass_count_output_bound) << ","
 	    << FormatNumber(bound_multiplier) << "," << sample_lanes << "," << seed << "\n";
 	csv.flush();
@@ -889,8 +895,8 @@ static int Main(int argc, char **argv) {
 	if (!csv.is_open()) {
 		throw std::runtime_error("Could not open output CSV: " + config.out_path);
 	}
-	csv << "query,mode,profile,description,key_cols,run,success,error,utility,recall,precision,median_error_pct,"
-	       "time_ms,epsilon,delta,"
+	csv << "query,mode,release,profile,description,key_cols,run,success,error,utility,recall,precision,"
+	       "median_error_pct,time_ms,epsilon,delta,"
 	       "dp_count_bound,dp_max_groups_contributed,dp_sass_count_output_bound,bound_multiplier,"
 	       "dp_sample_lanes,seed\n";
 
@@ -901,7 +907,10 @@ static int Main(int argc, char **argv) {
 				const auto &query = queries[qi];
 				const auto &multipliers =
 				    (mode == "dp_standard" || mode == "dp_sass") ? config.bound_multipliers : vector<double> {1.0};
-				for (idx_t mi = 0; mi < multipliers.size(); mi++) {
+				// dp_sass sweeps the requested release method(s); other modes have no release dimension.
+				const vector<string> releases = (mode == "dp_sass") ? config.sass_releases : vector<string> {"-"};
+				for (const auto &release : releases)
+					for (idx_t mi = 0; mi < multipliers.size(); mi++) {
 					double bound_multiplier = multipliers[mi];
 					double count_bound = config.public_count_bound * bound_multiplier;
 					double group_bound = config.public_group_bound;
@@ -931,8 +940,8 @@ static int Main(int argc, char **argv) {
 								RunStatement(con, "SET dp_max_groups_contributed=" + FormatNumber(group_bound));
 								RunStatement(con,
 								             "SET dp_sass_count_output_bound=" + FormatNumber(sass_output_bounds[qi]));
-								RunStatement(con, "SET dp_sass_release='" + config.sass_release + "'");
-								if (config.sass_release == "average") {
+								RunStatement(con, "SET dp_sass_release='" + release + "'");
+								if (release == "average") {
 									// GUPT mean release is pure ε-DP — no δ needed.
 									RunStatement(con, "SET dp_delta=NULL");
 								}
@@ -952,21 +961,23 @@ static int Main(int argc, char **argv) {
 							                         "touch the customer PU chain");
 						}
 						success = true;
-						Log(mode + " " + query.name + " run " + std::to_string(run) +
-						    " bound_multiplier=" + FormatNumber(bound_multiplier) + " utility=" + utility);
+						Log(mode + (mode == "dp_sass" ? "/" + release : "") + " " + query.name + " run " +
+						    std::to_string(run) + " bound_multiplier=" + FormatNumber(bound_multiplier) +
+						    " utility=" + utility);
 					} catch (const std::exception &e) {
 						error = e.what();
 						if (error.size() > 500) {
 							error = error.substr(0, 500);
 						}
-						Log(mode + " " + query.name + " run " + std::to_string(run) +
-						    " bound_multiplier=" + FormatNumber(bound_multiplier) + " failed: " + error);
+						Log(mode + (mode == "dp_sass" ? "/" + release : "") + " " + query.name + " run " +
+						    std::to_string(run) + " bound_multiplier=" + FormatNumber(bound_multiplier) +
+						    " failed: " + error);
 					}
 					RunStatement(con, "SET privacy_diffcols=NULL");
 					WriteResult(csv, query, run, success, error, utility, recall, precision, median_error_pct, time_ms,
 					            config.epsilon, mode == "dp_standard" ? 0.0 : deltas[qi],
 					            mode == "dp_elastic" ? 0.0 : count_bound, mode == "dp_elastic" ? 0.0 : group_bound,
-					            mode == "dp_sass" ? sass_output_bounds[qi] : 0.0, bound_multiplier, mode,
+					            mode == "dp_sass" ? sass_output_bounds[qi] : 0.0, bound_multiplier, mode, release,
 					            BenchmarkProfileName(config.profile), mode == "dp_sass" ? config.sample_lanes : 0,
 					            seed);
 				}
