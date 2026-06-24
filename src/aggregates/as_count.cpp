@@ -155,6 +155,143 @@ static void DpSampleCountMaskScatterUpdate(Vector inputs[], AggregateInputData &
 	}
 }
 
+static void CombineScatterState(ScatterState &src, ScatterState &dst, AggregateInputData &aggr) {
+#if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
+	src.FlushBuffer(dst, aggr.allocator);
+#endif
+	PacCountState *ss = src.GetState();
+	if (!ss) {
+		return;
+	}
+	PacCountState &ds = *dst.EnsureState(aggr.allocator);
+	ds.key_hash |= ss->key_hash;
+#ifndef PAC_NOCASCADING
+	bool src_has_totals = (ss->probabilistic_total != nullptr) || (ss->swar_fill > 0);
+#else
+	bool src_has_totals = (ss->probabilistic_total != nullptr);
+#endif
+	if (src_has_totals) {
+		ds.FlushLevel(aggr.allocator);
+		uint64_t *dst_totals = ds.EnsureTotals(aggr.allocator);
+		ss->FlushSWARInto(dst_totals);
+		if (ss->probabilistic_total) {
+			for (int j = 0; j < 64; j++) {
+				dst_totals[j] += ss->probabilistic_total[j];
+			}
+		}
+	}
+	ds.update_count += ss->update_count;
+}
+
+struct DpSampleMaskThresholdState {
+	ScatterState samples;
+	double support;
+	double threshold;
+};
+
+static idx_t DpSampleMaskThresholdStateSize(const AggregateFunction &) {
+	return sizeof(DpSampleMaskThresholdState);
+}
+
+static void DpSampleMaskThresholdInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
+	memset(state_ptr, 0, sizeof(DpSampleMaskThresholdState));
+}
+
+static double ReadSupportValue(UnifiedVectorFormat &support_data, LogicalTypeId support_type, idx_t idx) {
+	switch (support_type) {
+	case LogicalTypeId::DOUBLE:
+		return UnifiedVectorFormat::GetData<double>(support_data)[idx];
+	case LogicalTypeId::FLOAT:
+		return UnifiedVectorFormat::GetData<float>(support_data)[idx];
+	case LogicalTypeId::BIGINT:
+		return static_cast<double>(UnifiedVectorFormat::GetData<int64_t>(support_data)[idx]);
+	case LogicalTypeId::UBIGINT:
+		return static_cast<double>(UnifiedVectorFormat::GetData<uint64_t>(support_data)[idx]);
+	case LogicalTypeId::HUGEINT:
+		return Hugeint::Cast<double>(UnifiedVectorFormat::GetData<hugeint_t>(support_data)[idx]);
+	default:
+		throw InternalException("as_sample_count_mask_threshold: unsupported support type");
+	}
+}
+
+static void DpSampleCountMaskThresholdUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr,
+                                             idx_t count) {
+	auto &state = *reinterpret_cast<DpSampleMaskThresholdState *>(state_ptr);
+	idx_t mask_input = inputs[0].GetType().id() == LogicalTypeId::UBIGINT ? 0 : 1;
+	idx_t support_input = mask_input == 0 ? 1 : 0;
+	auto support_type = inputs[support_input].GetType().id();
+	UnifiedVectorFormat mask_data, support_data, threshold_data;
+	inputs[mask_input].ToUnifiedFormat(count, mask_data);
+	inputs[support_input].ToUnifiedFormat(count, support_data);
+	inputs[2].ToUnifiedFormat(count, threshold_data);
+	auto masks = UnifiedVectorFormat::GetData<uint64_t>(mask_data);
+	auto thresholds = UnifiedVectorFormat::GetData<double>(threshold_data);
+	for (idx_t i = 0; i < count; i++) {
+		auto m_idx = mask_data.sel->get_index(i);
+		auto s_idx = support_data.sel->get_index(i);
+		auto t_idx = threshold_data.sel->get_index(i);
+		if (threshold_data.validity.RowIsValid(t_idx)) {
+			state.threshold = thresholds[t_idx];
+		}
+		if (mask_data.validity.RowIsValid(m_idx)) {
+#if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
+			PacCountUpdateOne(state.samples, masks[m_idx], aggr.allocator);
+#else
+			PacCountBufferOrUpdateOne(state.samples, masks[m_idx], aggr.allocator);
+#endif
+		}
+		if (support_data.validity.RowIsValid(s_idx)) {
+			state.support += ReadSupportValue(support_data, support_type, s_idx);
+		}
+	}
+}
+
+static void DpSampleCountMaskThresholdScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
+                                                    idx_t count) {
+	idx_t mask_input = inputs[0].GetType().id() == LogicalTypeId::UBIGINT ? 0 : 1;
+	idx_t support_input = mask_input == 0 ? 1 : 0;
+	auto support_type = inputs[support_input].GetType().id();
+	UnifiedVectorFormat mask_data, support_data, threshold_data, state_data;
+	inputs[mask_input].ToUnifiedFormat(count, mask_data);
+	inputs[support_input].ToUnifiedFormat(count, support_data);
+	inputs[2].ToUnifiedFormat(count, threshold_data);
+	states.ToUnifiedFormat(count, state_data);
+	auto masks = UnifiedVectorFormat::GetData<uint64_t>(mask_data);
+	auto thresholds = UnifiedVectorFormat::GetData<double>(threshold_data);
+	auto state_p = UnifiedVectorFormat::GetData<DpSampleMaskThresholdState *>(state_data);
+	for (idx_t i = 0; i < count; i++) {
+		auto m_idx = mask_data.sel->get_index(i);
+		auto s_idx = support_data.sel->get_index(i);
+		auto t_idx = threshold_data.sel->get_index(i);
+		auto &state = *state_p[state_data.sel->get_index(i)];
+		if (threshold_data.validity.RowIsValid(t_idx)) {
+			state.threshold = thresholds[t_idx];
+		}
+		if (mask_data.validity.RowIsValid(m_idx)) {
+#if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
+			PacCountUpdateOne(state.samples, masks[m_idx], aggr.allocator);
+#else
+			PacCountBufferOrUpdateOne(state.samples, masks[m_idx], aggr.allocator);
+#endif
+		}
+		if (support_data.validity.RowIsValid(s_idx)) {
+			state.support += ReadSupportValue(support_data, support_type, s_idx);
+		}
+	}
+}
+
+static void DpSampleCountMaskThresholdCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
+	auto src_states = FlatVector::GetData<DpSampleMaskThresholdState *>(src);
+	auto dst_states = FlatVector::GetData<DpSampleMaskThresholdState *>(dst);
+	for (idx_t i = 0; i < count; i++) {
+		dst_states[i]->support += src_states[i]->support;
+		if (src_states[i]->threshold > dst_states[i]->threshold) {
+			dst_states[i]->threshold = src_states[i]->threshold;
+		}
+		CombineScatterState(src_states[i]->samples, dst_states[i]->samples, aggr);
+	}
+}
+
 // Combine - flush src's buffer into dst (don't allocate src), then merge states
 void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
 	auto sa = FlatVector::GetData<ScatterState *>(src);
@@ -405,6 +542,48 @@ static void DpSampleCountMaskFinalizeCounters(Vector &states, AggregateInputData
 	}
 }
 
+static void DpSampleCountMaskThresholdFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result,
+                                                       idx_t count, idx_t offset) {
+	auto aggs = FlatVector::GetData<DpSampleMaskThresholdState *>(states);
+	auto list_entries = FlatVector::GetData<list_entry_t>(result);
+	auto &result_mask = FlatVector::Validity(result);
+	auto &child_vec = ListVector::GetEntry(result);
+
+	idx_t total_elements = count * 64;
+	ListVector::Reserve(result, total_elements);
+	ListVector::SetListSize(result, total_elements);
+
+	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
+	PAC_FLOAT buf[64];
+
+	for (idx_t i = 0; i < count; i++) {
+		auto &state = *aggs[i];
+#if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
+		state.samples.FlushBuffer(state.samples, input.allocator);
+#endif
+		PacCountState *s = state.samples.GetState();
+
+		list_entries[offset + i].offset = i * 64;
+		list_entries[offset + i].length = 64;
+
+		idx_t base = i * 64;
+		if (state.support < state.threshold) {
+			result_mask.SetInvalid(offset + i);
+			memset(child_data + base, 0, 64 * sizeof(PAC_FLOAT));
+			continue;
+		}
+		if (!s) {
+			memset(child_data + base, 0, 64 * sizeof(PAC_FLOAT));
+			continue;
+		}
+
+		s->GetTotalsWithSWAR(buf);
+		for (int j = 0; j < 64; j++) {
+			child_data[base + j] = buf[j];
+		}
+	}
+}
+
 static unique_ptr<FunctionData> DpSampleCountBind(ClientContext &ctx, AggregateFunction &,
                                                   vector<unique_ptr<Expression>> &) {
 	return MakeDpSampleBindData(ctx);
@@ -437,6 +616,34 @@ void RegisterDpSampleCountFunctions(ExtensionLoader &loader) {
 	mask_desc.description = "[INTERNAL] Returns 64 sample-median DP counters from precomputed sample masks.";
 	mask_info.descriptions.push_back(std::move(mask_desc));
 	loader.RegisterFunction(std::move(mask_info));
+
+	AggregateFunctionSet threshold_mask_set("as_sample_count_mask_threshold");
+	threshold_mask_set.AddFunction(AggregateFunction(
+	    "as_sample_count_mask_threshold", {LogicalType::UBIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE}, list_type,
+	    DpSampleMaskThresholdStateSize, DpSampleMaskThresholdInitialize, DpSampleCountMaskThresholdScatterUpdate,
+	    DpSampleCountMaskThresholdCombine, DpSampleCountMaskThresholdFinalizeCounters,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, DpSampleCountMaskThresholdUpdate, DpSampleCountBind));
+	threshold_mask_set.AddFunction(AggregateFunction(
+	    "as_sample_count_mask_threshold", {LogicalType::DOUBLE, LogicalType::UBIGINT, LogicalType::DOUBLE}, list_type,
+	    DpSampleMaskThresholdStateSize, DpSampleMaskThresholdInitialize, DpSampleCountMaskThresholdScatterUpdate,
+	    DpSampleCountMaskThresholdCombine, DpSampleCountMaskThresholdFinalizeCounters,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, DpSampleCountMaskThresholdUpdate, DpSampleCountBind));
+	threshold_mask_set.AddFunction(AggregateFunction(
+	    "as_sample_count_mask_threshold", {LogicalType::HUGEINT, LogicalType::UBIGINT, LogicalType::DOUBLE}, list_type,
+	    DpSampleMaskThresholdStateSize, DpSampleMaskThresholdInitialize, DpSampleCountMaskThresholdScatterUpdate,
+	    DpSampleCountMaskThresholdCombine, DpSampleCountMaskThresholdFinalizeCounters,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, DpSampleCountMaskThresholdUpdate, DpSampleCountBind));
+	threshold_mask_set.AddFunction(AggregateFunction(
+	    "as_sample_count_mask_threshold", {LogicalType::UBIGINT, LogicalType::HUGEINT, LogicalType::DOUBLE}, list_type,
+	    DpSampleMaskThresholdStateSize, DpSampleMaskThresholdInitialize, DpSampleCountMaskThresholdScatterUpdate,
+	    DpSampleCountMaskThresholdCombine, DpSampleCountMaskThresholdFinalizeCounters,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, DpSampleCountMaskThresholdUpdate, DpSampleCountBind));
+	CreateAggregateFunctionInfo threshold_mask_info(threshold_mask_set);
+	FunctionDescription threshold_mask_desc;
+	threshold_mask_desc.description =
+	    "[INTERNAL] Returns sample-median DP counters from sample masks after an internal support threshold.";
+	threshold_mask_info.descriptions.push_back(std::move(threshold_mask_desc));
+	loader.RegisterFunction(std::move(threshold_mask_info));
 }
 
 // ============================================================================

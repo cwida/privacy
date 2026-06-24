@@ -159,26 +159,16 @@ statement ok
 SET dp_sum_bound = 1000.0;
 
 # ---------------------------------------------------------------------------
-# τ-thresholding (privacy_min_group_count) is IGNORED under dp_standard: data-dependent
-# group suppression is fundamentally (ε,δ)-DP (partition selection), and dp_standard is pure
-# ε-DP with no δ to spend. So the setting is a no-op here (with a notice) — groups survive
-# regardless of threshold. (Each store has 125 rows; per-user count 5 < bound 10 → clip inert.)
+# Manual support thresholding (privacy_min_group_count) is the admin-set tau gate
+# for DP groups. dp_standard remains pure ε-DP and treats grouped partitions as
+# admin/public-managed.
 # ---------------------------------------------------------------------------
 
 statement ok
 SET dp_count_bound = 10.0;
 
-# Google-style pure-epsilon grouped queries need a public/data-independent partition domain.
-statement error
-SELECT store, COUNT(*) FROM orders GROUP BY store;
-----
-dp_public_partitions
-
-statement ok
-SET dp_public_partitions = 'assert';
-
 # Grouped joins require an L0 group-contribution bound: one PU may affect multiple
-# output groups, so Google-style bounded-contribution DP must charge that vector sensitivity.
+# output groups, so bounded-contribution DP must charge that vector sensitivity.
 statement error
 SELECT store, COUNT(*) FROM orders GROUP BY store;
 ----
@@ -187,17 +177,13 @@ dp_max_groups_contributed
 statement ok
 SET dp_max_groups_contributed = 4.0;
 
-# Even a threshold far above any group's PU support leaves all 4 groups present.
+# A threshold far above each group's PU support suppresses all groups.
 statement ok
 SET privacy_min_group_count = 100000.0;
 
-query II rowsort
+query II
 SELECT store, COUNT(*) FROM orders GROUP BY store;
 ----
-s0	125
-s1	125
-s2	125
-s3	125
 
 statement ok
 SET privacy_min_group_count = NULL;

@@ -235,9 +235,6 @@ statement ok
 SET dp_max_groups_contributed = 1;
 
 statement ok
-SET dp_public_partitions = 'assert';
-
-statement ok
 SET dp_sass_count_output_bound = 1000;
 
 query I nosort explain_sass_distinct_count
@@ -270,20 +267,37 @@ WHERE p_brand = 'Brand#22';
 1
 
 statement ok
-SET dp_public_partitions = NULL;
-
-statement ok
 SET dp_delta = 1e-6;
 
-statement error
-SELECT p_brand, p_type, p_size, COUNT(DISTINCT ps_suppkey) AS supplier_cnt
-FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
-GROUP BY p_brand, p_type, p_size;
+statement ok
+SET privacy_min_group_count = 64;
+
+query II rowsort
+SELECT p_brand, supplier_cnt
+FROM (
+    SELECT p_brand, p_type, p_size, COUNT(DISTINCT ps_suppkey) AS supplier_cnt
+    FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
+    GROUP BY p_brand, p_type, p_size
+) q;
 ----
-partition selection must count contributing privacy units
+Brand#11	7
+Brand#22	1
 
 statement ok
-SET dp_public_partitions = 'assert';
+SET privacy_min_group_count = 65;
+
+query I
+SELECT COUNT(*)
+FROM (
+    SELECT p_brand, p_type, p_size, COUNT(DISTINCT ps_suppkey) AS supplier_cnt
+    FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
+    GROUP BY p_brand, p_type, p_size
+) q;
+----
+0
+
+statement ok
+SET privacy_min_group_count = NULL;
 
 statement error
 SELECT COUNT(*)
@@ -352,9 +366,6 @@ SET dp_count_bound = 1000;
 
 statement ok
 SET dp_max_groups_contributed = 1;
-
-statement ok
-SET dp_public_partitions = 'assert';
 
 statement ok
 SET dp_sass_count_output_bound = 1000;
@@ -477,9 +488,6 @@ SET dp_count_bound = 1000;
 
 statement ok
 SET dp_max_groups_contributed = 1;
-
-statement ok
-SET dp_public_partitions = 'assert';
 
 statement ok
 SET dp_sass_count_output_bound = 1000;
@@ -715,31 +723,6 @@ SELECT COUNT(*) IS NOT NULL FROM sass_many;
 ----
 true
 
-# Pure-ε private range estimation under the average release.
-statement ok
-SET dp_sass_private_range = true;
-
-statement ok
-SET dp_sass_range_budget_fraction = 0.25;
-
-statement ok
-SELECT COUNT(*) FROM sass_many;
-
-# Private range estimation requires the average release.
-statement ok
-SET dp_sass_release = 'median';
-
-statement ok
-SET dp_delta = 1e-6;
-
-statement error
-SELECT COUNT(*) FROM sass_many;
-----
-dp_sass_private_range currently requires dp_sass_release='average'
-
-statement ok
-SET dp_sass_private_range = false;
-
 statement ok
 CREATE PU TABLE sass_group_users(uid INTEGER, PRIVACY_KEY(uid));
 
@@ -758,23 +741,23 @@ FROM range(200) t(i);
 statement ok
 ALTER TABLE sass_group_events ADD PRIVACY_LINK (uid) REFERENCES sass_group_users(uid);
 
-# Grouped private partitions use automatic tau-thresholding. The average release is pure-epsilon
-# for values, but private partition selection still needs delta.
-statement ok
-SET dp_public_partitions = NULL;
-
+# DP grouped queries use an admin-set support threshold when privacy_min_group_count is set.
+# The average release remains pure-epsilon and does not require dp_delta.
 statement ok
 SET dp_sass_release = 'average';
 
 statement ok
 SET dp_delta = NULL;
 
-statement error
-SELECT g, COUNT(*)
-FROM sass_group_events
-GROUP BY g;
+query I
+SELECT COUNT(*)
+FROM (
+    SELECT g, COUNT(*)
+    FROM sass_group_events
+    GROUP BY g
+);
 ----
-dp_delta
+161
 
 statement ok
 SET dp_sass_release = 'median';
@@ -789,7 +772,7 @@ statement ok
 SET dp_max_groups_contributed = 1;
 
 statement ok
-SET privacy_min_group_count = NULL;
+SET privacy_min_group_count = 30;
 
 query II rowsort
 SELECT g, CAST(c IS NOT NULL AS INTEGER)

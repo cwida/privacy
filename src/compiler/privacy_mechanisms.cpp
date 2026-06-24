@@ -24,6 +24,7 @@
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_window_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/bound_result_modifier.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
@@ -674,54 +675,6 @@ static double GetRequiredFiniteSetting(ClientContext &context, const string &set
 	return bound;
 }
 
-static bool IsDpPublicPartitionsAsserted(ClientContext &context, const string &mechanism_name) {
-	Value v;
-	if (!context.TryGetCurrentSetting("dp_public_partitions", v) || v.IsNull()) {
-		return false;
-	}
-	string setting = v.ToString();
-	std::transform(setting.begin(), setting.end(), setting.begin(), [](unsigned char c) { return std::tolower(c); });
-	auto begin = setting.find_first_not_of(" \t\n\r");
-	auto end = setting.find_last_not_of(" \t\n\r");
-	if (begin == string::npos) {
-		return false;
-	}
-	setting = setting.substr(begin, end - begin + 1);
-	if (setting != "assert") {
-		throw InvalidInputException(mechanism_name + ": dp_public_partitions must be NULL or 'assert' (got '" +
-		                            setting + "')");
-	}
-	return true;
-}
-
-static void RequirePublicPartitionsForGroupedStandard(ClientContext &context, idx_t n_groups) {
-	if (n_groups == 0 || IsDpPublicPartitionsAsserted(context, "dp_standard")) {
-		return;
-	}
-	throw InvalidInputException("dp_standard: GROUP BY queries require public/data-independent partitions. "
-	                            "Set dp_public_partitions='assert' after providing a public partition domain, "
-	                            "or use an (epsilon,delta) mode with partition selection.");
-}
-
-static double ComputeTauThreshold(double epsilon, double delta, int64_t max_groups_contributed) {
-	if (epsilon <= 0.0 || !std::isfinite(epsilon)) {
-		throw InvalidInputException("dp_sass: partition-selection epsilon must be positive and finite");
-	}
-	if (delta <= 0.0 || delta >= 1.0 || !std::isfinite(delta)) {
-		throw InvalidInputException("dp_sass: partition selection requires dp_delta in (0, 1)");
-	}
-	if (max_groups_contributed <= 0) {
-		throw InvalidInputException("dp_sass: dp_max_groups_contributed must be positive");
-	}
-	double c_u = static_cast<double>(max_groups_contributed);
-	double log_one_minus_delta_over_c = std::log1p(-delta) / c_u;
-	double threshold_term = -2.0 * std::expm1(log_one_minus_delta_over_c);
-	if (threshold_term <= 0.0 || !std::isfinite(threshold_term)) {
-		throw InvalidInputException("dp_sass: could not compute a finite partition-selection threshold");
-	}
-	return 1.0 - (c_u * std::log(threshold_term)) / epsilon;
-}
-
 // Elastic Laplace scale = sensitivity / epsilon; sensitivity = es for COUNT, es * sum_bound for SUM
 static double ElasticSensitivity(const BoundAggregateExpression &aggr, double sum_bound, double es) {
 	const string &name = aggr.function.name;
@@ -1031,6 +984,27 @@ static LogicalFilter *ApplySupportFilter(OptimizerExtensionInput &input, unique_
 	return filter_ptr;
 }
 
+static LogicalFilter *ApplyAggregateNotNullFilter(unique_ptr<LogicalOperator> &plan, LogicalAggregate *agg,
+                                                  idx_t aggregate_pos) {
+	auto value_ref = make_uniq<BoundColumnRefExpression>(agg->types[agg->groups.size() + aggregate_pos],
+	                                                     ColumnBinding(agg->aggregate_index, aggregate_pos));
+	auto condition = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NOT_NULL, LogicalType::BOOLEAN);
+	condition->children.push_back(std::move(value_ref));
+
+	auto filter = make_uniq<LogicalFilter>();
+	filter->expressions.push_back(std::move(condition));
+
+	auto *slot = FindOperatorSlotByPointer(plan, agg);
+	if (!slot) {
+		throw InternalException("dp: could not locate aggregate slot for not-null filter");
+	}
+	filter->children.push_back(std::move(*slot));
+	filter->ResolveOperatorTypes();
+	auto *filter_ptr = filter.get();
+	*slot = std::move(filter);
+	return filter_ptr;
+}
+
 // ----------------------------------------------------------------------------
 // Wrap aggregate output — inserts LogicalProjection above `agg` with
 // dp_noise applied to each DP-target column, cast back to original type.
@@ -1252,13 +1226,14 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
                                                   const vector<double> &deltas, const vector<LogicalType> &output_types,
                                                   const vector<double> &lower_bounds,
                                                   const vector<double> &upper_bounds, LogicalOperator *insert_above,
-                                                  const string &release_method, double range_fraction) {
+                                                  const string &release_method, const vector<idx_t> &agg_positions) {
 	idx_t n_groups = agg->groups.size();
 	idx_t n_aggs = output_types.size();
 	D_ASSERT(epsilons.size() == n_aggs);
 	D_ASSERT(deltas.size() == n_aggs);
 	D_ASSERT(lower_bounds.size() == n_aggs);
 	D_ASSERT(upper_bounds.size() == n_aggs);
+	D_ASSERT(agg_positions.size() == n_aggs);
 	bool average_release = release_method == "average";
 
 	vector<unique_ptr<Expression>> proj_exprs;
@@ -1269,21 +1244,19 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 
 	int sample_lanes = GetDpSampleLanes(input.context);
 	for (idx_t ai = 0; ai < n_aggs; ai++) {
+		idx_t agg_pos = agg_positions[ai];
 		vector<unique_ptr<Expression>> children;
-		children.push_back(
-		    make_uniq<BoundColumnRefExpression>(agg->types[n_groups + ai], ColumnBinding(agg->aggregate_index, ai)));
+		children.push_back(make_uniq<BoundColumnRefExpression>(agg->types[n_groups + agg_pos],
+		                                                       ColumnBinding(agg->aggregate_index, agg_pos)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(epsilons[ai])));
 		if (!average_release) {
 			// median path: dp_smooth_median_noise(list, ε, δ, lanes, lower, upper)
 			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(deltas[ai])));
 		}
-		// average path: dp_gupt_mean_noise(list, ε, lanes, lower, upper, range_fraction) — pure ε, no δ.
+		// average path: dp_gupt_mean_noise(list, ε, lanes, lower, upper) — pure ε, no δ.
 		children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(sample_lanes)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(lower_bounds[ai])));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(upper_bounds[ai])));
-		if (average_release) {
-			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(range_fraction)));
-		}
 		const char *terminal = average_release ? "dp_gupt_mean_noise" : "dp_smooth_median_noise";
 		unique_ptr<Expression> noised = BindScalarLocal(input, terminal, std::move(children));
 		if (output_types[ai] != LogicalType::DOUBLE) {
@@ -1373,7 +1346,8 @@ static DpSassContributionBounds GetDpSassContributionBounds(ClientContext &conte
 
 static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, LogicalAggregate *agg,
                                                unique_ptr<Expression> pu_hash_expr, int64_t count_bound,
-                                               int64_t group_bound) {
+                                               int64_t group_bound, bool apply_support_filter,
+                                               double support_threshold) {
 	auto &binder = input.optimizer.binder;
 	auto &old_aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
 	auto distinct_value = old_aggr.children[0]->Copy();
@@ -1440,11 +1414,46 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 	}
 	distinct_rows = BuildRankCapFilter(input, std::move(distinct_rows), inner_agg_ptr, inner_gi, caps);
 
+	optional_idx support_window_index;
+	if (apply_support_filter) {
+		idx_t window_index = binder.GenerateTableIndex();
+		auto window = make_uniq<LogicalWindow>(window_index);
+		auto rn =
+		    make_uniq<BoundWindowExpression>(ExpressionType::WINDOW_ROW_NUMBER, LogicalType::BIGINT, nullptr, nullptr);
+		for (idx_t gi = 0; gi < num_original_groups; gi++) {
+			rn->partitions.push_back(BuildLowerGroupRef(inner_agg_ptr, inner_gi, gi));
+		}
+		rn->partitions.push_back(BuildLowerGroupRef(inner_agg_ptr, inner_gi, pu_group_col));
+		vector<unique_ptr<Expression>> distinct_hash_children;
+		distinct_hash_children.push_back(BuildLowerGroupRef(inner_agg_ptr, inner_gi, distinct_col));
+		auto distinct_hash = BindScalarLocal(input, "hash", std::move(distinct_hash_children));
+		rn->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST, std::move(distinct_hash));
+		rn->start = WindowBoundary::UNBOUNDED_PRECEDING;
+		rn->end = WindowBoundary::CURRENT_ROW_ROWS;
+		window->expressions.push_back(std::move(rn));
+		window->children.push_back(std::move(distinct_rows));
+		distinct_rows = std::move(window);
+		support_window_index = optional_idx(window_index);
+	}
+
 	idx_t merge_group_index = binder.GenerateTableIndex();
 	idx_t merge_agg_index = binder.GenerateTableIndex();
 	vector<unique_ptr<Expression>> merge_expressions;
 	auto mask_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, ColumnBinding(inner_agg_index, 0));
 	merge_expressions.push_back(BindPlainAggregate(input, "bit_or", std::move(mask_ref)));
+	if (apply_support_filter) {
+		auto rn_ref =
+		    make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ColumnBinding(support_window_index.GetIndex(), 0));
+		auto is_first = make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_EQUAL, std::move(rn_ref),
+		                                                     make_uniq<BoundConstantExpression>(Value::BIGINT(1)));
+		auto marker = make_uniq<BoundCaseExpression>(LogicalType::BIGINT);
+		BoundCaseCheck check;
+		check.when_expr = std::move(is_first);
+		check.then_expr = make_uniq<BoundConstantExpression>(Value::BIGINT(1));
+		marker->case_checks.push_back(std::move(check));
+		marker->else_expr = make_uniq<BoundConstantExpression>(Value::BIGINT(0));
+		merge_expressions.push_back(BindPlainAggregate(input, "sum", std::move(marker)));
+	}
 	auto merge_agg = make_uniq<LogicalAggregate>(merge_group_index, merge_agg_index, std::move(merge_expressions));
 	for (idx_t gi = 0; gi < num_original_groups; gi++) {
 		merge_agg->groups.push_back(
@@ -1455,14 +1464,48 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 	merge_agg->children.push_back(std::move(distinct_rows));
 	merge_agg->ResolveOperatorTypes();
 
+	idx_t distinct_proj_index = binder.GenerateTableIndex();
+	vector<unique_ptr<Expression>> distinct_proj_exprs;
+	distinct_proj_exprs.reserve(num_original_groups + 1 + (apply_support_filter ? 1 : 0));
+	for (idx_t gi = 0; gi < num_original_groups; gi++) {
+		distinct_proj_exprs.push_back(
+		    make_uniq<BoundColumnRefExpression>(merge_agg->types[gi], ColumnBinding(merge_group_index, gi)));
+	}
+	if (apply_support_filter) {
+		distinct_proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(
+		    merge_agg->types[merge_agg->groups.size() + 1], ColumnBinding(merge_agg_index, 1)));
+	}
+	distinct_proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(merge_agg->types[merge_agg->groups.size()],
+	                                                                  ColumnBinding(merge_agg_index, 0)));
+	auto distinct_proj = make_uniq<LogicalProjection>(distinct_proj_index, std::move(distinct_proj_exprs));
+	distinct_proj->children.push_back(std::move(merge_agg));
+	distinct_proj->ResolveOperatorTypes();
+	unique_ptr<LogicalOperator> final_input = std::move(distinct_proj);
+
 	for (idx_t gi = 0; gi < num_original_groups; gi++) {
 		agg->groups[gi] =
-		    make_uniq<BoundColumnRefExpression>(merge_agg->types[gi], ColumnBinding(merge_group_index, gi));
+		    make_uniq<BoundColumnRefExpression>(final_input->types[gi], ColumnBinding(distinct_proj_index, gi));
 	}
 
-	auto merged_mask_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, ColumnBinding(merge_agg_index, 0));
-	agg->children[0] = std::move(merge_agg);
-	agg->expressions[0] = BindPlainAggregate(input, "as_sample_count_mask", std::move(merged_mask_ref));
+	idx_t support_proj_pos = num_original_groups;
+	idx_t mask_proj_pos = apply_support_filter ? num_original_groups + 1 : num_original_groups;
+	auto merged_mask_ref =
+	    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, ColumnBinding(distinct_proj_index, mask_proj_pos));
+	agg->children[0] = std::move(final_input);
+	vector<unique_ptr<Expression>> top_expressions;
+	top_expressions.reserve(1);
+	if (apply_support_filter) {
+		vector<unique_ptr<Expression>> threshold_children;
+		threshold_children.push_back(make_uniq<BoundColumnRefExpression>(
+		    agg->children[0]->types[support_proj_pos], ColumnBinding(distinct_proj_index, support_proj_pos)));
+		threshold_children.push_back(std::move(merged_mask_ref));
+		threshold_children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(support_threshold)));
+		top_expressions.push_back(
+		    BindPlainAggregate(input, "as_sample_count_mask_threshold", std::move(threshold_children)));
+	} else {
+		top_expressions.push_back(BindPlainAggregate(input, "as_sample_count_mask", std::move(merged_mask_ref)));
+	}
+	agg->expressions = std::move(top_expressions);
 	agg->ResolveOperatorTypes();
 }
 
@@ -1590,14 +1633,15 @@ static unique_ptr<Expression> BuildSampleMedianAggregateRef(OptimizerExtensionIn
 }
 
 static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, LogicalAggregate *agg,
-                                           unique_ptr<Expression> pu_hash_expr,
-                                           const DpSassContributionBounds &bounds) {
+                                           unique_ptr<Expression> pu_hash_expr, const DpSassContributionBounds &bounds,
+                                           bool apply_distinct_support_filter, double support_threshold) {
 	if (IsDpSampleCountDistinct(agg)) {
 		D_ASSERT(bounds.has_integer_count_bound);
 		int64_t count_bound = bounds.count_bound_integer;
 		int64_t group_bound =
 		    !agg->groups.empty() ? GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", "dp_sass") : 1;
-		RewriteDistinctCountToSampleMedian(input, agg, std::move(pu_hash_expr), count_bound, group_bound);
+		RewriteDistinctCountToSampleMedian(input, agg, std::move(pu_hash_expr), count_bound, group_bound,
+		                                   apply_distinct_support_filter, support_threshold);
 		return;
 	}
 
@@ -1668,9 +1712,9 @@ static vector<double> ClipAndComputeSensitivities(OptimizerExtensionInput &input
 	return sens;
 }
 
-// Shared finalize tail for both Laplace DP modes: append the τ-support aggregate, suppress
-// low-support groups when privacy_min_group_count is set, split ε across aggregates, inject
-// Laplace noise, and (for AVG) layer the ratio projection. `agg_sens` carries one raw
+// Shared finalize tail for both Laplace DP modes: append the admin-provided support aggregate,
+// suppress low-support groups when privacy_min_group_count is set, split ε across aggregates,
+// inject Laplace noise, and (for AVG) layer the ratio projection. `agg_sens` carries one raw
 // sensitivity per DP aggregate; `per_pu` reflects whether the input was per-PU pre-aggregated.
 static void FinalizeDPLaplace(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan, LogicalAggregate *agg,
                               const DPFKChain &chain, const string &mech, const vector<AvgInfo> &avg_infos,
@@ -1679,16 +1723,7 @@ static void FinalizeDPLaplace(OptimizerExtensionInput &input, unique_ptr<Logical
                               bool allow_group_suppression) {
 	double support_threshold = 0.0;
 	bool want_support = TryGetPrivacyMinGroupCount(input.context, support_threshold);
-	// Data-dependent group suppression (τ-thresholding / partition selection) is fundamentally
-	// (ε,δ)-DP: whether a group appears is a sensitivity-1 function of the data, and δ pays for
-	// the chance a group survives on one PU alone. Pure ε-DP modes have no δ to spend, so we
-	// ignore the setting there (rather than apply an unsound filter) and tell the user.
 	bool apply_support_filter = want_support && allow_group_suppression;
-	if (want_support && !allow_group_suppression) {
-		Printer::Print("Note: privacy_min_group_count is ignored under privacy_mode='" + mech +
-		               "'. Group suppression (τ-thresholding) requires an (ε,δ) mode (dp_elastic or dp_sass); "
-		               "pure ε-DP cannot select partitions data-dependently. No groups were suppressed.");
-	}
 	auto support_pos =
 	    AddSupportAggregate(input, plan, agg, chain, apply_support_filter ? support_threshold : 0.0, per_pu);
 	idx_t n_dp_aggs = support_pos.IsValid() ? support_pos.GetIndex() : agg->expressions.size();
@@ -1768,9 +1803,6 @@ static void CompileDPLaplaceQuery(const PrivacyCompatibilityResult &check, Optim
 	auto avg_infos = RewriteAvgAggregates(input, agg);
 	idx_t n_original_aggs = agg->expressions.size() - avg_infos.size();
 	idx_t n_groups = agg->groups.size();
-	if (kind == DPSensitivityKind::GLOBAL) {
-		RequirePublicPartitionsForGroupedStandard(input.context, n_groups);
-	}
 
 	// Capture the desired final output type of each DP aggregate *before* clipping. Standard-DP
 	// per-PU clipping rewrites e.g. COUNT→SUM(clipped count), changing the type; the noise
@@ -1791,10 +1823,8 @@ static void CompileDPLaplaceQuery(const PrivacyCompatibilityResult &check, Optim
 	auto agg_sens = ClipAndComputeSensitivities(input, plan, agg, fk_chain, mech, kind, epsilon, per_pu,
 	                                            self_join_factor, target.nested_pu_histogram);
 
-	// Pure ε-DP (dp_standard / GLOBAL) cannot do data-dependent group suppression — see FinalizeDPLaplace.
-	bool allow_group_suppression = kind != DPSensitivityKind::GLOBAL;
 	FinalizeDPLaplace(input, plan, agg, fk_chain, mech, avg_infos, agg_sens, output_types, n_original_aggs, n_groups,
-	                  epsilon, noise_enabled, per_pu, allow_group_suppression);
+	                  epsilon, noise_enabled, per_pu, true);
 }
 
 void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
@@ -1831,25 +1861,6 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		}
 	}
 
-	// Pure-ε private range estimation (only for the 'average' release): spend a fraction of each
-	// aggregate's ε estimating the clip range from the lane answers, within the public envelope.
-	double range_fraction = 0.0;
-	{
-		Value pr;
-		bool private_range =
-		    input.context.TryGetCurrentSetting("dp_sass_private_range", pr) && !pr.IsNull() && pr.GetValue<bool>();
-		if (private_range) {
-			if (release_method != "average") {
-				throw InvalidInputException(
-				    "dp_sass: dp_sass_private_range currently requires dp_sass_release='average'");
-			}
-			range_fraction = GetRequiredFiniteSetting(input.context, "dp_sass_range_budget_fraction", "dp_sass");
-			if (range_fraction <= 0.0 || range_fraction >= 1.0) {
-				throw InvalidInputException("dp_sass: dp_sass_range_budget_fraction must be in (0, 1)");
-			}
-		}
-	}
-
 	bool allow_self_joins = ValidateDPSelfJoins(plan, "dp_sample_median") > 1.0;
 	CheckDPFKChainShape(plan, privacy_units, check, allow_self_joins);
 	auto pu_setup = PreparePlanForPUHashing(check, input, plan, privacy_units);
@@ -1866,7 +1877,6 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	idx_t n_original_aggs = agg->expressions.size();
 	idx_t n_groups = agg->groups.size();
 	auto contribution_bounds = GetDpSassContributionBounds(input.context, agg);
-	bool private_partition_selection = n_groups > 0 && !IsDpPublicPartitionsAsserted(input.context, "dp_sass");
 
 	vector<LogicalType> output_types;
 	output_types.reserve(agg->expressions.size());
@@ -1881,23 +1891,15 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	// Ungrouped queries have C_u = 1. This makes C_u enter the guarantee, not just filter rows.
 	int64_t group_bound =
 	    n_groups > 0 ? GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", "dp_sass") : 1;
-	if (private_partition_selection && delta == 0.0) {
-		if (!TryGetDpDelta(input.context, delta)) {
-			throw InvalidInputException("dp_sass: grouped private partitions require dp_delta for tau-thresholding");
-		}
-		if (delta <= 0.0 || delta >= 0.5 || !std::isfinite(delta)) {
-			throw InvalidInputException("dp_sass: dp_delta must be in (0, 0.5)");
-		}
-	}
-	double release_epsilon = private_partition_selection ? epsilon * 0.5 : epsilon;
-	double partition_epsilon = private_partition_selection ? epsilon - release_epsilon : 0.0;
-	double release_delta = private_partition_selection ? delta * 0.5 : delta;
-	double partition_delta = private_partition_selection ? delta - release_delta : 0.0;
 	double budget_divisor = k * static_cast<double>(group_bound);
+	double support_threshold = 0.0;
+	bool apply_support_filter = TryGetPrivacyMinGroupCount(input.context, support_threshold);
 	vector<double> epsilons;
 	vector<double> deltas;
 	epsilons.reserve(agg->expressions.size());
 	deltas.reserve(agg->expressions.size());
+	vector<idx_t> sample_output_positions;
+	sample_output_positions.reserve(agg->expressions.size());
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
 		auto &aggr = agg->expressions[ai]->Cast<BoundAggregateExpression>();
 		string name = StringUtil::Lower(aggr.function.name);
@@ -1929,41 +1931,33 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 			lower_bounds.push_back(-output_bound);
 			upper_bounds.push_back(output_bound);
 		}
-		epsilons.push_back(release_epsilon / budget_divisor);
-		deltas.push_back(release_delta / budget_divisor);
+		epsilons.push_back(epsilon / budget_divisor);
+		deltas.push_back(delta / budget_divisor);
+		sample_output_positions.push_back(ai);
 	}
 
 	if (HasDistinctAggregate(agg) && !IsDpSampleCountDistinct(agg)) {
 		throw InvalidInputException("dp_sass: clipped COUNT(DISTINCT) is supported only as a single aggregate; "
 		                            "mixed DISTINCT aggregate lists are not supported yet");
 	}
-	if (private_partition_selection && IsDpSampleCountDistinct(agg)) {
-		throw InvalidInputException("dp_sass: grouped COUNT(DISTINCT) over private partitions is not supported yet; "
-		                            "partition selection must count contributing privacy units");
-	}
 
-	RewriteAggregateToSampleMedian(input, agg, std::move(hash_infos[0].hash_expr), contribution_bounds);
+	bool distinct_support_filter = apply_support_filter && IsDpSampleCountDistinct(agg);
+	RewriteAggregateToSampleMedian(input, agg, std::move(hash_infos[0].hash_expr), contribution_bounds,
+	                               distinct_support_filter, support_threshold);
 
 	LogicalOperator *projection_anchor = agg;
-	double support_threshold =
-	    private_partition_selection ? ComputeTauThreshold(partition_epsilon, partition_delta, group_bound) : 0.0;
-	double requested_support_threshold = 0.0;
-	if (TryGetPrivacyMinGroupCount(input.context, requested_support_threshold)) {
-		support_threshold = std::max(support_threshold, requested_support_threshold);
-	}
-	bool apply_support_filter = support_threshold > 0.0 && std::isfinite(support_threshold);
-	if (apply_support_filter) {
+	if (distinct_support_filter) {
+		projection_anchor = ApplyAggregateNotNullFilter(plan, agg, 0);
+	} else if (apply_support_filter) {
 		idx_t support_pos = agg->expressions.size();
 		agg->expressions.push_back(BindPlainAggregate(input, "count_star", nullptr));
 		agg->ResolveOperatorTypes();
-		bool noise_enabled = IsPacNoiseEnabled(input.context, true);
-		double support_scale =
-		    private_partition_selection && noise_enabled ? static_cast<double>(group_bound) / partition_epsilon : 0.0;
-		projection_anchor = ApplySupportFilter(input, plan, agg, support_pos, support_threshold, support_scale);
+		projection_anchor = ApplySupportFilter(input, plan, agg, support_pos, support_threshold);
 	}
 
-	auto noise_proj = WrapSampleMedianProjection(input, plan, agg, epsilons, deltas, output_types, lower_bounds,
-	                                             upper_bounds, projection_anchor, release_method, range_fraction);
+	auto noise_proj =
+	    WrapSampleMedianProjection(input, plan, agg, epsilons, deltas, output_types, lower_bounds, upper_bounds,
+	                               projection_anchor, release_method, sample_output_positions);
 	(void)noise_proj;
 
 #if PRIVACY_DEBUG
