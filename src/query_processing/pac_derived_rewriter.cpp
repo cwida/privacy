@@ -46,6 +46,8 @@
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/logical_operator_visitor.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
+#include "duckdb/planner/operator/logical_cteref.hpp"
+#include "duckdb/planner/operator/logical_materialized_cte.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
@@ -67,6 +69,20 @@ static bool ExpressionContainsPacFinalize(Expression &e) {
 	bool found = false;
 	ExpressionIterator::EnumerateChildren(e, [&](Expression &child) {
 		if (!found && ExpressionContainsPacFinalize(child)) {
+			found = true;
+		}
+	});
+	return found;
+}
+
+static bool ExpressionReferencesFinalizedBinding(Expression &e, const unordered_set<uint64_t> &finalized_bindings) {
+	if (e.type == ExpressionType::BOUND_COLUMN_REF) {
+		auto &col_ref = e.Cast<BoundColumnRefExpression>();
+		return finalized_bindings.count(HashBinding(col_ref.binding)) > 0;
+	}
+	bool found = false;
+	ExpressionIterator::EnumerateChildren(e, [&](Expression &child) {
+		if (!found && ExpressionReferencesFinalizedBinding(child, finalized_bindings)) {
 			found = true;
 		}
 	});
@@ -273,6 +289,32 @@ static unique_ptr<Expression> CastScalarToPacFloat(unique_ptr<Expression> scalar
 	return scalar;
 }
 
+static void SyncMaterializedCTERefTypes(LogicalOperator *op, idx_t cte_index, const vector<LogicalType> &cte_types,
+                                        const LogicalType &list_type, const LogicalType &finalized_type,
+                                        unordered_set<uint64_t> &finalized_bindings) {
+	if (!op) {
+		return;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		auto &cte_ref = op->Cast<LogicalCTERef>();
+		if (cte_ref.cte_index == cte_index) {
+			auto bindings = cte_ref.GetColumnBindings();
+			for (idx_t i = 0; i < cte_types.size() && i < cte_ref.chunk_types.size(); i++) {
+				if (cte_ref.chunk_types[i] == list_type && cte_types[i] == finalized_type && i < bindings.size()) {
+					finalized_bindings.insert(HashBinding(bindings[i]));
+				}
+				cte_ref.chunk_types[i] = cte_types[i];
+				if (i < cte_ref.types.size()) {
+					cte_ref.types[i] = cte_types[i];
+				}
+			}
+		}
+	}
+	for (auto &child : op->children) {
+		SyncMaterializedCTERefTypes(child.get(), cte_index, cte_types, list_type, finalized_type, finalized_bindings);
+	}
+}
+
 // Rewrite a comparison expression on a counter column to a priv_filter_<cmp> call.
 // Returns the rewritten expression, or nullptr if the comparison doesn't involve a counter column.
 static unique_ptr<Expression> RewriteComparisonToFilterCmp(OptimizerExtensionInput &input,
@@ -348,8 +390,18 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 	// Suppress wrapping inside AGGREGATE subtrees (e.g. first() in scalar subqueries needs
 	// raw FLOAT[] input).
 	bool child_suppress = suppress || (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY);
-	for (auto &child : op->children) {
-		WrapCounterRefsWithFinalize(input, child.get(), derived_table_indices, finalized_bindings, child_suppress);
+	if (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE && op->children.size() > 1) {
+		auto &cte = op->Cast<LogicalMaterializedCTE>();
+		WrapCounterRefsWithFinalize(input, op->children[0].get(), derived_table_indices, finalized_bindings,
+		                            child_suppress);
+		SyncMaterializedCTERefTypes(op->children[1].get(), cte.table_index, op->children[0]->types, CounterListType(),
+		                            PacFloatLogicalType(), finalized_bindings);
+		WrapCounterRefsWithFinalize(input, op->children[1].get(), derived_table_indices, finalized_bindings,
+		                            child_suppress);
+	} else {
+		for (auto &child : op->children) {
+			WrapCounterRefsWithFinalize(input, child.get(), derived_table_indices, finalized_bindings, child_suppress);
+		}
 	}
 
 	auto list_type = CounterListType();
@@ -370,6 +422,9 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 			}
 		}
 		ExpressionIterator::EnumerateChildren(*e, FixExpr);
+		if (e->return_type == list_type && ExpressionReferencesFinalizedBinding(*e, finalized_bindings)) {
+			e->return_type = finalized_type;
+		}
 		if (e->GetExpressionClass() == ExpressionClass::BOUND_BETWEEN) {
 			auto &between = e->Cast<BoundBetweenExpression>();
 			FixExpr(between.input);

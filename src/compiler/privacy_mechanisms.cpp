@@ -814,7 +814,7 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 		double lo = is_count[i] ? 0.0 : -bound; // counts are non-negative
 		auto clipped = ClipToBounds(input, std::move(lower_ref), lo, bound, lower_type);
 		agg->expressions[i] = BindPlainAggregate(input, "sum", std::move(clipped));
-		sens.push_back(bound * group_bound);
+		sens.push_back(bound * static_cast<double>(group_bound));
 	}
 	agg->ResolveOperatorTypes();
 	return sens;
@@ -1009,7 +1009,7 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 
 	for (idx_t ai = 0; ai < n_aggs; ai++) {
 		auto agg_col_type = agg_types[n_groups + ai];
-		auto out_type = output_types[ai];
+		const auto &out_type = output_types[ai];
 		auto col_ref = make_uniq<BoundColumnRefExpression>(agg_col_type, ColumnBinding(agg_idx, ai));
 		double scale = agg_scales[ai];
 		if (scale <= 0.0 || !std::isfinite(scale)) {
@@ -1083,14 +1083,14 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 		auto *avg_info = avg_lookup[ai];
 		if (!avg_info) {
 			// Non-AVG: pass the noised value through
-			auto col_type = noise_proj.proj_types[n_groups + ai];
+			const auto &col_type = noise_proj.proj_types[n_groups + ai];
 			proj_exprs.push_back(
 			    make_uniq<BoundColumnRefExpression>(col_type, ColumnBinding(noise_proj.proj_idx, n_groups + ai)));
 		} else {
 			// AVG: compute CAST(noised_sum AS DOUBLE) / CAST(noised_count AS DOUBLE)
 			const AvgInfo &info = *avg_info;
-			auto sum_type = noise_proj.proj_types[n_groups + info.sum_pos];
-			auto cnt_type = noise_proj.proj_types[n_groups + info.count_pos];
+			const auto &sum_type = noise_proj.proj_types[n_groups + info.sum_pos];
+			const auto &cnt_type = noise_proj.proj_types[n_groups + info.count_pos];
 
 			auto make_sum_dbl = [&]() {
 				auto sum_ref = make_uniq<BoundColumnRefExpression>(
