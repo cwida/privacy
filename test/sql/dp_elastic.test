@@ -667,7 +667,10 @@ ALTER TABLE _dp_q13_customer SET PU;
 statement ok
 ALTER TABLE _dp_q13_orders ADD PRIVACY_LINK (o_custkey) REFERENCES _dp_q13_customer(c_custkey);
 
-query II rowsort
+# Nested aggregates are not supported in DP modes. Multiple aggregate
+# expressions in one aggregate node are tested below, but aggregate-over-
+# aggregate shapes like TPC-H Q13 must be rejected.
+statement error
 SELECT c_count, custdist
 FROM (
     SELECT c_count, COUNT(*) AS custdist
@@ -682,13 +685,12 @@ FROM (
     GROUP BY c_count
 ) q;
 ----
-0	2
-1	2
+dp_elastic: expected exactly one aggregate
 
 statement ok
 SET privacy_min_group_count = 2;
 
-query II rowsort
+statement error
 SELECT c_count, custdist
 FROM (
     SELECT c_count, COUNT(*) AS custdist
@@ -703,8 +705,7 @@ FROM (
     GROUP BY c_count
 ) q;
 ----
-0	2
-1	2
+dp_elastic: expected exactly one aggregate
 
 statement ok
 RESET privacy_min_group_count;

@@ -158,6 +158,13 @@ SELECT SUM(amount) FROM orders;
 statement ok
 SET dp_sum_bound = 1000.0;
 
+# Multiple aggregate expressions in the same aggregate node are supported; this is
+# one DP release vector with budget split across the user-visible aggregates.
+query II
+SELECT COUNT(*), SUM(amount) FROM orders;
+----
+500	2250.000000
+
 # ---------------------------------------------------------------------------
 # Manual support thresholding (privacy_min_group_count) is the admin-set tau gate
 # for DP groups. dp_standard remains pure ε-DP and treats grouped partitions as
@@ -188,9 +195,9 @@ SELECT store, COUNT(*) FROM orders GROUP BY store;
 statement ok
 SET privacy_min_group_count = NULL;
 
-# Nested PU-key histogram, like TPC-H Q13, with public bins 0..6 and an overflow bin at 6.
-# Each PU contributes to exactly one public bin, and the outer histogram receives DP noise.
-query II rowsort
+# Nested aggregates are not supported: a query may have multiple aggregate
+# expressions, but not an aggregate over another aggregate's private output.
+statement error
 WITH public_bins(order_count) AS (
   SELECT i FROM range(0, 7) t(i)
 ),
@@ -205,13 +212,7 @@ FROM public_bins
 LEFT JOIN per_user ON public_bins.order_count = per_user.order_count
 GROUP BY public_bins.order_count;
 ----
-0	0
-1	0
-2	0
-3	0
-4	0
-5	100
-6	0
+dp_standard: expected exactly one aggregate
 
 # L0 contribution bounding: two PUs each touch three groups, but max groups is two.
 statement ok

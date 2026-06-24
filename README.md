@@ -222,7 +222,7 @@ This gives a formal (ε,δ)-DP guarantee at the **user level** — neighboring d
 
 ### Supported Aggregates and Operators
 
-PAC mode supports `SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, and `COUNT(DISTINCT)`. DP-elastic supports `SUM`, `COUNT`, and `AVG` — `MIN` and `MAX` have unbounded sensitivity in DP and are not supported. Joins, subqueries (correlated and uncorrelated), `UNION`/`UNION ALL`, `GROUP BY`, `HAVING`, `ORDER BY`, and `LIMIT` all work. Window functions and `EXCEPT`/`INTERSECT` are not yet supported.
+PAC mode supports `SUM`, `COUNT`, `AVG`, `MIN`, `MAX`, and `COUNT(DISTINCT)`. DP modes support one aggregate node with one or more aggregate expressions; `COUNT`, `SUM`, `AVG`, and `COUNT(DISTINCT)` are supported in bounded-contribution form, while `dp_sass` also supports bounded-domain `MIN`/`MAX`. DP joins must preserve a single privacy-unit contribution stream, with optional public side tables; `INNER`, `LEFT`, and `RIGHT` joins are supported, while nested aggregates and full outer joins are rejected. Window functions and `EXCEPT`/`INTERSECT` are not yet supported.
 
 ### DDL Quick Reference
 

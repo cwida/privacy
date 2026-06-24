@@ -244,8 +244,8 @@ GROUP BY p_brand, p_type, p_size;
 ----
 as_sample_count_mask
 
-query I
-SELECT COUNT(*)
+query II rowsort
+SELECT p_brand, supplier_cnt
 FROM (
     SELECT p_brand, p_type, p_size, COUNT(DISTINCT ps_suppkey) AS supplier_cnt
     FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
@@ -253,7 +253,8 @@ FROM (
 ) q
 WHERE supplier_cnt > 0;
 ----
-2
+Brand#11	7
+Brand#22	1
 
 query I
 SELECT supplier_cnt
@@ -286,15 +287,14 @@ Brand#22	1
 statement ok
 SET privacy_min_group_count = 65;
 
-query I
-SELECT COUNT(*)
+query II rowsort
+SELECT p_brand, supplier_cnt
 FROM (
     SELECT p_brand, p_type, p_size, COUNT(DISTINCT ps_suppkey) AS supplier_cnt
     FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
     GROUP BY p_brand, p_type, p_size
 ) q;
 ----
-0
 
 statement ok
 SET privacy_min_group_count = NULL;
@@ -370,7 +370,10 @@ SET dp_max_groups_contributed = 1;
 statement ok
 SET dp_sass_count_output_bound = 1000;
 
-query I nosort explain_sass_q13_nested_count
+# Nested aggregates are not supported in DP modes. A query may have multiple
+# aggregate expressions in one aggregate node, but not aggregate over another
+# aggregate's private output.
+statement error
 EXPLAIN SELECT c_count, COUNT(*) AS custdist
 FROM (
     SELECT c_custkey, COUNT(o_orderkey) AS c_count
@@ -382,9 +385,9 @@ FROM (
 ) AS c_orders
 GROUP BY c_count;
 ----
-as_sample_sum
+dp_sass: expected exactly one aggregate
 
-query I
+statement error
 SELECT custdist > 0
 FROM (
     SELECT c_count, COUNT(*) AS custdist
@@ -399,7 +402,7 @@ FROM (
     GROUP BY c_count
 ) q;
 ----
-true
+dp_sass: expected exactly one aggregate
 
 statement ok
 PRAGMA clear_privacy_metadata;
@@ -631,6 +634,12 @@ SELECT SUM(v) IS NOT NULL FROM sass_users;
 ----
 true
 
+# Multiple aggregate expressions in the same aggregate node are supported.
+query II
+SELECT COUNT(*) IS NOT NULL, SUM(v) IS NOT NULL FROM sass_users;
+----
+true	true
+
 statement ok
 SET dp_sass_avg_lower_bound = 0.0;
 
@@ -749,15 +758,14 @@ SET dp_sass_release = 'average';
 statement ok
 SET dp_delta = NULL;
 
-query I
-SELECT COUNT(*)
-FROM (
-    SELECT g, COUNT(*)
-    FROM sass_group_events
-    GROUP BY g
-);
+query II
+SELECT g, COUNT(*) IS NOT NULL
+FROM sass_group_events
+GROUP BY g
+ORDER BY g
+LIMIT 1;
 ----
-161
+0	true
 
 statement ok
 SET dp_sass_release = 'median';

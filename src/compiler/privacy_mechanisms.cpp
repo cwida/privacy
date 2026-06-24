@@ -272,96 +272,19 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 static void CheckDPAggregateNode(LogicalAggregate *agg, const string &mechanism_name, bool allow_min_max);
 static bool IsCountAggregate(const BoundAggregateExpression &aggr);
 
-struct DPAggregateTarget {
-	LogicalAggregate *agg;
-	bool nested_pu_histogram;
-};
-
-static vector<string> BuildDPRelevantTables(const PrivacyCompatibilityResult &check,
-                                            const vector<string> &privacy_units) {
-	vector<string> relevant_tables;
-	std::unordered_set<string> seen;
-	for (auto &pu : privacy_units) {
-		if (seen.insert(pu).second) {
-			relevant_tables.push_back(pu);
-		}
-	}
-
-	vector<string> sorted_fk_path_keys;
-	for (auto &kv : check.fk_paths) {
-		sorted_fk_path_keys.push_back(kv.first);
-	}
-	std::sort(sorted_fk_path_keys.begin(), sorted_fk_path_keys.end());
-
-	for (auto &fk_key : sorted_fk_path_keys) {
-		if (seen.insert(fk_key).second) {
-			relevant_tables.push_back(fk_key);
-		}
-		auto &path = check.fk_paths.at(fk_key);
-		for (auto &table : path) {
-			if (seen.insert(table).second) {
-				relevant_tables.push_back(table);
-			}
-		}
-	}
-	return relevant_tables;
-}
-
 static LogicalAggregate *CheckDPAggregates(unique_ptr<LogicalOperator> &plan, const string &mechanism_name) {
 	bool allow_min_max = mechanism_name == "dp_sass";
 	vector<LogicalAggregate *> aggs;
 	FindAllAggregates(plan, aggs);
 	if (aggs.size() != 1) {
+		PRIVACY_DEBUG_PRINT("[" + mechanism_name + "] rejecting query with " + std::to_string(aggs.size()) +
+		                    " aggregate nodes");
 		throw InvalidInputException(mechanism_name + ": expected exactly one aggregate, found " +
 		                            std::to_string(aggs.size()));
 	}
 	auto *agg = aggs[0];
 	CheckDPAggregateNode(agg, mechanism_name, allow_min_max);
 	return agg;
-}
-
-static DPAggregateTarget CheckDPNestedAggregateTarget(unique_ptr<LogicalOperator> &plan,
-                                                      const PrivacyCompatibilityResult &check,
-                                                      const vector<string> &privacy_units,
-                                                      const string &mechanism_name) {
-	vector<LogicalAggregate *> aggs;
-	FindAllAggregates(plan, aggs);
-	if (aggs.empty()) {
-		throw InvalidInputException(mechanism_name + ": expected exactly one aggregate, found 0");
-	}
-	if (aggs.size() == 1) {
-		CheckDPAggregateNode(aggs[0], mechanism_name, false);
-		return {aggs[0], false};
-	}
-
-	auto cte_map = BuildAndResolveCTETableMap(plan.get());
-	auto relevant_tables = BuildDPRelevantTables(check, privacy_units);
-	auto targets = FilterTargetAggregatesWithPUKeyCheck(aggs, relevant_tables, check, privacy_units, cte_map);
-	if (targets.size() != 1) {
-		throw InvalidInputException(mechanism_name + ": expected exactly one privacy-unit aggregate, found " +
-		                            std::to_string(targets.size()));
-	}
-
-	auto *target = targets[0];
-	auto *inner = FindFirstChildAggregate(target);
-	if (!inner) {
-		throw InvalidInputException(mechanism_name + ": nested aggregates are only supported for PU-key histograms");
-	}
-	CheckDPAggregateNode(target, mechanism_name, false);
-	for (auto &expr : target->expressions) {
-		auto &aggr = expr->Cast<BoundAggregateExpression>();
-		if (!IsCountAggregate(aggr) || aggr.IsDistinct()) {
-			throw InvalidInputException(mechanism_name + ": nested PU-key histograms only support COUNT aggregates");
-		}
-	}
-	for (auto &expr : inner->expressions) {
-		auto &aggr = expr->Cast<BoundAggregateExpression>();
-		if (!IsCountAggregate(aggr) || aggr.IsDistinct()) {
-			throw InvalidInputException(mechanism_name + ": nested PU-key histograms only support inner COUNT "
-			                                             "aggregates");
-		}
-	}
-	return {target, true};
 }
 
 static void CheckDPAggregateNode(LogicalAggregate *agg, const string &mechanism_name, bool allow_min_max) {
@@ -1678,19 +1601,7 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 static vector<double> ClipAndComputeSensitivities(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                                   LogicalAggregate *agg, const DPFKChain &chain, const string &mech,
                                                   DPSensitivityKind kind, double epsilon, bool &per_pu,
-                                                  double self_join_factor, bool nested_pu_histogram) {
-	if (nested_pu_histogram) {
-		// The child of the outer histogram aggregate is the inner PU-key aggregate,
-		// so each input row already represents one privacy unit.
-		per_pu = true;
-		double sensitivity = kind == DPSensitivityKind::GLOBAL ? 1.0 : 2.0;
-		vector<double> sens;
-		sens.reserve(agg->expressions.size());
-		for (idx_t i = 0; i < agg->expressions.size(); i++) {
-			sens.push_back(sensitivity);
-		}
-		return sens;
-	}
+                                                  double self_join_factor) {
 	if (kind == DPSensitivityKind::GLOBAL) {
 		// Standard DP: per-PU contribution clipping → sensitivity = the bound (data-independent).
 		return ApplyPerPuClipping(input, plan, agg, chain, mech, per_pu);
@@ -1793,10 +1704,7 @@ static void CompileDPLaplaceQuery(const PrivacyCompatibilityResult &check, Optim
 	}
 
 	auto fk_chain = ExtractDPFKChain(plan, privacy_units, check, allow_self_joins);
-	DPAggregateTarget target = (mech == "dp_elastic" || mech == "dp_standard")
-	                               ? CheckDPNestedAggregateTarget(plan, check, privacy_units, mech)
-	                               : DPAggregateTarget {CheckDPAggregates(plan, mech), false};
-	auto *agg = target.agg;
+	auto *agg = CheckDPAggregates(plan, mech);
 
 	// Rewrite AVG(x) → SUM(x) + COUNT(*) before bound/clipping checks.
 	// Each AVG uses ε/2 per component so the combined cost is still ε-DP.
@@ -1820,8 +1728,8 @@ static void CompileDPLaplaceQuery(const PrivacyCompatibilityResult &check, Optim
 	bool noise_enabled = IsPacNoiseEnabled(input.context, true);
 
 	bool per_pu = false;
-	auto agg_sens = ClipAndComputeSensitivities(input, plan, agg, fk_chain, mech, kind, epsilon, per_pu,
-	                                            self_join_factor, target.nested_pu_histogram);
+	auto agg_sens =
+	    ClipAndComputeSensitivities(input, plan, agg, fk_chain, mech, kind, epsilon, per_pu, self_join_factor);
 
 	FinalizeDPLaplace(input, plan, agg, fk_chain, mech, avg_infos, agg_sens, output_types, n_original_aggs, n_groups,
 	                  epsilon, noise_enabled, per_pu, true);
@@ -1863,6 +1771,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 
 	bool allow_self_joins = ValidateDPSelfJoins(plan, "dp_sample_median") > 1.0;
 	CheckDPFKChainShape(plan, privacy_units, check, allow_self_joins);
+	auto *single_agg = CheckDPAggregates(plan, "dp_sass");
 	auto pu_setup = PreparePlanForPUHashing(check, input, plan, privacy_units);
 	auto hash_infos = BuildPUHashExpressionsForAggregates(input, plan, pu_setup.pu_names, check, pu_setup.cte_map);
 	if (hash_infos.empty()) {
@@ -1872,6 +1781,9 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		throw InvalidInputException("dp_sample_median: expected exactly one privacy-unit aggregate");
 	}
 	auto *agg = hash_infos[0].aggregate;
+	if (agg != single_agg) {
+		throw InternalException("dp_sample_median: privacy-unit aggregate does not match the single aggregate node");
+	}
 	CheckDPAggregateNode(agg, "dp_sass", true);
 
 	idx_t n_original_aggs = agg->expressions.size();

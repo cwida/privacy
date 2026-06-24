@@ -367,3 +367,5 @@ by running many independent SQL queries.
   threshold for DP grouped queries.
 - Grouped `COUNT(DISTINCT)` under `dp_sass` applies `privacy_min_group_count`
   to contributing privacy units, not to the number of distinct values.
+- Nested aggregates are not supported; use one aggregate node with one or more
+  aggregate expressions.
