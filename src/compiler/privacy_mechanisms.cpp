@@ -2,6 +2,7 @@
 #include "aggregates/as_aggregate.hpp"
 #include "utils/privacy_helpers.hpp"
 #include "compiler/privacy_compiler.hpp"
+#include "compiler/privacy_compiler_helpers.hpp"
 #include "query_processing/privacy_plan_traversal.hpp"
 #include "query_processing/privacy_expression_builder.hpp"
 #include "privacy_debug.hpp"
@@ -624,6 +625,54 @@ static bool AggregateContainsCount(const LogicalAggregate *agg) {
 	return false;
 }
 
+static void EnsurePuAdjacentTableAvailable(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                           LogicalAggregate *agg, const PrivacyCompatibilityResult &check,
+                                           const DPFKChain &chain, const string &mech) {
+	if (chain.tables.size() < 2) {
+		return;
+	}
+	const string &adj_table = chain.tables[chain.tables.size() - 2];
+	if (FindTableScanInSubtree(agg->children[0].get(), adj_table)) {
+		return;
+	}
+
+	optional_idx start_pos;
+	for (idx_t i = 0; i + 1 < chain.tables.size(); i++) {
+		if (FindTableScanInSubtree(agg->children[0].get(), chain.tables[i])) {
+			start_pos = i;
+			break;
+		}
+	}
+	if (!start_pos.IsValid()) {
+		throw InternalException(mech + ": could not find a table from the PRIVACY_LINK chain in aggregate input");
+	}
+
+	vector<string> tables_to_join;
+	for (idx_t i = start_pos.GetIndex() + 1; i + 1 < chain.tables.size(); i++) {
+		tables_to_join.push_back(chain.tables[i]);
+	}
+	if (tables_to_join.empty()) {
+		return;
+	}
+
+	auto *start_ref = FindNodeRefByTable(&agg->children[0], chain.tables[start_pos.GetIndex()]);
+	if (!start_ref) {
+		throw InternalException(mech + ": could not find join attachment table '" + chain.tables[start_pos.GetIndex()] +
+		                        "' in aggregate input");
+	}
+
+	PRIVACY_DEBUG_PRINT("[" + mech + "] adding missing FK joins for per-PU clipping from '" +
+	                    chain.tables[start_pos.GetIndex()] + "' to '" + adj_table + "'");
+	auto &binder = input.optimizer.binder;
+	unique_ptr<LogicalOperator> current = (*start_ref)->Copy(input.context);
+	for (auto &table : tables_to_join) {
+		idx_t table_index = binder.GenerateTableIndex();
+		auto get = CreateLogicalGet(input.context, plan, table, table_index);
+		current = CreateLogicalJoin(check, input.context, std::move(current), std::move(get));
+	}
+	ReplaceNode(agg->children[0], *start_ref, current, &binder);
+}
+
 // Locate the PU-identifying FK column for per-PU grouping: the FK on the table *adjacent* to
 // the PU (chain.fk_cols.back() on chain.tables[size-2]). That value uniquely identifies the PU
 // and, because the join is already in the aggregate's input subtree, is available on every
@@ -749,8 +798,8 @@ static void ApplyMaxGroupsContributed(OptimizerExtensionInput &input, LogicalAgg
 // Returns the per-aggregate sensitivity vector (one entry per current agg->expression) and sets
 // `per_pu_out` true when a per-PU pre-aggregation was inserted (so support counts PU groups).
 static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                         LogicalAggregate *agg, const DPFKChain &chain, const string &mech,
-                                         bool &per_pu_out) {
+                                         LogicalAggregate *agg, const PrivacyCompatibilityResult &check,
+                                         const DPFKChain &chain, const string &mech, bool &per_pu_out) {
 	bool is_join = chain.tables.size() >= 2;
 	bool has_sum = AggregateContainsSum(agg);
 	bool has_count = AggregateContainsCount(agg);
@@ -780,6 +829,7 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 	}
 
 	// Join: build plain per-PU lower aggregates mirroring each top aggregate.
+	EnsurePuAdjacentTableAvailable(input, plan, agg, check, chain, mech);
 	auto pu_key = BuildPuKeyExpression(plan, chain, mech);
 	vector<bool> is_count;
 	is_count.reserve(n);
@@ -1599,12 +1649,12 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 // order, before any support aggregate is appended) and sets `per_pu` when a per-PU
 // pre-aggregation was inserted (so the support aggregate counts PU groups).
 static vector<double> ClipAndComputeSensitivities(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                                  LogicalAggregate *agg, const DPFKChain &chain, const string &mech,
-                                                  DPSensitivityKind kind, double epsilon, bool &per_pu,
-                                                  double self_join_factor) {
+                                                  LogicalAggregate *agg, const PrivacyCompatibilityResult &check,
+                                                  const DPFKChain &chain, const string &mech, DPSensitivityKind kind,
+                                                  double epsilon, bool &per_pu, double self_join_factor) {
 	if (kind == DPSensitivityKind::GLOBAL) {
 		// Standard DP: per-PU contribution clipping → sensitivity = the bound (data-independent).
-		return ApplyPerPuClipping(input, plan, agg, chain, mech, per_pu);
+		return ApplyPerPuClipping(input, plan, agg, check, chain, mech, per_pu);
 	}
 	// Elastic DP: per-row clipping + smooth elastic sensitivity from the join max-frequencies.
 	per_pu = false;
@@ -1729,7 +1779,7 @@ static void CompileDPLaplaceQuery(const PrivacyCompatibilityResult &check, Optim
 
 	bool per_pu = false;
 	auto agg_sens =
-	    ClipAndComputeSensitivities(input, plan, agg, fk_chain, mech, kind, epsilon, per_pu, self_join_factor);
+	    ClipAndComputeSensitivities(input, plan, agg, check, fk_chain, mech, kind, epsilon, per_pu, self_join_factor);
 
 	FinalizeDPLaplace(input, plan, agg, fk_chain, mech, avg_infos, agg_sens, output_types, n_original_aggs, n_groups,
 	                  epsilon, noise_enabled, per_pu, true);
@@ -1785,6 +1835,29 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		throw InternalException("dp_sample_median: privacy-unit aggregate does not match the single aggregate node");
 	}
 	CheckDPAggregateNode(agg, "dp_sass", true);
+
+	if (GetDpSampleLanes(input.context) == 1 && pu_setup.pu_names.size() == 1) {
+		const auto &pu_table_name = pu_setup.pu_names[0];
+		auto meta_it = check.table_metadata.find(pu_table_name);
+		if (meta_it == check.table_metadata.end() || meta_it->second.pks.empty()) {
+			throw InternalException("dp_sass: PU table '" + pu_table_name + "' has no PRIVACY_KEY metadata");
+		}
+
+		auto *pu_get = FindAccessibleGetInSubtree(plan, agg, pu_table_name);
+		if (pu_get) {
+			std::unordered_map<idx_t, ColumnBinding> lane_cache;
+			auto lane_binding =
+			    GetOrInsertBalancedSampleLaneProjection(input, plan, *pu_get, meta_it->second.pks, lane_cache);
+			auto propagated_lane =
+			    PropagateSingleBinding(*plan, lane_binding.table_index, lane_binding, LogicalType::UBIGINT, agg);
+			if (propagated_lane.table_index == DConstants::INVALID_INDEX) {
+				throw InvalidInputException("dp_sass: could not propagate balanced privacy-unit lane to aggregate");
+			}
+			hash_infos[0].hash_expr = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated_lane);
+			hash_infos[0].hash_binding = propagated_lane;
+			PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] using exact balanced disjoint sample lanes");
+		}
+	}
 
 	idx_t n_original_aggs = agg->expressions.size();
 	idx_t n_groups = agg->groups.size();

@@ -261,6 +261,51 @@ GROUP BY public_store.label;
 even	50
 odd	50
 
+# Missing FK path tables are joined internally for per-PU clipping. The query
+# scans only the leaf table, but the PU key lives on the parent table:
+# child_lines -> parent_orders -> users2. The raw leaf count is 9; after grouping
+# by user and clipping to 4, the result is min(5,4) + min(4,4) = 8.
+statement ok
+CREATE TABLE users2 (id BIGINT);
+
+statement ok
+INSERT INTO users2 VALUES (0), (1);
+
+statement ok
+ALTER TABLE users2 ADD PRIVACY_KEY (id);
+
+statement ok
+ALTER TABLE users2 SET PU;
+
+statement ok
+CREATE TABLE parent_orders (order_id BIGINT, uid BIGINT);
+
+statement ok
+INSERT INTO parent_orders VALUES (10, 0), (11, 0), (20, 1);
+
+statement ok
+ALTER TABLE parent_orders ADD PRIVACY_LINK (uid) REFERENCES users2(id);
+
+statement ok
+CREATE TABLE child_lines (line_id BIGINT, order_id BIGINT);
+
+statement ok
+INSERT INTO child_lines VALUES (1, 10), (2, 10), (3, 10), (4, 11), (5, 11), (6, 20), (7, 20), (8, 20), (9, 20);
+
+statement ok
+ALTER TABLE child_lines ADD PRIVACY_LINK (order_id) REFERENCES parent_orders(order_id);
+
+statement ok
+SET dp_count_bound = 4.0;
+
+statement ok
+SET dp_max_groups_contributed = 1.0;
+
+query I
+SELECT COUNT(*) FROM child_lines;
+----
+8
+
 # Hidden self-joins from EXISTS/NOT EXISTS filters are allowed; explicit accessible
 # self-joins remain rejected by the validator.
 query I

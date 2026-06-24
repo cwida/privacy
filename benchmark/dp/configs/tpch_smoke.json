@@ -1,0 +1,23 @@
+{
+  "out": "benchmark/dp/tpch_smoke_results.csv",
+  "runs": 1,
+  "threads": 1,
+  "modes": ["dp_standard", "dp_elastic", "dp_sass"],
+  "epsilons": [1.0],
+  "deltas": [1e-6],
+  "count_bounds": [1000.0],
+  "sum_bounds": [1000.0],
+  "c_u": [1.0],
+  "bound_multipliers": [1.0],
+  "sample_lanes": [1],
+  "sass_releases": ["median"],
+  "datasets": [
+    {
+      "name": "tpch",
+      "workload": "tpch_utility",
+      "sf": 0.001,
+      "db": "tpch_sass_sf0.001.db",
+      "query_limit": 1
+    }
+  ]
+}

@@ -715,6 +715,46 @@ SELECT AVG(v) IS NOT NULL FROM sass_many;
 ----
 true
 
+statement ok
+CREATE PU TABLE sass_balanced_130(uid INTEGER, PRIVACY_KEY(uid));
+
+statement ok
+INSERT INTO sass_balanced_130
+SELECT i FROM range(130) t(i);
+
+# With dp_sample_lanes=1, dp_sass assigns every PU to exactly one of the 64
+# sample counters. For 130 PUs, 62 counters hold 2 PUs and 2 counters hold 3;
+# the noise-free sample median is therefore 2 * 64 = 128 after rescaling.
+statement ok
+SET dp_sample_lanes = 1;
+
+query I
+SELECT COUNT(*) FROM sass_balanced_130;
+----
+128
+
+statement ok
+CREATE PU TABLE sass_balanced_users(uid INTEGER, PRIVACY_KEY(uid));
+
+statement ok
+CREATE TABLE sass_balanced_events(uid INTEGER, event_id INTEGER);
+
+statement ok
+INSERT INTO sass_balanced_users
+SELECT i FROM range(130) t(i);
+
+statement ok
+INSERT INTO sass_balanced_events
+SELECT i, i FROM range(130) t(i);
+
+statement ok
+ALTER TABLE sass_balanced_events ADD PRIVACY_LINK (uid) REFERENCES sass_balanced_users(uid);
+
+query I
+SELECT COUNT(*) FROM sass_balanced_events;
+----
+128
+
 # GUPT-style mean release (pure-ε; no delta required).
 statement ok
 SET dp_sass_release = 'average';

@@ -12,7 +12,9 @@
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
+#include "duckdb/planner/expression/bound_window_expression.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_window.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -262,6 +264,89 @@ ColumnBinding GetOrInsertHashProjection(OptimizerExtensionInput &input, unique_p
 		return it->second;
 	}
 	auto binding = InsertHashProjectionAboveGet(input, plan, get, key_columns, use_rowid);
+	cache[get.table_index] = binding;
+	return binding;
+}
+
+ColumnBinding InsertBalancedSampleLaneProjectionAboveGet(OptimizerExtensionInput &input,
+                                                         unique_ptr<LogicalOperator> &plan, LogicalGet &get,
+                                                         const vector<string> &key_columns) {
+	constexpr int64_t DP_SASS_LANE_COUNT = 64;
+
+	AddPKColumns(get, key_columns);
+	auto order_hash = BuildXorHashFromPKs(input, get, key_columns);
+
+	vector<unique_ptr<LogicalOperator> *> get_nodes;
+	FindAllNodesByTableIndex(&plan, get.table_index, get_nodes);
+	if (get_nodes.empty()) {
+		throw InternalException("Privacy compiler: InsertBalancedSampleLaneProjectionAboveGet could not find get #" +
+		                        std::to_string(get.table_index));
+	}
+	auto &get_slot = *get_nodes[0];
+	auto old_bindings = get_slot->GetColumnBindings();
+	idx_t num_get_cols = old_bindings.size();
+
+	auto &binder = input.optimizer.binder;
+	idx_t window_index = binder.GenerateTableIndex();
+	auto window = make_uniq<LogicalWindow>(window_index);
+	auto row_number =
+	    make_uniq<BoundWindowExpression>(ExpressionType::WINDOW_ROW_NUMBER, LogicalType::BIGINT, nullptr, nullptr);
+	row_number->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST, std::move(order_hash));
+	row_number->start = WindowBoundary::UNBOUNDED_PRECEDING;
+	row_number->end = WindowBoundary::CURRENT_ROW_ROWS;
+	window->expressions.push_back(std::move(row_number));
+	window->children.push_back(std::move(get_slot));
+	window->ResolveOperatorTypes();
+
+	idx_t proj_table_index = binder.GenerateTableIndex();
+	vector<unique_ptr<Expression>> proj_expressions;
+	proj_expressions.reserve(num_get_cols + 1);
+	for (idx_t i = 0; i < num_get_cols; i++) {
+		proj_expressions.push_back(make_uniq<BoundColumnRefExpression>(window->types[i], old_bindings[i]));
+	}
+
+	auto row_number_ref_for_lane =
+	    make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ColumnBinding(window_index, 0));
+	auto zero_based = input.optimizer.BindScalarFunction("-", std::move(row_number_ref_for_lane),
+	                                                     make_uniq<BoundConstantExpression>(Value::BIGINT(1)));
+	auto lane = input.optimizer.BindScalarFunction(
+	    "&", std::move(zero_based), make_uniq<BoundConstantExpression>(Value::BIGINT(DP_SASS_LANE_COUNT - 1)));
+	auto row_number_ref_for_identity =
+	    make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ColumnBinding(window_index, 0));
+	auto identity_prefix = input.optimizer.BindScalarFunction("<<", std::move(row_number_ref_for_identity),
+	                                                          make_uniq<BoundConstantExpression>(Value::BIGINT(6)));
+	auto encoded_lane = input.optimizer.BindScalarFunction("+", std::move(identity_prefix), std::move(lane));
+	encoded_lane = BoundCastExpression::AddCastToType(input.context, std::move(encoded_lane), LogicalType::UBIGINT);
+	encoded_lane->alias = "dp_sass_lane_key";
+	proj_expressions.push_back(std::move(encoded_lane));
+
+	auto projection = make_uniq<LogicalProjection>(proj_table_index, std::move(proj_expressions));
+	projection->children.push_back(std::move(window));
+	projection->ResolveOperatorTypes();
+
+	LogicalOperator *proj_ptr = projection.get();
+	get_slot = std::move(projection);
+
+	ColumnBindingReplacer replacer;
+	for (idx_t i = 0; i < num_get_cols; i++) {
+		replacer.replacement_bindings.emplace_back(old_bindings[i], ColumnBinding(proj_table_index, i));
+	}
+	replacer.stop_operator = proj_ptr;
+	replacer.VisitOperator(*plan);
+
+	PRIVACY_DEBUG_PRINT("InsertBalancedSampleLaneProjectionAboveGet: inserted balanced SASS lane projection #" +
+	                    std::to_string(proj_table_index) + " above get #" + std::to_string(get.table_index));
+	return ColumnBinding(proj_table_index, num_get_cols);
+}
+
+ColumnBinding GetOrInsertBalancedSampleLaneProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                                      LogicalGet &get, const vector<string> &key_columns,
+                                                      std::unordered_map<idx_t, ColumnBinding> &cache) {
+	auto it = cache.find(get.table_index);
+	if (it != cache.end()) {
+		return it->second;
+	}
+	auto binding = InsertBalancedSampleLaneProjectionAboveGet(input, plan, get, key_columns);
 	cache[get.table_index] = binding;
 	return binding;
 }
