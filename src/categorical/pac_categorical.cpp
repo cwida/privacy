@@ -54,14 +54,11 @@ struct PacCategoricalBindData : public FunctionData {
 	uint64_t query_hash;               // derived from seed: used as counter selector for NoisySample
 	std::shared_ptr<PacPState> pstate; // p-tracking state shared across query (may be nullptr)
 	double utility_threshold;          // z-score threshold for utility NULLing (NaN = disabled)
-	int sample_lanes;                  // SASS mode: half-width of the median region; 0 means non-SASS
 
 	// Primary constructor - reads seed from privacy_seed setting, or uses default 42 if not set.
 	// When mi > 0, seed is randomized per query via the query number.
-	explicit PacCategoricalBindData(ClientContext &ctx, double mi_val = 0.0, double correction_val = 1.0,
-	                                int sample_lanes_val = 0)
-	    : mi(mi_val), correction(correction_val), utility_threshold(std::numeric_limits<double>::quiet_NaN()),
-	      sample_lanes(sample_lanes_val) {
+	explicit PacCategoricalBindData(ClientContext &ctx, double mi_val = 0.0, double correction_val = 1.0)
+	    : mi(mi_val), correction(correction_val), utility_threshold(std::numeric_limits<double>::quiet_NaN()) {
 		// Read utility threshold setting
 		Value ut_val;
 		if (ctx.TryGetCurrentSetting("privacy_min_group_count", ut_val) && !ut_val.IsNull()) {
@@ -97,8 +94,7 @@ struct PacCategoricalBindData : public FunctionData {
 
 	bool Equals(const FunctionData &other) const override {
 		auto &o = other.Cast<PacCategoricalBindData>();
-		return mi == o.mi && correction == o.correction && seed == o.seed && query_hash == o.query_hash &&
-		       sample_lanes == o.sample_lanes;
+		return mi == o.mi && correction == o.correction && seed == o.seed && query_hash == o.query_hash;
 	}
 };
 
@@ -456,214 +452,6 @@ static void RegisterPacSelectCmp(ExtensionLoader &loader, const string &name) {
 	CreateScalarFunctionInfo info(f);
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Categorical comparison + mask application for PAC queries.";
-	info.descriptions.push_back(std::move(desc));
-	loader.RegisterFunction(std::move(info));
-}
-
-// ============================================================================
-// SASS filter/select: median-region decision over 64 sample counters
-// ============================================================================
-// Peter's policy (2026-05-31): sort the 64 counters, evaluate the comparison at each
-// position, then look at the window of size 2*sample_lanes+1 centered on the median
-// (index 32). If every element of the window agrees, return that. Otherwise random
-// coin flip — the median itself is unstable under one-PU change. Window width tracks
-// the maximum shift one PU can induce on the sorted statistic, mirroring the smooth-
-// sensitivity bound used by dp_smooth_median_noise.
-
-// Decide a boolean filter outcome from 64 comparison booleans (already in sorted order
-// of the underlying counter values). Returns:
-//   - true  if window [32-w, 32+w] is unanimously true
-//   - false if window [32-w, 32+w] is unanimously false
-//   - random coin flip otherwise
-static inline bool MedianRegionDecide(const bool cmp_at_sorted_idx[64], int sample_lanes, std::mt19937_64 &gen) {
-	int w = sample_lanes;
-	if (w < 1) {
-		w = 1;
-	}
-	int lo = 32 - w;
-	int hi = 32 + w;
-	if (lo < 0) {
-		lo = 0;
-	}
-	if (hi > 63) {
-		hi = 63;
-	}
-	bool first = cmp_at_sorted_idx[lo];
-	bool unanimous = true;
-	for (int k = lo + 1; k <= hi; k++) {
-		if (cmp_at_sorted_idx[k] != first) {
-			unanimous = false;
-			break;
-		}
-	}
-	if (unanimous) {
-		return first;
-	}
-	return (gen() & 1ULL) != 0;
-}
-
-// Read up to 64 PAC_FLOAT values from a LIST<FLOAT> entry into `out`. Short lists
-// are padded by repeating the last seen value; NULL elements become 0.0. Returns
-// the source list length (capped at 64) for diagnostics; `out` is always fully
-// populated when the entry is non-empty.
-static inline idx_t LoadCounterListInto(const list_entry_t &entry, UnifiedVectorFormat &child_data,
-                                        const PAC_FLOAT *child_values, PAC_FLOAT out[64]) {
-	idx_t len = entry.length > 64 ? 64 : entry.length;
-	for (idx_t j = 0; j < len; j++) {
-		auto child_idx = child_data.sel->get_index(entry.offset + j);
-		out[j] = child_data.validity.RowIsValid(child_idx) ? child_values[child_idx] : static_cast<PAC_FLOAT>(0);
-	}
-	for (idx_t j = len; j < 64; j++) {
-		out[j] = out[len - 1];
-	}
-	return len;
-}
-
-// Read sample_lanes from the bound function expression; default to 1 when missing
-// or out of range.
-static inline int SassSampleLanesOrDefault(ExpressionState &state) {
-	auto &function = state.expr.Cast<BoundFunctionExpression>();
-	if (!function.bind_info) {
-		return 1;
-	}
-	int n = function.bind_info->Cast<PacCategoricalBindData>().sample_lanes;
-	return n < 1 ? 1 : n;
-}
-
-template <PacFilterCmpOp CMP, bool HAS_CORRECTION_ARG>
-static void PrivFilterSassCmpFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	idx_t count = args.size();
-	auto params = GetPacFilterParams(state);
-	int sample_lanes = SassSampleLanesOrDefault(state);
-
-	UnifiedVectorFormat val_data;
-	args.data[0].ToUnifiedFormat(count, val_data);
-	auto vals = UnifiedVectorFormat::GetData<PAC_FLOAT>(val_data);
-
-	auto &list_vec = args.data[1];
-	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
-
-	auto &child_vec = ListVector::GetEntry(list_vec);
-	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
-	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
-
-	auto result_data = FlatVector::GetData<bool>(result);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto val_idx = val_data.sel->get_index(i);
-		auto list_idx = list_data.sel->get_index(i);
-		if (!list_data.validity.RowIsValid(list_idx) || !val_data.validity.RowIsValid(val_idx)) {
-			result_data[i] = false;
-			continue;
-		}
-		auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
-		auto &entry = list_entries[list_idx];
-		if (entry.length == 0) {
-			result_data[i] = false;
-			continue;
-		}
-		PAC_FLOAT counters[64];
-		LoadCounterListInto(entry, child_data, child_values, counters);
-		std::sort(counters, counters + 64);
-		PAC_FLOAT val = vals[val_idx];
-		bool cmp_at_sorted_idx[64];
-		for (int j = 0; j < 64; j++) {
-			cmp_at_sorted_idx[j] = ComparePacFloat<CMP>(val, counters[j]);
-		}
-		(void)HAS_CORRECTION_ARG; // correction not meaningful for the median rule
-		(void)params.mi;
-		(void)params.correction;
-		result_data[i] = MedianRegionDecide(cmp_at_sorted_idx, sample_lanes, params.gen);
-	}
-}
-
-template <PacFilterCmpOp CMP>
-static void PrivSelectSassCmpFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	idx_t count = args.size();
-	auto params = GetPacFilterParams(state);
-	int sample_lanes = SassSampleLanesOrDefault(state);
-
-	UnifiedVectorFormat hash_data, val_data;
-	args.data[0].ToUnifiedFormat(count, hash_data);
-	args.data[1].ToUnifiedFormat(count, val_data);
-	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-	auto vals = UnifiedVectorFormat::GetData<PAC_FLOAT>(val_data);
-
-	auto &list_vec = args.data[2];
-	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
-
-	auto &child_vec = ListVector::GetEntry(list_vec);
-	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
-	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
-
-	auto result_data = FlatVector::GetData<uint64_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto h_idx = hash_data.sel->get_index(i);
-		auto val_idx = val_data.sel->get_index(i);
-		auto list_idx = list_data.sel->get_index(i);
-		if (!hash_data.validity.RowIsValid(h_idx) || !val_data.validity.RowIsValid(val_idx) ||
-		    !list_data.validity.RowIsValid(list_idx)) {
-			result_validity.SetInvalid(i);
-			continue;
-		}
-		auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
-		auto &entry = list_entries[list_idx];
-		if (entry.length == 0) {
-			result_data[i] = 0;
-			continue;
-		}
-		PAC_FLOAT counters[64];
-		LoadCounterListInto(entry, child_data, child_values, counters);
-		std::sort(counters, counters + 64);
-		PAC_FLOAT val = vals[val_idx];
-		bool cmp_at_sorted_idx[64];
-		for (int j = 0; j < 64; j++) {
-			cmp_at_sorted_idx[j] = ComparePacFloat<CMP>(val, counters[j]);
-		}
-		bool keep = MedianRegionDecide(cmp_at_sorted_idx, sample_lanes, params.gen);
-		result_data[i] = keep ? hashes[h_idx] : uint64_t(0);
-	}
-}
-
-// Bind for priv_filter_sass_<cmp> and priv_select_sass_<cmp>: captures sample_lanes from the context.
-static unique_ptr<FunctionData> PrivCategoricalSassBind(ClientContext &ctx, ScalarFunction &,
-                                                        vector<unique_ptr<Expression>> &) {
-	double mi = GetPacMiFromSetting(ctx);
-	int sample_lanes = GetDpSampleLanes(ctx);
-	return make_uniq<PacCategoricalBindData>(ctx, mi, 1.0, sample_lanes);
-}
-
-template <PacFilterCmpOp CMP>
-static void RegisterPrivFilterSassCmp(ExtensionLoader &loader, const string &name) {
-	auto pf = PacFloatLogicalType();
-	auto ldt = LogicalType::LIST(pf);
-	ScalarFunctionSet fset(name);
-	fset.AddFunction(ScalarFunction(name, {pf, ldt}, LogicalType::BOOLEAN, PrivFilterSassCmpFunction<CMP, false>,
-	                                PrivCategoricalSassBind, nullptr, nullptr, PacCategoricalInitLocal));
-	fset.AddFunction(ScalarFunction(name, {pf, ldt, pf}, LogicalType::BOOLEAN, PrivFilterSassCmpFunction<CMP, true>,
-	                                PrivCategoricalSassBind, nullptr, nullptr, PacCategoricalInitLocal));
-	CreateScalarFunctionInfo info(fset);
-	FunctionDescription desc;
-	desc.description = "[INTERNAL] SASS median-region categorical filter.";
-	info.descriptions.push_back(std::move(desc));
-	loader.RegisterFunction(std::move(info));
-}
-
-template <PacFilterCmpOp CMP>
-static void RegisterPrivSelectSassCmp(ExtensionLoader &loader, const string &name) {
-	auto pf = PacFloatLogicalType();
-	auto ldt = LogicalType::LIST(pf);
-	ScalarFunction f(name, {LogicalType::UBIGINT, pf, ldt}, LogicalType::UBIGINT, PrivSelectSassCmpFunction<CMP>,
-	                 PrivCategoricalSassBind, nullptr, nullptr, PacCategoricalInitLocal);
-	CreateScalarFunctionInfo info(f);
-	FunctionDescription desc;
-	desc.description = "[INTERNAL] SASS median-region categorical select.";
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 }
@@ -1435,20 +1223,6 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	RegisterPacSelectCmp<PacFilterCmpOp::LTE>(loader, "priv_select_lte");
 	RegisterPacSelectCmp<PacFilterCmpOp::EQ>(loader, "priv_select_eq");
 	RegisterPacSelectCmp<PacFilterCmpOp::NEQ>(loader, "priv_select_neq");
-
-	// priv_filter_sass_<cmp> / priv_select_sass_<cmp>: SASS median-region decision on 64 samples
-	RegisterPrivFilterSassCmp<PacFilterCmpOp::GT>(loader, "priv_filter_sass_gt");
-	RegisterPrivFilterSassCmp<PacFilterCmpOp::GTE>(loader, "priv_filter_sass_gte");
-	RegisterPrivFilterSassCmp<PacFilterCmpOp::LT>(loader, "priv_filter_sass_lt");
-	RegisterPrivFilterSassCmp<PacFilterCmpOp::LTE>(loader, "priv_filter_sass_lte");
-	RegisterPrivFilterSassCmp<PacFilterCmpOp::EQ>(loader, "priv_filter_sass_eq");
-	RegisterPrivFilterSassCmp<PacFilterCmpOp::NEQ>(loader, "priv_filter_sass_neq");
-	RegisterPrivSelectSassCmp<PacFilterCmpOp::GT>(loader, "priv_select_sass_gt");
-	RegisterPrivSelectSassCmp<PacFilterCmpOp::GTE>(loader, "priv_select_sass_gte");
-	RegisterPrivSelectSassCmp<PacFilterCmpOp::LT>(loader, "priv_select_sass_lt");
-	RegisterPrivSelectSassCmp<PacFilterCmpOp::LTE>(loader, "priv_select_sass_lte");
-	RegisterPrivSelectSassCmp<PacFilterCmpOp::EQ>(loader, "priv_select_sass_eq");
-	RegisterPrivSelectSassCmp<PacFilterCmpOp::NEQ>(loader, "priv_select_sass_neq");
 
 	// List aggregates are now registered as overloads of as_sum/as_count/as_min/as_max
 	// alongside the counters variants, via AddPacListAggregateOverload() called from each

@@ -661,6 +661,17 @@ void InjectPacFinalizeForDerivedPu(OptimizerExtensionInput &input, unique_ptr<Lo
 	if (derived_table_indices.empty()) {
 		return;
 	}
+	// derived_pu counter tables hold PAC 64-world counters and are finalized/compared with the
+	// PAC categorical terminals (priv_finalize, priv_filter_<cmp>). Those terminals are NOT
+	// differentially private, so reading them under a DP mode would silently route a DP query
+	// through an unbudgeted PAC decision. Reject instead — this is the resilience guard that
+	// guarantees no DP session can reach a PAC categorical terminal.
+	string privacy_mode = GetPrivacyMode(input.context);
+	if (privacy_mode != "pac") {
+		throw InvalidInputException(
+		    "derived_pu counter tables are a PAC-only feature and cannot be read under privacy_mode='" + privacy_mode +
+		    "'. Set privacy_mode='pac' to query materialized counter columns.");
+	}
 	PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Injecting priv_finalize for " +
 	                    std::to_string(derived_table_indices.size()) + " derived_pu table(s)");
 	// Rewrite scan-level filters on counter columns to priv_filter_<cmp> calls.

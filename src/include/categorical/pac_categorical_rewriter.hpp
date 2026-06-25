@@ -97,19 +97,17 @@ static inline const char *GetPacCmpFuncName(ExpressionType cmp_type, PacCmpKind 
 	default:
 		return nullptr;
 	}
-	// [kind][sass][suffix]: 2 × 2 × 6 — one stable const char* per registered SQL function.
-	static const char *const TABLE[2][2][6] = {
-	    {{"priv_filter_gt", "priv_filter_gte", "priv_filter_lt", "priv_filter_lte", "priv_filter_eq",
-	      "priv_filter_neq"},
-	     {"priv_filter_sass_gt", "priv_filter_sass_gte", "priv_filter_sass_lt", "priv_filter_sass_lte",
-	      "priv_filter_sass_eq", "priv_filter_sass_neq"}},
-	    {{"priv_select_gt", "priv_select_gte", "priv_select_lt", "priv_select_lte", "priv_select_eq",
-	      "priv_select_neq"},
-	     {"priv_select_sass_gt", "priv_select_sass_gte", "priv_select_sass_lt", "priv_select_sass_lte",
-	      "priv_select_sass_eq", "priv_select_sass_neq"}},
+	// [kind][suffix]: 2 × 6 — one stable const char* per registered SQL function.
+	// Categorical terminals are a PAC-only feature; DP modes (dp_sass/dp_standard/dp_elastic)
+	// never reach this resolver because their compilers reject aggregate-in-predicate queries
+	// and never invoke the categorical rewriter. The mode argument is retained for call-site
+	// compatibility but no longer selects a variant.
+	(void)privacy_mode;
+	static const char *const TABLE[2][6] = {
+	    {"priv_filter_gt", "priv_filter_gte", "priv_filter_lt", "priv_filter_lte", "priv_filter_eq", "priv_filter_neq"},
+	    {"priv_select_gt", "priv_select_gte", "priv_select_lt", "priv_select_lte", "priv_select_eq", "priv_select_neq"},
 	};
-	int sass_idx = privacy_mode == "dp_sass" ? 1 : 0;
-	return TABLE[static_cast<int>(kind)][sass_idx][suf];
+	return TABLE[static_cast<int>(kind)][suf];
 }
 
 // Thin wrappers preserved for existing call sites in pac_categorical_lambdas.cpp
