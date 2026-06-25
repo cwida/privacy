@@ -20,6 +20,7 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/aggregate_function_catalog_entry.hpp"
 #include "duckdb/common/constants.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/optimizer/column_binding_replacer.hpp"
 #include "duckdb/planner/binder.hpp"
@@ -92,8 +93,8 @@ idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name) {
 	for (idx_t cid = 0; cid < g.GetColumnIds().size(); ++cid) {
 		auto col_idx = g.GetColumnIds()[cid];
 		if (!col_idx.IsVirtualColumn()) {
-			idx_t primary = col_idx.GetPrimaryIndex();
-			if (primary < g.names.size() && g.names[primary] == col_name) {
+			auto existing_name = g.GetColumnName(col_idx);
+			if (!existing_name.empty() && StringUtil::CIEquals(existing_name, col_name)) {
 				return cid;
 			}
 		}
@@ -107,7 +108,7 @@ idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name) {
 	LogicalType logical_type = LogicalType::INVALID;
 	idx_t ti = 0;
 	for (auto &col : table_entry->GetColumns().Logical()) {
-		if (col.Name() == col_name) {
+		if (StringUtil::CIEquals(col.Name(), col_name)) {
 			logical_idx = ti;
 			logical_type = col.Type();
 			break;

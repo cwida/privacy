@@ -308,7 +308,7 @@ WHERE ps_suppkey NOT IN (
     WHERE s_comment LIKE '%Customer%Complaints%'
 );
 ----
-has no PRIVACY_LINK path
+dp_sass: scalar or mark subqueries are not supported by DP mechanisms
 
 statement error
 EXPLAIN SELECT p_brand, COUNT(DISTINCT ps_suppkey), COUNT(*)
@@ -495,7 +495,7 @@ SET dp_max_groups_contributed = 1;
 statement ok
 SET dp_sass_count_output_bound = 1000;
 
-query I nosort explain_sass_q21_self_join
+statement error
 EXPLAIN SELECT l1.l_suppkey, COUNT(*) AS numwait
 FROM _sass_q21_lineitem l1, _sass_q21_orders
 WHERE o_orderkey = l1.l_orderkey
@@ -516,9 +516,9 @@ WHERE o_orderkey = l1.l_orderkey
   )
 GROUP BY l1.l_suppkey;
 ----
-as_sample_sum
+dp_sass: lateral or correlated subqueries are not supported by DP mechanisms
 
-query I
+statement error
 SELECT numwait > 0
 FROM (
     SELECT l1.l_suppkey, COUNT(*) AS numwait
@@ -542,7 +542,7 @@ FROM (
     GROUP BY l1.l_suppkey
 ) q;
 ----
-true
+dp_sass: lateral or correlated subqueries are not supported by DP mechanisms
 
 statement error
 SELECT COUNT(*)
@@ -872,6 +872,41 @@ true
 
 statement ok
 SET privacy_noise = false;
+
+statement ok
+SET dp_sample_lanes = 1;
+
+query I
+WITH counters AS (
+    SELECT as_sample_count((64 + i)::UBIGINT) AS samples
+    FROM range(64) t(i)
+)
+SELECT (dp_sass_stability(samples)).stddev_pop = 0.0
+FROM counters;
+----
+true
+
+query II
+WITH counters AS (
+    SELECT as_sample_count(0::UBIGINT) AS samples
+)
+SELECT (dp_sass_stability(samples)).valid_count,
+       (dp_sass_stability(samples)).null_count
+FROM counters;
+----
+64	0
+
+query III
+WITH counters AS (
+    SELECT list(CASE WHEN i < 32 THEN NULL::FLOAT ELSE i::FLOAT END ORDER BY i) AS samples
+    FROM range(64) t(i)
+)
+SELECT (dp_sass_stability(samples)).valid_count,
+       (dp_sass_stability(samples)).null_count,
+       (dp_sass_stability(samples)).stable_mad_1
+FROM counters;
+----
+32	32	false
 
 statement ok
 SET privacy_mode = 'dp_elastic';

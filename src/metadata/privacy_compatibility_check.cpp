@@ -97,6 +97,51 @@ static bool ContainsRecursiveCTE(const LogicalOperator &op) {
 	return false;
 }
 
+static bool IsDPPrivacyMode(const string &privacy_mode) {
+	return privacy_mode == "dp_standard" || privacy_mode == "dp_elastic" || privacy_mode == "dp_sass";
+}
+
+static bool ContainsUnsupportedDPShape(const LogicalOperator &op, string &shape) {
+	if (op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE || op.type == LogicalOperatorType::LOGICAL_CTE_REF ||
+	    op.type == LogicalOperatorType::LOGICAL_RECURSIVE_CTE) {
+		shape = "CTEs";
+		return true;
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN || op.type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN) {
+		shape = "lateral or correlated subqueries";
+		return true;
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+		shape = "subqueries";
+		return true;
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &join = op.Cast<LogicalJoin>();
+		if (join.join_type == JoinType::SINGLE || join.join_type == JoinType::MARK) {
+			shape = "scalar or mark subqueries";
+			return true;
+		}
+	}
+	for (auto &child : op.children) {
+		if (ContainsUnsupportedDPShape(*child, shape)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void CheckDPQueryShape(const string &privacy_mode, const LogicalOperator &plan) {
+	if (!IsDPPrivacyMode(privacy_mode)) {
+		return;
+	}
+
+	string unsupported_shape;
+	if (ContainsUnsupportedDPShape(plan, unsupported_shape)) {
+		throw InvalidInputException("%s: %s are not supported by DP mechanisms", privacy_mode.c_str(),
+		                            unsupported_shape.c_str());
+	}
+}
+
 static bool ContainsAggregation(const LogicalOperator &op) {
 	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
 		auto &aggr = op.Cast<LogicalAggregate>();
@@ -710,7 +755,6 @@ static bool DetectCycleInFKGraph(ClientContext &context, const vector<string> &s
 
 PrivacyCompatibilityResult PrivRewriteQueryCheck(unique_ptr<LogicalOperator> &plan, ClientContext &context,
                                                  const string &privacy_mode, PACOptimizerInfo *optimizer_info) {
-	(void)privacy_mode;
 	PrivacyCompatibilityResult result;
 
 	// If a replan/compilation is already in progress by the optimizer extension, skip compatibility checks
@@ -1023,6 +1067,8 @@ PrivacyCompatibilityResult PrivRewriteQueryCheck(unique_ptr<LogicalOperator> &pl
 			}
 			return result;
 		}
+
+		CheckDPQueryShape(privacy_mode, *plan);
 
 		if (ContainsRecursiveCTE(*plan)) {
 			if (is_conservative) {

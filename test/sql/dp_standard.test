@@ -212,7 +212,7 @@ FROM public_bins
 LEFT JOIN per_user ON public_bins.order_count = per_user.order_count
 GROUP BY public_bins.order_count;
 ----
-dp_standard: expected exactly one aggregate
+dp_standard: CTEs are not supported by DP mechanisms
 
 # L0 contribution bounding: two PUs each touch three groups, but max groups is two.
 statement ok
@@ -306,9 +306,9 @@ SELECT COUNT(*) FROM child_lines;
 ----
 8
 
-# Hidden self-joins from EXISTS/NOT EXISTS filters are allowed; explicit accessible
-# self-joins remain rejected by the validator.
-query I
+# Hidden self-joins from EXISTS/NOT EXISTS filters are rejected by the shared
+# DP shape checker before mode-specific rewrite logic runs.
+statement error
 SELECT COUNT(*)
 FROM orders_l0 o1
 WHERE EXISTS (
@@ -318,7 +318,7 @@ WHERE EXISTS (
     AND o2.store <> o1.store
 );
 ----
-6
+dp_standard: lateral or correlated subqueries are not supported by DP mechanisms
 
 statement ok
 SET privacy_noise = true;

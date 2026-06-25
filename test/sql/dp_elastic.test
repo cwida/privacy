@@ -787,7 +787,7 @@ WHERE p_partkey = ps_partkey
     WHERE s_comment LIKE '%Customer%Complaints%'
   );
 ----
-has no PRIVACY_LINK path
+dp_elastic: scalar or mark subqueries are not supported by DP mechanisms
 
 statement ok
 PRAGMA clear_privacy_metadata;
@@ -866,7 +866,7 @@ ALTER TABLE _dp_q21_supplier ADD PRIVACY_KEY (s_suppkey);
 statement ok
 ALTER TABLE _dp_q21_nation ADD PRIVACY_KEY (n_nationkey);
 
-query II
+statement error
 SELECT suppkey, numwait
 FROM (
     SELECT l1.l_suppkey AS suppkey, COUNT(*) AS numwait
@@ -890,7 +890,7 @@ FROM (
     GROUP BY l1.l_suppkey
 ) q;
 ----
-1	2
+dp_elastic: lateral or correlated subqueries are not supported by DP mechanisms
 
 statement error
 SELECT COUNT(*)
