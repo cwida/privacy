@@ -6,6 +6,14 @@ namespace duckdb {
 
 class ExtensionLoader;
 
+struct DpSassStabilityQueryRecord {
+	int32_t aggregate_index;
+	vector<Value> stats;
+};
+
+void ClearDpSassStabilityQueryRecords();
+vector<DpSassStabilityQueryRecord> TakeDpSassStabilityQueryRecords();
+
 // Registers `dp_noise(value DOUBLE, scale DOUBLE) -> DOUBLE`.
 // Returns value + Lap(scale) (location 0, scale = scale). Deterministic when `privacy_seed` is set.
 void RegisterDpLaplaceNoiseFunction(ExtensionLoader &loader);

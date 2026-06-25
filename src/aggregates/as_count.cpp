@@ -388,7 +388,7 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 	auto &child_vec = ListVector::GetEntry(result);
 
 	// Reserve space for all lists (64 elements each)
-	idx_t total_elements = count * 64;
+	idx_t total_elements = (offset + count) * 64;
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
 
@@ -402,12 +402,12 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 		PacCountState *s = aggs[i]->GetState();
 
 		// Set up the list entry - always needed even for NULL results
-		list_entries[offset + i].offset = i * 64;
+		idx_t base = (offset + i) * 64;
+		list_entries[offset + i].offset = base;
 		list_entries[offset + i].length = 64;
 
 		if (!s) {
 			// No values seen: output 64 zeros
-			idx_t base = i * 64;
 			memset(child_data + base, 0, 64 * sizeof(PAC_FLOAT));
 			continue;
 		}
@@ -419,7 +419,6 @@ void PacCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector 
 
 		// Copy counters to list: 0 where key_hash bit is 0, value * 2 * correction otherwise
 		// The 2x factor compensates for 50% sampling, correction is user-specified multiplier
-		idx_t base = i * 64;
 		for (int j = 0; j < 64; j++) {
 			if ((key_hash >> j) & 1ULL) {
 				child_data[base + j] =
@@ -478,7 +477,7 @@ static void DpSampleCountFinalizeCounters(Vector &states, AggregateInputData &in
 	auto list_entries = FlatVector::GetData<list_entry_t>(result);
 	auto &child_vec = ListVector::GetEntry(result);
 
-	idx_t total_elements = count * 64;
+	idx_t total_elements = (offset + count) * 64;
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
 
@@ -491,10 +490,10 @@ static void DpSampleCountFinalizeCounters(Vector &states, AggregateInputData &in
 #endif
 		PacCountState *s = aggs[i]->GetState();
 
-		list_entries[offset + i].offset = i * 64;
+		idx_t base = (offset + i) * 64;
+		list_entries[offset + i].offset = base;
 		list_entries[offset + i].length = 64;
 
-		idx_t base = i * 64;
 		if (!s) {
 			memset(child_data + base, 0, 64 * sizeof(PAC_FLOAT));
 			continue;
@@ -513,7 +512,7 @@ static void DpSampleCountMaskFinalizeCounters(Vector &states, AggregateInputData
 	auto list_entries = FlatVector::GetData<list_entry_t>(result);
 	auto &child_vec = ListVector::GetEntry(result);
 
-	idx_t total_elements = count * 64;
+	idx_t total_elements = (offset + count) * 64;
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
 
@@ -526,10 +525,10 @@ static void DpSampleCountMaskFinalizeCounters(Vector &states, AggregateInputData
 #endif
 		PacCountState *s = aggs[i]->GetState();
 
-		list_entries[offset + i].offset = i * 64;
+		idx_t base = (offset + i) * 64;
+		list_entries[offset + i].offset = base;
 		list_entries[offset + i].length = 64;
 
-		idx_t base = i * 64;
 		if (!s) {
 			memset(child_data + base, 0, 64 * sizeof(PAC_FLOAT));
 			continue;
@@ -549,7 +548,7 @@ static void DpSampleCountMaskThresholdFinalizeCounters(Vector &states, Aggregate
 	auto &result_mask = FlatVector::Validity(result);
 	auto &child_vec = ListVector::GetEntry(result);
 
-	idx_t total_elements = count * 64;
+	idx_t total_elements = (offset + count) * 64;
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
 
@@ -563,10 +562,10 @@ static void DpSampleCountMaskThresholdFinalizeCounters(Vector &states, Aggregate
 #endif
 		PacCountState *s = state.samples.GetState();
 
-		list_entries[offset + i].offset = i * 64;
+		idx_t base = (offset + i) * 64;
+		list_entries[offset + i].offset = base;
 		list_entries[offset + i].length = 64;
 
-		idx_t base = i * 64;
 		if (state.support < state.threshold) {
 			result_mask.SetInvalid(offset + i);
 			memset(child_data + base, 0, 64 * sizeof(PAC_FLOAT));

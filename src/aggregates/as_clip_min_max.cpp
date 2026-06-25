@@ -447,7 +447,7 @@ static void PacClipMinMaxFinalizeCounters(Vector &states, AggregateInputData &in
 	auto list_entries = FlatVector::GetData<list_entry_t>(result);
 	auto &child_vec = ListVector::GetEntry(result);
 
-	idx_t total_elements = count * 64;
+	idx_t total_elements = (offset + count) * 64;
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
 
@@ -456,7 +456,8 @@ static void PacClipMinMaxFinalizeCounters(Vector &states, AggregateInputData &in
 	for (idx_t i = 0; i < count; i++) {
 		PacClipMinMaxFlushBuffer<IS_MAX, true>(*state_ptrs[i], *state_ptrs[i], input.allocator);
 
-		list_entries[offset + i].offset = i * 64;
+		idx_t base = (offset + i) * 64;
+		list_entries[offset + i].offset = base;
 		list_entries[offset + i].length = 64;
 
 		PAC_FLOAT buf[64] = {0};
@@ -488,7 +489,6 @@ static void PacClipMinMaxFinalizeCounters(Vector &states, AggregateInputData &in
 		}
 		CheckPacSampleDiversity(key_hash, buf, update_count, IS_MAX ? "as_clip_max" : "as_clip_min", bind);
 
-		idx_t base = i * 64;
 		for (int j = 0; j < 64; j++) {
 			if ((key_hash >> j) & 1ULL) {
 				child_data[base + j] = static_cast<PAC_FLOAT>(buf[j] * correction / float_scale);

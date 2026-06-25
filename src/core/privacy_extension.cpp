@@ -26,6 +26,7 @@
 #include "categorical/pac_categorical.hpp"
 #include "parser/privacy_parser.hpp"
 #include "diff/pac_utility_diff.hpp"
+#include "table_functions/dp_sass_stability_query.hpp"
 #include "query_processing/pac_topk_rewriter.hpp"
 #include "query_processing/pac_avg_rewriter.hpp"
 #include "privacy_debug.hpp"
@@ -402,6 +403,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Enable/disable join elimination (stop FK chain before reaching PU)
 	db.config.AddExtensionOption("priv_join_elimination", "[INTERNAL] Eliminate final join to PU table",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	db.config.AddExtensionOption("dp_sass_stability_query_mode",
+	                             "[INTERNAL] Record dp_sass aggregate-list stability for "
+	                             "dp_sass_stability_query",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	db.config.AddExtensionOption("dp_sass_exact_balanced_lanes",
+	                             "[INTERNAL] Assign dp_sass sample_lanes=1 PUs to exactly balanced lane sizes",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	// When false, unsupported operators skip privacy compilation instead of throwing
 	db.config.AddExtensionOption(
 	    "pac_conservative_mode",
@@ -496,6 +504,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register dp_noise scalar function (value, scale) -> value + Lap(scale)
 	RegisterDpLaplaceNoiseFunction(loader);
 	RegisterDpSmoothMedianNoiseFunction(loader);
+	RegisterDpSassStabilityQueryFunction(loader);
 
 	// Register PAC parser extension
 	ParserExtension::Register(db.config, PrivacyParserExtension());

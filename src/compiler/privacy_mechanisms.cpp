@@ -1207,6 +1207,7 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 	D_ASSERT(lower_bounds.size() == n_aggs);
 	D_ASSERT(upper_bounds.size() == n_aggs);
 	D_ASSERT(agg_positions.size() == n_aggs);
+	bool stability_query_mode = GetBooleanSetting(input.context, "dp_sass_stability_query_mode", false);
 	bool average_release = release_method == "average";
 
 	vector<unique_ptr<Expression>> proj_exprs;
@@ -1221,6 +1222,15 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 		vector<unique_ptr<Expression>> children;
 		children.push_back(make_uniq<BoundColumnRefExpression>(agg->types[n_groups + agg_pos],
 		                                                       ColumnBinding(agg->aggregate_index, agg_pos)));
+		if (stability_query_mode) {
+			children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(static_cast<int32_t>(ai))));
+			unique_ptr<Expression> recorded = BindScalarLocal(input, "dp_sass_record_stability", std::move(children));
+			if (output_types[ai] != LogicalType::DOUBLE) {
+				recorded = BoundCastExpression::AddCastToType(input.context, std::move(recorded), output_types[ai]);
+			}
+			proj_exprs.push_back(std::move(recorded));
+			continue;
+		}
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(epsilons[ai])));
 		if (!average_release) {
 			// median path: dp_smooth_median_noise(list, ε, δ, lanes, lower, upper)
@@ -1836,7 +1846,8 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	}
 	CheckDPAggregateNode(agg, "dp_sass", true);
 
-	if (GetDpSampleLanes(input.context) == 1 && pu_setup.pu_names.size() == 1) {
+	if (GetDpSampleLanes(input.context) == 1 && pu_setup.pu_names.size() == 1 &&
+	    GetBooleanSetting(input.context, "dp_sass_exact_balanced_lanes", true)) {
 		const auto &pu_table_name = pu_setup.pu_names[0];
 		auto meta_it = check.table_metadata.find(pu_table_name);
 		if (meta_it == check.table_metadata.end() || meta_it->second.pks.empty()) {

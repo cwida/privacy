@@ -41,6 +41,7 @@ set(EXTENSION_SOURCES
     src/aggregates/as_clip_sum.cpp
     src/aggregates/as_clip_min_max.cpp
     src/aggregates/dp_laplace_noise.cpp
+    src/table_functions/dp_sass_stability_query.cpp
     src/compiler/privacy_compiler.cpp
     src/compiler/privacy_mechanisms.cpp
     src/compiler/privacy_compiler_helpers.cpp

@@ -213,7 +213,7 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 	auto &child_vec = ListVector::GetEntry(result);
 
 	// Reserve space for all lists (64 elements each)
-	idx_t total_elements = count * 64;
+	idx_t total_elements = (offset + count) * 64;
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
 
@@ -227,17 +227,18 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 		auto *s = state_ptrs[i]->GetState();
 
 		// Set up the list entry - always needed even for NULL results
-		list_entries[offset + i].offset = i * 64;
+		idx_t base = (offset + i) * 64;
+		list_entries[offset + i].offset = base;
 		list_entries[offset + i].length = 64;
 
 		if (!s || !s->initialized) {
 			// No values seen: output 64 zeros
-			memset(child_data + i * 64, 0, 64 * sizeof(PAC_FLOAT));
+			memset(child_data + base, 0, 64 * sizeof(PAC_FLOAT));
 			continue;
 		}
 
 		uint64_t key_hash = s->key_hash;
-		PAC_FLOAT *dst = &child_data[i * 64];
+		PAC_FLOAT *dst = &child_data[base];
 		// Undo SWAR interleaving: extremes[swar_pos] corresponds to bit j of key_hash
 		constexpr int SZ = sizeof(T) <= 8 ? static_cast<int>(sizeof(T)) : 8;
 		constexpr int ELEMS = 8 / SZ;
@@ -313,7 +314,7 @@ static void DpSampleMinMaxFinalizeCounters(Vector &states, AggregateInputData &i
 	auto list_entries = FlatVector::GetData<list_entry_t>(result);
 	auto &child_vec = ListVector::GetEntry(result);
 
-	idx_t total_elements = count * 64;
+	idx_t total_elements = (offset + count) * 64;
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
 
@@ -329,10 +330,10 @@ static void DpSampleMinMaxFinalizeCounters(Vector &states, AggregateInputData &i
 #endif
 		auto *s = state_ptrs[i]->GetState();
 
-		list_entries[offset + i].offset = i * 64;
+		idx_t base = (offset + i) * 64;
+		list_entries[offset + i].offset = base;
 		list_entries[offset + i].length = 64;
 
-		idx_t base = i * 64;
 		if (!s || !s->initialized) {
 			memset(child_data + base, 0, 64 * sizeof(PAC_FLOAT));
 			for (int j = 0; j < 64; j++) {

@@ -22,6 +22,248 @@ static void DpSampleMaskFunction(DataChunk &args, ExpressionState &state, Vector
 	    args.data[0], result, count, [sample_lanes](uint64_t hash) { return DpSampleHash(hash, sample_lanes); });
 }
 
+struct DpSassStabilityStats {
+	int32_t lane_count = 0;
+	int32_t valid_count = 0;
+	int32_t null_count = 0;
+	double mean = 0.0;
+	double stddev_pop = 0.0;
+	double cv = 0.0;
+	double min = 0.0;
+	double median = 0.0;
+	double max = 0.0;
+	double range = 0.0;
+	double mad = 0.0;
+	double max_abs_dev = 0.0;
+	bool cv_valid = true;
+};
+
+static bool ComputeDpSassStabilityStats(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
+                                        const PAC_FLOAT *child_values, DpSassStabilityStats &stats) {
+	stats.lane_count = static_cast<int32_t>(entry.length);
+	stats.null_count = stats.lane_count;
+	if (entry.length == 0) {
+		return false;
+	}
+
+	vector<double> values;
+	values.reserve(entry.length);
+	for (idx_t j = 0; j < entry.length; j++) {
+		auto child_idx = child_data.sel->get_index(entry.offset + j);
+		if (!child_data.validity.RowIsValid(child_idx)) {
+			continue;
+		}
+		double value = static_cast<double>(child_values[child_idx]);
+		if (!std::isfinite(value)) {
+			continue;
+		}
+		values.push_back(value);
+	}
+	if (values.empty()) {
+		return false;
+	}
+
+	stats.valid_count = static_cast<int32_t>(values.size());
+	stats.null_count = stats.lane_count - stats.valid_count;
+
+	double sum = 0.0;
+	for (double value : values) {
+		sum += value;
+	}
+	stats.mean = sum / static_cast<double>(values.size());
+
+	double var_sum = 0.0;
+	stats.max_abs_dev = 0.0;
+	for (double value : values) {
+		double dev = value - stats.mean;
+		var_sum += dev * dev;
+		stats.max_abs_dev = std::max(stats.max_abs_dev, std::abs(dev));
+	}
+	stats.stddev_pop = std::sqrt(var_sum / static_cast<double>(values.size()));
+	if (std::abs(stats.mean) > 0.0) {
+		stats.cv = stats.stddev_pop / std::abs(stats.mean);
+	} else if (stats.stddev_pop == 0.0) {
+		stats.cv = 0.0;
+	} else {
+		stats.cv_valid = false;
+	}
+
+	std::sort(values.begin(), values.end());
+	stats.min = values.front();
+	stats.max = values.back();
+	stats.range = stats.max - stats.min;
+	idx_t mid = values.size() / 2;
+	if (values.size() % 2 == 0) {
+		stats.median = (values[mid - 1] + values[mid]) / 2.0;
+	} else {
+		stats.median = values[mid];
+	}
+
+	vector<double> abs_devs;
+	abs_devs.reserve(values.size());
+	for (double value : values) {
+		abs_devs.push_back(std::abs(value - stats.median));
+	}
+	std::sort(abs_devs.begin(), abs_devs.end());
+	if (abs_devs.size() % 2 == 0) {
+		stats.mad = (abs_devs[mid - 1] + abs_devs[mid]) / 2.0;
+	} else {
+		stats.mad = abs_devs[mid];
+	}
+	return true;
+}
+
+static void DpSassStabilityFunction(DataChunk &args, ExpressionState &, Vector &result) {
+	idx_t count = args.size();
+	auto &list_vec = args.data[0];
+	UnifiedVectorFormat list_data;
+	list_vec.ToUnifiedFormat(count, list_data);
+	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+
+	auto &child_vec = ListVector::GetEntry(list_vec);
+	UnifiedVectorFormat child_data;
+	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
+
+	auto &entries = StructVector::GetEntries(result);
+	auto lane_count_data = FlatVector::GetData<int32_t>(*entries[0]);
+	auto valid_count_data = FlatVector::GetData<int32_t>(*entries[1]);
+	auto null_count_data = FlatVector::GetData<int32_t>(*entries[2]);
+	auto mean_data = FlatVector::GetData<double>(*entries[3]);
+	auto stddev_data = FlatVector::GetData<double>(*entries[4]);
+	auto cv_data = FlatVector::GetData<double>(*entries[5]);
+	auto min_data = FlatVector::GetData<double>(*entries[6]);
+	auto median_data = FlatVector::GetData<double>(*entries[7]);
+	auto max_data = FlatVector::GetData<double>(*entries[8]);
+	auto range_data = FlatVector::GetData<double>(*entries[9]);
+	auto mad_data = FlatVector::GetData<double>(*entries[10]);
+	auto max_abs_dev_data = FlatVector::GetData<double>(*entries[11]);
+	auto stable_stddev_1_data = FlatVector::GetData<bool>(*entries[12]);
+	auto stable_mad_1_data = FlatVector::GetData<bool>(*entries[13]);
+
+	auto &result_validity = FlatVector::Validity(result);
+	auto &cv_validity = FlatVector::Validity(*entries[5]);
+	for (idx_t i = 0; i < count; i++) {
+		auto list_idx = list_data.sel->get_index(i);
+		if (!list_data.validity.RowIsValid(list_idx)) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+		DpSassStabilityStats stats;
+		if (!ComputeDpSassStabilityStats(list_entries[list_idx], child_data, child_values, stats)) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		lane_count_data[i] = stats.lane_count;
+		valid_count_data[i] = stats.valid_count;
+		null_count_data[i] = stats.null_count;
+		mean_data[i] = stats.mean;
+		stddev_data[i] = stats.stddev_pop;
+		cv_data[i] = stats.cv;
+		if (!stats.cv_valid) {
+			cv_validity.SetInvalid(i);
+		}
+		min_data[i] = stats.min;
+		median_data[i] = stats.median;
+		max_data[i] = stats.max;
+		range_data[i] = stats.range;
+		mad_data[i] = stats.mad;
+		max_abs_dev_data[i] = stats.max_abs_dev;
+		stable_stddev_1_data[i] = stats.stddev_pop < 1.0;
+		stable_mad_1_data[i] = stats.mad < 1.0;
+	}
+}
+
+static thread_local vector<DpSassStabilityQueryRecord> dp_sass_stability_query_records;
+
+void ClearDpSassStabilityQueryRecords() {
+	dp_sass_stability_query_records.clear();
+}
+
+vector<DpSassStabilityQueryRecord> TakeDpSassStabilityQueryRecords() {
+	auto records = std::move(dp_sass_stability_query_records);
+	dp_sass_stability_query_records.clear();
+	return records;
+}
+
+static vector<Value> DpSassStatsToValues(const DpSassStabilityStats &stats) {
+	vector<Value> values;
+	values.reserve(14);
+	values.push_back(Value::INTEGER(stats.lane_count));
+	values.push_back(Value::INTEGER(stats.valid_count));
+	values.push_back(Value::INTEGER(stats.null_count));
+	values.push_back(Value::DOUBLE(stats.mean));
+	values.push_back(Value::DOUBLE(stats.stddev_pop));
+	values.push_back(stats.cv_valid ? Value::DOUBLE(stats.cv) : Value(LogicalType::DOUBLE));
+	values.push_back(Value::DOUBLE(stats.min));
+	values.push_back(Value::DOUBLE(stats.median));
+	values.push_back(Value::DOUBLE(stats.max));
+	values.push_back(Value::DOUBLE(stats.range));
+	values.push_back(Value::DOUBLE(stats.mad));
+	values.push_back(Value::DOUBLE(stats.max_abs_dev));
+	values.push_back(Value::BOOLEAN(stats.stddev_pop < 1.0));
+	values.push_back(Value::BOOLEAN(stats.mad < 1.0));
+	return values;
+}
+
+static vector<Value> NullDpSassStatsValues() {
+	vector<Value> values;
+	values.reserve(14);
+	values.push_back(Value(LogicalType::INTEGER));
+	values.push_back(Value(LogicalType::INTEGER));
+	values.push_back(Value(LogicalType::INTEGER));
+	values.push_back(Value(LogicalType::DOUBLE));
+	values.push_back(Value(LogicalType::DOUBLE));
+	values.push_back(Value(LogicalType::DOUBLE));
+	values.push_back(Value(LogicalType::DOUBLE));
+	values.push_back(Value(LogicalType::DOUBLE));
+	values.push_back(Value(LogicalType::DOUBLE));
+	values.push_back(Value(LogicalType::DOUBLE));
+	values.push_back(Value(LogicalType::DOUBLE));
+	values.push_back(Value(LogicalType::DOUBLE));
+	values.push_back(Value(LogicalType::BOOLEAN));
+	values.push_back(Value(LogicalType::BOOLEAN));
+	return values;
+}
+
+static void DpSassRecordStabilityFunction(DataChunk &args, ExpressionState &, Vector &result) {
+	idx_t count = args.size();
+	auto &list_vec = args.data[0];
+	UnifiedVectorFormat list_data, aggregate_index_data;
+	list_vec.ToUnifiedFormat(count, list_data);
+	args.data[1].ToUnifiedFormat(count, aggregate_index_data);
+	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+	auto aggregate_indexes = UnifiedVectorFormat::GetData<int32_t>(aggregate_index_data);
+
+	auto &child_vec = ListVector::GetEntry(list_vec);
+	UnifiedVectorFormat child_data;
+	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
+
+	auto result_data = FlatVector::GetData<double>(result);
+	auto &result_validity = FlatVector::Validity(result);
+	for (idx_t i = 0; i < count; i++) {
+		auto list_idx = list_data.sel->get_index(i);
+		auto aggregate_index_idx = aggregate_index_data.sel->get_index(i);
+		if (!list_data.validity.RowIsValid(list_idx) ||
+		    !aggregate_index_data.validity.RowIsValid(aggregate_index_idx)) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		DpSassStabilityStats stats;
+		bool valid = ComputeDpSassStabilityStats(list_entries[list_idx], child_data, child_values, stats);
+		dp_sass_stability_query_records.push_back(
+		    {aggregate_indexes[aggregate_index_idx], valid ? DpSassStatsToValues(stats) : NullDpSassStatsValues()});
+		if (valid) {
+			result_data[i] = stats.median;
+		} else {
+			result_validity.SetInvalid(i);
+		}
+	}
+}
+
 static uint64_t GetDpNoiseSeed(ClientContext &context) {
 	Value seed_val;
 	uint64_t seed = 42;
@@ -487,6 +729,38 @@ void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
 	loader.RegisterFunction(std::move(mask_info));
 
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+	child_list_t<LogicalType> stability_children;
+	stability_children.emplace_back("lane_count", LogicalType::INTEGER);
+	stability_children.emplace_back("valid_count", LogicalType::INTEGER);
+	stability_children.emplace_back("null_count", LogicalType::INTEGER);
+	stability_children.emplace_back("mean", LogicalType::DOUBLE);
+	stability_children.emplace_back("stddev_pop", LogicalType::DOUBLE);
+	stability_children.emplace_back("cv", LogicalType::DOUBLE);
+	stability_children.emplace_back("min", LogicalType::DOUBLE);
+	stability_children.emplace_back("median", LogicalType::DOUBLE);
+	stability_children.emplace_back("max", LogicalType::DOUBLE);
+	stability_children.emplace_back("range", LogicalType::DOUBLE);
+	stability_children.emplace_back("mad", LogicalType::DOUBLE);
+	stability_children.emplace_back("max_abs_dev", LogicalType::DOUBLE);
+	stability_children.emplace_back("stable_stddev_1", LogicalType::BOOLEAN);
+	stability_children.emplace_back("stable_mad_1", LogicalType::BOOLEAN);
+	ScalarFunction stability("dp_sass_stability", {list_type}, LogicalType::STRUCT(std::move(stability_children)),
+	                         DpSassStabilityFunction);
+	CreateScalarFunctionInfo stability_info(stability);
+	FunctionDescription stability_desc;
+	stability_desc.description = "Returns descriptive stability statistics over SASS's 64 lane answers.";
+	stability_info.descriptions.push_back(std::move(stability_desc));
+	loader.RegisterFunction(std::move(stability_info));
+
+	ScalarFunction record_stability("dp_sass_record_stability", {list_type, LogicalType::INTEGER}, LogicalType::DOUBLE,
+	                                DpSassRecordStabilityFunction);
+	CreateScalarFunctionInfo record_info(record_stability);
+	FunctionDescription record_desc;
+	record_desc.description =
+	    "[INTERNAL] Records SASS lane stability stats for dp_sass_stability_query and returns the sample median.";
+	record_info.descriptions.push_back(std::move(record_desc));
+	loader.RegisterFunction(std::move(record_info));
+
 	ScalarFunctionSet set("dp_smooth_median_noise");
 	set.AddFunction(ScalarFunction("dp_smooth_median_noise",
 	                               {list_type, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::INTEGER},

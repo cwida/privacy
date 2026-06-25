@@ -776,7 +776,7 @@ static void PacSumAvgFinalizeCountersInternal(Vector &states, AggregateInputData
 	auto &child_vec = ListVector::GetEntry(result);
 
 	// Reserve space for all lists (64 elements each)
-	idx_t total_elements = count * 64;
+	idx_t total_elements = (offset + count) * 64;
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
 
@@ -795,7 +795,8 @@ static void PacSumAvgFinalizeCountersInternal(Vector &states, AggregateInputData
 		auto *s = state_ptrs[i]->GetState();
 
 		// Set up the list entry - always needed even for NULL results
-		list_entries[offset + i].offset = i * 64;
+		idx_t base = (offset + i) * 64;
+		list_entries[offset + i].offset = base;
 		list_entries[offset + i].length = 64;
 
 		PAC_FLOAT buf[64] = {0};
@@ -826,7 +827,6 @@ static void PacSumAvgFinalizeCountersInternal(Vector &states, AggregateInputData
 		}
 
 		// PAC counters need 2x compensation for 50% sampling; DP sample counters use their own lane probability.
-		idx_t base = i * 64;
 		for (int j = 0; j < 64; j++) {
 			if (dp_sample) {
 				child_data[base + j] = static_cast<PAC_FLOAT>(buf[j] * dp_sample_rescale);
@@ -1048,7 +1048,7 @@ static void DpSampleAvgFinalize(Vector &states, AggregateInputData &, Vector &re
 	auto list_entries = FlatVector::GetData<list_entry_t>(result);
 	auto &child_vec = ListVector::GetEntry(result);
 
-	idx_t total_elements = count * 64;
+	idx_t total_elements = (offset + count) * 64;
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
 
@@ -1058,7 +1058,7 @@ static void DpSampleAvgFinalize(Vector &states, AggregateInputData &, Vector &re
 
 	for (idx_t i = 0; i < count; i++) {
 		auto *state = state_ptrs[i];
-		idx_t base = i * 64;
+		idx_t base = (offset + i) * 64;
 		list_entries[offset + i].offset = base;
 		list_entries[offset + i].length = 64;
 

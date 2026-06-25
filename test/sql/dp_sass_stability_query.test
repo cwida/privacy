@@ -1,0 +1,98 @@
+# name: test/sql/dp_sass_stability_query.test
+# description: SASS stability table function over DP-allowed aggregate queries
+# group: [sql]
+
+require privacy
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET privacy_seed = 42;
+
+statement ok
+SET dp_epsilon = 1.0;
+
+statement ok
+SET dp_delta = 1e-6;
+
+statement ok
+SET dp_sample_lanes = 1;
+
+statement ok
+SET dp_count_bound = 10;
+
+statement ok
+SET dp_sum_bound = 100;
+
+statement ok
+SET dp_sass_count_output_bound = 1000;
+
+statement ok
+SET dp_sass_sum_output_bound = 10000;
+
+statement ok
+SET dp_max_groups_contributed = 1;
+
+statement ok
+CREATE TABLE users(uid INTEGER);
+
+statement ok
+CREATE TABLE events(uid INTEGER, category VARCHAR, amount INTEGER);
+
+statement ok
+INSERT INTO users SELECT i FROM range(128) t(i);
+
+statement ok
+INSERT INTO events
+SELECT i, CASE WHEN i % 2 = 0 THEN 'even' ELSE 'odd' END, i
+FROM range(128) t(i);
+
+statement ok
+ALTER TABLE users ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE users SET PU;
+
+statement ok
+ALTER TABLE events ADD PRIVACY_LINK (uid) REFERENCES users(uid);
+
+query TIIIII
+SELECT aggregate_name, lane_count, valid_count, median::INTEGER,
+       stable_stddev_1::INTEGER, stable_mad_1::INTEGER
+FROM dp_sass_stability_query($$SELECT COUNT(*) AS c FROM users$$);
+----
+c	64	64	128	1	1
+
+query ITTIII
+SELECT aggregate_index, aggregate_name, group_key_json, lane_count, valid_count, median::INTEGER
+FROM dp_sass_stability_query($$
+    SELECT category, COUNT(*) AS c, SUM(amount) AS s
+    FROM events
+    GROUP BY category
+    ORDER BY category
+$$)
+ORDER BY aggregate_index, group_key_json;
+----
+0	c	{"category":"even"}	64	64	64
+0	c	{"category":"odd"}	64	64	64
+1	s	{"category":"even"}	64	64	2304
+1	s	{"category":"odd"}	64	64	2432
+
+statement error
+SELECT *
+FROM dp_sass_stability_query($$SELECT uid FROM users$$);
+----
+protected column
+
+query I
+SELECT COUNT(*)::INTEGER
+FROM dp_sass_stability_query($$SELECT COUNT(*) AS c FROM users$$);
+----
+1
+
+statement ok
+PRAGMA clear_privacy_metadata;

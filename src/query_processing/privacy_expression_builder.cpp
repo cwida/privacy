@@ -34,8 +34,14 @@ namespace duckdb {
 // When projection_ids is empty, DuckDB generates bindings from column_ids.size();
 // we must populate it with existing indices to maintain correct binding generation.
 static void EnsureProjectionIdsPopulated(LogicalGet &get) {
+	auto &column_ids = get.GetMutableColumnIds();
+	for (idx_t i = 0; i < column_ids.size() && i < get.types.size(); i++) {
+		if (!column_ids[i].HasType()) {
+			column_ids[i].SetType(get.types[i]);
+		}
+	}
 	if (get.projection_ids.empty()) {
-		for (idx_t i = 0; i < get.GetColumnIds().size(); i++) {
+		for (idx_t i = 0; i < column_ids.size(); i++) {
 			get.projection_ids.push_back(i);
 		}
 	}
@@ -98,10 +104,12 @@ idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name) {
 		return DConstants::INVALID_INDEX;
 	}
 	idx_t logical_idx = DConstants::INVALID_INDEX;
+	LogicalType logical_type = LogicalType::INVALID;
 	idx_t ti = 0;
 	for (auto &col : table_entry->GetColumns().Logical()) {
 		if (col.Name() == col_name) {
 			logical_idx = ti;
+			logical_type = col.Type();
 			break;
 		}
 		ti++;
@@ -112,8 +120,12 @@ idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name) {
 
 	EnsureProjectionIdsPopulated(g);
 
-	// Add the column to the LogicalGet
-	g.AddColumnId(logical_idx);
+	// Add the column to the LogicalGet. The get's returned_types can be a projected
+	// subset, so carry the type on the ColumnIndex instead of indexing returned_types
+	// by the base table column id.
+	ColumnIndex col_index(logical_idx);
+	col_index.SetType(logical_type);
+	g.GetMutableColumnIds().push_back(std::move(col_index));
 
 	// The projection index is the position in the output, which equals the new size - 1
 	idx_t new_proj_idx = g.GetColumnIds().size() - 1;
@@ -224,8 +236,8 @@ ColumnBinding InsertHashProjectionAboveGet(OptimizerExtensionInput &input, uniqu
 
 	// Passthrough expressions for each existing get output column
 	for (idx_t i = 0; i < num_get_cols; i++) {
-		auto &binding = old_bindings[i];
 		auto col_type = get_slot->types[i];
+		auto binding = ColumnBinding(get.table_index, i);
 		proj_expressions.push_back(make_uniq<BoundColumnRefExpression>(col_type, binding));
 	}
 
@@ -302,7 +314,8 @@ ColumnBinding InsertBalancedSampleLaneProjectionAboveGet(OptimizerExtensionInput
 	vector<unique_ptr<Expression>> proj_expressions;
 	proj_expressions.reserve(num_get_cols + 1);
 	for (idx_t i = 0; i < num_get_cols; i++) {
-		proj_expressions.push_back(make_uniq<BoundColumnRefExpression>(window->types[i], old_bindings[i]));
+		proj_expressions.push_back(
+		    make_uniq<BoundColumnRefExpression>(window->types[i], ColumnBinding(get.table_index, i)));
 	}
 
 	auto row_number_ref_for_lane =
