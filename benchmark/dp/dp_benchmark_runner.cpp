@@ -89,6 +89,8 @@ struct DatasetConfig {
 	vector<double> deltas;
 	vector<double> count_bounds;
 	vector<double> sum_bounds;
+	vector<double> sass_count_output_bounds;
+	vector<double> sass_sum_output_bounds;
 	vector<double> group_bounds;
 	vector<double> c_u_values;
 	vector<double> bound_multipliers;
@@ -107,6 +109,8 @@ struct Config {
 	vector<double> deltas;
 	vector<double> count_bounds = {1000.0};
 	vector<double> sum_bounds = {1000.0};
+	vector<double> sass_count_output_bounds;
+	vector<double> sass_sum_output_bounds;
 	vector<double> group_bounds = {1.0};
 	vector<double> c_u_values;
 	vector<double> bound_multipliers = {1.0};
@@ -130,6 +134,8 @@ struct RunPoint {
 	double delta = 0.0;
 	double count_bound = 1000.0;
 	double sum_bound = 1000.0;
+	double sass_count_output_bound = 0.0;
+	double sass_sum_output_bound = 0.0;
 	double group_bound = 1.0;
 	double c_u = 1.0;
 	double bound_multiplier = 1.0;
@@ -611,6 +617,10 @@ static Config LoadConfig(const string &path) {
 	config.deltas = JsonNumberList(root, "deltas", "delta", config.deltas);
 	config.count_bounds = JsonNumberList(root, "count_bounds", "count_bound", config.count_bounds);
 	config.sum_bounds = JsonNumberList(root, "sum_bounds", "sum_bound", config.sum_bounds);
+	config.sass_count_output_bounds =
+	    JsonNumberList(root, "sass_count_output_bounds", "sass_count_output_bound", config.sass_count_output_bounds);
+	config.sass_sum_output_bounds =
+	    JsonNumberList(root, "sass_sum_output_bounds", "sass_sum_output_bound", config.sass_sum_output_bounds);
 	config.group_bounds = JsonNumberList(root, "group_bounds", "group_bound", config.group_bounds);
 	config.c_u_values = JsonNumberList(root, "c_u", "c_u", config.c_u_values);
 	config.bound_multipliers = JsonNumberList(root, "bound_multipliers", "bound_multiplier", config.bound_multipliers);
@@ -644,6 +654,10 @@ static Config LoadConfig(const string &path) {
 		ds.deltas = JsonNumberList(entry, "deltas", "delta", config.deltas);
 		ds.count_bounds = JsonNumberList(entry, "count_bounds", "count_bound", config.count_bounds);
 		ds.sum_bounds = JsonNumberList(entry, "sum_bounds", "sum_bound", config.sum_bounds);
+		ds.sass_count_output_bounds = JsonNumberList(entry, "sass_count_output_bounds", "sass_count_output_bound",
+		                                             config.sass_count_output_bounds);
+		ds.sass_sum_output_bounds =
+		    JsonNumberList(entry, "sass_sum_output_bounds", "sass_sum_output_bound", config.sass_sum_output_bounds);
 		ds.group_bounds = JsonNumberList(entry, "group_bounds", "group_bound", config.group_bounds);
 		ds.c_u_values = JsonNumberList(entry, "c_u", "c_u", config.c_u_values);
 		ds.bound_multipliers = JsonNumberList(entry, "bound_multipliers", "bound_multiplier", config.bound_multipliers);
@@ -859,20 +873,17 @@ static double DefaultDelta(double epsilon, double privacy_units) {
 	return std::exp(-epsilon * log_pu * log_pu);
 }
 
-static double PublicCountOutputBound(const QuerySpec &query, double scale_factor) {
-	if (query.name == "q1" || query.name == "q21") {
-		return std::max(1.0, std::ceil(6000000.0 * scale_factor));
+static double DeriveSassOutputBound(double per_pu_bound, double pu_count, int sample_lanes,
+                                    const string &setting_name) {
+	(void)sample_lanes;
+	if (pu_count <= 0.0 || !std::isfinite(pu_count)) {
+		throw std::runtime_error("cannot derive " + setting_name + " without a finite privacy unit count");
 	}
-	if (query.name == "q4") {
-		return std::max(1.0, std::ceil(1500000.0 * scale_factor));
-	}
-	if (query.name == "q13") {
-		return std::max(1.0, std::ceil(150000.0 * scale_factor));
-	}
-	if (query.name == "q16") {
-		return std::max(1.0, std::ceil(10000.0 * scale_factor));
-	}
-	return std::max(1.0, std::ceil(6000000.0 * scale_factor));
+	// SASS aggregate finalizers rescale every lane by DpSampleRescale(sample_lanes)
+	// before dp_smooth_median_noise / dp_gupt_mean_noise clips to this public output
+	// domain. Therefore the terminal bound must be on the rescaled full-output scale,
+	// not the raw per-lane sample scale.
+	return std::max(1.0, per_pu_bound * std::ceil(pu_count));
 }
 
 static bool ReadLastUtilityLine(const string &path, UtilityMetrics &metrics) {
@@ -1013,6 +1024,10 @@ static vector<RunPoint> BuildRunPoints(const DatasetConfig &dataset) {
 	}
 	for (auto &mode : dataset.modes) {
 		auto releases = mode == "dp_sass" ? dataset.sass_releases : vector<string> {"-"};
+		auto sass_count_output_bounds =
+		    mode == "dp_sass" ? NonEmpty(dataset.sass_count_output_bounds, {0.0}) : vector<double> {0.0};
+		auto sass_sum_output_bounds =
+		    mode == "dp_sass" ? NonEmpty(dataset.sass_sum_output_bounds, {0.0}) : vector<double> {0.0};
 		for (double epsilon : dataset.epsilons) {
 			auto deltas = dataset.deltas.empty() ? vector<double> {0.0} : dataset.deltas;
 			for (double delta : deltas) {
@@ -1020,20 +1035,26 @@ static vector<RunPoint> BuildRunPoints(const DatasetConfig &dataset) {
 					for (double sum_bound : dataset.sum_bounds) {
 						for (double c_u : c_u_values) {
 							for (double multiplier : dataset.bound_multipliers) {
-								for (int lanes : NonEmptyInt(dataset.sample_lanes, {1})) {
-									for (auto &release : releases) {
-										RunPoint point;
-										point.mode = mode;
-										point.release = release;
-										point.epsilon = epsilon;
-										point.delta = delta;
-										point.count_bound = count_bound * multiplier;
-										point.sum_bound = sum_bound * multiplier;
-										point.group_bound = c_u;
-										point.c_u = c_u;
-										point.bound_multiplier = multiplier;
-										point.sample_lanes = lanes;
-										points.push_back(std::move(point));
+								for (double sass_count_output_bound : sass_count_output_bounds) {
+									for (double sass_sum_output_bound : sass_sum_output_bounds) {
+										for (int lanes : NonEmptyInt(dataset.sample_lanes, {1})) {
+											for (auto &release : releases) {
+												RunPoint point;
+												point.mode = mode;
+												point.release = release;
+												point.epsilon = epsilon;
+												point.delta = delta;
+												point.count_bound = count_bound * multiplier;
+												point.sum_bound = sum_bound * multiplier;
+												point.sass_count_output_bound = sass_count_output_bound;
+												point.sass_sum_output_bound = sass_sum_output_bound;
+												point.group_bound = c_u;
+												point.c_u = c_u;
+												point.bound_multiplier = multiplier;
+												point.sample_lanes = lanes;
+												points.push_back(std::move(point));
+											}
+										}
 									}
 								}
 							}
@@ -1046,7 +1067,8 @@ static vector<RunPoint> BuildRunPoints(const DatasetConfig &dataset) {
 	return points;
 }
 
-static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta, double sass_count_output_bound) {
+static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta, double sass_count_output_bound,
+                            double sass_sum_output_bound) {
 	RunStatement(con, "SET privacy_mode='" + point.mode + "'");
 	RunStatement(con, "SET dp_epsilon=" + FormatNumber(point.epsilon));
 	if (point.mode == "dp_standard" || (point.mode == "dp_sass" && point.release == "average")) {
@@ -1061,7 +1083,7 @@ static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta
 		RunStatement(con, "SET dp_sample_lanes=" + std::to_string(point.sample_lanes));
 		RunStatement(con, "SET dp_sass_release='" + point.release + "'");
 		RunStatement(con, "SET dp_sass_count_output_bound=" + FormatNumber(sass_count_output_bound));
-		RunStatement(con, "SET dp_sass_sum_output_bound=" + FormatNumber(point.sum_bound));
+		RunStatement(con, "SET dp_sass_sum_output_bound=" + FormatNumber(sass_sum_output_bound));
 		RunStatement(con, "SET dp_sass_avg_lower_bound=0");
 		RunStatement(con, "SET dp_sass_avg_upper_bound=" + FormatNumber(point.sum_bound));
 		RunStatement(con, "SET dp_sass_minmax_lower_bound=0");
@@ -1078,8 +1100,8 @@ static void WriteHeader(std::ofstream &csv) {
 
 static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const QuerySpec &query, idx_t query_id,
                      const RunPoint &point, idx_t run, bool success, const string &error, const UtilityMetrics &metrics,
-                     double time_ms, double delta, double sass_count_output_bound, uint64_t seed,
-                     const string &db_path) {
+                     double time_ms, double delta, double sass_count_output_bound, double sass_sum_output_bound,
+                     uint64_t seed, const string &db_path) {
 	csv << dataset.name << "," << dataset.workload << "," << query.name << "," << query_id << "," << point.mode << ","
 	    << point.release << "," << (query.profile == PrivacyProfile::PART ? "part" : "customer") << "," << run << ","
 	    << (success ? "true" : "false") << "," << CsvQuote(error) << ",utility," << FormatNumber(time_ms) << ","
@@ -1087,7 +1109,7 @@ static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const Que
 	    << "," << FormatNumber(point.epsilon) << "," << FormatNumber(delta) << "," << FormatNumber(dataset.scale_factor)
 	    << "," << FormatNumber(point.sum_bound) << "," << FormatNumber(point.count_bound) << ","
 	    << FormatNumber(point.group_bound) << "," << FormatNumber(point.c_u) << ","
-	    << FormatNumber(sass_count_output_bound) << "," << FormatNumber(point.sum_bound) << ","
+	    << FormatNumber(sass_count_output_bound) << "," << FormatNumber(sass_sum_output_bound) << ","
 	    << FormatNumber(point.bound_multiplier) << "," << point.sample_lanes << "," << seed << "," << CsvQuote(db_path)
 	    << "," << CsvQuote(query.path) << "\n";
 	csv.flush();
@@ -1149,6 +1171,21 @@ static double ReadPrivacyUnitCount(Connection &con, const DatasetConfig &dataset
 	return ReadGenericPrivacyUnitCount(con, dataset);
 }
 
+static double ReadBenchmarkPrivacyUnitCount(Connection &con, const DatasetConfig &dataset, const QuerySpec &query) {
+	RunStatement(con, "SET priv_rewrite=false");
+	try {
+		double count = ReadPrivacyUnitCount(con, dataset, query);
+		RunStatement(con, "SET priv_rewrite=true");
+		return count;
+	} catch (...) {
+		try {
+			RunStatement(con, "SET priv_rewrite=true");
+		} catch (...) {
+		}
+		throw;
+	}
+}
+
 static void RunDataset(const Config &config, const DatasetConfig &dataset, std::ofstream &csv) {
 	ValidateDataset(dataset);
 	auto queries = LoadDatasetQueries(dataset);
@@ -1190,19 +1227,29 @@ static void RunDataset(const Config &config, const DatasetConfig &dataset, std::
 				uint64_t seed = config.seed_base + 9973ULL * static_cast<uint64_t>(run) +
 				                131ULL * static_cast<uint64_t>(qi) + static_cast<uint64_t>(points.size());
 				double delta = point.delta;
-				double sass_count_output_bound = std::max(1.0, point.count_bound);
+				double sass_count_output_bound = 0.0;
+				double sass_sum_output_bound = 0.0;
 				std::remove(utility_path.c_str());
 				try {
 					ApplyDatasetPrivacy(con, dataset, query);
-					double pu_count = ReadPrivacyUnitCount(con, dataset, query);
+					double pu_count = ReadBenchmarkPrivacyUnitCount(con, dataset, query);
 					if (delta <= 0.0 && point.mode != "dp_standard" &&
 					    !(point.mode == "dp_sass" && point.release == "average")) {
 						delta = DefaultDelta(point.epsilon, pu_count);
 					}
-					if ((dataset.name == "tpch" || dataset.name == "jcch") && point.mode == "dp_sass") {
-						sass_count_output_bound = PublicCountOutputBound(query, dataset.scale_factor);
+					if (point.mode == "dp_sass") {
+						sass_count_output_bound =
+						    point.sass_count_output_bound > 0.0
+						        ? point.sass_count_output_bound
+						        : DeriveSassOutputBound(point.count_bound, pu_count, point.sample_lanes,
+						                                "dp_sass_count_output_bound");
+						sass_sum_output_bound =
+						    point.sass_sum_output_bound > 0.0
+						        ? point.sass_sum_output_bound
+						        : DeriveSassOutputBound(point.sum_bound, pu_count, point.sample_lanes,
+						                                "dp_sass_sum_output_bound");
 					}
-					ApplyDpSettings(con, point, delta, sass_count_output_bound);
+					ApplyDpSettings(con, point, delta, sass_count_output_bound, sass_sum_output_bound);
 					RunStatement(con, "SET privacy_seed=" + std::to_string(seed));
 					RunStatement(con, "SET privacy_diffcols=" +
 					                      SqlQuote(std::to_string(query.key_cols) + ":" + utility_path));
@@ -1226,7 +1273,7 @@ static void RunDataset(const Config &config, const DatasetConfig &dataset, std::
 				} catch (...) {
 				}
 				WriteRow(csv, dataset, query, qi + 1, point, run, success, error, metrics, time_ms, delta,
-				         sass_count_output_bound, seed, db_path);
+				         sass_count_output_bound, sass_sum_output_bound, seed, db_path);
 			}
 		}
 	}

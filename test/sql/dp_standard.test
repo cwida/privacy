@@ -144,6 +144,32 @@ SELECT SUM(amount) FROM orders;
 ----
 2250.000000
 
+# dp_standard AVG follows Google-style bounded mean shape: clip values into the
+# public bounded domain [0, dp_sum_bound], center around the midpoint before
+# SUM noise, divide by noised COUNT, then add the midpoint back.
+statement ok
+CREATE TABLE avg_values (id BIGINT, v DOUBLE);
+
+statement ok
+INSERT INTO avg_values VALUES (0, -10.0), (1, 10.0), (2, 200.0);
+
+statement ok
+ALTER TABLE avg_values ADD PRIVACY_KEY (id);
+
+statement ok
+ALTER TABLE avg_values SET PU;
+
+statement ok
+SET dp_sum_bound = 100.0;
+
+query I
+SELECT AVG(v) FROM avg_values;
+----
+36.666667
+
+statement ok
+SET dp_sum_bound = 1000.0;
+
 # Per-PU clipping: bound 10 clips each user's sum (= 5*(u%10)) to min(., 10).
 # Per residue r in 0..9 (10 users each): min(5r, 10) = [0,5,10,10,10,10,10,10,10,10]
 # sum over residues = 85, * 10 users = 850. (Per-ROW clipping would leave 2250.)
@@ -156,7 +182,21 @@ SELECT SUM(amount) FROM orders;
 850.000000
 
 statement ok
+SET dp_count_bound = 3.0;
+
+# For joined AVG, the centered SUM contribution bound is
+# dp_count_bound * ((upper - lower) / 2). With bounds [0, 10], that is
+# 3 * 5 = 15 per PU, matching Google's bounded-mean calibration.
+query I
+SELECT AVG(amount) FROM orders;
+----
+4.500000
+
+statement ok
 SET dp_sum_bound = 1000.0;
+
+statement ok
+SET dp_count_bound = 10.0;
 
 # Multiple aggregate expressions in the same aggregate node are supported; this is
 # one DP release vector with budget split across the user-visible aggregates.
