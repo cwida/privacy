@@ -1,21 +1,21 @@
--- q08: 64-possible-worlds-semantics using lambda expressions: 
+-- q08: 64-possible-worlds-semantics using lambda expressions:
 -- we calculate the expression sum(nation=='BRAZIL'?volume:0)/SUM(volume) in a list_transform-lambda for all 64 outcomes
 -- since that expression contains two aggregates, we list_zip two counters into a list of two values first
 -- the inner list_transforms are just to cast the DOUBLE counter values back to their original type
--- the final computed expression is then reduced to a single noised double value using pac_noised and cast to the exptected type
-SELECT o_year, 
-       CAST(pac_noised(
+-- the final computed expression is then reduced to a single noised double value using as_noised and cast to the exptected type
+SELECT o_year,
+       CAST(as_noised(
               list_transform(
                 list_zip(
                   list_transform(
-                    pac_sum(pac_pu, (CASE WHEN nation = 'BRAZIL' THEN volume ELSE 0 END)),
+                    as_sum(pac_pu, (CASE WHEN nation = 'BRAZIL' THEN volume ELSE 0 END)),
                     lambda y: CAST(y AS DECIMAL(18,2))),
                   list_transform(
-                    pac_sum(pac_pu, volume),
+                    as_sum(pac_pu, volume),
                     lambda y: CAST(y AS DECIMAL(18,2)))),
                 lambda x: CAST(x[1] / x[2] AS FLOAT))) AS FLOAT) AS mkt_share
-  FROM (SELECT EXTRACT(year FROM o_orderdate) AS o_year, l_extendedprice * (1 - l_discount) AS volume, n2.n_name AS nation, 
-               pac_hash(hash(c_custkey)) AS pac_pu
+  FROM (SELECT EXTRACT(year FROM o_orderdate) AS o_year, l_extendedprice * (1 - l_discount) AS volume, n2.n_name AS nation,
+               priv_hash(hash(c_custkey)) AS pac_pu
           FROM part JOIN lineitem ON p_partkey = l_partkey
                     JOIN orders ON l_orderkey = o_orderkey
                     JOIN customer ON o_custkey = c_custkey
@@ -24,5 +24,5 @@ SELECT o_year,
                     JOIN supplier ON l_suppkey = s_suppkey
                     JOIN nation n2 ON s_nationkey = n2.n_nationkey
          WHERE r_name = 'AMERICA' AND p_type = 'ECONOMY ANODIZED STEEL' AND o_orderdate BETWEEN DATE '1995-01-01' AND DATE '1996-12-31') AS all_nations
- GROUP BY ALL 
+ GROUP BY ALL
  ORDER BY ALL;

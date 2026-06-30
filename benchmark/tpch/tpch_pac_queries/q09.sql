@@ -1,5 +1,5 @@
 SELECT n_name AS nation, extract(year FROM o_orderdate) AS o_year,
-       pac_noised_sum(pac_hash(hash(o_custkey)), l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity) AS sum_profit
+       as_noised_sum(priv_hash(hash(o_custkey)), l_extendedprice * (1 - l_discount) - ps_supplycost * l_quantity) AS sum_profit
   FROM part JOIN lineitem ON part.p_partkey = lineitem.l_partkey
             JOIN supplier ON supplier.s_suppkey = lineitem.l_suppkey
             JOIN partsupp ON partsupp.ps_partkey = part.p_partkey AND partsupp.ps_suppkey = supplier.s_suppkey

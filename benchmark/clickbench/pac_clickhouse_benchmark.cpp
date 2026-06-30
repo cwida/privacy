@@ -289,7 +289,8 @@ static string BuildCountBoundQuery(const string &query) {
     return "SELECT max(cnt) FROM (SELECT count(*) AS cnt " + from_where + " GROUP BY UserID)";
 }
 
-static bool ReadLastUtilityLine(const string &path, string &utility, string &recall, string &precision) {
+static bool ReadLastUtilityLine(const string &path, string &utility, string &recall, string &precision,
+                                string &median_error_pct) {
     std::ifstream in(path);
     if (!in.is_open()) {
         return false;
@@ -314,9 +315,13 @@ static bool ReadLastUtilityLine(const string &path, string &utility, string &rec
     if (!std::getline(ss, precision, ',')) {
         return false;
     }
+    if (!std::getline(ss, median_error_pct, ',')) {
+        return false;
+    }
     utility = Trim(utility);
     recall = Trim(recall);
     precision = Trim(precision);
+    median_error_pct = Trim(median_error_pct);
     return true;
 }
 
@@ -417,6 +422,7 @@ struct BenchmarkQueryResult {
     string utility;
     string recall;
     string precision;
+    string median_error_pct;
     string epsilon;
     string delta_scenario;
     string dp_delta;
@@ -1187,7 +1193,8 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                         if (diff_setup_ok) {
                             auto diff_res = worker.SubmitQuery(query, timeout_s);
                             if (diff_res == ForkWorker::SR_OK && worker.result_ok) {
-                                ReadLastUtilityLine(utility_path, result.utility, result.recall, result.precision);
+                                ReadLastUtilityLine(utility_path, result.utility, result.recall, result.precision,
+                                                    result.median_error_pct);
                             }
                         }
                     }
@@ -1295,7 +1302,8 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                         if (diff_setup_ok) {
                             auto diff_res = worker.SubmitQuery(query, timeout_s);
                             if (diff_res == ForkWorker::SR_OK && worker.result_ok) {
-                                ReadLastUtilityLine(utility_path, result.utility, result.recall, result.precision);
+                                ReadLastUtilityLine(utility_path, result.utility, result.recall, result.precision,
+                                                    result.median_error_pct);
                             }
                         }
                     }
@@ -1430,7 +1438,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
         // =====================================================================
         // Write CSV
         // =====================================================================
-        csv << "query,mode,run,time_ms,success,error,utility,recall,precision,epsilon,delta_scenario,dp_delta,bound_scenario,dp_sum_bound,dp_count_bound,pac_mi,seed\n";
+        csv << "query,mode,run,time_ms,success,error,utility,recall,precision,median_error_pct,epsilon,delta_scenario,dp_delta,bound_scenario,dp_sum_bound,dp_count_bound,pac_mi,seed\n";
         for (const auto &r : all_results) {
             csv << r.query_num << "," << r.mode << "," << r.run << ","
                 << FormatNumber(r.time_ms) << ","
@@ -1439,6 +1447,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                 << r.utility << ","
                 << r.recall << ","
                 << r.precision << ","
+                << r.median_error_pct << ","
                 << r.epsilon << ","
                 << r.delta_scenario << ","
                 << r.dp_delta << ","

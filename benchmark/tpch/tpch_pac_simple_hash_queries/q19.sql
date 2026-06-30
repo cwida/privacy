@@ -1,4 +1,4 @@
-SELECT pac_noised_sum(pac_hash(hash(l_orderkey)), l_extendedprice * (1 - l_discount)) AS revenue
+SELECT as_noised_sum(priv_hash(hash(l_orderkey)), l_extendedprice * (1 - l_discount)) AS revenue
   FROM lineitem JOIN part ON l_partkey = p_partkey
  WHERE (p_brand = 'Brand#12'
         AND p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')

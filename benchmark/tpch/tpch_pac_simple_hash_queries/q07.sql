@@ -1,4 +1,4 @@
-SELECT supp_nation, cust_nation, l_year, pac_noised_sum(pac_hash(hash(l_orderkey)), volume) AS revenue
+SELECT supp_nation, cust_nation, l_year, as_noised_sum(priv_hash(hash(l_orderkey)), volume) AS revenue
   FROM (SELECT n1.n_name AS supp_nation, n2.n_name AS cust_nation, extract(year FROM l_shipdate) AS l_year,
                l_orderkey, l_extendedprice * (1 - l_discount) AS volume
           FROM supplier JOIN lineitem ON s_suppkey = l_suppkey

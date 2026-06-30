@@ -1,4 +1,4 @@
-SELECT s_name, pac_noised_count(pac_hash(hash(o_custkey))) AS numwait
+SELECT s_name, as_noised_count(priv_hash(hash(o_custkey))) AS numwait
   FROM supplier JOIN lineitem l1 ON s_suppkey = l1.l_suppkey
                 JOIN orders ON o_orderkey = l1.l_orderkey
                 JOIN nation ON s_nationkey = n_nationkey
@@ -10,5 +10,5 @@ SELECT s_name, pac_noised_count(pac_hash(hash(o_custkey))) AS numwait
                       AND l3.l_suppkey <> l1.l_suppkey
                       AND l3.l_receiptdate > l3.l_commitdate)
 GROUP BY s_name
-ORDER BY numwait DESC, s_name 
+ORDER BY numwait DESC, s_name
 LIMIT 100;

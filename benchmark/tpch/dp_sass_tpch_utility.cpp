@@ -955,7 +955,6 @@ static int Main(int argc, char **argv) {
 						RunStatement(con, "SET dp_epsilon=" + FormatNumber(config.epsilon));
 						if (mode == "dp_standard") {
 							RunStatement(con, "SET dp_delta=NULL");
-							RunStatement(con, "SET dp_public_partitions='assert'");
 							RunStatement(con, "SET dp_count_bound=" + FormatNumber(count_bound));
 							RunStatement(con, "SET dp_max_groups_contributed=" + FormatNumber(group_bound));
 						} else {
