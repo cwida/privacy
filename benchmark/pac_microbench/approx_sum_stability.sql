@@ -1,5 +1,5 @@
--- Test numeric accuracy of approximate pac_sum vs exact SUM
--- pac_sum with hash(1) and mi=0, divide by 2 since hash(1) has all bits set
+-- Test numeric accuracy of approximate as_sum vs exact SUM
+-- as_sum with hash(1) and mi=0, divide by 2 since hash(1) has all bits set
 
 -- Create test table with various distributions
 CREATE OR REPLACE TABLE accuracy_test AS
@@ -25,16 +25,16 @@ UNION ALL SELECT * FROM negative_mixed
 UNION ALL SELECT * FROM all_same;
 
 -- It is tricky to characterize the precision of an approximate if the expected mean is 0. Because if you divide ApproxResult / ExpectedMean then you divide by 0 and nothing makes sense (this is roughly the case for the negative_mixed distribution which is 0, -1, 2, -3, ... ,-N, N+1) 
--- So people use the RMSE (Root Mean Squared Error) / variance, if you can run an experiment many times. Well, we can run it 64 times, of course. RMSE is ((exact_sum[i]/pac_sum[i])^2/64). You can further divide by variance: z_square = RMSE / variance(pac_sum[]). 
+-- So people use the RMSE (Root Mean Squared Error) / variance, if you can run an experiment many times. Well, we can run it 64 times, of course. RMSE is ((exact_sum[i]/as_sum[i])^2/64). You can further divide by variance: z_square = RMSE / variance(as_sum[]). 
 
 -- test query:
 SET pac_mi = 0;
 WITH bit_positions AS (SELECT unnest(range(64)) as bit_pos),
-    exact_sums AS (SELECT dist, bit_pos, sum(val * ((pac_hash(hash(rowid)) >> bit_pos) & 1))::DOUBLE as exact_sum
+    exact_sums AS (SELECT dist, bit_pos, sum(val * ((priv_hash(hash(rowid)) >> bit_pos) & 1))::DOUBLE as exact_sum
                    FROM accuracy_test, bit_positions GROUP BY dist, bit_pos),
     exact_lists AS (SELECT dist, list(exact_sum ORDER BY bit_pos) as exact_counters
                     FROM exact_sums GROUP BY dist),
-    approx_sums AS (SELECT dist, pac_sum(pac_hash(hash(rowid)), val) as approx_counters
+    approx_sums AS (SELECT dist, as_sum(priv_hash(hash(rowid)), val) as approx_counters
                     FROM accuracy_test GROUP BY dist),
     per_counter_stats AS (
         SELECT e.dist, e.exact_counters, a.approx_counters,
@@ -53,7 +53,7 @@ WITH bit_positions AS (SELECT unnest(range(64)) as bit_pos),
     FROM per_counter_stats ORDER BY dist; 
 -- which computes the percentual difference, but also this RMSE/variance, which is known as "z_squared". 
 
--- reminder: this query takes 64 random 50% samples of the distribution, and computes the exact sum of that, as well as the approximated sum (using pac_sum, so we take the 64 non-noised counter values). So handy, that function! 
+-- reminder: this query takes 64 random 50% samples of the distribution, and computes the exact sum of that, as well as the approximated sum (using as_sum, so we take the 64 non-noised counter values). So handy, that function! 
 
 -- using: binaries/duckdb_signedsum
 -- ┌──────────────────┬───────────┬──────────┬───────────┬───────────────────┬───────────────────┬────────────┐

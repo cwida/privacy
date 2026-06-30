@@ -1,5 +1,5 @@
 #!/bin/bash
-# Utility experiment: naive (N independent pac_sum) vs optimized (pac_sum + list_transform + pac_noised)
+# Utility experiment: naive (N independent as_sum) vs optimized (as_sum + list_transform + as_noised)
 #
 # Usage:
 #   bash benchmark/utility_listtransform/run.sh [database] [duckdb_binary] [runs]
