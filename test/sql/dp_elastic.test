@@ -296,6 +296,20 @@ SELECT abs(COUNT(*) - 500) < 500 FROM u JOIN orders ON u.id = orders.uid;
 ----
 true
 
+# The smooth-elastic-sensitivity search follows the FLEX window k* ≈ n/β with no fixed ceiling, so
+# it never silently under-noises for small ε. An absurdly tiny ε makes the window n/β exceed 1e9,
+# which is refused (rather than truncated or hung).
+statement ok
+SET dp_epsilon = 1e-9;
+
+statement error
+SELECT COUNT(*) FROM u JOIN orders ON u.id = orders.uid;
+----
+too small to compute smooth elastic sensitivity
+
+statement ok
+SET dp_epsilon = 1.0;
+
 # COUNT type preserved (BIGINT) even after Laplace + cast
 query I
 SELECT typeof(COUNT(*)) FROM u JOIN orders ON u.id = orders.uid;

@@ -468,11 +468,23 @@ static double ComputeSmoothElasticSensitivity(const vector<double> &mf_values, d
 	for (auto m : mf_values) {
 		ses *= m;
 	}
-	// k* ≈ n/β; add margin and cap to avoid impractically long loops
+	// FLEX (Johnson, Near & Song 2018): the maximizer of ∏ᵢ(mfᵢ+k)·e^(−βk) lies in k ∈ [0, m] with
+	// m on the order of (polynomial degree)/β. The elastic sensitivity here is a degree-n product
+	// (n = number of join hops), and its log-derivative Σ 1/(mfᵢ+k) − β = 0 gives k* ≈ n/β. Search
+	// that full window with a margin — NOT a fixed ceiling, which for small β (small ε/δ) would stop
+	// before k* and under-estimate the sensitivity (under-noise). The window depends on the query (n)
+	// and budget (β), not the database size, per FLEX.
 	double n = static_cast<double>(mf_values.size());
-	int k_max = static_cast<int>(std::min(n / beta + 200.0, 100000.0));
-	k_max = std::max(k_max, 1000);
-	for (int k = 1; k <= k_max; k++) {
+	double window = n / beta + 200.0;
+	// An astronomically large window means ε (with δ) is too small to compute this tractably; refuse
+	// rather than silently truncate the search (under-noise) or hang.
+	if (!std::isfinite(window) || window > 1e9) {
+		throw InvalidInputException(
+		    "dp_elastic: ε (with δ) is too small to compute smooth elastic sensitivity tractably — the FLEX "
+		    "search window n/β exceeds 1e9. Increase dp_epsilon or dp_delta.");
+	}
+	int64_t k_max = std::max(static_cast<int64_t>(window), static_cast<int64_t>(1000));
+	for (int64_t k = 1; k <= k_max; k++) {
 		double decay = std::exp(-beta * static_cast<double>(k));
 		if (decay < 1e-15) {
 			break;
