@@ -1788,32 +1788,70 @@ static void FinalizeDPLaplace(OptimizerExtensionInput &input, unique_ptr<Logical
                               const vector<double> &agg_sens, const vector<LogicalType> &output_types,
                               idx_t n_original_aggs, idx_t n_groups, double epsilon, bool noise_enabled, bool per_pu,
                               bool allow_group_suppression) {
-	double support_threshold = 0.0;
-	bool want_support = TryGetPrivacyMinGroupCount(input.context, support_threshold);
-	bool apply_support_filter = want_support && allow_group_suppression;
-	auto support_pos =
-	    AddSupportAggregate(input, plan, agg, chain, apply_support_filter ? support_threshold : 0.0, per_pu);
+	// Partition selection. The released set of group keys is data-dependent, so a grouped query must
+	// privatize it (Google DP / Wilson et al.): noise the per-group COUNT(DISTINCT pu) — the
+	// AddSupportAggregate output — and keep groups whose noisy η' clears τ. Partitions are private by
+	// default, matching dp_sass (no public-partition opt-out in any mode).
+	//   - dp_standard: automatic for every grouped query, with Laplace(C_u/ε_η) noise and the computed
+	//     τ = 1 − C_u·log(2 − 2(1−δ_η)^{1/C_u})/ε_η. This needs δ_η, so grouped dp_standard is (ε,δ)-DP
+	//     (ungrouped stays pure ε). ε_η = ε/(c+1) is reserved from the budget.
+	//   - dp_elastic: still on the legacy opt-in raw threshold here; its private auto-threshold needs
+	//     the value channel's (ε,δ) to be split against τ first (pending follow-up).
+	double k = static_cast<double>(n_original_aggs);
+	bool apply_support_filter = false;
+	double tau = 0.0;
+	double support_noise_scale = 0.0;
+	double support_gate = 0.0; // positive → AddSupportAggregate appends the η aggregate
+	double budget_units = k;   // ε split across the k user aggregates; +1 reserves ε_η for η
+	if (mech == "dp_standard") {
+		apply_support_filter = allow_group_suppression && n_groups > 0;
+		if (apply_support_filter) {
+			double delta = 0.0;
+			if (!TryGetDpDelta(input.context, delta) || !std::isfinite(delta) || delta <= 0.0 || delta >= 0.5) {
+				throw InvalidInputException(
+				    "dp_standard: grouped queries require dp_delta in (0, 0.5) for DP partition selection (the "
+				    "released set of group keys is data-dependent). Ungrouped dp_standard queries remain pure ε-DP.");
+			}
+			bool is_join = chain.tables.size() >= 2;
+			double cu =
+			    is_join
+			        ? static_cast<double>(GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", mech))
+			        : 1.0;
+			double eps_eta = epsilon / (k + 1.0);
+			double delta_eta = delta / (k + 1.0);
+			tau = 1.0 - (cu * std::log(2.0 - 2.0 * std::pow(1.0 - delta_eta, 1.0 / cu))) / eps_eta;
+			support_noise_scale = noise_enabled ? (cu / eps_eta) : 0.0;
+			support_gate = 1.0;
+			budget_units = k + 1.0;
+			PRIVACY_DEBUG_PRINT("[" + mech + "] partition selection: eps_eta=" + std::to_string(eps_eta) +
+			                    " tau=" + std::to_string(tau) + " noise_scale=" + std::to_string(support_noise_scale));
+		}
+	} else {
+		double support_threshold = 0.0;
+		bool want_support = TryGetPrivacyMinGroupCount(input.context, support_threshold);
+		apply_support_filter = want_support && allow_group_suppression;
+		tau = support_threshold;
+		support_gate = support_threshold; // > 0 whenever want_support (raw threshold, no noise)
+	}
+	auto support_pos = AddSupportAggregate(input, plan, agg, chain, apply_support_filter ? support_gate : 0.0, per_pu);
 	idx_t n_dp_aggs = support_pos.IsValid() ? support_pos.GetIndex() : agg->expressions.size();
 	LogicalOperator *noise_anchor = agg;
 	if (apply_support_filter) {
-		noise_anchor = ApplySupportFilter(input, plan, agg, support_pos.GetIndex(), support_threshold);
+		noise_anchor = ApplySupportFilter(input, plan, agg, support_pos.GetIndex(), tau, support_noise_scale);
 	}
 
 	auto avg_components = BuildAvgComponentSet(avg_infos);
 
-	// Build per-aggregate Laplace scales. With k user-visible aggregates we split ε equally
-	// (sequential composition) → each gets ε/k. AVG splits its share again into ε/(2k) per
-	// component (SUM and COUNT). Effective scale multiplier:
-	//   - non-AVG aggregate:           k       (using ε/k)
-	//   - AVG-derived SUM and COUNT:   2k      (each using ε/(2k))
-	double k = static_cast<double>(n_original_aggs);
+	// Build per-aggregate Laplace scales. The ε budget is split across `budget_units` cells: the k
+	// user-visible aggregates, plus 1 for the partition-selection count η when it is active. So each
+	// aggregate gets ε/budget_units. AVG splits its share again into half per component (SUM, COUNT).
 	vector<double> agg_scales;
 	agg_scales.reserve(n_dp_aggs);
 	for (idx_t ai = 0; ai < n_dp_aggs; ai++) {
 		double sens = agg_sens[ai];
 		double scale = noise_enabled ? (sens / epsilon) : 0.0;
-		if (k > 1.0) {
-			scale *= k; // budget split across user-visible aggregates
+		if (budget_units > 1.0) {
+			scale *= budget_units; // budget split across user aggregates (+ η when thresholding)
 		}
 		if (avg_components.count(ai)) {
 			scale *= 2.0; // additional split: each AVG component uses half its allocation

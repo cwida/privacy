@@ -220,16 +220,17 @@ SELECT COUNT(*), SUM(amount) FROM orders;
 500	2250.000000
 
 # ---------------------------------------------------------------------------
-# Manual support thresholding (privacy_min_group_count) is the admin-set tau gate
-# for DP groups. dp_standard remains pure ε-DP and treats grouped partitions as
-# admin/public-managed.
+# Partition selection. The released set of group keys is data-dependent, so grouped dp_standard
+# queries automatically apply DP partition selection (noised COUNT(DISTINCT pu) ≥ τ, τ computed from
+# the budget — private by default, like dp_sass). This makes grouped dp_standard (ε,δ)-DP, so
+# dp_delta is required; ungrouped dp_standard stays pure ε-DP.
 # ---------------------------------------------------------------------------
 
 statement ok
 SET dp_count_bound = 10.0;
 
-# Grouped joins require an L0 group-contribution bound: one PU may affect multiple
-# output groups, so bounded-contribution DP must charge that vector sensitivity.
+# Grouped joins require an L0 group-contribution bound (dp_max_groups_contributed = C_u): one PU may
+# affect multiple output groups, and C_u enters both the value sensitivity and the τ formula.
 statement error
 SELECT store, COUNT(*) FROM orders GROUP BY store;
 ----
@@ -238,16 +239,26 @@ dp_max_groups_contributed
 statement ok
 SET dp_max_groups_contributed = 4.0;
 
-# A threshold far above each group's PU support suppresses all groups.
+# Without dp_delta a grouped query is now rejected — partition selection needs δ_η.
+statement error
+SELECT store, COUNT(*) FROM orders GROUP BY store;
+----
+dp_delta
+
 statement ok
-SET privacy_min_group_count = 100000.0;
+SET dp_delta = 0.49;
+
+# With a tiny ε the computed τ far exceeds every group's PU support, so all groups are suppressed
+# (noise off → deterministic distinct-PU count ≥ τ).
+statement ok
+SET dp_epsilon = 0.001;
 
 query II
 SELECT store, COUNT(*) FROM orders GROUP BY store;
 ----
 
 statement ok
-SET privacy_min_group_count = NULL;
+SET dp_epsilon = 1.0;
 
 # Nested aggregates are not supported: a query may have multiple aggregate
 # expressions, but not an aggregate over another aggregate's private output.
@@ -268,12 +279,14 @@ GROUP BY public_bins.order_count;
 ----
 dp_standard: CTEs are not supported by DP mechanisms
 
-# L0 contribution bounding: two PUs each touch three groups, but max groups is two.
+# L0 contribution bounding: each PU touches all three groups, but max groups is two, so each PU's
+# total contribution is capped at 2. Uses enough PUs (40) that the surviving groups clear τ — small
+# groups would otherwise be suppressed by partition selection.
 statement ok
 CREATE TABLE orders_l0 (uid BIGINT, store VARCHAR);
 
 statement ok
-INSERT INTO orders_l0 VALUES (0, 'a'), (0, 'b'), (0, 'c'), (1, 'a'), (1, 'b'), (1, 'c');
+INSERT INTO orders_l0 SELECT i, s FROM range(40) t(i), (VALUES ('a'), ('b'), ('c')) v(s);
 
 statement ok
 ALTER TABLE orders_l0 ADD PRIVACY_LINK (uid) REFERENCES u(id);
@@ -284,13 +297,17 @@ SET dp_count_bound = 1.0;
 statement ok
 SET dp_max_groups_contributed = 2.0;
 
+# Each PU contributes at most 1 per group (count_bound=1) and to at most 2 groups (C_u=2), so the
+# total released count across all groups is ≤ 40·2 = 80, never the raw 120 (noise off, dense groups
+# survive τ). Exact per-group split is determined by the deterministic per-PU group selection.
 query II rowsort
 SELECT store, COUNT(*) AS cnt
 FROM orders_l0
 GROUP BY store;
 ----
-b	2
-c	2
+a	18
+b	33
+c	29
 
 # Public side tables are allowed in Google-style DP. COUNT(DISTINCT) is computed per PU
 # before clipping, then summed.
