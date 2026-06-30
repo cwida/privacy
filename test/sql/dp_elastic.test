@@ -1242,3 +1242,21 @@ RESET dp_sum_bound;
 
 statement ok
 SET privacy_noise = true;
+
+# Concern #3: a non-finite Laplace scale (sensitivity/ε overflow) must NOT silently release the
+# raw value. dp_noise throws on inf/NaN scale, while scale 0 is the intentional noise-disabled
+# passthrough.
+query I
+SELECT dp_noise(10.0::DOUBLE, 0.0::DOUBLE);
+----
+10
+
+statement error
+SELECT dp_noise(10.0::DOUBLE, 'inf'::DOUBLE);
+----
+non-finite
+
+statement error
+SELECT dp_noise(10.0::DOUBLE, 'nan'::DOUBLE);
+----
+non-finite

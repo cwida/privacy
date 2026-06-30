@@ -5,6 +5,7 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/common/vector_operations/ternary_executor.hpp"
 #include "duckdb/common/vector_operations/unary_executor.hpp"
+#include "duckdb/common/exception.hpp"
 
 #include <algorithm>
 #include <array>
@@ -276,8 +277,12 @@ static uint64_t GetDpNoiseSeed(ClientContext &context) {
 }
 
 static double AddLaplaceNoise(double value, double scale, uint64_t seed, uint64_t nonce) {
-	if (scale <= 0.0 || !std::isfinite(scale)) {
-		return value;
+	if (!std::isfinite(scale)) {
+		throw InvalidInputException("dp_noise: non-finite Laplace scale (sensitivity/ε overflow) — refusing to "
+		                            "release a value without noise");
+	}
+	if (scale <= 0.0) {
+		return value; // scale 0 = noise disabled / zero sensitivity → no noise
 	}
 	std::mt19937_64 gen(seed ^ (PAC_MAGIC_HASH * nonce));
 	std::uniform_real_distribution<double> uni(-0.5, 0.5);
@@ -321,8 +326,12 @@ void RegisterDpLaplaceNoiseFunction(ExtensionLoader &loader) {
 }
 
 static double LaplaceNoise(double scale, uint64_t seed) {
-	if (scale <= 0.0 || !std::isfinite(scale)) {
-		return 0.0;
+	if (!std::isfinite(scale)) {
+		throw InvalidInputException(
+		    "dp_sass: non-finite smooth-sensitivity Laplace scale — refusing to release without noise");
+	}
+	if (scale <= 0.0) {
+		return 0.0; // zero sensitivity (stable statistic) or noise disabled → no noise
 	}
 	std::mt19937_64 gen(seed);
 	std::uniform_real_distribution<double> uni(-0.5, 0.5);

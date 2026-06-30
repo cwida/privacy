@@ -1095,8 +1095,17 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 		const auto &out_type = output_types[ai];
 		auto col_ref = make_uniq<BoundColumnRefExpression>(agg_col_type, ColumnBinding(agg_idx, ai));
 		double scale = agg_scales[ai];
-		if (scale <= 0.0 || !std::isfinite(scale)) {
-			// No noise: still cast back to the original output type if the rewrite changed it.
+		if (!std::isfinite(scale)) {
+			// A non-finite scale means the sensitivity or ε overflowed (e.g. an elastic-sensitivity
+			// product that blew up). Releasing the aggregate without noise would violate DP, so we
+			// refuse rather than silently emit the raw value.
+			throw InvalidInputException(
+			    "dp: computed Laplace noise scale is not finite (sensitivity/ε overflow) — refusing to "
+			    "release the aggregate without noise. Check dp_sum_bound / dp_epsilon and the join structure.");
+		}
+		if (scale <= 0.0) {
+			// scale == 0 is the intentional noise-disabled path (privacy_noise=false / zero sensitivity):
+			// pass through, still casting back to the original output type if the rewrite changed it.
 			unique_ptr<Expression> passthrough = std::move(col_ref);
 			if (agg_col_type != out_type) {
 				passthrough = BoundCastExpression::AddCastToType(input.context, std::move(passthrough), out_type);
