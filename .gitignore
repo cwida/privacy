@@ -9,3 +9,31 @@ test/python/__pycache__/
 .Rhistory
 *.db
 *.pdf
+
+# Large benchmark data / build cache — never commit (GitHub rejects >100MB files)
+.cache/
+*.parquet
+
+# Generated benchmark result outputs
+benchmark/tpch/dp_elastic_*.csv
+benchmark/tpch/dp_sass_*.csv
+benchmark/clickbench/clickbench_*.csv
+benchmark/clickbench/*.png
+benchmark/dp/sqlstorm_stackoverflow_*stability*.csv
+benchmark/dp/jcch_*_results.csv
+benchmark/sqlstorm/sqlstorm_degradation_*.csv
+benchmark/sqlstorm/data/
+
+# Generated query sets (produced by the stability/scan scripts)
+benchmark/dp/sqlstorm_stackoverflow_stable_queries/
+benchmark/dp/sqlstorm_stackoverflow_stable_aggregate_queries/
+benchmark/dp/uber_like_jcch/
+
+# Serialized privacy-metadata dumps
+pac_metadata_*.json
+privacy_metadata_*.json
+*.json.bak
+
+# Stray local files
+/true
+.codex
