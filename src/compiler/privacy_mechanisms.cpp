@@ -845,6 +845,32 @@ static void ApplyMaxGroupsContributed(OptimizerExtensionInput &input, LogicalAgg
 //  - Grouped join: one PU may affect multiple output groups, so the vector sensitivity is also
 //    multiplied by dp_max_groups_contributed (Google DP's L0 contribution bound).
 //
+// Fold an aggregate's FILTER (WHERE cond) into its value: value → CASE WHEN cond THEN value END
+// Fold an aggregate's FILTER (WHERE cond) into its value: value → CASE WHEN cond THEN value ELSE e.
+// This matches FILTER semantics while avoiding a separate filter clause, which mis-binds in DuckDB's
+// aggregate planner (the filter resolves to the value column) when the aggregate sits under a per-PU
+// pre-aggregation. The ELSE branch differs by aggregate:
+//   - SUM: ELSE 0. A non-matching row must contribute 0. Using NULL would make an all-non-matching
+//     PU's partial NULL, and the downstream greatest/least clip turns NULL into the *bound* (those
+//     functions ignore NULLs), inflating the sum.
+//   - COUNT: ELSE NULL, so non-matching rows are skipped (a 0 would be counted).
+// Returns the value unchanged when there is no filter.
+static unique_ptr<Expression> FoldFilterIntoValue(const BoundAggregateExpression &aggr, unique_ptr<Expression> value,
+                                                  bool else_zero) {
+	if (!aggr.filter) {
+		return value;
+	}
+	auto value_type = value->return_type;
+	auto case_expr = make_uniq<BoundCaseExpression>(value_type);
+	BoundCaseCheck check;
+	check.when_expr = aggr.filter->Copy();
+	check.then_expr = std::move(value);
+	case_expr->case_checks.push_back(std::move(check));
+	case_expr->else_expr = make_uniq<BoundConstantExpression>(else_zero ? Value::Numeric(value_type, 0)
+	                                                                    : Value(value_type)); // 0, or NULL of the type
+	return std::move(case_expr);
+}
+
 // Returns the per-aggregate sensitivity vector (one entry per current agg->expression) and sets
 // `per_pu_out` true when a per-PU pre-aggregation was inserted (so support counts PU groups).
 static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
@@ -890,18 +916,23 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 	lower_exprs.reserve(n);
 	for (idx_t i = 0; i < n; i++) {
 		auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-		if (IsCountAggregate(aggr)) {
-			is_count.push_back(true);
-			if (aggr.IsDistinct()) {
-				lower_exprs.push_back(agg->expressions[i]->Copy());
-			} else if (aggr.function.name == "count" && !aggr.children.empty()) {
-				lower_exprs.push_back(BindPlainAggregate(input, "count", aggr.children[0]->Copy()));
+		is_count.push_back(IsCountAggregate(aggr));
+		if (aggr.IsDistinct()) {
+			lower_exprs.push_back(agg->expressions[i]->Copy()); // filtered DISTINCT is rejected upstream
+		} else if (IsCountAggregate(aggr)) {
+			if (aggr.function.name == "count" && !aggr.children.empty()) {
+				lower_exprs.push_back(BindPlainAggregate(
+				    input, "count", FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/false)));
 			} else {
+				// COUNT(*): no value child, so a FILTER clause binds correctly — attach it directly.
 				lower_exprs.push_back(BindPlainAggregate(input, "count_star", nullptr));
+				if (aggr.filter) {
+					lower_exprs.back()->Cast<BoundAggregateExpression>().filter = aggr.filter->Copy();
+				}
 			}
 		} else { // sum
-			is_count.push_back(false);
-			lower_exprs.push_back(BindPlainAggregate(input, "sum", aggr.children[0]->Copy()));
+			lower_exprs.push_back(BindPlainAggregate(
+			    input, "sum", FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/true)));
 		}
 	}
 

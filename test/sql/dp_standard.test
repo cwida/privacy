@@ -144,6 +144,20 @@ SELECT SUM(amount) FROM orders;
 ----
 2250.000000
 
+# FILTER (WHERE ...) on a join must be applied to the per-PU partial, not dropped. Each user's 5
+# orders all carry amount = uid % 10, so amount > 5 keeps only the 40 users with uid % 10 in
+# {6,7,8,9}: SUM = 5 * (6+7+8+9) * 10 = 1500 (vs 2250 unfiltered).
+query I
+SELECT SUM(amount) FILTER (WHERE amount > 5) FROM orders;
+----
+1500.000000
+
+# COUNT(*) FILTER over the same join: 40 users * 5 rows = 200 (vs 500 unfiltered).
+query I
+SELECT COUNT(*) FILTER (WHERE amount > 5) FROM orders;
+----
+200
+
 # dp_standard AVG follows Google-style bounded mean shape: clip values into the
 # public bounded domain [0, dp_sum_bound], center around the midpoint before
 # SUM noise, divide by noised COUNT, then add the midpoint back.
