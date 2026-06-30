@@ -34,6 +34,9 @@ pac_metadata_*.json
 privacy_metadata_*.json
 *.json.bak
 
+# Paper sources — kept local only, not published to the repo
+paper_rewrite_materials/
+
 # Stray local files
 /true
 .codex
