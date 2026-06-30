@@ -648,8 +648,12 @@ SET dp_sass_avg_lower_bound = 0.0;
 statement ok
 SET dp_sass_avg_upper_bound = 500.0;
 
+# AVG no longer returns a data-dependent NULL on sparse input. Empty subsample lanes are filled
+# with the public midpoint of [dp_sass_avg_lower_bound, dp_sass_avg_upper_bound], so the populated-
+# lane count is data-independent and the release is always a (noised) value. Previously a table with
+# fewer than 32 populated lanes leaked group support by flipping the output to NULL.
 query I
-SELECT AVG(v) IS NULL FROM sass_users;
+SELECT AVG(v) IS NOT NULL FROM sass_users;
 ----
 true
 

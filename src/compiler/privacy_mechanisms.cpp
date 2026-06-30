@@ -1279,7 +1279,8 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
                                                   LogicalAggregate *agg, const vector<double> &epsilons,
                                                   const vector<double> &deltas, const vector<LogicalType> &output_types,
                                                   const vector<double> &lower_bounds,
-                                                  const vector<double> &upper_bounds, LogicalOperator *insert_above,
+                                                  const vector<double> &upper_bounds,
+                                                  const vector<double> &empty_defaults, LogicalOperator *insert_above,
                                                   const string &release_method, const vector<idx_t> &agg_positions) {
 	idx_t n_groups = agg->groups.size();
 	idx_t n_aggs = output_types.size();
@@ -1287,6 +1288,7 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 	D_ASSERT(deltas.size() == n_aggs);
 	D_ASSERT(lower_bounds.size() == n_aggs);
 	D_ASSERT(upper_bounds.size() == n_aggs);
+	D_ASSERT(empty_defaults.size() == n_aggs);
 	D_ASSERT(agg_positions.size() == n_aggs);
 	bool stability_query_mode = GetBooleanSetting(input.context, "dp_sass_stability_query_mode", false);
 	bool average_release = release_method == "average";
@@ -1321,6 +1323,9 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 		children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(sample_lanes)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(lower_bounds[ai])));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(upper_bounds[ai])));
+		// Per-kind public default used to fill empty lanes so the populated-lane count is
+		// data-independent (no NULL leak; fixed GUPT denominator).
+		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(empty_defaults[ai])));
 		const char *terminal = average_release ? "dp_gupt_mean_noise" : "dp_smooth_median_noise";
 		unique_ptr<Expression> noised = BindScalarLocal(input, terminal, std::move(children));
 		if (output_types[ai] != LogicalType::DOUBLE) {
@@ -1959,8 +1964,10 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	output_types.reserve(agg->expressions.size());
 	vector<double> lower_bounds;
 	vector<double> upper_bounds;
+	vector<double> empty_defaults; // public in-range value used to fill empty lanes (per aggregate kind)
 	lower_bounds.reserve(agg->expressions.size());
 	upper_bounds.reserve(agg->expressions.size());
+	empty_defaults.reserve(agg->expressions.size());
 	double k = static_cast<double>(n_original_aggs);
 	// Cross-group contribution bound C_u (dp_max_groups_contributed): one PU may affect up to
 	// C_u output groups, each released independently. By sequential composition that costs the PU
@@ -2014,6 +2021,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 			double output_bound = GetRequiredDpBound(input.context, "dp_sass_count_output_bound", "dp_sass");
 			lower_bounds.push_back(0.0);
 			upper_bounds.push_back(output_bound);
+			empty_defaults.push_back(0.0); // an empty subsample counts 0
 		} else if (name == "avg") {
 			double avg_lower = GetRequiredFiniteSetting(input.context, "dp_sass_avg_lower_bound", "dp_sass");
 			double avg_upper = GetRequiredFiniteSetting(input.context, "dp_sass_avg_upper_bound", "dp_sass");
@@ -2023,6 +2031,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 			}
 			lower_bounds.push_back(avg_lower);
 			upper_bounds.push_back(avg_upper);
+			empty_defaults.push_back((avg_lower + avg_upper) / 2.0); // no identity for mean → neutral midpoint
 		} else if (name == "min" || name == "max") {
 			double mm_lower = GetRequiredFiniteSetting(input.context, "dp_sass_minmax_lower_bound", "dp_sass");
 			double mm_upper = GetRequiredFiniteSetting(input.context, "dp_sass_minmax_upper_bound", "dp_sass");
@@ -2032,10 +2041,13 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 			}
 			lower_bounds.push_back(mm_lower);
 			upper_bounds.push_back(mm_upper);
+			// MIN identity is +∞ (→ clamp to upper); MAX identity is −∞ (→ clamp to lower).
+			empty_defaults.push_back(name == "min" ? mm_upper : mm_lower);
 		} else {
 			double output_bound = GetRequiredDpBound(input.context, "dp_sass_sum_output_bound", "dp_sass");
 			lower_bounds.push_back(-output_bound);
 			upper_bounds.push_back(output_bound);
+			empty_defaults.push_back(0.0); // an empty subsample sums to 0
 		}
 		epsilons.push_back(epsilon / budget_divisor);
 		deltas.push_back(delta / budget_divisor);
@@ -2067,7 +2079,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 
 	auto noise_proj =
 	    WrapSampleMedianProjection(input, plan, agg, epsilons, deltas, output_types, lower_bounds, upper_bounds,
-	                               projection_anchor, release_method, sample_output_positions);
+	                               empty_defaults, projection_anchor, release_method, sample_output_positions);
 	(void)noise_proj;
 
 #if PRIVACY_DEBUG
