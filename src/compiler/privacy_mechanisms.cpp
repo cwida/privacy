@@ -1011,27 +1011,6 @@ static LogicalFilter *ApplySupportFilter(OptimizerExtensionInput &input, unique_
 	return filter_ptr;
 }
 
-static LogicalFilter *ApplyAggregateNotNullFilter(unique_ptr<LogicalOperator> &plan, LogicalAggregate *agg,
-                                                  idx_t aggregate_pos) {
-	auto value_ref = make_uniq<BoundColumnRefExpression>(agg->types[agg->groups.size() + aggregate_pos],
-	                                                     ColumnBinding(agg->aggregate_index, aggregate_pos));
-	auto condition = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NOT_NULL, LogicalType::BOOLEAN);
-	condition->children.push_back(std::move(value_ref));
-
-	auto filter = make_uniq<LogicalFilter>();
-	filter->expressions.push_back(std::move(condition));
-
-	auto *slot = FindOperatorSlotByPointer(plan, agg);
-	if (!slot) {
-		throw InternalException("dp: could not locate aggregate slot for not-null filter");
-	}
-	filter->children.push_back(std::move(*slot));
-	filter->ResolveOperatorTypes();
-	auto *filter_ptr = filter.get();
-	*slot = std::move(filter);
-	return filter_ptr;
-}
-
 // ----------------------------------------------------------------------------
 // Wrap aggregate output — inserts LogicalProjection above `agg` with
 // dp_noise applied to each DP-target column, cast back to original type.
@@ -1391,8 +1370,7 @@ static DpSassContributionBounds GetDpSassContributionBounds(ClientContext &conte
 
 static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, LogicalAggregate *agg,
                                                unique_ptr<Expression> pu_hash_expr, int64_t count_bound,
-                                               int64_t group_bound, bool apply_support_filter,
-                                               double support_threshold) {
+                                               int64_t group_bound, bool apply_support_filter) {
 	auto &binder = input.optimizer.binder;
 	auto &old_aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
 	auto distinct_value = old_aggr.children[0]->Copy();
@@ -1538,17 +1516,15 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 	    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, ColumnBinding(distinct_proj_index, mask_proj_pos));
 	agg->children[0] = std::move(final_input);
 	vector<unique_ptr<Expression>> top_expressions;
-	top_expressions.reserve(1);
+	// expr[0] = the 64-counter mask, released via the smooth-sensitivity median. When partition
+	// selection is active, expr[1] = the per-group COUNT(DISTINCT pu) support (sum of the per-value
+	// markers), which the caller noises (Laplace C_u/ε_η) and τ-thresholds via ApplySupportFilter —
+	// the same projection-based path the generic aggregates use, so the noise is keyed on the group.
+	top_expressions.push_back(BindPlainAggregate(input, "as_sample_count_mask", std::move(merged_mask_ref)));
 	if (apply_support_filter) {
-		vector<unique_ptr<Expression>> threshold_children;
-		threshold_children.push_back(make_uniq<BoundColumnRefExpression>(
-		    agg->children[0]->types[support_proj_pos], ColumnBinding(distinct_proj_index, support_proj_pos)));
-		threshold_children.push_back(std::move(merged_mask_ref));
-		threshold_children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(support_threshold)));
-		top_expressions.push_back(
-		    BindPlainAggregate(input, "as_sample_count_mask_threshold", std::move(threshold_children)));
-	} else {
-		top_expressions.push_back(BindPlainAggregate(input, "as_sample_count_mask", std::move(merged_mask_ref)));
+		auto support_ref = make_uniq<BoundColumnRefExpression>(agg->children[0]->types[support_proj_pos],
+		                                                       ColumnBinding(distinct_proj_index, support_proj_pos));
+		top_expressions.push_back(BindPlainAggregate(input, "sum", std::move(support_ref)));
 	}
 	agg->expressions = std::move(top_expressions);
 	agg->ResolveOperatorTypes();
@@ -1679,14 +1655,14 @@ static unique_ptr<Expression> BuildSampleMedianAggregateRef(OptimizerExtensionIn
 
 static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, LogicalAggregate *agg,
                                            unique_ptr<Expression> pu_hash_expr, const DpSassContributionBounds &bounds,
-                                           bool apply_distinct_support_filter, double support_threshold) {
+                                           bool apply_distinct_support_filter) {
 	if (IsDpSampleCountDistinct(agg)) {
 		D_ASSERT(bounds.has_integer_count_bound);
 		int64_t count_bound = bounds.count_bound_integer;
 		int64_t group_bound =
 		    !agg->groups.empty() ? GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", "dp_sass") : 1;
 		RewriteDistinctCountToSampleMedian(input, agg, std::move(pu_hash_expr), count_bound, group_bound,
-		                                   apply_distinct_support_filter, support_threshold);
+		                                   apply_distinct_support_filter);
 		return;
 	}
 
@@ -1952,30 +1928,31 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	// Ungrouped queries have C_u = 1. This makes C_u enter the guarantee, not just filter rows.
 	int64_t group_bound =
 	    n_groups > 0 ? GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", "dp_sass") : 1;
-	double support_threshold = 0.0;
-	bool apply_support_filter = TryGetPrivacyMinGroupCount(input.context, support_threshold);
 
-	// τ-thresholding budget (Algorithm 2, SIMD-SAA^udp). Partition selection privatizes the
-	// auxiliary η = COUNT(DISTINCT pu) per group (the count_star appended below counts the pu∪G
-	// pre-aggregation rows, so it equals the distinct-PU count) with pure ε_η-DP Laplace noise,
-	// then releases only groups with η' > τ. We reserve ε_η = ε/(c+1), leaving each of the c
-	// smooth-sensitivity cells ε' = (ε−ε_η)/(c·C_u) = ε/((c+1)·C_u); δ_η = δ/(c+1) bounds the
-	// chance a group survives solely because of one PU. Without thresholding the c cells split
-	// ε/(c·C_u) as before.
-	double tau = support_threshold;
+	// DP partition selection (Algorithm 2, SIMD-SAA^udp). The set of released group keys is itself
+	// data-dependent, so for any grouped query we privatize the auxiliary η = COUNT(DISTINCT pu)
+	// per group with pure ε_η-DP Laplace noise and release only groups with η' ≥ τ. No user setting
+	// is needed: τ is computed from the budget. Ungrouped queries have a single, data-independent
+	// output row and need no partition selection.
+	//
+	// Budget: reserve ε_η = ε/(c+1) (δ_η = δ/(c+1)) for partition selection, leaving each of the c
+	// smooth-sensitivity cells ε' = (ε−ε_η)/(c·C_u) = ε/((c+1)·C_u). Ungrouped queries split
+	// ε/(c·C_u) as before (no η).
+	bool apply_support_filter = n_groups > 0;
+	double tau = 0.0;
 	double support_noise_scale = 0.0;
 	if (apply_support_filter) {
 		if (!(delta > 0.0)) {
 			throw InvalidInputException(
-			    "dp_sass: privacy_min_group_count (DP partition selection) requires dp_delta > 0; the pure-ε "
-			    "'average' release cannot privately threshold an unbounded group domain");
+			    "dp_sass: grouped queries require dp_delta > 0 for DP partition selection (the released set of "
+			    "group keys is data-dependent). The pure-ε 'average' release cannot privately threshold an "
+			    "unbounded group domain — set dp_delta, or remove the GROUP BY.");
 		}
 		double eps_eta = epsilon / (k + 1.0);
 		double delta_eta = delta / (k + 1.0);
 		double cu = static_cast<double>(group_bound);
 		// Google DP / Wilson et al. threshold: P[releasing a group backed by a single PU] ≤ δ_η.
-		double tau_dp = 1.0 - (cu * std::log(2.0 - 2.0 * std::pow(1.0 - delta_eta, 1.0 / cu))) / eps_eta;
-		tau = std::max(tau_dp, support_threshold); // honor a stricter admin floor; never drop below the DP τ
+		tau = 1.0 - (cu * std::log(2.0 - 2.0 * std::pow(1.0 - delta_eta, 1.0 / cu))) / eps_eta;
 		bool noise_enabled = GetBooleanSetting(input.context, "privacy_noise", true);
 		// One PU changes the per-group distinct count in up to C_u groups by 1 → L1 sensitivity C_u.
 		support_noise_scale = noise_enabled ? (cu / eps_eta) : 0.0;
@@ -2032,14 +2009,16 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 
 	bool distinct_support_filter = apply_support_filter && IsDpSampleCountDistinct(agg);
 	RewriteAggregateToSampleMedian(input, agg, std::move(hash_infos[0].hash_expr), contribution_bounds,
-	                               distinct_support_filter, support_threshold);
+	                               distinct_support_filter);
 
 	LogicalOperator *projection_anchor = agg;
 	if (distinct_support_filter) {
-		projection_anchor = ApplyAggregateNotNullFilter(plan, agg, 0);
+		// The distinct rewrite exposed the per-group COUNT(DISTINCT pu) support as expr[1]; release
+		// position 0 (the counter mask) stays in sample_output_positions. Same noised-τ filter as below.
+		projection_anchor = ApplySupportFilter(input, plan, agg, 1, tau, support_noise_scale);
 	} else if (apply_support_filter) {
 		// η = COUNT(DISTINCT pu): count_star over the pu∪G pre-aggregation equals the distinct-PU
-		// count per group. ApplySupportFilter adds Laplace(C_u/ε_η) noise and keeps groups with η' > τ.
+		// count per group. ApplySupportFilter adds Laplace(C_u/ε_η) noise and keeps groups with η' ≥ τ.
 		idx_t support_pos = agg->expressions.size();
 		agg->expressions.push_back(BindPlainAggregate(input, "count_star", nullptr));
 		agg->ResolveOperatorTypes();

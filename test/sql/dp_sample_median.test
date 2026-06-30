@@ -270,9 +270,9 @@ WHERE p_brand = 'Brand#22';
 statement ok
 SET dp_delta = 1e-6;
 
-statement ok
-SET privacy_min_group_count = 64;
-
+# COUNT(DISTINCT) grouped queries auto-apply DP partition selection with a computed τ (there is no
+# privacy_min_group_count knob). At ε = 1 the threshold τ (~29) sits below each group's distinct-PU
+# support, so both groups survive (noise off → deterministic support ≥ τ).
 query II rowsort
 SELECT p_brand, supplier_cnt
 FROM (
@@ -284,8 +284,10 @@ FROM (
 Brand#11	7
 Brand#22	1
 
+# With a tiny ε the computed τ far exceeds every group's distinct-PU support, so partition
+# selection suppresses all groups.
 statement ok
-SET privacy_min_group_count = 65;
+SET dp_epsilon = 0.001;
 
 query II rowsort
 SELECT p_brand, supplier_cnt
@@ -297,7 +299,7 @@ FROM (
 ----
 
 statement ok
-SET privacy_min_group_count = NULL;
+SET dp_epsilon = 1.0;
 
 statement error
 SELECT COUNT(*)
@@ -790,22 +792,25 @@ FROM range(200) t(i);
 statement ok
 ALTER TABLE sass_group_events ADD PRIVACY_LINK (uid) REFERENCES sass_group_users(uid);
 
-# DP grouped queries use an admin-set support threshold when privacy_min_group_count is set.
-# The average release remains pure-epsilon and does not require dp_delta.
+# The pure-ε 'average' release needs no dp_delta — for an UNGROUPED query, which has a single
+# data-independent output row and thus no partition selection.
 statement ok
 SET dp_sass_release = 'average';
 
 statement ok
 SET dp_delta = NULL;
 
-query II
-SELECT g, COUNT(*) IS NOT NULL
-FROM sass_group_events
-GROUP BY g
-ORDER BY g
-LIMIT 1;
+query I
+SELECT COUNT(*) IS NOT NULL FROM sass_group_events;
 ----
-0	true
+true
+
+# A GROUPED query always applies DP partition selection (the released key set is data-dependent),
+# which needs δ_η. So a grouped query under the pure-ε average release without dp_delta is rejected.
+statement error
+SELECT g, COUNT(*) FROM sass_group_events GROUP BY g;
+----
+dp_delta
 
 statement ok
 SET dp_sass_release = 'median';
@@ -819,9 +824,9 @@ SET privacy_noise = false;
 statement ok
 SET dp_max_groups_contributed = 1;
 
-statement ok
-SET privacy_min_group_count = 30;
-
+# Grouped queries auto-apply DP partition selection (computed τ ≈ 29 at ε = 1); group 0 has 40
+# distinct PUs so it survives (noise off → deterministic support ≥ τ), while the 160 singleton
+# groups (1 PU each) are suppressed.
 query II rowsort
 SELECT g, CAST(c IS NOT NULL AS INTEGER)
 FROM (
@@ -832,12 +837,9 @@ FROM (
 ----
 0	1
 
-# Partition selection now derives τ from the Google-DP formula over C_u, ε_η, δ_η
-# (Algorithm 2 SIMD-SAA^udp), so τ scales with the privacy budget instead of using the
-# raw privacy_min_group_count floor directly. With a tiny ε the DP threshold τ far exceeds
-# group 0's 40 distinct PUs, so even this dense group is suppressed (noise off →
-# deterministic count ≥ τ). Under the old raw-threshold behavior it cleared the floor of 30
-# and was released.
+# τ derives from the Google-DP formula over C_u, ε_η, δ_η (Algorithm 2 SIMD-SAA^udp), so it scales
+# with the privacy budget. With a tiny ε the threshold τ far exceeds group 0's 40 distinct PUs, so
+# even this dense group is suppressed (noise off → deterministic support ≥ τ).
 statement ok
 SET dp_epsilon = 0.01;
 
