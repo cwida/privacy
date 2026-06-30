@@ -832,6 +832,27 @@ FROM (
 ----
 0	1
 
+# Partition selection now derives τ from the Google-DP formula over C_u, ε_η, δ_η
+# (Algorithm 2 SIMD-SAA^udp), so τ scales with the privacy budget instead of using the
+# raw privacy_min_group_count floor directly. With a tiny ε the DP threshold τ far exceeds
+# group 0's 40 distinct PUs, so even this dense group is suppressed (noise off →
+# deterministic count ≥ τ). Under the old raw-threshold behavior it cleared the floor of 30
+# and was released.
+statement ok
+SET dp_epsilon = 0.01;
+
+query II rowsort
+SELECT g, c
+FROM (
+    SELECT g, COUNT(*) AS c
+    FROM sass_group_events
+    GROUP BY g
+);
+----
+
+statement ok
+SET dp_epsilon = 1.0;
+
 # Smoke test: the exact SmoothSensitivityMedian (Algorithm 1 + JList) bounded path
 # with noise ON. The 64 lane values have a large gap just ABOVE the median (off-center),
 # which the exact NRS envelope charges even though a centered window could miss it. With a

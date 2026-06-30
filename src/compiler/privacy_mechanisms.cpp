@@ -1952,9 +1952,37 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	// Ungrouped queries have C_u = 1. This makes C_u enter the guarantee, not just filter rows.
 	int64_t group_bound =
 	    n_groups > 0 ? GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", "dp_sass") : 1;
-	double budget_divisor = k * static_cast<double>(group_bound);
 	double support_threshold = 0.0;
 	bool apply_support_filter = TryGetPrivacyMinGroupCount(input.context, support_threshold);
+
+	// τ-thresholding budget (Algorithm 2, SIMD-SAA^udp). Partition selection privatizes the
+	// auxiliary η = COUNT(DISTINCT pu) per group (the count_star appended below counts the pu∪G
+	// pre-aggregation rows, so it equals the distinct-PU count) with pure ε_η-DP Laplace noise,
+	// then releases only groups with η' > τ. We reserve ε_η = ε/(c+1), leaving each of the c
+	// smooth-sensitivity cells ε' = (ε−ε_η)/(c·C_u) = ε/((c+1)·C_u); δ_η = δ/(c+1) bounds the
+	// chance a group survives solely because of one PU. Without thresholding the c cells split
+	// ε/(c·C_u) as before.
+	double tau = support_threshold;
+	double support_noise_scale = 0.0;
+	if (apply_support_filter) {
+		if (!(delta > 0.0)) {
+			throw InvalidInputException(
+			    "dp_sass: privacy_min_group_count (DP partition selection) requires dp_delta > 0; the pure-ε "
+			    "'average' release cannot privately threshold an unbounded group domain");
+		}
+		double eps_eta = epsilon / (k + 1.0);
+		double delta_eta = delta / (k + 1.0);
+		double cu = static_cast<double>(group_bound);
+		// Google DP / Wilson et al. threshold: P[releasing a group backed by a single PU] ≤ δ_η.
+		double tau_dp = 1.0 - (cu * std::log(2.0 - 2.0 * std::pow(1.0 - delta_eta, 1.0 / cu))) / eps_eta;
+		tau = std::max(tau_dp, support_threshold); // honor a stricter admin floor; never drop below the DP τ
+		bool noise_enabled = GetBooleanSetting(input.context, "privacy_noise", true);
+		// One PU changes the per-group distinct count in up to C_u groups by 1 → L1 sensitivity C_u.
+		support_noise_scale = noise_enabled ? (cu / eps_eta) : 0.0;
+		PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] partition selection: eps_eta=" + std::to_string(eps_eta) +
+		                    " tau=" + std::to_string(tau) + " noise_scale=" + std::to_string(support_noise_scale));
+	}
+	double budget_divisor = (apply_support_filter ? (k + 1.0) : k) * static_cast<double>(group_bound);
 	vector<double> epsilons;
 	vector<double> deltas;
 	epsilons.reserve(agg->expressions.size());
@@ -2010,10 +2038,12 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	if (distinct_support_filter) {
 		projection_anchor = ApplyAggregateNotNullFilter(plan, agg, 0);
 	} else if (apply_support_filter) {
+		// η = COUNT(DISTINCT pu): count_star over the pu∪G pre-aggregation equals the distinct-PU
+		// count per group. ApplySupportFilter adds Laplace(C_u/ε_η) noise and keeps groups with η' > τ.
 		idx_t support_pos = agg->expressions.size();
 		agg->expressions.push_back(BindPlainAggregate(input, "count_star", nullptr));
 		agg->ResolveOperatorTypes();
-		projection_anchor = ApplySupportFilter(input, plan, agg, support_pos, support_threshold);
+		projection_anchor = ApplySupportFilter(input, plan, agg, support_pos, tau, support_noise_scale);
 	}
 
 	auto noise_proj =
