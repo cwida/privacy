@@ -405,8 +405,14 @@ void SmoothMedianJList(const std::array<double, SMOOTH_MEDIAN_N + 2> &x, double 
 
 static double SmoothMedianSensitivityExact(const std::array<double, 64> &values, double beta, int sample_lanes,
                                            double lower_bound, double upper_bound) {
-	// One PU can move up to `sample_lanes` lane answers, so the element-level NRS envelope is
-	// reweighted to PU-distance via beta_eff = beta / sample_lanes (beta-smooth in PU distance).
+	// One PU can move up to `sample_lanes` lane answers, so a PU-neighbor at PU-distance d is an
+	// element-distance ≤ sample_lanes·d change. Reweighting the element-level NRS envelope by
+	// beta_eff = beta / sample_lanes makes the result (a) beta-smooth in PU distance —
+	// S(D) ≤ e^{beta_eff·(sample_lanes·d)}·S(D') = e^{beta·d}·S(D') — and (b) a conservative upper
+	// bound on the true PU-level smooth sensitivity: the PU terms are the subset k = sample_lanes·d of
+	// max_k e^{-beta_eff·k}·LS^(k)_elem, and maxing over all k only grows it. So it over-noises if
+	// anything. (Also valid with the public empty-lane padding: padded values stay in [L,Λ], so a
+	// PU-neighbor still differs in ≤ sample_lanes bracketed positions.)
 	double beta_eff = beta / static_cast<double>(sample_lanes);
 	std::array<double, SMOOTH_MEDIAN_N + 2> x;
 	x[0] = lower_bound;
@@ -641,14 +647,14 @@ static void DpAggregateFunction(DataChunk &args, ExpressionState &state, Vector 
 	}
 }
 
-// GUPT-style release: the MEAN of the valid lane (block) answers, clipped to [lower,upper], plus
-// pure-ε Laplace noise (no δ). Each PU's hash sets `sample_lanes` of the 64 lane bits, so removing
-// one PU can change up to `sample_lanes` lane answers, each by at most (upper-lower). The mean over
-// `valid_count` lanes therefore has global sensitivity sample_lanes*(upper-lower)/valid_count, and
-// the Laplace scale is that divided by ε. (This is the overlapping-subsample analogue of GUPT's
-// disjoint-block mean, mirroring how the median path uses beta_eff = beta/sample_lanes.)
-// GUPT mean release: mean of the valid lane answers clipped to the public [lower_bound, upper_bound]
-// envelope, plus pure-ε Laplace noise.
+// GUPT-style release (pure-ε, no δ): the MEAN of all 64 lane (block) answers clipped to the public
+// [lower,upper] envelope, plus Laplace noise. Every lane contributes — empty subsamples get a public
+// in-range default — so the block count is a fixed, data-independent 64 (not the data-dependent
+// number of populated lanes). Each PU's hash sets `sample_lanes` of the 64 lane bits, so removing one
+// PU changes at most `sample_lanes` lane answers, each by at most (upper-lower); the mean over 64
+// therefore has global sensitivity sample_lanes*(upper-lower)/64, and the Laplace scale is that
+// divided by ε. This is the overlapping-subsample analogue of GUPT's disjoint-block mean (they
+// coincide at sample_lanes = 1), mirroring how the median path reweights via beta_eff = beta/sample_lanes.
 static bool GuptMeanNoiseRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
                              const PAC_FLOAT *child_values, double epsilon, int sample_lanes_raw, double lower_bound,
                              double upper_bound, double empty_default, bool noise_enabled, uint64_t seed, double &out) {
