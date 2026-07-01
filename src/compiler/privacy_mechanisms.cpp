@@ -168,6 +168,10 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 		}
 	}
 
+	// Fail-OPEN heuristic: a table with no privacy annotations (no PRIVACY_KEY/LINK, no protected
+	// columns) is treated as a public side input and joined in without privacy accounting. This relies
+	// on the analyst annotating every private table — an UNannotated private table would silently get
+	// no protection. (Matches Google DP's "public side tables allowed", but the discipline is required.)
 	auto is_public_side_table = [&](const string &table_name) {
 		auto meta_it = check.table_metadata.find(table_name);
 		if (meta_it == check.table_metadata.end()) {
@@ -1813,6 +1817,10 @@ static void FinalizeDPLaplace(OptimizerExtensionInput &input, unique_ptr<Logical
 				    "released set of group keys is data-dependent). Ungrouped dp_standard queries remain pure ε-DP.");
 			}
 			bool is_join = chain.tables.size() >= 2;
+			// C_u = max output groups one PU can affect. On a join a PU owns many fact rows spanning
+			// groups → dp_max_groups_contributed. On a single PU table we assume one row per PU (unique
+			// PRIVACY_KEY) → each PU is in exactly one group → C_u = 1. (A single PU table with a
+			// non-unique PRIVACY_KEY, i.e. multiple rows per PU across groups, would need C_u > 1.)
 			double cu =
 			    is_join
 			        ? static_cast<double>(GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", mech))
@@ -1827,11 +1835,15 @@ static void FinalizeDPLaplace(OptimizerExtensionInput &input, unique_ptr<Logical
 			                    " tau=" + std::to_string(tau) + " noise_scale=" + std::to_string(support_noise_scale));
 		}
 	} else {
+		// dp_elastic: row-level FLEX baseline (public/enumerated partitions). privacy_min_group_count
+		// here is a RAW, un-noised admin support filter — NOT DP partition selection. Under FLEX's
+		// public-partition assumption it's a utility convenience; a row-level-DP-safe version would need
+		// a noised τ with C_u = 1 (Dandan's row-level branch). Deferred — dp_elastic is the FLEX baseline.
 		double support_threshold = 0.0;
 		bool want_support = TryGetPrivacyMinGroupCount(input.context, support_threshold);
 		apply_support_filter = want_support && allow_group_suppression;
 		tau = support_threshold;
-		support_gate = support_threshold; // > 0 whenever want_support (raw threshold, no noise)
+		support_gate = support_threshold; // raw threshold, no noise
 	}
 	auto support_pos = AddSupportAggregate(input, plan, agg, chain, apply_support_filter ? support_gate : 0.0, per_pu);
 	idx_t n_dp_aggs = support_pos.IsValid() ? support_pos.GetIndex() : agg->expressions.size();
