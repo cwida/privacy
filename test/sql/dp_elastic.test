@@ -238,11 +238,11 @@ SELECT abs(SUM(v)) < 200 FROM signed_u;
 ----
 true
 
-# MIN still rejected
+# MIN still rejected (elastic sensitivity is defined only for counting queries)
 statement error
 SELECT MIN(id) FROM u;
 ----
-only COUNT, SUM, and AVG
+MIN/MAX are not supported
 
 statement ok
 SET dp_sum_bound = 100.0;

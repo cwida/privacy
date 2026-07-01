@@ -297,7 +297,10 @@ static void CheckDPAggregateNode(LogicalAggregate *agg, const string &mechanism_
 static bool IsCountAggregate(const BoundAggregateExpression &aggr);
 
 static LogicalAggregate *CheckDPAggregates(unique_ptr<LogicalOperator> &plan, const string &mechanism_name) {
-	bool allow_min_max = mechanism_name == "dp_sass";
+	// dp_sass handles MIN/MAX via sample-and-aggregate; dp_standard via bounded global sensitivity
+	// (values clipped to [dp_minmax_lower_bound, dp_minmax_upper_bound], sensitivity = U-L). dp_elastic
+	// cannot: elastic sensitivity is defined only for counting queries, not order statistics.
+	bool allow_min_max = mechanism_name == "dp_sass" || mechanism_name == "dp_standard";
 	vector<LogicalAggregate *> aggs;
 	FindAllAggregates(plan, aggs);
 	if (aggs.size() != 1) {
@@ -328,6 +331,12 @@ static void CheckDPAggregateNode(LogicalAggregate *agg, const string &mechanism_
 		}
 		bool is_sum_avg = name == "sum" || name == "avg";
 		bool is_min_max = name == "min" || name == "max";
+		if (is_min_max && !allow_min_max) {
+			throw InvalidInputException(
+			    mechanism_name +
+			    ": MIN/MAX are not supported (elastic sensitivity is defined only for counting queries). "
+			    "Use dp_standard or dp_sass for MIN/MAX.");
+		}
 		if (!is_count && !is_sum_avg && !(allow_min_max && is_min_max)) {
 			string supported = allow_min_max ? "COUNT, SUM, AVG, MIN, and MAX" : "COUNT, SUM, and AVG";
 			throw InvalidInputException(mechanism_name + ": only " + supported + " are supported (got '" +
@@ -665,6 +674,18 @@ static double GetRequiredFiniteSetting(ClientContext &context, const string &set
 	return bound;
 }
 
+// Public domain [L, U] for MIN/MAX under dp_standard. Values are clipped to this range, so the
+// global sensitivity of MIN/MAX (change from removing/adding one PU) is exactly U - L.
+static std::pair<double, double> GetDpMinMaxBounds(ClientContext &context, const string &mechanism_name) {
+	double lower = GetRequiredFiniteSetting(context, "dp_minmax_lower_bound", mechanism_name);
+	double upper = GetRequiredFiniteSetting(context, "dp_minmax_upper_bound", mechanism_name);
+	if (lower >= upper) {
+		throw InvalidInputException(mechanism_name + ": dp_minmax_lower_bound must be smaller than "
+		                                             "dp_minmax_upper_bound");
+	}
+	return {lower, upper};
+}
+
 // Elastic Laplace scale = sensitivity / epsilon; sensitivity = es for COUNT, es * sum_bound for SUM
 static double ElasticSensitivity(const BoundAggregateExpression &aggr, double sum_bound, double es) {
 	const string &name = aggr.function.name;
@@ -906,6 +927,23 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 	                          ? GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", mech)
 	                          : 1;
 
+	// MIN/MAX: values are clipped to the public domain [mm_lower, mm_upper], so removing/adding one PU
+	// moves the extremum by at most the range mm_range = mm_upper - mm_lower (per affected group).
+	bool has_min_max = false;
+	for (auto &e : agg->expressions) {
+		string nm = StringUtil::Lower(e->Cast<BoundAggregateExpression>().function.name);
+		if (nm == "min" || nm == "max") {
+			has_min_max = true;
+			break;
+		}
+	}
+	double mm_lower = 0.0;
+	double mm_upper = 0.0;
+	if (has_min_max) {
+		std::tie(mm_lower, mm_upper) = GetDpMinMaxBounds(input.context, mech);
+	}
+	double mm_range = mm_upper - mm_lower;
+
 	idx_t n = agg->expressions.size();
 	vector<double> sens;
 	sens.reserve(n);
@@ -914,11 +952,28 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 		if (has_sum) {
 			ClipSumInputs(input, agg, sum_bound, &avg_infos);
 		}
+		// Clip MIN/MAX inputs to the public domain so the extremum's sensitivity is bounded by mm_range.
+		if (has_min_max) {
+			for (idx_t i = 0; i < n; i++) {
+				auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
+				string nm = StringUtil::Lower(aggr.function.name);
+				if ((nm == "min" || nm == "max") && !aggr.children.empty()) {
+					auto child_type = aggr.children[0]->return_type;
+					aggr.children[0] = ClipToBounds(input, std::move(aggr.children[0]), mm_lower, mm_upper, child_type);
+				}
+			}
+			agg->ResolveOperatorTypes();
+		}
 		for (idx_t i = 0; i < n; i++) {
 			auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-			sens.push_back(IsCountAggregate(aggr)
-			                   ? 1.0
-			                   : StandardSumContributionBound(i, avg_infos, false, sum_bound, count_bound));
+			string nm = StringUtil::Lower(aggr.function.name);
+			if (nm == "min" || nm == "max") {
+				sens.push_back(mm_range); // single table: one row per PU → one group affected (group_bound = 1)
+			} else if (IsCountAggregate(aggr)) {
+				sens.push_back(1.0);
+			} else {
+				sens.push_back(StandardSumContributionBound(i, avg_infos, false, sum_bound, count_bound));
+			}
 		}
 		return sens;
 	}
@@ -946,6 +1001,11 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 					lower_exprs.back()->Cast<BoundAggregateExpression>().filter = aggr.filter->Copy();
 				}
 			}
+		} else if (StringUtil::Lower(aggr.function.name) == "min" || StringUtil::Lower(aggr.function.name) == "max") {
+			// Per-PU MIN/MAX partial. else_zero=false → filtered-out rows become NULL, which MIN/MAX skip.
+			lower_exprs.push_back(BindPlainAggregate(input, StringUtil::Lower(aggr.function.name),
+			                                         FoldFilterIntoValue(aggr, aggr.children[0]->Copy(),
+			                                                             /*else_zero=*/false)));
 		} else { // sum
 			lower_exprs.push_back(BindPlainAggregate(
 			    input, "sum", FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/true)));
@@ -955,17 +1015,28 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 	auto pre = InsertPuPreAggregation(input, agg, std::move(lower_exprs), std::move(pu_key));
 	ApplyMaxGroupsContributed(input, agg, pre, group_bound);
 
-	// Rewrite each top aggregate to SUM(clip(per-PU partial, bound)).
+	// Rewrite each top aggregate: SUM/COUNT → SUM(clip(partial)); MIN/MAX → MIN/MAX(clip(partial)).
 	for (idx_t i = 0; i < n; i++) {
+		// agg->expressions[i] still holds the original aggregate until overwritten below.
+		string nm = StringUtil::Lower(agg->expressions[i]->Cast<BoundAggregateExpression>().function.name);
+		bool pos_min_max = nm == "min" || nm == "max";
 		auto lower_type = pre.lower_agg->types[pre.num_original_groups + 1 + i];
 		unique_ptr<Expression> lower_ref =
 		    make_uniq<BoundColumnRefExpression>(lower_type, ColumnBinding(pre.lower_agg_index, i));
-		double bound =
-		    is_count[i] ? count_bound : StandardSumContributionBound(i, avg_infos, true, sum_bound, count_bound);
-		double lo = is_count[i] ? 0.0 : -bound; // counts are non-negative
-		auto clipped = ClipToBounds(input, std::move(lower_ref), lo, bound, lower_type);
-		agg->expressions[i] = BindPlainAggregate(input, "sum", std::move(clipped));
-		sens.push_back(bound * static_cast<double>(group_bound));
+		if (pos_min_max) {
+			// Clip the per-PU partial to [mm_lower, mm_upper], then take the overall MIN/MAX. Removing one
+			// PU shifts the extremum by at most mm_range per group → L1 sensitivity mm_range · group_bound.
+			auto clipped = ClipToBounds(input, std::move(lower_ref), mm_lower, mm_upper, lower_type);
+			agg->expressions[i] = BindPlainAggregate(input, nm, std::move(clipped));
+			sens.push_back(mm_range * static_cast<double>(group_bound));
+		} else {
+			double bound =
+			    is_count[i] ? count_bound : StandardSumContributionBound(i, avg_infos, true, sum_bound, count_bound);
+			double lo = is_count[i] ? 0.0 : -bound; // counts are non-negative
+			auto clipped = ClipToBounds(input, std::move(lower_ref), lo, bound, lower_type);
+			agg->expressions[i] = BindPlainAggregate(input, "sum", std::move(clipped));
+			sens.push_back(bound * static_cast<double>(group_bound));
+		}
 	}
 	agg->ResolveOperatorTypes();
 	return sens;
@@ -1133,6 +1204,22 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 	vector<unique_ptr<Expression>> proj_exprs;
 	proj_exprs.reserve(n_groups + n_aggs);
 
+	// MIN/MAX (dp_standard) releases are clamped back to the public domain after noise — DP-free
+	// post-processing that keeps outputs in [mm_lower, mm_upper].
+	bool has_min_max = false;
+	for (idx_t ai = 0; ai < n_aggs; ai++) {
+		string nm = StringUtil::Lower(agg->expressions[ai]->Cast<BoundAggregateExpression>().function.name);
+		if (nm == "min" || nm == "max") {
+			has_min_max = true;
+			break;
+		}
+	}
+	double mm_lower = 0.0;
+	double mm_upper = 0.0;
+	if (has_min_max) {
+		std::tie(mm_lower, mm_upper) = GetDpMinMaxBounds(input.context, "dp_standard");
+	}
+
 	for (idx_t gi = 0; gi < n_groups; gi++) {
 		proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(agg_types[gi], ColumnBinding(group_idx, gi)));
 	}
@@ -1176,6 +1263,12 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 		noise_children.push_back(std::move(scale_expr));
 		noise_children.push_back(std::move(nonce));
 		unique_ptr<Expression> noised = BindScalarLocal(input, "dp_noise", std::move(noise_children));
+		if (has_min_max) {
+			string nm = StringUtil::Lower(agg->expressions[ai]->Cast<BoundAggregateExpression>().function.name);
+			if (nm == "min" || nm == "max") {
+				noised = ClipToBounds(input, std::move(noised), mm_lower, mm_upper, LogicalType::DOUBLE);
+			}
+		}
 		if (out_type != LogicalType::DOUBLE) {
 			noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), out_type);
 		}

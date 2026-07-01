@@ -336,6 +336,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "Per-PU group contribution bound for dp_standard/dp_sass grouped joins. "
 	                             "This is the max number of output groups one privacy unit may affect.",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_minmax_lower_bound",
+	                             "Public domain lower bound L for MIN/MAX under dp_standard. Values are clipped to "
+	                             "[L, U]; global sensitivity is U-L. Required when a MIN/MAX aggregate is present.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption(
+	    "dp_minmax_upper_bound",
+	    "Public domain upper bound U for MIN/MAX under dp_standard (see dp_minmax_lower_bound).", LogicalType::DOUBLE,
+	    Value(LogicalType::DOUBLE));
 	db.config.AddExtensionOption("dp_sass_count_output_bound",
 	                             "Public output-domain upper bound for dp_sass COUNT/COUNT(DISTINCT) sample answers.",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));

@@ -391,5 +391,55 @@ WHERE EXISTS (
 ----
 dp_standard: lateral or correlated subqueries are not supported by DP mechanisms
 
+# --- MIN/MAX (dp_standard) ---
+# Values are clipped to the public domain [dp_minmax_lower_bound, dp_minmax_upper_bound], so global
+# sensitivity is the range U-L; the noised output is clamped back into that domain. dp_elastic rejects
+# MIN/MAX (elastic sensitivity is defined only for counting queries — see dp_elastic.test).
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET dp_minmax_lower_bound = 0.0;
+
+statement ok
+SET dp_minmax_upper_bound = 100.0;
+
+# Single table: values -10, 10, 200 clip into [0, 100] → MIN = 0, MAX = 100.
+query II
+SELECT MIN(v), MAX(v) FROM avg_values;
+----
+0.0	100.0
+
+# Join: each user's amount is constant (uid % 10); per-PU MIN/MAX = that value, overall MIN = 0,
+# MAX = 9 (both inside [0, 100], so clipping is a no-op here).
+query II
+SELECT MIN(amount), MAX(amount) FROM orders JOIN u ON orders.uid = u.id;
+----
+0.0	9.0
+
+# MIN/MAX require the domain bounds.
+statement ok
+SET dp_minmax_upper_bound = NULL;
+
+statement error
+SELECT MAX(v) FROM avg_values;
+----
+dp_minmax_upper_bound must be set
+
+# Lower bound must be strictly below the upper bound.
+statement ok
+SET dp_minmax_upper_bound = 100.0;
+
+statement ok
+SET dp_minmax_lower_bound = 100.0;
+
+statement error
+SELECT MIN(v) FROM avg_values;
+----
+dp_minmax_lower_bound must be smaller than
+
+statement ok
+SET dp_minmax_lower_bound = 0.0;
+
 statement ok
 SET privacy_noise = true;
