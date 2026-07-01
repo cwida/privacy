@@ -54,11 +54,20 @@ Three flavors, decided by what counts as a "neighboring dataset":
   use this. This is what PAC's PU concept already encodes — one PU = one user
   = one row in the PU table plus all linked rows across PRIVACY_LINK joins.
 
-For a PU+LINK system, **user-level (unbounded at the PU)** is the natural choice.
-The neighboring relation is "remove all rows belonging to one PU." Elastic
-sensitivity = ∏(max-frequency along the join chain) — already counts per-PU
-contribution correctly. This is what the current `dp_elastic_compiler.cpp`
-implements via `ExtractFKChain`/`ComputeMfK`.
+For a PU+LINK system, **user-level (unbounded at the PU)** — neighbor = "remove
+all rows belonging to one PU" — is the natural *goal*. `dp_standard` and `dp_sass`
+achieve it via per-PU contribution bounding (clip each PU's total, cap groups per
+PU via `dp_max_groups_contributed`, and private partition selection).
+
+**Caveat — elastic sensitivity is NOT user-level.** FLEX's ∏(max-frequency along
+the join chain) bounds a *single-tuple* change (row-level), not a whole PU's
+contribution, so `dp_elastic` (`ExtractFKChain`/`ComputeMfK`) is **row-level DP** —
+the FLEX baseline, exactly as Google DP (Wilson et al.) treats FLEX in its
+comparison. A user-level extension would need extra per-user statistics (e.g. the
+max rows one user contributes per table) folded into a new sensitivity analysis
+and privacy proof — future work, not something to claim today. Accordingly,
+`dp_elastic` follows FLEX's public/enumerated-partition model and does not do
+private partition selection (which `dp_standard`/`dp_sass` do).
 
 ### Elastic sensitivity (Flex / Johnson, Near, Song 2018)
 
