@@ -124,7 +124,6 @@ static void ConfigureNestedConnection(ClientContext &context, Connection &conn) 
 	    "dp_sass_minmax_lower_bound",
 	    "dp_sass_minmax_upper_bound",
 	    "dp_sass_release",
-	    "dp_sass_exact_balanced_lanes",
 	    "dp_sample_lanes",
 	    "privacy_min_group_count",
 	    "privacy_seed",

@@ -1994,8 +1994,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	}
 	CheckDPAggregateNode(agg, "dp_sass", true);
 
-	if (GetDpSampleLanes(input.context) == 1 && pu_setup.pu_names.size() == 1 &&
-	    GetBooleanSetting(input.context, "dp_sass_exact_balanced_lanes", true)) {
+	if (GetDpSampleLanes(input.context) == 1 && pu_setup.pu_names.size() == 1) {
 		const auto &pu_table_name = pu_setup.pu_names[0];
 		auto meta_it = check.table_metadata.find(pu_table_name);
 		if (meta_it == check.table_metadata.end() || meta_it->second.pks.empty()) {

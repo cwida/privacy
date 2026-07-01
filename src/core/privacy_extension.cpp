@@ -407,9 +407,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "[INTERNAL] Record dp_sass aggregate-list stability for "
 	                             "dp_sass_stability_query",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
-	db.config.AddExtensionOption("dp_sass_exact_balanced_lanes",
-	                             "[INTERNAL] Assign dp_sass sample_lanes=1 PUs to exactly balanced lane sizes",
-	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	// When false, unsupported operators skip privacy compilation instead of throwing
 	db.config.AddExtensionOption(
 	    "pac_conservative_mode",
