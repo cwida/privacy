@@ -2,9 +2,14 @@
 
 The privacy extension optimizer hook transforms standard SQL aggregate plans into privacy-preserving equivalents. It operates as a **pre-optimizer**, running before DuckDB's built-in optimizers (join ordering, filter pushdown, column lifetime, compressed materialization), so the transformed plan benefits from all standard optimizations automatically.
 
-The active mode (`privacy_mode`) determines which compiler runs:
+The active mode (`privacy_mode`) determines which compiler runs. This document covers
+the **`pac`** compiler; the DP modes are documented under [`../dp/`](../dp/dp_mechanisms.md).
 - **`pac`** (default): Proceeds in two phases matching Algorithm 1 in the PAC paper — top-down PU join insertion + hash derivation, then bottom-up aggregate replacement and categorical rewriting.
-- **`dp_elastic`**: Extracts the FK join chain, computes elastic sensitivity, clips SUM inputs per-PU, injects Laplace noise.
+- **`dp_standard`**: Global-sensitivity DP (Google DP) — per-PU contribution clipping, Laplace noise; private partition selection for grouped queries.
+- **`dp_elastic`**: FLEX elastic sensitivity — extracts the FK join chain, computes the smoothed join-frequency envelope, clips SUM inputs per-row, injects Laplace noise.
+- **`dp_sass`**: Sample-and-aggregate (this paper's SIMD-SAA) — per-lane aggregates, median (smooth-sensitivity) or GUPT mean release.
+
+See [`../dp/dp_mechanisms.md`](../dp/dp_mechanisms.md) for the DP modes.
 
 ## Query Classification
 
@@ -54,17 +59,17 @@ Once the PU (or its FK proxy) is reachable from every aggregate:
    - FK proxy: `priv_hash(hash(fk_col))` (e.g., `priv_hash(hash(o_custkey))`)
 3. **Insert a projection** above the hash source scan that computes the hash as an extra column
 4. **Propagate** the hash column through all intermediate operators (projections, joins, filters) between the hash source and the aggregate
-5. **Replace** each standard aggregate with its PAC equivalent: `SUM(x)` becomes `priv_noised_sum(hash, x)`, `COUNT(*)` becomes `priv_noised_count(hash)`, etc.
+5. **Replace** each standard aggregate with its PAC equivalent: `SUM(x)` becomes `as_noised_sum(hash, x)`, `COUNT(*)` becomes `as_noised_count(hash)`, etc.
 6. For **multiple PUs**, AND all hashes together: `hash1 AND hash2` — a tuple is in sub-sample j only if ALL its PUs have bit j set
 
-> **PAC aggregate naming:** base functions (`priv_count`, `priv_sum`, ...) return `LIST<T>` — 64 per-sample counters. `pac_noised(list<T>):T` applies noise and returns a scalar. The `priv_noised_<aggr>()` variants (e.g., `priv_noised_count`) are fused shortcuts: `priv_noised_count(hash)` = `pac_noised(priv_count(hash))`. Similarly, `priv_select` and `priv_filter` consume counter lists for categorical queries.
+> **PAC aggregate naming:** base functions (`as_count`, `as_sum`, ...) return `LIST<T>` — 64 per-sample counters. `as_noised(list<T>):T` applies noise and returns a scalar. The `as_noised_<aggr>()` variants (e.g., `as_noised_count`) are fused shortcuts: `as_noised_count(hash)` = `as_noised(as_count(hash))`. Similarly, `priv_select` and `priv_filter` consume counter lists for categorical queries.
 
 ### Example: Direct PU scan
 ```sql
 -- Original
 SELECT COUNT(*) FROM customer WHERE c_mktsegment = 'BUILDING'
 -- Rewritten (conceptual)
-SELECT priv_noised_count(priv_hash(hash(c_custkey)))
+SELECT as_noised_count(priv_hash(hash(c_custkey)))
 FROM customer WHERE c_mktsegment = 'BUILDING'
 ```
 
@@ -74,8 +79,8 @@ FROM customer WHERE c_mktsegment = 'BUILDING'
 SELECT l_returnflag, SUM(l_quantity) FROM lineitem
 WHERE l_shipdate <= '1998-09-02' GROUP BY l_returnflag
 -- Step 1: join orders to reach PU FK column
--- Step 2: hash o_custkey, replace SUM with priv_noised_sum
-SELECT l_returnflag, priv_noised_sum(priv_hash(hash(o_custkey)), l_quantity)
+-- Step 2: hash o_custkey, replace SUM with as_noised_sum
+SELECT l_returnflag, as_noised_sum(priv_hash(hash(o_custkey)), l_quantity)
 FROM lineitem JOIN orders ON l_orderkey = o_orderkey
 WHERE l_shipdate <= '1998-09-02' GROUP BY l_returnflag
 ```
@@ -147,7 +152,7 @@ Top-K queries (`ORDER BY agg LIMIT k`) get special treatment via a dedicated pos
 1. Convert PAC aggregates to `_counters` variants (return all 64 counter values as `LIST<FLOAT>`)
 2. Insert a **mean projection** (`priv_mean(counters)`) for ordering — gives the true aggregate mean
 3. **TopN** selects top-k groups based on the true mean
-4. Insert a **noised projection** (`pac_noised(counters)`) above TopN — applies noise only to selected rows, cast back to original type
+4. Insert a **noised projection** (`as_noised(counters)`) above TopN — applies noise only to selected rows, cast back to original type
 
 Two paths depending on plan structure:
 - **Path A** (intermediate projections, e.g., string decompress): preserves intermediate projections, adds `priv_mean` passthrough columns
@@ -159,8 +164,8 @@ Two paths depending on plan structure:
 
 **Aggregate DISTINCT** (e.g., `COUNT(DISTINCT col)`) is rewritten:
 
-- `COUNT(DISTINCT x)` is handled via pre-aggregation: the compiler inserts a `GROUP BY x` with `bit_or(key_hash)` before the standard `priv_noised_count` aggregate
-- `SUM(DISTINCT x)` similarly uses `GROUP BY x` with `bit_or(key_hash)` before `priv_noised_sum`
+- `COUNT(DISTINCT x)` is handled via pre-aggregation: the compiler inserts a `GROUP BY x` with `bit_or(key_hash)` before the standard `as_noised_count` aggregate
+- `SUM(DISTINCT x)` similarly uses `GROUP BY x` with `bit_or(key_hash)` before `as_noised_sum`
 
 The compiler detects when an aggregate expression is marked as distinct and inserts the pre-aggregation step automatically.
 
@@ -168,30 +173,30 @@ The compiler detects when an aggregate expression is marked as distinct and inse
 
 Categorical queries arise when a (scalar or correlated) subquery produces a PAC aggregate result that is used outside of a direct aggregation context — typically in projection expressions or filter predicates. The categorical rewriter (Phase 2) handles these by converting the inner PAC aggregate to its `_counters` variant (returning all 64 per-sample values as `LIST<DOUBLE>`) and then applying one of three terminal wrappers depending on how the result is consumed.
 
-### Case 1: `pac_noised` — Projection Expressions
+### Case 1: `as_noised` — Projection Expressions
 
-When a PAC aggregate result appears in a **projection expression** (arithmetic over one or more aggregates), the rewriter builds a `list_transform` lambda that evaluates the expression across all 64 possible worlds, then reduces to a scalar with `pac_noised`.
+When a PAC aggregate result appears in a **projection expression** (arithmetic over one or more aggregates), the rewriter builds a `list_transform` lambda that evaluates the expression across all 64 possible worlds, then reduces to a scalar with `as_noised`.
 
 For expressions involving multiple aggregates, `list_zip` combines the counter lists so the lambda can access all values per world.
 
 **TPC-H Q08** illustrates this: the query computes `SUM(CASE nation='BRAZIL' THEN volume ELSE 0 END) / SUM(volume)` — a ratio of two aggregates:
 
 ```sql
--- Q08: pac_noised wraps a projection expression over two aggregates
+-- Q08: as_noised wraps a projection expression over two aggregates
 SELECT o_year,
-       CAST(pac_noised(
+       CAST(as_noised(
               list_transform(
                 list_zip(
-                  list_transform(priv_sum(pac_pu, brazil_volume),
+                  list_transform(as_sum(pac_pu, brazil_volume),
                                  lambda y: CAST(y AS DECIMAL(18,2))),
-                  list_transform(priv_sum(pac_pu, volume),
+                  list_transform(as_sum(pac_pu, volume),
                                  lambda y: CAST(y AS DECIMAL(18,2)))),
                 lambda x: CAST(x[1] / x[2] AS FLOAT))) AS FLOAT) AS mkt_share
 FROM ...
 GROUP BY o_year
 ```
 
-The inner `list_transform` calls cast counters back to their original types; the outer lambda computes the division for each of the 64 worlds; `pac_noised` then reduces the 64-element list to a single noised scalar.
+The inner `list_transform` calls cast counters back to their original types; the outer lambda computes the division for each of the 64 worlds; `as_noised` then reduces the 64-element list to a single noised scalar.
 
 ### Case 2: `priv_filter` — Filters on Non-Sensitive Tuples
 
@@ -209,14 +214,14 @@ SELECT s_name, s_address
     SELECT ps_suppkey FROM partsupp
      WHERE ps_partkey IN (SELECT p_partkey FROM part WHERE p_name LIKE 'forest%')
        AND priv_filter_gt(ps_availqty * 2,
-             (SELECT priv_sum(priv_hash(hash(o_custkey)), l_quantity)
+             (SELECT as_sum(priv_hash(hash(o_custkey)), l_quantity)
                 FROM lineitem JOIN orders ON l_orderkey = o_orderkey
                WHERE l_partkey = ps_partkey AND l_suppkey = ps_suppkey
                  AND l_shipdate >= DATE '1994-01-01'
                  AND l_shipdate < DATE '1995-01-01')))
 ```
 
-`priv_filter_gt` compares the non-sensitive value `ps_availqty * 2` against each of the 64 counter values of `priv_sum` and returns a UBIGINT mask; the row passes if the mask is non-zero (majority vote).
+`priv_filter_gt` compares the non-sensitive value `ps_availqty * 2` against each of the 64 counter values of `as_sum` and returns a UBIGINT mask; the row passes if the mask is non-zero (majority vote).
 
 ### Case 3: `priv_select` — Filters With a Sensitive Aggregation Above
 
@@ -228,13 +233,13 @@ The rewriter emits specialized variants (`priv_select_lt`, `priv_select_gt`, etc
 
 ```sql
 -- Q17: priv_select wraps a filter that feeds into an outer PAC aggregate
-SELECT priv_noised_sum(pac_pu, l_extendedprice) / 7.0 AS avg_yearly
+SELECT as_noised_sum(pac_pu, l_extendedprice) / 7.0 AS avg_yearly
   FROM (SELECT priv_select_lt(
                  priv_hash(hash(o_custkey)),
                  lineitem.l_quantity * 5,
                  (SELECT priv_div(
-                           priv_sum(priv_hash(hash(o_sub.o_custkey)), l_sub.l_quantity),
-                           priv_count(priv_hash(hash(o_sub.o_custkey)), l_sub.l_quantity))
+                           as_sum(priv_hash(hash(o_sub.o_custkey)), l_sub.l_quantity),
+                           as_count(priv_hash(hash(o_sub.o_custkey)), l_sub.l_quantity))
                     FROM lineitem AS l_sub JOIN orders AS o_sub ON ...
                    WHERE l_sub.l_partkey = part.p_partkey)) AS pac_pu,
                l_extendedprice
@@ -243,4 +248,4 @@ SELECT priv_noised_sum(pac_pu, l_extendedprice) / 7.0 AS avg_yearly
  WHERE pac_pu <> 0
 ```
 
-`priv_select_lt` takes the outer hash, the non-sensitive comparand (`l_quantity * 5`), and the inner aggregate's counter list. It returns a new UBIGINT hash where bit j is set only if both the original sub-sample includes the tuple AND the comparison holds in world j. The outer `priv_noised_sum` then aggregates using this combined hash. The `WHERE pac_pu <> 0` applies majority-vote filtering.
+`priv_select_lt` takes the outer hash, the non-sensitive comparand (`l_quantity * 5`), and the inner aggregate's counter list. It returns a new UBIGINT hash where bit j is set only if both the original sub-sample includes the tuple AND the comparison holds in world j. The outer `as_noised_sum` then aggregates using this combined hash. The `WHERE pac_pu <> 0` applies majority-vote filtering.

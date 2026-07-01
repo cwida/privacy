@@ -244,12 +244,12 @@ ALTER PU TABLE t ADD PROTECTED (col2);
 ALTER PU TABLE t DROP PROTECTED (col2);
 ```
 
-`CREATE TABLE AS SELECT` from a PU table automatically propagates privacy metadata to the new table (see [syntax docs](docs/pac/syntax.md#derived-tables-create-table-as-select)).
+`CREATE TABLE AS SELECT` from a PU table automatically propagates privacy metadata to the new table (see [syntax docs](docs/syntax.md#derived-tables-create-table-as-select)).
 
 ## Documentation
 
-For implementation details, see the [docs/](docs/) folder: \
-[Parser](docs/pac/syntax.md) | [Query Operators](docs/pac/query_operators.md) | [PAC Functions](docs/pac/functions.md) | [Runtime Checks](docs/pac/runtime_checks.md) | [Tests](docs/test/README.md) | [Benchmarks](docs/benchmark/README.md)
+For implementation details, see the [docs/](docs/README.md) folder: \
+[Syntax](docs/syntax.md) | [SIMD aggregates](docs/simd-asa/aggregates.md) | [Query Operators](docs/pac/query_operators.md) | [DP mechanisms](docs/dp/dp_mechanisms.md) | [Runtime Checks](docs/pac/runtime_checks.md) | [Tests](docs/test/README.md) | [Benchmarks](docs/benchmark/README.md)
 
 ## Literature
 

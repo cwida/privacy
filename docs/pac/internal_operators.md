@@ -16,43 +16,43 @@ The rewriter (`pac_topk_rewriter.cpp`) runs as a post-optimizer. It walks the pl
 
 1. A `LogicalTopN` node
 2. With a `LogicalAggregate` child (possibly through intermediate projections like `__internal_decompress_string`)
-3. Where at least one ORDER BY expression references a PAC aggregate (`priv_sum`, `priv_count`, `priv_avg`, `priv_min`, `priv_max`)
+3. Where at least one ORDER BY expression references a PAC aggregate (`as_sum`, `as_count`, `as_avg`, `as_min`, `as_max`)
 
 ### Plan transformation
 
 **Before:**
 ```
 TopN(limit=K, order_by=[noised_agg])
-└── Aggregate(priv_sum → noised scalar)
+└── Aggregate(as_sum → noised scalar)
 ```
 
 **After (expansion = 1):**
 ```
 OrderBy(order_by=[noised_agg])
-└── NoisedProj(pac_noised on K selected rows)
+└── NoisedProj(as_noised on K selected rows)
     └── TopN(limit=K, order_by=[true_mean])
         └── MeanProj(priv_mean for ordering)
-            └── Aggregate(priv_sum → LIST<FLOAT>)
+            └── Aggregate(as_sum → LIST<FLOAT>)
 ```
 
 **After (expansion > 1, e.g. 3.0):**
 ```
 TopN(limit=K, order_by=[noised_agg])
-└── NoisedProj(pac_noised on ceil(3*K) candidates)
+└── NoisedProj(as_noised on ceil(3*K) candidates)
     └── TopN(limit=ceil(3*K), order_by=[true_mean])
         └── MeanProj(priv_mean for ordering)
-            └── Aggregate(priv_sum → LIST<FLOAT>)
+            └── Aggregate(as_sum → LIST<FLOAT>)
 ```
 
 ### Step by step
 
-1. **Convert aggregates to `_counters` variants.** Each PAC aggregate (e.g. `priv_sum`) is rebound to its counters version (`priv_sum`), which returns `LIST<FLOAT>` (64 per-sample counters) instead of a noised scalar.
+1. **Convert aggregates to `_counters` variants.** Each PAC aggregate (e.g. `as_sum`) is rebound to its counters version (`as_sum`), which returns `LIST<FLOAT>` (64 per-sample counters) instead of a noised scalar.
 
 2. **Insert MeanProj.** A new projection is inserted between the aggregate and TopN. For each PAC aggregate column, it adds a `priv_mean(counters)` column that computes the mean of the 64 counters. This is the "true" aggregate value (pre-noise), used for ranking.
 
 3. **Rewrite TopN ORDER BY.** Order expressions that referenced PAC aggregates are rewritten to reference the `priv_mean` columns instead.
 
-4. **Insert NoisedProj.** A projection above TopN applies `pac_noised()` to each counter list, producing the final noised scalar. Non-PAC columns pass through unchanged.
+4. **Insert NoisedProj.** A projection above TopN applies `as_noised()` to each counter list, producing the final noised scalar. Non-PAC columns pass through unchanged.
 
 5. **Re-sort.** Since noise changes the ranking, a final ORDER BY (or TopN if expansion > 1) re-sorts the output by the noised values.
 
@@ -84,7 +84,7 @@ Before:
   Aggregate: COUNT(DISTINCT col) GROUP BY [g]
 
 After:
-  Outer Aggregate: priv_count(combined_hash) GROUP BY [g]
+  Outer Aggregate: as_count(combined_hash) GROUP BY [g]
   └── Inner Aggregate: bit_or(key_hash) GROUP BY [g, col]
       └── Original child
 ```
@@ -98,8 +98,8 @@ The compiler splits the plan into separate branches and joins them on the group 
 ```
 Projection (reorder outputs)
 └── Join (on group keys)
-    ├── Branch 1 (DISTINCT col_A): bit_or + priv_count GROUP BY [g, col_A]
-    └── Branch 2 (non-DISTINCT): priv_sum GROUP BY [g]
+    ├── Branch 1 (DISTINCT col_A): bit_or + as_count GROUP BY [g, col_A]
+    └── Branch 2 (non-DISTINCT): as_sum GROUP BY [g]
 ```
 
 ---
@@ -130,7 +130,7 @@ So the PAC rewrite is the same transformation PAC already does for GROUP BY aggr
 
 ```sql
 -- PAC rewritten (orders linked to PU customer via o_custkey)
-SELECT *, priv_sum(priv_hash(o_custkey), o_totalprice) OVER (PARTITION BY o_orderstatus) FROM orders;
+SELECT *, as_sum(priv_hash(o_custkey), o_totalprice) OVER (PARTITION BY o_orderstatus) FROM orders;
 ```
 
 For tables not directly linked to the PU (e.g. lineitem → orders → customer), PAC adds the FK join as usual:
@@ -140,7 +140,7 @@ For tables not directly linked to the PU (e.g. lineitem → orders → customer)
 SELECT *, SUM(l_quantity) OVER (PARTITION BY l_returnflag) FROM lineitem;
 
 -- PAC rewritten: join for FK path, swap aggregate inside window
-SELECT li.*, priv_sum(priv_hash(o_custkey), l_quantity) OVER (PARTITION BY l_returnflag)
+SELECT li.*, as_sum(priv_hash(o_custkey), l_quantity) OVER (PARTITION BY l_returnflag)
 FROM lineitem li JOIN orders ON l_orderkey = o_orderkey;
 ```
 
@@ -148,7 +148,7 @@ FROM lineitem li JOIN orders ON l_orderkey = o_orderkey;
 
 Returning all rows alongside a noised aggregate does not leak additional information beyond the aggregate itself. Whether the noised value is returned as 3 rows (GROUP BY) or repeated across 1.5M rows (window), the attacker learns the same 3 numbers. The broadcasting is purely presentational.
 
-The existing `PROTECTED` column mechanism ensures that protected columns cannot appear outside of aggregates in the SELECT list. This check works identically for window functions — if `o_totalprice` is protected, it can only appear inside `priv_sum(...) OVER (...)`, not as a raw column in the output.
+The existing `PROTECTED` column mechanism ensures that protected columns cannot appear outside of aggregates in the SELECT list. This check works identically for window functions — if `o_totalprice` is protected, it can only appear inside `as_sum(...) OVER (...)`, not as a raw column in the output.
 
 ### Detection
 
@@ -168,7 +168,7 @@ The rewrite happens in the same pass as regular aggregate rewriting. When the pl
 
 1. For each window aggregate expression, apply the same transformation as GROUP BY aggregates:
    - Ensure the hash column (from PU key or FK path) is projected into the window operator's input
-   - Replace `SUM(x)` → `priv_sum(hash, x)`, `COUNT(*)` → `priv_count(hash)`, etc. inside the `BoundWindowExpression`
+   - Replace `SUM(x)` → `as_sum(hash, x)`, `COUNT(*)` → `as_count(hash)`, etc. inside the `BoundWindowExpression`
 2. If FK joins are needed (PU table not in the plan), add them below the `LogicalWindow` node — same as for `LogicalAggregate`
 
 No new aggregate functions, no new noise mechanisms, no plan decomposition.

@@ -86,9 +86,9 @@ with `steepness = 3`. At the threshold z-score, P(keep) ≈ 50%. Well above thre
 **Privacy safety**: This is safe post-processing of the already-noised output. By the data processing inequality, any function of a differentially private output is at least as private. The sigmoid decision uses independent random coins (from the same seeded RNG stream), not the underlying data.
 
 **Scope**: Utility NULLing applies to all PAC aggregate finalize paths:
-- `priv_noised_sum`, `priv_noised_count`, `priv_noised_min`, `priv_noised_max`
-- `priv_noised_clip_sum`, `priv_noised_clip_min`, `priv_noised_clip_max` (when `priv_clip_support` is also active)
-- Categorical terminals: `priv_noised`, `priv_noised_div`
+- `as_noised_sum`, `as_noised_count`, `as_noised_min`, `as_noised_max`
+- `as_noised_clip_sum`, `as_noised_clip_min`, `as_noised_clip_max` (when `priv_clip_support` is also active)
+- Categorical terminals: `as_noised`, `as_noised_div`
 
 **Configuration**:
 ```sql
@@ -110,7 +110,7 @@ When `pac_hash_repair=true` (default), `priv_hash` repairs its output to have **
 
 ### Bound Pruning Stability (MIN/MAX)
 
-`priv_min` and `priv_max` maintain a global bound `g` (worst extreme across all 64 counters):
+`as_min` and `as_max` maintain a global bound `g` (worst extreme across all 64 counters):
 - For MAX: `g = min_j(max_value[j])` — the minimum of all maximums
 - For MIN: `g = max_j(min_value[j])` — the maximum of all minimums
 
@@ -120,7 +120,7 @@ This optimization works on all distributions **except** monotonically increasing
 
 ### Two-Sided Sum Stability
 
-`priv_sum` keeps separate positive and negative counter arrays. This prevents cancellation when summing mixed-sign data:
+`as_sum` keeps separate positive and negative counter arrays. This prevents cancellation when summing mixed-sign data:
 
 - Without two-sided: positive and negative values cancel within each counter, collapsing totals to near-zero, destroying variance, and inflating `z^2` to ~210 (unusable)
 - With two-sided: `result[j] = 2 * (pos[j] - neg[j])`, the counter hierarchy preserves natural spread. `z^2` normalizes to ~0.004, `var_ratio` to ~1.0
