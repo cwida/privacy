@@ -1,14 +1,9 @@
 # DP mechanisms — implementation reference
 
-This note documents how the three **differential-privacy** modes of the extension
-are implemented, and how the code maps to the SIMD-ASA paper and to the DP
-literature. It is written for a reader who knows DP; it points at the code only
-lightly (`file — Function`) and leans on the paper ("this implements Algorithm 2,
-line N") and on Google DP / FLEX / GUPT / Nissim et al. for the parts that are not
-this paper's contribution.
-
-The privacy mode is selected by a single setting, `SET privacy_mode = '…'`. This
-document only covers the DP modes (`dp_standard`, `dp_elastic`, `dp_sass`).
+Implementation reference for the extension's three **differential-privacy** modes
+(`dp_standard`, `dp_elastic`, `dp_sass`), selected via `SET privacy_mode = '…'`, and
+their correspondence to the SIMD-ASA paper and the DP literature. Source references
+are given as `file — Function`.
 
 ---
 
@@ -28,15 +23,16 @@ sensitivity is derived and in the neighbor relation they protect:
 |---|---|---|---|---|---|
 | `dp_standard` | pure ε (ungrouped) / (ε,δ) (grouped) | **user** | global (per-PU contribution clipped to a constant) | private by default | Google DP (Wilson et al. 2020) |
 | `dp_elastic`  | (ε,δ) | **row** | smooth elastic sensitivity `2·SES_β` over join max-frequencies | public / enumerated (FLEX) | FLEX (Johnson, Near & Song 2018) |
-| `dp_sass`     | (ε,δ) (median) / pure ε (mean) | **user** | smooth sensitivity of the per-lane median | private by default | **this paper** (SIMD-SAA^udp) |
+| `dp_sass`     | (ε,δ) (median) / pure ε (mean) | **user** | smooth sensitivity of the per-lane median | private by default | smooth-sensitivity sample-and-aggregate over SIMD aggregates (SIMD-SAA^udp) |
 
 ---
 
 ## 2. Mapping to the paper and literature
 
-- **`dp_sass` is the paper.** It implements **Algorithm 2 (SIMD-SAA^udp compiler)**,
-  the `ss_noised` subroutine, and **Theorem 4.1** (user-level (ε,δ)-DP). §11 walks
-  the algorithm line by line.
+- **`dp_sass`** is our implementation of smooth-sensitivity DP over a sample-and-aggregate
+  decomposition built on the SIMD stochastic aggregates. It realises **Algorithm 2
+  (SIMD-SAA^udp compiler)**, the `ss_noised` subroutine, and **Theorem 4.1** (user-level
+  (ε,δ)-DP) from the SIMD-ASA paper. §11 walks the algorithm line by line.
 - **`dp_standard`** is **Google DP** — the bounded-user-contribution SQL mechanism of
   *Wilson et al., "Differentially Private SQL with Bounded User Contribution"* (PoPETs
   2020). It is not in this paper; it is the standard global-sensitivity baseline.
@@ -52,16 +48,23 @@ and `CompileDPSampleMedianQuery`.
 
 ## 3. The DP checker and rejected queries
 
+A **foreign-key (FK) path** is the chain of join edges that connects a table
+referenced in the query to the PU table, following the `PRIVACY_LINK` foreign keys
+declared in the schema (e.g. `lineitem → orders → customer`, where `customer` is the
+PU). The path is **linear** when it is a simple chain of one-to-many joins with no
+branching, so that every tuple maps to exactly one PU. This is what lets the compiler
+attribute each contribution to a single privacy unit.
+
 Before any rewrite, a shared structural check runs
 (`src/metadata/privacy_compatibility_check.cpp`, and `CheckDPAggregates` /
 `CheckDPAggregateNode` in `privacy_mechanisms.cpp`). It accepts a single aggregation
-over a linear FK path to the PU and rejects everything it cannot analyse, failing
+over such a linear FK path to the PU and rejects everything it cannot analyse, failing
 loudly rather than releasing something unproven:
 
 - **More than one aggregate node** (i.e. an aggregate over another aggregate's output
-  — nested/`E`-type queries). This is exactly the paper's restriction: `T^udp`
-  **excludes the expression type `E`** (aggregate-in-predicate / categorical). Such
-  queries are rejected, not silently mishandled.
+  — nested/`E`-type queries). This matches the restriction in the SIMD-ASA paper: the
+  `T^udp` query class **excludes the expression type `E`** (aggregate-in-predicate /
+  categorical). Such queries are rejected, not silently mishandled.
 - **Protected columns in `GROUP BY` or `HAVING`** (a protected value would drive the
   released key set / a post-aggregation filter).
 - **Unsupported aggregate functions.** `dp_standard`/`dp_elastic` support
@@ -89,7 +92,6 @@ loudly rather than releasing something unproven:
 | `dp_sass_release` | `'median'` (smooth-sensitivity, (ε,δ)) or `'average'` (GUPT mean, pure ε) | release rule |
 | `dp_sass_count_output_bound` / `dp_sass_sum_output_bound` | public output domain `[L,Λ]` for COUNT/SUM lane answers | `L_i, Λ_i` |
 | `dp_sass_avg_lower/upper_bound`, `dp_sass_minmax_lower/upper_bound` | public output domain for AVG / MIN-MAX | `L_i, Λ_i` |
-| `dp_sass_exact_balanced_lanes` | use the disjoint balanced-lane assignment when `dp_sample_lanes = 1` | — |
 | `privacy_noise` | `false` zeroes all noise (deterministic testing) | — |
 | `privacy_seed` | RNG seed for reproducible noise | — |
 | `privacy_min_group_count` | **`dp_elastic` only**: a raw admin support filter (not DP; see §10) | — |
@@ -175,11 +177,23 @@ partition selection (§10).
 ## 8. Contribution bounding and what we estimate
 
 **Bounding (all modes).** Per-PU value contribution is clipped to the public domain
-(`greatest(least(v, Λ), L)`), and one PU is capped to `C_u` output groups by a
-row-number/dense-rank window (`ApplyMaxGroupsContributed`) so it enters the guarantee
-rather than merely filtering rows. On a join, `dp_standard` first **pre-aggregates per
-PU** (`InsertPuPreAggregation`, grouping by the PU-adjacent FK) and clips each PU's
-partial; `dp_elastic` clips per row instead.
+(`greatest(least(v, Λ), L)`), and one PU is capped to `C_u` output groups so the cap
+enters the guarantee rather than merely filtering rows. On a join, `dp_standard` first
+**pre-aggregates per PU** (`InsertPuPreAggregation`, grouping by the PU-adjacent FK) and
+clips each PU's partial; `dp_elastic` clips per row instead.
+
+**How `C_u` is enforced (low level).** After per-PU pre-aggregation each input row is
+one `(PU, group)` partial. `ApplyMaxGroupsContributed` wraps that stream in a single
+`LogicalWindow` + `LogicalFilter` (`BuildRankCapFilter`): a `ROW_NUMBER()` **partitioned
+by the PU key** and **ordered by `hash(PU, group columns)`**, keeping only rows with
+`row_number ≤ C_u`. Ordering by a hash makes the retained subset a deterministic,
+data-independent per-PU sample of at most `C_u` groups (not "the first `C_u` by value").
+`ROW_NUMBER` compiles to a per-partition top-K of capacity `C_u`, so `C_u` must stay
+small. `COUNT(DISTINCT)` uses the same primitive but with **two** stacked caps instead
+of one (see §13): a `DENSE_RANK` over the group columns capped at `C_u` (at most `C_u`
+groups per PU) and a `ROW_NUMBER` over the distinct value capped at `dp_count_bound`
+(at most `dp_count_bound` distinct values per `(PU, group)`) — the same factored
+clipping `dp_standard` uses, which avoids one giant `C_u·dp_count_bound` top-K.
 
 **What is estimated vs. public.**
 - `dp_standard`: **nothing data-dependent** — sensitivity is the public bound times
@@ -235,17 +249,23 @@ Song 2018) and its follow-up Chorus.
 
 ---
 
-## 11. `dp_sass` — SIMD-SAA^udp (the paper)
+## 11. `dp_sass` — smooth-sensitivity sample-and-aggregate over SIMD aggregates (SIMD-SAA^udp)
 
-`CompileDPSampleMedianQuery`. This is Algorithm 2. Each PU is hashed into sample
-**lanes** of a fixed `m = 64`; per lane we compute the aggregate on that subsample,
-then release either the **median** of the 64 lane answers (smooth-sensitivity Laplace,
-(ε,δ)) or their **mean** (GUPT-style, pure ε).
+`CompileDPSampleMedianQuery`. This realises Algorithm 2. Each PU is hashed into sample
+**lanes**; per lane we compute the aggregate on that subsample, then release either the
+**median** of the lane answers (smooth-sensitivity Laplace, (ε,δ)) or their **mean**
+(GUPT-style, pure ε).
 
-**Membership function (paper's `H(pu) mod m`).** With `dp_sample_lanes = 1` and
-`dp_sass_exact_balanced_lanes` (the paper's setting) each PU is assigned to exactly
-one lane by a balanced, disjoint projection (`GetOrInsertBalancedSampleLaneProjection`)
-— disjoint subsamples, as GUPT/the paper assume.
+> **Two "lanes" to keep apart.** There are always **`m = 64` lanes** (fixed) — the
+> release is the median/mean over these 64. The setting **`dp_sample_lanes`** (default
+> `1`) is *not* this count; it is how many of the 64 lanes each **PU** is placed into
+> (its per-PU spread). The name is misleading: `dp_sample_lanes = 1` still means 64
+> lanes, each PU in one of them.
+
+**Membership function (paper's `H(pu) mod m`).** With `dp_sample_lanes = 1` (the
+default) each PU is assigned to exactly one lane by a balanced, disjoint projection
+(`GetOrInsertBalancedSampleLaneProjection`) — disjoint subsamples, as GUPT/the paper
+assume.
 
 > **Note — lanes are not disjoint when `dp_sample_lanes > 1`.** For `sample_lanes > 1`
 > a PU is hashed into up to `sample_lanes` lanes by `DpSampleHash`
@@ -316,18 +336,57 @@ smooth sensitivity, same NRS `β`.
 into the value (`CASE WHEN cond THEN x END`) rather than kept as a separate filter, so
 it survives the per-PU rewrite (`FoldFilterIntoValue`).
 
+**`COUNT(DISTINCT)` in `dp_sass` (low level).** `RewriteDistinctCountToSampleMedian`
+builds a three-stage plan. (1) An **inner aggregate** groups by `[groups…, PU, distinct
+value]` and computes `bit_or(dp_sample_mask(pu_hash))` — `dp_sample_mask` maps the PU to
+its lane bitmask, so each distinct `(group, PU, value)` row records *which of the 64
+lanes that PU occupies*. (2) The **contribution caps** above it (the two `BuildRankCapFilter`
+windows from §8) bound each PU to `C_u` groups and `dp_count_bound` distinct values per
+`(PU, group)`. (3) A **merge aggregate** groups by `[groups…, distinct value]` and
+`bit_or`s the per-PU masks, yielding, for each distinct value, the set of lanes in which
+it appeared; the terminal then counts distinct values per lane (a popcount across the 64
+bits) to get 64 lane counts, and releases their median/mean. Per-lane distinct counting
+is thus a `bit_or`-of-lane-masks reduction, not 64 separate `COUNT(DISTINCT)`s.
+
 ---
 
 ## 14. NULL handling
 
-- **No data-dependent NULL from sparse groups.** A `dp_sass` aggregate produces 64
-  lane answers; an *empty* subsample would naturally be NULL (for `AVG`/`MIN`/`MAX`)
-  or 0 (for `COUNT`/`SUM`). Because the number of populated lanes is data-dependent,
-  emitting NULL for "too few populated lanes" would leak group support. Instead every
-  empty lane is filled with a **public, in-range default** (per aggregate kind:
-  `COUNT`/`SUM` → 0, `MIN` → Λ, `MAX` → L, `AVG` → midpoint), so the populated-lane
-  count is a data-independent 64 and the release is always a numeric value. This is
-  the GUPT "fixed number of blocks, bounded block outputs" property.
+### Empty-lane filling (`dp_sass`)
+
+A `dp_sass` aggregate computes 64 lane answers and releases the median (or mean) of
+those 64. Some lanes can be **empty** — no PU was assigned to that lane, or everything
+in it was filtered out. An empty lane has no natural answer: an empty `COUNT`/`SUM` is
+`0`, but an empty `AVG`/`MIN`/`MAX` is undefined (`NULL`, i.e. ±∞).
+
+The danger is that the *number* of non-empty lanes is **data-dependent** — a group with
+3 PUs populates far fewer of the 64 lanes than a group with 3000. If we released "the
+median over just the non-empty lanes," that effective sample size would itself be a
+signal about the group's support, and it is not covered by the noise calibration — a
+leak.
+
+So instead of dropping empty lanes, every empty lane is filled with a fixed **public**
+constant, chosen per aggregate kind from the admin-set output domain `[L, Λ]` (§4) and
+**never from the data**:
+
+| aggregate | empty-lane fill | rationale |
+|---|---|---|
+| `COUNT` | `0` | an empty subsample counts nothing |
+| `SUM` | `0` | empty sum |
+| `MIN` | `Λ` (public upper bound) | min of the empty set is +∞ → clamp to the top of the domain |
+| `MAX` | `L` (public lower bound) | max of the empty set is −∞ → clamp to the bottom of the domain |
+| `AVG` | midpoint `(L+Λ)/2` | neutral in-range value |
+
+Because the fill depends only on the public bounds (`dp_sass_count_output_bound`,
+`dp_sass_minmax_lower/upper_bound`, …), swapping one PU in or out cannot change what an
+empty lane receives — it leaks nothing. Were the fill taken from the data (e.g. the
+observed minimum) it *would* leak, which is why §5 lists "empty-lane fill is public" as
+a load-bearing assumption. The effect: a 3-PU group and a 3000-PU group both yield 64
+fully-defined lanes, so the support signal never reaches the released median. This is
+the GUPT "fixed number of blocks, bounded block outputs" property.
+
+### Other NULL cases
+
 - **Suppressed groups** (noised `η' < τ`, §7) are **dropped** from the result — they
   do not appear as NULL rows.
 - **SQL NULLs in the data** follow normal aggregate semantics (e.g. `SUM` skips NULL
@@ -385,3 +444,17 @@ releasing the raw value; `privacy_noise = false` zeroes noise for deterministic 
    (graceful empty) but worth surfacing to analysts.
 6. **Fail-open side tables** — an unannotated private table is treated as public
    (§5.6); this relies on analyst discipline.
+7. **`FILTER` on `COUNT(DISTINCT)` is rejected** (§3) — this is an implementation gap,
+   not a DP restriction. `COUNT(DISTINCT x)` is rewritten structurally (`GROUP BY x` +
+   `bit_or(hash) FILTER (x IS NOT NULL)`, then count), which already uses the aggregate's
+   `FILTER` slot; a user `FILTER (WHERE p)` would have to be composed with that grouping
+   rewrite, which isn't implemented, so we fail closed. Plain aggregates support `FILTER`
+   (folded to `CASE WHEN p THEN x END`). Worth wiring up, or is failing closed fine?
+8. **MIN/MAX only under `dp_sass`.** The two Laplace modes don't support MIN/MAX: an
+   extremum's global/elastic sensitivity is the full domain range `Λ−L` (removing one
+   PU can move it across the whole range), so additive Laplace noise would be on the
+   order of the domain, and FLEX's elastic sensitivity is defined for counting queries,
+   not order statistics. `dp_sass` handles them via sample-and-aggregate (the median of
+   per-lane extrema over a public range). Is it acceptable to leave MIN/MAX to `dp_sass`
+   only, or should the Laplace modes add a bounded-quantile / exponential-mechanism path
+   (as Google DP does for order statistics)?
