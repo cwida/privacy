@@ -712,6 +712,19 @@ static bool AggregateContainsCount(const LogicalAggregate *agg) {
 	return false;
 }
 
+static bool IsMinMaxAggregate(const BoundAggregateExpression &aggr) {
+	return aggr.function.name == "min" || aggr.function.name == "max";
+}
+
+static bool AggregateContainsMinMax(const LogicalAggregate *agg) {
+	for (auto &expr : agg->expressions) {
+		if (IsMinMaxAggregate(expr->Cast<BoundAggregateExpression>())) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static void EnsurePuAdjacentTableAvailable(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                            LogicalAggregate *agg, const PrivacyCompatibilityResult &check,
                                            const DPFKChain &chain, const string &mech) {
@@ -929,14 +942,7 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 
 	// MIN/MAX: values are clipped to the public domain [mm_lower, mm_upper], so removing/adding one PU
 	// moves the extremum by at most the range mm_range = mm_upper - mm_lower (per affected group).
-	bool has_min_max = false;
-	for (auto &e : agg->expressions) {
-		string nm = StringUtil::Lower(e->Cast<BoundAggregateExpression>().function.name);
-		if (nm == "min" || nm == "max") {
-			has_min_max = true;
-			break;
-		}
-	}
+	bool has_min_max = AggregateContainsMinMax(agg);
 	double mm_lower = 0.0;
 	double mm_upper = 0.0;
 	if (has_min_max) {
@@ -954,10 +960,11 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 		}
 		// Clip MIN/MAX inputs to the public domain so the extremum's sensitivity is bounded by mm_range.
 		if (has_min_max) {
+			PRIVACY_DEBUG_PRINT("[" + mech + "] clipping single-table MIN/MAX inputs to [" + std::to_string(mm_lower) +
+			                    ", " + std::to_string(mm_upper) + "]");
 			for (idx_t i = 0; i < n; i++) {
 				auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-				string nm = StringUtil::Lower(aggr.function.name);
-				if ((nm == "min" || nm == "max") && !aggr.children.empty()) {
+				if (IsMinMaxAggregate(aggr) && !aggr.children.empty()) {
 					auto child_type = aggr.children[0]->return_type;
 					aggr.children[0] = ClipToBounds(input, std::move(aggr.children[0]), mm_lower, mm_upper, child_type);
 				}
@@ -966,8 +973,7 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 		}
 		for (idx_t i = 0; i < n; i++) {
 			auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-			string nm = StringUtil::Lower(aggr.function.name);
-			if (nm == "min" || nm == "max") {
+			if (IsMinMaxAggregate(aggr)) {
 				sens.push_back(mm_range); // single table: one row per PU → one group affected (group_bound = 1)
 			} else if (IsCountAggregate(aggr)) {
 				sens.push_back(1.0);
@@ -1001,11 +1007,10 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 					lower_exprs.back()->Cast<BoundAggregateExpression>().filter = aggr.filter->Copy();
 				}
 			}
-		} else if (StringUtil::Lower(aggr.function.name) == "min" || StringUtil::Lower(aggr.function.name) == "max") {
+		} else if (IsMinMaxAggregate(aggr)) {
 			// Per-PU MIN/MAX partial. else_zero=false → filtered-out rows become NULL, which MIN/MAX skip.
-			lower_exprs.push_back(BindPlainAggregate(input, StringUtil::Lower(aggr.function.name),
-			                                         FoldFilterIntoValue(aggr, aggr.children[0]->Copy(),
-			                                                             /*else_zero=*/false)));
+			lower_exprs.push_back(BindPlainAggregate(
+			    input, aggr.function.name, FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/false)));
 		} else { // sum
 			lower_exprs.push_back(BindPlainAggregate(
 			    input, "sum", FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/true)));
@@ -1018,16 +1023,19 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 	// Rewrite each top aggregate: SUM/COUNT → SUM(clip(partial)); MIN/MAX → MIN/MAX(clip(partial)).
 	for (idx_t i = 0; i < n; i++) {
 		// agg->expressions[i] still holds the original aggregate until overwritten below.
-		string nm = StringUtil::Lower(agg->expressions[i]->Cast<BoundAggregateExpression>().function.name);
-		bool pos_min_max = nm == "min" || nm == "max";
+		auto &orig = agg->expressions[i]->Cast<BoundAggregateExpression>();
+		bool pos_min_max = IsMinMaxAggregate(orig);
+		string min_max_name = pos_min_max ? orig.function.name : string();
 		auto lower_type = pre.lower_agg->types[pre.num_original_groups + 1 + i];
 		unique_ptr<Expression> lower_ref =
 		    make_uniq<BoundColumnRefExpression>(lower_type, ColumnBinding(pre.lower_agg_index, i));
 		if (pos_min_max) {
 			// Clip the per-PU partial to [mm_lower, mm_upper], then take the overall MIN/MAX. Removing one
 			// PU shifts the extremum by at most mm_range per group → L1 sensitivity mm_range · group_bound.
+			PRIVACY_DEBUG_PRINT("[" + mech + "] join MIN/MAX rewrite: " + min_max_name + "(clip partial) sensitivity=" +
+			                    std::to_string(mm_range * static_cast<double>(group_bound)));
 			auto clipped = ClipToBounds(input, std::move(lower_ref), mm_lower, mm_upper, lower_type);
-			agg->expressions[i] = BindPlainAggregate(input, nm, std::move(clipped));
+			agg->expressions[i] = BindPlainAggregate(input, min_max_name, std::move(clipped));
 			sens.push_back(mm_range * static_cast<double>(group_bound));
 		} else {
 			double bound =
@@ -1206,17 +1214,13 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 
 	// MIN/MAX (dp_standard) releases are clamped back to the public domain after noise — DP-free
 	// post-processing that keeps outputs in [mm_lower, mm_upper].
-	bool has_min_max = false;
-	for (idx_t ai = 0; ai < n_aggs; ai++) {
-		string nm = StringUtil::Lower(agg->expressions[ai]->Cast<BoundAggregateExpression>().function.name);
-		if (nm == "min" || nm == "max") {
-			has_min_max = true;
-			break;
-		}
-	}
+	bool has_min_max = AggregateContainsMinMax(agg);
 	double mm_lower = 0.0;
 	double mm_upper = 0.0;
 	if (has_min_max) {
+		// Only dp_standard reaches here with MIN/MAX (dp_elastic rejects them in the checker). If MIN/MAX
+		// is ever extended to another Laplace mode with its own bounds settings, thread the mechanism name
+		// through instead of hardcoding "dp_standard".
 		std::tie(mm_lower, mm_upper) = GetDpMinMaxBounds(input.context, "dp_standard");
 	}
 
@@ -1264,8 +1268,7 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 		noise_children.push_back(std::move(nonce));
 		unique_ptr<Expression> noised = BindScalarLocal(input, "dp_noise", std::move(noise_children));
 		if (has_min_max) {
-			string nm = StringUtil::Lower(agg->expressions[ai]->Cast<BoundAggregateExpression>().function.name);
-			if (nm == "min" || nm == "max") {
+			if (IsMinMaxAggregate(agg->expressions[ai]->Cast<BoundAggregateExpression>())) {
 				noised = ClipToBounds(input, std::move(noised), mm_lower, mm_upper, LogicalType::DOUBLE);
 			}
 		}
