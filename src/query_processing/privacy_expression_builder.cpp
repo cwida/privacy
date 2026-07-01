@@ -1355,6 +1355,12 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 			continue; // shouldn't happen
 		}
 		// Build lower aggregate expressions (plain DuckDB aggregates)
+		// TODO(PAC, deferred — DP is the current focus): this rebuilds the per-PU lower aggregates via
+		// BindPlainAggregate and DROPS any FILTER (WHERE ...) on the original aggregate, so a filtered
+		// PAC clip query silently aggregates the wrong rows (same bug fixed for dp_standard by folding
+		// the predicate into the value via FoldFilterIntoValue — see privacy_mechanisms.cpp). Apply the
+		// same fix here (or verify PAC never carries an aggregate filter) before relying on filtered
+		// clip queries. Not addressed now: we are focusing on the DP mechanisms.
 		vector<unique_ptr<Expression>> lower_expressions;
 		for (idx_t i = 0; i < agg->expressions.size(); i++) {
 			auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
