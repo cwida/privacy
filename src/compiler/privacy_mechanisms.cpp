@@ -2121,11 +2121,33 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 			throw InternalException("dp_sass: PU table '" + pu_table_name + "' has no PRIVACY_KEY metadata");
 		}
 
-		auto *pu_get = FindAccessibleGetInSubtree(plan, agg, pu_table_name);
-		if (pu_get) {
+		// Build the balanced disjoint sample lanes. Preferred source: a scan of the PU table itself
+		// (one row per PU → ROW_NUMBER). If the PU table is not in the plan (implicit FK path — the
+		// query is over a PRIVACY_LINK table and never names the PU table), fall back to the PU-adjacent
+		// linked table's FK column, which identifies the PU on every contributing row; DENSE_RANK then
+		// maps a PU's many rows to a single lane so the lanes stay disjoint. This mirrors how
+		// dp_standard derives the PU key from the FK column (BuildPuKeyExpression) rather than requiring
+		// the PU-table scan.
+		LogicalGet *lane_get = FindAccessibleGetInSubtree(plan, agg, pu_table_name);
+		vector<string> lane_key_columns = meta_it->second.pks;
+		bool per_distinct_key = false;
+		if (!lane_get) {
+			vector<LogicalGet *> gets;
+			FindAllGetNodes(plan.get(), gets);
+			auto chain = ExtractFKChain(check, gets, privacy_units, /*include_fk_cols=*/true, allow_self_joins);
+			if (chain.tables.size() >= 2 && !chain.fk_cols.empty()) {
+				const string &linked_table = chain.tables[chain.tables.size() - 2];
+				lane_get = FindAccessibleGetInSubtree(plan, agg, linked_table);
+				if (lane_get) {
+					lane_key_columns = {chain.fk_cols.back()};
+					per_distinct_key = true;
+				}
+			}
+		}
+		if (lane_get) {
 			std::unordered_map<idx_t, ColumnBinding> lane_cache;
-			auto lane_binding =
-			    GetOrInsertBalancedSampleLaneProjection(input, plan, *pu_get, meta_it->second.pks, lane_cache);
+			auto lane_binding = GetOrInsertBalancedSampleLaneProjection(input, plan, *lane_get, lane_key_columns,
+			                                                            lane_cache, per_distinct_key);
 			auto propagated_lane =
 			    PropagateSingleBinding(*plan, lane_binding.table_index, lane_binding, LogicalType::UBIGINT, agg);
 			if (propagated_lane.table_index == DConstants::INVALID_INDEX) {
@@ -2133,7 +2155,12 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 			}
 			hash_infos[0].hash_expr = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated_lane);
 			hash_infos[0].hash_binding = propagated_lane;
-			PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] using exact balanced disjoint sample lanes");
+			PRIVACY_DEBUG_PRINT(string("[DP_SAMPLE_MEDIAN] using exact balanced disjoint sample lanes") +
+			                    (per_distinct_key ? " (implicit FK: DENSE_RANK over linked-table FK column)" : ""));
+		} else {
+			// No PU-table or linked-table scan reachable (e.g. through a CTE): keep the hash built by
+			// BuildPUHashExpressionsForAggregates rather than the balanced-lane projection.
+			PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] no balanced-lane source found; keeping default PU hash");
 		}
 	}
 

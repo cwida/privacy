@@ -1000,5 +1000,108 @@ FROM counters;
 ----
 32	32	false
 
+# --- Implicit FK path (PU table not named in FROM) — regression for balanced sample lanes ---
+# Before this fix, dp_sass silently mis-handled a query over a PRIVACY_LINK table that never scans the
+# PU table: the balanced disjoint lanes were skipped (they required the PU-table scan), so SUM/COUNT
+# returned 0 and AVG returned the empty-lane midpoint. The lanes are now built from the PU-adjacent
+# linked table's FK column (DENSE_RANK, so a PU's many rows share one lane). With a constant value the
+# mean is exact, so the implicit result must equal the explicit-join result.
+statement ok
+SET privacy_mode = 'dp_sass';
+
+statement ok
+CREATE PU TABLE ifk_users(uid INTEGER, PRIVACY_KEY(uid));
+
+statement ok
+INSERT INTO ifk_users SELECT i FROM range(200) t(i);
+
+statement ok
+CREATE TABLE ifk_events(uid INTEGER, v DOUBLE);
+
+statement ok
+INSERT INTO ifk_events SELECT i % 200, 8.0 FROM range(2000) t(i);
+
+statement ok
+ALTER TABLE ifk_events ADD PRIVACY_LINK (uid) REFERENCES ifk_users(uid);
+
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET privacy_seed = 42;
+
+statement ok
+SET dp_sass_release = 'median';
+
+statement ok
+SET dp_delta = 1e-5;
+
+statement ok
+SET dp_sum_bound = 1000.0;
+
+statement ok
+SET dp_count_bound = 100.0;
+
+statement ok
+SET dp_sass_sum_output_bound = 100000.0;
+
+statement ok
+SET dp_sass_count_output_bound = 100000.0;
+
+statement ok
+SET dp_sass_avg_lower_bound = 0.0;
+
+statement ok
+SET dp_sass_avg_upper_bound = 10.0;
+
+# Not broken: implicit SUM/COUNT/COUNT(DISTINCT) are populated (previously 0 from empty lanes).
+query I
+SELECT SUM(v) > 0 FROM ifk_events;
+----
+true
+
+query I
+SELECT COUNT(*) > 0 FROM ifk_events;
+----
+true
+
+# COUNT(DISTINCT) shares the same lane-assignment site — also fixed for the implicit path.
+query I
+SELECT COUNT(DISTINCT v) > 0 FROM ifk_events;
+----
+true
+
+# lane_average AVG: constant value → exact mean 8.0, and the implicit result equals the explicit join
+# (previously implicit returned the empty-lane midpoint 5.0).
+query I
+SELECT AVG(v) FROM ifk_events;
+----
+8.0
+
+query I
+SELECT AVG(v) FROM ifk_events JOIN ifk_users ON ifk_events.uid = ifk_users.uid;
+----
+8.0
+
+# ratio AVG: same, over the implicit FK path (previously 0.0 = noised_sum 0 / noised_count 0).
+statement ok
+SET dp_sass_avg_method = 'ratio';
+
+query I
+SELECT AVG(v) FROM ifk_events;
+----
+8.0
+
+query I
+SELECT AVG(v) FROM ifk_events JOIN ifk_users ON ifk_events.uid = ifk_users.uid;
+----
+8.0
+
+statement ok
+SET dp_sass_avg_method = 'lane_average';
+
+statement ok
+SET dp_sass_release = 'median';
+
 statement ok
 SET privacy_mode = 'dp_elastic';

@@ -283,7 +283,7 @@ ColumnBinding GetOrInsertHashProjection(OptimizerExtensionInput &input, unique_p
 
 ColumnBinding InsertBalancedSampleLaneProjectionAboveGet(OptimizerExtensionInput &input,
                                                          unique_ptr<LogicalOperator> &plan, LogicalGet &get,
-                                                         const vector<string> &key_columns) {
+                                                         const vector<string> &key_columns, bool per_distinct_key) {
 	constexpr int64_t DP_SASS_LANE_COUNT = 64;
 
 	AddPKColumns(get, key_columns);
@@ -302,8 +302,11 @@ ColumnBinding InsertBalancedSampleLaneProjectionAboveGet(OptimizerExtensionInput
 	auto &binder = input.optimizer.binder;
 	idx_t window_index = binder.GenerateTableIndex();
 	auto window = make_uniq<LogicalWindow>(window_index);
-	auto row_number =
-	    make_uniq<BoundWindowExpression>(ExpressionType::WINDOW_ROW_NUMBER, LogicalType::BIGINT, nullptr, nullptr);
+	// ROW_NUMBER numbers each row (correct when the get has one row per PU, e.g. a PU-table scan).
+	// DENSE_RANK gives every row sharing a key value the same rank, so a PU that owns many rows on a
+	// linked table (FK value repeated) maps to exactly one lane — keeping the sample lanes disjoint.
+	auto rank_type = per_distinct_key ? ExpressionType::WINDOW_RANK_DENSE : ExpressionType::WINDOW_ROW_NUMBER;
+	auto row_number = make_uniq<BoundWindowExpression>(rank_type, LogicalType::BIGINT, nullptr, nullptr);
 	row_number->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST, std::move(order_hash));
 	row_number->start = WindowBoundary::UNBOUNDED_PRECEDING;
 	row_number->end = WindowBoundary::CURRENT_ROW_ROWS;
@@ -355,12 +358,13 @@ ColumnBinding InsertBalancedSampleLaneProjectionAboveGet(OptimizerExtensionInput
 
 ColumnBinding GetOrInsertBalancedSampleLaneProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                                       LogicalGet &get, const vector<string> &key_columns,
-                                                      std::unordered_map<idx_t, ColumnBinding> &cache) {
+                                                      std::unordered_map<idx_t, ColumnBinding> &cache,
+                                                      bool per_distinct_key) {
 	auto it = cache.find(get.table_index);
 	if (it != cache.end()) {
 		return it->second;
 	}
-	auto binding = InsertBalancedSampleLaneProjectionAboveGet(input, plan, get, key_columns);
+	auto binding = InsertBalancedSampleLaneProjectionAboveGet(input, plan, get, key_columns, per_distinct_key);
 	cache[get.table_index] = binding;
 	return binding;
 }

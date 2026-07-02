@@ -47,14 +47,20 @@ ColumnBinding GetOrInsertHashProjection(OptimizerExtensionInput &input, unique_p
 // Insert a projection above a PU LogicalGet that assigns privacy units to exactly balanced
 // disjoint SASS lanes. The returned UBIGINT binding is unique per PU, with low bits encoded
 // so dp_sample_lanes=1 maps it to exactly one of the 64 sample counters.
+// When per_distinct_key is true, lanes are assigned by DENSE_RANK over the key columns (so repeated
+// key values — e.g. an FK column on a linked table where one PU owns many rows — all map to the same
+// lane, preserving disjointness). When false (default), ROW_NUMBER numbers each row (correct when the
+// get already has one row per PU, e.g. a scan of the PU table itself).
 ColumnBinding InsertBalancedSampleLaneProjectionAboveGet(OptimizerExtensionInput &input,
                                                          unique_ptr<LogicalOperator> &plan, LogicalGet &get,
-                                                         const vector<string> &key_columns);
+                                                         const vector<string> &key_columns,
+                                                         bool per_distinct_key = false);
 
 // Caching wrapper around InsertBalancedSampleLaneProjectionAboveGet. Keyed by get.table_index.
 ColumnBinding GetOrInsertBalancedSampleLaneProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                                       LogicalGet &get, const vector<string> &key_columns,
-                                                      std::unordered_map<idx_t, ColumnBinding> &cache);
+                                                      std::unordered_map<idx_t, ColumnBinding> &cache,
+                                                      bool per_distinct_key = false);
 
 // Insert a hash projection above a CTE_SCAN (LogicalCTERef) node.
 // The CTE_SCAN must expose the key columns by name in its bound_columns.
