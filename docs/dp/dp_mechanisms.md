@@ -23,7 +23,13 @@ sensitivity is derived and in the neighbor relation they protect:
 |---|---|---|---|---|---|
 | `dp_standard` | pure ε (ungrouped) / (ε,δ) (grouped) | **user** | global (per-PU contribution clipped to a constant) | private by default | Google DP (Wilson et al. 2020) |
 | `dp_elastic`  | (ε,δ) | **row** | smooth elastic sensitivity `2·SES_β` over join max-frequencies | public / enumerated (FLEX) | FLEX (Johnson, Near & Song 2018) |
-| `dp_sass`     | (ε,δ) (median) / pure ε (mean) | **user** | smooth sensitivity of the per-lane median | private by default | smooth-sensitivity sample-and-aggregate over SIMD aggregates (SIMD-SAA^udp) |
+| `dp_sass`     | median: (ε,δ) always; mean: pure ε (ungrouped) / (ε,δ) (grouped) | **user** | smooth sensitivity of the per-lane median | private by default | smooth-sensitivity sample-and-aggregate over SIMD aggregates (SIMD-SAA^udp) |
+
+For `dp_sass` the guarantee depends on **both** the release rule and grouping. The
+**median** release is (ε,δ)-DP for grouped and ungrouped queries alike. The **mean**
+(GUPT) release mirrors `dp_standard`: pure ε-DP when ungrouped, but (ε,δ)-DP when
+grouped, because grouping triggers private partition selection (§7), which needs a
+non-zero δ.
 
 ---
 
@@ -67,9 +73,9 @@ loudly rather than releasing something unproven:
   categorical). Such queries are rejected, not silently mishandled.
 - **Protected columns in `GROUP BY` or `HAVING`** (a protected value would drive the
   released key set / a post-aggregation filter).
-- **Unsupported aggregate functions.** `dp_standard`/`dp_elastic` support
-  `COUNT`, `COUNT(DISTINCT)`, `SUM`, `AVG`. `dp_sass` additionally supports `MIN`/`MAX`
-  (`allow_min_max` is set only for `dp_sass`).
+- **Unsupported aggregate functions.** `dp_standard` and `dp_sass` support `COUNT`,
+  `COUNT(DISTINCT)`, `SUM`, `AVG`, `MIN`, `MAX` (`allow_min_max`). `dp_elastic` supports
+  all but `MIN`/`MAX` (elastic sensitivity is defined only for counting queries).
 - **`FILTER` on `COUNT(DISTINCT)`** (filtered distinct is not analysed).
 - **Window functions, recursive CTEs, and (for DP) CTEs / some correlated subqueries.**
 - **Missing required parameters** — e.g. `dp_sum_bound` for `SUM`, `dp_count_bound`
@@ -90,8 +96,10 @@ loudly rather than releasing something unproven:
 | `dp_max_groups_contributed` | max output groups one PU may affect | **`C_u`** |
 | `dp_sample_lanes` | number of sample lanes a PU is hashed into (`m` is fixed at 64) | subsample assignment (`m`; see §11) |
 | `dp_sass_release` | `'median'` (smooth-sensitivity, (ε,δ)) or `'average'` (GUPT mean, pure ε) | release rule |
+| `dp_sass_avg_method` | `dp_sass` AVG estimator: `'lane_average'` (default) or `'ratio'` (§13) | — |
 | `dp_sass_count_output_bound` / `dp_sass_sum_output_bound` | public output domain `[L,Λ]` for COUNT/SUM lane answers | `L_i, Λ_i` |
-| `dp_sass_avg_lower/upper_bound`, `dp_sass_minmax_lower/upper_bound` | public output domain for AVG / MIN-MAX | `L_i, Λ_i` |
+| `dp_sass_avg_lower/upper_bound`, `dp_sass_minmax_lower/upper_bound` | public output domain for `dp_sass` AVG / MIN-MAX | `L_i, Λ_i` |
+| `dp_minmax_lower/upper_bound` | public domain `[L,U]` for MIN/MAX under **`dp_standard`** (sensitivity = `U−L`) | `L_i, Λ_i` |
 | `privacy_noise` | `false` zeroes all noise (deterministic testing) | — |
 | `privacy_seed` | RNG seed for reproducible noise | — |
 | `privacy_min_group_count` | **`dp_elastic` only**: a raw admin support filter (not DP; see §10) | — |
@@ -216,6 +224,10 @@ clipped to a fixed constant, so global sensitivity equals that constant
 - single PU table: per-row clip — `COUNT` sensitivity 1, `SUM` = `dp_sum_bound`;
 - join: pre-aggregate per PU, clip the partial to `dp_sum_bound` / `dp_count_bound`,
   then `SUM` the clipped partials — so a join with `COUNT` requires `dp_count_bound`;
+- `MIN`/`MAX`: clip the value (single table) or the per-PU partial (join) to the public
+  domain `[dp_minmax_lower_bound, dp_minmax_upper_bound]`, keep the top aggregate as
+  `MIN`/`MAX`, sensitivity = the range `U−L`; the noised output is clamped back into the
+  domain (free post-processing);
 - grouped: the vector sensitivity is multiplied by `C_u` (`sens = bound · C_u`).
 
 Noise is `Laplace(sens / ε_value)`. For grouped queries, partition selection (§7)
@@ -329,12 +341,24 @@ smooth sensitivity, same NRS `β`.
 | `COUNT(*)` | clip per-PU row count (join: `dp_count_bound`), Laplace | per-lane count, median/mean of 64 |
 | `COUNT(DISTINCT x)` | per-PU distinct count, clip, sum, Laplace | dedicated per-lane distinct path (bit-mask of distinct values per lane), median/mean |
 | `SUM(x)` | clip `x` to `dp_sum_bound`, sum, Laplace | per-lane sum, median/mean |
-| `AVG(x)` | decomposed → `SUM(clip x)` + `COUNT`; released as `noised_sum / max(noised_count, 1)` (Google bounded-mean shape) | per-lane average, **median/mean of the 64 lane averages** |
-| `MIN(x)` / `MAX(x)` | not supported | per-lane min/max, median/mean; empty-lane identity = Λ (min) / L (max) |
+| `AVG(x)` | decomposed → `SUM(clip x)` + `COUNT`; released as `noised_sum / max(noised_count, 1)` (Google bounded-mean shape) | **two estimators** (`dp_sass_avg_method`): `lane_average` (default) = median/mean of the 64 per-lane averages; `ratio` = two independent SAA mechanisms for SUM and COUNT, released as `noised_sum / noised_count` |
+| `MIN(x)` / `MAX(x)` | **`dp_standard`: supported** — values clipped to the public domain `[dp_minmax_lower_bound, dp_minmax_upper_bound]`, global sensitivity = range `U−L` (`×C_u` grouped), `Laplace`, output clamped back into the domain. `dp_elastic`: unsupported (elastic sensitivity is defined only for counting queries) | per-lane min/max, median/mean; empty-lane identity = Λ (min) / L (max) |
 
-`AVG` correctness is an open question (§16). Aggregate `FILTER (WHERE …)` is folded
-into the value (`CASE WHEN cond THEN x END`) rather than kept as a separate filter, so
-it survives the per-PU rewrite (`FoldFilterIntoValue`).
+**AVG estimators (`dp_sass`).** `lane_average` is the NRS/GUPT sample-and-aggregate of the
+mean (median/mean of the per-lane averages). `ratio` decomposes `AVG` into `SUM`+`COUNT`,
+privatises each with its own SAA mechanism (each gets `ε/2`, `δ/2` of the AVG cell), and
+releases the ratio clamped into `[dp_sass_avg_lower_bound, dp_sass_avg_upper_bound]` — the
+Google-DP bounded-mean shape (reuses the Laplace modes' `RewriteAvgAggregates` +
+`WrapAvgRatioProjection`). Both satisfy DP; the flag exists to compare utility (§16).
+
+Aggregate `FILTER (WHERE …)` is folded into the value (`CASE WHEN cond THEN x END`) rather
+than kept as a separate filter, so it survives the per-PU rewrite (`FoldFilterIntoValue`).
+
+**Implicit FK paths.** A `dp_sass` query over a `PRIVACY_LINK` table that never names the
+PU table (e.g. `SELECT SUM(v) FROM events`) is fully supported: the balanced disjoint
+sample lanes are built from the PU-adjacent table's FK column (`DENSE_RANK`, so a PU's
+many rows share one lane), matching the explicit-join result — the same way `dp_standard`
+derives the PU key from the FK column.
 
 **`COUNT(DISTINCT)` in `dp_sass` (low level).** `RewriteDistinctCountToSampleMedian`
 builds a three-stage plan. (1) An **inner aggregate** groups by `[groups…, PU, distinct
@@ -425,36 +449,46 @@ releasing the raw value; `privacy_noise = false` zeroes noise for deterministic 
 
 ---
 
-## 16. Open questions
+## 16. Open questions and resolutions
 
-1. **Is `N_PU` public?** We report benchmarks at `δ = 1/N_PU`. `δ` must be a fixed
-   public parameter, so this is only sound if the dataset scale is public. Is it OK to
-   assume `N_PU` is public? If not, we should use a conservative public upper bound on
-   `N`, or spend a small separate budget to estimate it privately.
-2. **Is our `AVG` correct?** `dp_standard`/`dp_elastic` release a **ratio of two
-   independently-noised values** (`noised_sum / noised_count`), which is biased and
-   whose (ε,δ) comes from composing the SUM and COUNT budgets; `dp_sass` releases the
-   **median of 64 per-lane averages**. Is this the intended accounting for both?
-3. **Non-disjoint lanes for `sample_lanes > 1`** (§11) — there is no mechanism to force
-   disjoint subsamples; the SAA analysis assumes disjointness. Should `sample_lanes > 1`
-   be restricted, or the overlap analysis stated explicitly?
-4. **User-level FLEX** — extending `dp_elastic` from row-level to user-level needs new
+### Resolved
+
+- **`N_PU` public (`δ = 1/N_PU`).** Accepted: revealing `N_PU` is fine in the current
+  model. Keep `δ = 1/N_PU` derived from a *public* estimate of the dataset scale, not the
+  exact private PU count.
+- **AVG estimator.** Both are now implemented and selectable via `dp_sass_avg_method`
+  (§13): `lane_average` (NRS/GUPT sample-and-aggregate of the mean) and `ratio` (two
+  independent SAA mechanisms for SUM/COUNT, released as their clamped ratio — the
+  Google-DP shape). Both satisfy DP; which gives better utility is the empirical
+  comparison the flag enables.
+- **MIN/MAX under the Laplace modes.** `dp_standard` now supports MIN/MAX via bounded
+  global sensitivity (`U−L` over the public `[dp_minmax_lower_bound, dp_minmax_upper_bound]`
+  domain, `×C_u` grouped, output clamped) — confirmed sound and expected to give better
+  utility than `dp_sass`'s median-of-lane-extrema; Google DP supports them too.
+  `dp_elastic` still cannot (elastic sensitivity is defined only for counting queries).
+- **Implicit FK paths in `dp_sass`.** Previously `dp_sass` silently returned garbage for a
+  query that never named the PU table (the balanced lanes needed the PU-table scan); now
+  the lanes are derived from the linked table's FK column and the result matches the
+  explicit join (§13).
+
+### Still open
+
+1. **`sample_lanes > 1` smooth sensitivity.** Overlapping subsamples change the analysis: a
+   PU may influence several lanes. We use a **hard cap** of `sample_lanes` (`DpSampleHash`
+   sets ≤ `sample_lanes` bits) and charge `beta_eff = β/sample_lanes`; this differs from a
+   Bernoulli-`1/m` inclusion model, under which a PU appears in up to O(√m) subsamples
+   (Nissim et al.) and that factor must enter the analysis. Confirm our hard-cap scaling is
+   sound, or restrict `sample_lanes > 1`. (Dandan offered pseudocode for this case.)
+2. **Configurable `m`.** `m` is fixed at 64 (SIMD/perf). SAA supports general `m`; `m ≤ 64`
+   is achievable by using a subset of the 64-bit mask, `m > 64` needs a wider multi-word
+   representation. Worth exposing `m` as a setting (64 the recommended default) — future work.
+3. **τ under very small δ.** A very small `δ_η` drives τ large enough to suppress all
+   groups. Possible mitigation (Dandan): give partition selection a relatively larger
+   `δ_η` (an uneven δ split) so τ stays practical. Currently `δ_η = δ/(c+1)` (even split).
+4. **User-level FLEX.** Extending `dp_elastic` from row-level to user-level needs new
    per-user statistics + a sensitivity analysis and proof (future work).
-5. **τ under tiny δ** — a very small `δ_η` drives τ → ∞, suppressing all groups. Safe
-   (graceful empty) but worth surfacing to analysts.
-6. **Fail-open side tables** — an unannotated private table is treated as public
-   (§5.6); this relies on analyst discipline.
-7. **`FILTER` on `COUNT(DISTINCT)` is rejected** (§3) — this is an implementation gap,
-   not a DP restriction. `COUNT(DISTINCT x)` is rewritten structurally (`GROUP BY x` +
-   `bit_or(hash) FILTER (x IS NOT NULL)`, then count), which already uses the aggregate's
-   `FILTER` slot; a user `FILTER (WHERE p)` would have to be composed with that grouping
-   rewrite, which isn't implemented, so we fail closed. Plain aggregates support `FILTER`
-   (folded to `CASE WHEN p THEN x END`). Worth wiring up, or is failing closed fine?
-8. **MIN/MAX only under `dp_sass`.** The two Laplace modes don't support MIN/MAX: an
-   extremum's global/elastic sensitivity is the full domain range `Λ−L` (removing one
-   PU can move it across the whole range), so additive Laplace noise would be on the
-   order of the domain, and FLEX's elastic sensitivity is defined for counting queries,
-   not order statistics. `dp_sass` handles them via sample-and-aggregate (the median of
-   per-lane extrema over a public range). Is it acceptable to leave MIN/MAX to `dp_sass`
-   only, or should the Laplace modes add a bounded-quantile / exponential-mechanism path
-   (as Google DP does for order statistics)?
+5. **`FILTER` on `COUNT(DISTINCT)`** (§3) — implementation gap, not a DP restriction: the
+   distinct rewrite already uses the aggregate's `FILTER` slot, so a user `FILTER` would
+   have to be composed with it. Fails closed for now; plain aggregates support `FILTER`.
+6. **Fail-open side tables** — an unannotated private table is treated as public (§5.6);
+   this relies on analyst discipline.
