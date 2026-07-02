@@ -1294,8 +1294,18 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 static std::pair<idx_t, LogicalProjection *>
 WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                        const NoiseProjection &noise_proj, const vector<AvgInfo> &avg_infos, idx_t n_groups,
-                       idx_t n_original_aggs, LogicalOperator *insert_above, bool null_on_nonpositive_count) {
+                       idx_t n_original_aggs, LogicalOperator *insert_above, bool null_on_nonpositive_count,
+                       bool clamp_output = false, double clamp_lo = 0.0, double clamp_hi = 0.0) {
 	D_ASSERT(!avg_infos.empty());
+
+	// dp_sass 'ratio' clamps the released mean back into its public output domain [clamp_lo, clamp_hi]
+	// (free DP post-processing), matching the lane_average estimator's domain. Off for the Laplace modes.
+	auto maybe_clamp = [&](unique_ptr<Expression> v) -> unique_ptr<Expression> {
+		if (!clamp_output) {
+			return v;
+		}
+		return ClipToBounds(input, std::move(v), clamp_lo, clamp_hi, LogicalType::DOUBLE);
+	};
 
 	// Build lookup: original-agg-position → AvgInfo
 	vector<const AvgInfo *> avg_lookup(n_original_aggs, nullptr);
@@ -1351,7 +1361,7 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 				auto one = make_uniq<BoundConstantExpression>(Value::DOUBLE(1.0));
 				denominator = input.optimizer.BindScalarFunction("greatest", std::move(denominator), std::move(one));
 				auto ratio = input.optimizer.BindScalarFunction("/", make_sum_dbl(), std::move(denominator));
-				proj_exprs.push_back(add_midpoint(std::move(ratio)));
+				proj_exprs.push_back(maybe_clamp(add_midpoint(std::move(ratio))));
 			} else {
 				auto ratio = input.optimizer.BindScalarFunction("/", make_sum_dbl(), std::move(denominator));
 				auto case_expr = make_uniq<BoundCaseExpression>(LogicalType::DOUBLE);
@@ -1361,7 +1371,7 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 				                                         make_uniq<BoundConstantExpression>(Value::DOUBLE(0.0)));
 				check.then_expr = make_uniq<BoundConstantExpression>(Value(LogicalType::DOUBLE));
 				case_expr->case_checks.push_back(std::move(check));
-				case_expr->else_expr = add_midpoint(std::move(ratio));
+				case_expr->else_expr = maybe_clamp(add_midpoint(std::move(ratio)));
 				proj_exprs.push_back(std::move(case_expr));
 			}
 		}
@@ -2109,7 +2119,20 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	// modes' RewriteAvgAggregates + WrapAvgRatioProjection; use_bounded_mean=false gives a plain
 	// (non-centered) sum/count ratio, so midpoint = 0 and no add-back is applied.
 	vector<AvgInfo> avg_infos;
+	double ratio_avg_lower = 0.0;
+	double ratio_avg_upper = 0.0;
 	if (GetDpSassAvgMethod(input.context) == "ratio" && AggregateContainsAvg(agg)) {
+		// Read + validate the public AVG output domain even in ratio mode (so an inverted range is
+		// still caught), and clamp the released ratio into it below — matching the lane_average
+		// estimator's output domain (free DP post-processing).
+		ratio_avg_lower = GetRequiredFiniteSetting(input.context, "dp_sass_avg_lower_bound", "dp_sass");
+		ratio_avg_upper = GetRequiredFiniteSetting(input.context, "dp_sass_avg_upper_bound", "dp_sass");
+		if (ratio_avg_lower >= ratio_avg_upper) {
+			throw InvalidInputException("dp_sass: dp_sass_avg_lower_bound must be smaller than "
+			                            "dp_sass_avg_upper_bound");
+		}
+		PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] AVG ratio mode: decomposing AVG -> SUM + COUNT "
+		                    "(two independent SAA mechanisms), ratio clamped to the public avg domain");
 		avg_infos = RewriteAvgAggregates(input, agg, /*use_bounded_mean=*/false, 0.0);
 	}
 	std::unordered_set<idx_t> avg_components = BuildAvgComponentSet(avg_infos);
@@ -2293,10 +2316,14 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	    WrapSampleMedianProjection(input, plan, agg, epsilons, deltas, output_types, lower_bounds, upper_bounds,
 	                               empty_defaults, projection_anchor, release_method, sample_output_positions);
 
-	// 'ratio' AVG: divide the independently-noised SUM and COUNT releases (noised_sum / max(noised_count, 1)).
-	if (!avg_infos.empty()) {
+	// 'ratio' AVG: divide the independently-noised SUM and COUNT releases (noised_sum / max(noised_count, 1)),
+	// then clamp into the public avg domain. Skipped under stability-query mode, which emits raw per-lane
+	// recorded values for diagnostics rather than a released ratio.
+	bool stability_query_mode = GetBooleanSetting(input.context, "dp_sass_stability_query_mode", false);
+	if (!avg_infos.empty() && !stability_query_mode) {
 		WrapAvgRatioProjection(input, plan, noise_proj, avg_infos, n_groups, n_original_aggs, noise_proj.proj_ptr,
-		                       false);
+		                       /*null_on_nonpositive_count=*/false, /*clamp_output=*/true, ratio_avg_lower,
+		                       ratio_avg_upper);
 	}
 	(void)noise_proj;
 

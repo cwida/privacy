@@ -697,6 +697,32 @@ SELECT AVG(v) FROM sass_avg_flag;
 ----
 4.5
 
+# ratio clamps the released mean into the public avg domain [lower, upper] (free post-processing):
+# a tight upper bound of 3.0 clamps the 4.5 mean down to 3.0.
+statement ok
+SET dp_sass_avg_upper_bound = 3.0;
+
+query I
+SELECT AVG(v) FROM sass_avg_flag;
+----
+3.0
+
+statement ok
+SET dp_sass_avg_upper_bound = 10.0;
+
+# ratio still validates the avg domain (inverted range rejected, even though the ratio derives from
+# the sum/count output bounds).
+statement ok
+SET dp_sass_avg_lower_bound = 500.0;
+
+statement error
+SELECT AVG(v) FROM sass_avg_flag;
+----
+dp_sass_avg_lower_bound must be smaller than
+
+statement ok
+SET dp_sass_avg_lower_bound = 0.0;
+
 # lane_average (default): median/mean of the per-lane averages, close to the true mean 4.5.
 statement ok
 SET dp_sass_avg_method = 'lane_average';
