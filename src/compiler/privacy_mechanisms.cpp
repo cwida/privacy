@@ -1387,6 +1387,19 @@ static string GetDpSassReleaseMethod(ClientContext &context) {
 	return method;
 }
 
+static string GetDpSassAvgMethod(ClientContext &context) {
+	Value v;
+	if (!context.TryGetCurrentSetting("dp_sass_avg_method", v) || v.IsNull()) {
+		return "lane_average";
+	}
+	string method = StringUtil::Lower(v.ToString());
+	if (method != "lane_average" && method != "ratio") {
+		throw InvalidInputException("dp_sass: dp_sass_avg_method must be 'lane_average' or 'ratio' (got '" + method +
+		                            "')");
+	}
+	return method;
+}
+
 static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                                   LogicalAggregate *agg, const vector<double> &epsilons,
                                                   const vector<double> &deltas, const vector<LogicalType> &output_types,
@@ -2090,6 +2103,17 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	}
 	CheckDPAggregateNode(agg, "dp_sass", true);
 
+	// AVG estimator selection. 'lane_average' (default): keep AVG as one as_sample_avg cell (the
+	// NRS/GUPT sample-and-aggregate of the mean). 'ratio': decompose AVG → SUM + COUNT and privatize
+	// each with its own SAA mechanism, then release the ratio (Google-DP-style). We reuse the Laplace
+	// modes' RewriteAvgAggregates + WrapAvgRatioProjection; use_bounded_mean=false gives a plain
+	// (non-centered) sum/count ratio, so midpoint = 0 and no add-back is applied.
+	vector<AvgInfo> avg_infos;
+	if (GetDpSassAvgMethod(input.context) == "ratio" && AggregateContainsAvg(agg)) {
+		avg_infos = RewriteAvgAggregates(input, agg, /*use_bounded_mean=*/false, 0.0);
+	}
+	std::unordered_set<idx_t> avg_components = BuildAvgComponentSet(avg_infos);
+
 	if (GetDpSampleLanes(input.context) == 1 && pu_setup.pu_names.size() == 1) {
 		const auto &pu_table_name = pu_setup.pu_names[0];
 		auto meta_it = check.table_metadata.find(pu_table_name);
@@ -2113,7 +2137,9 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		}
 	}
 
-	idx_t n_original_aggs = agg->expressions.size();
+	// AVG→SUM+COUNT decomposition (ratio mode) appends a COUNT per AVG; the appended components are not
+	// separate user aggregates, so exclude them from the budget-splitting count k (AVG stays one cell).
+	idx_t n_original_aggs = agg->expressions.size() - avg_infos.size();
 	idx_t n_groups = agg->groups.size();
 	auto contribution_bounds = GetDpSassContributionBounds(input.context, agg);
 
@@ -2206,8 +2232,10 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 			upper_bounds.push_back(output_bound);
 			empty_defaults.push_back(0.0); // an empty subsample sums to 0
 		}
-		epsilons.push_back(epsilon / budget_divisor);
-		deltas.push_back(delta / budget_divisor);
+		// A 'ratio' AVG splits its cell budget in half across its SUM and COUNT components.
+		double cell_divisor = avg_components.count(ai) ? (budget_divisor * 2.0) : budget_divisor;
+		epsilons.push_back(epsilon / cell_divisor);
+		deltas.push_back(delta / cell_divisor);
 		sample_output_positions.push_back(ai);
 	}
 
@@ -2237,6 +2265,12 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	auto noise_proj =
 	    WrapSampleMedianProjection(input, plan, agg, epsilons, deltas, output_types, lower_bounds, upper_bounds,
 	                               empty_defaults, projection_anchor, release_method, sample_output_positions);
+
+	// 'ratio' AVG: divide the independently-noised SUM and COUNT releases (noised_sum / max(noised_count, 1)).
+	if (!avg_infos.empty()) {
+		WrapAvgRatioProjection(input, plan, noise_proj, avg_infos, n_groups, n_original_aggs, noise_proj.proj_ptr,
+		                       false);
+	}
 	(void)noise_proj;
 
 #if PRIVACY_DEBUG

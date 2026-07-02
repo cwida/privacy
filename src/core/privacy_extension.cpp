@@ -366,6 +366,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "dp_sass release method: 'median' (smooth-sensitivity median, (ε,δ)-DP) or "
 	                             "'average' (GUPT-style mean, pure ε-DP).",
 	                             LogicalType::VARCHAR, Value("median"));
+	db.config.AddExtensionOption("dp_sass_avg_method",
+	                             "dp_sass AVG estimator: 'lane_average' (sample-and-aggregate of the mean, "
+	                             "NRS/GUPT-native; default) or 'ratio' (two independent SAA mechanisms for SUM and "
+	                             "COUNT, released as their ratio; Google-DP-style).",
+	                             LogicalType::VARCHAR, Value("lane_average"));
 	// Privacy failure probability δ for (ε,δ)-DP smooth sensitivity. Required by dp_elastic and
 	// dp_sass; ignored by dp_standard, which gives pure ε-DP. PRAGMA refresh_dp_stats(epsilon) can set it.
 	db.config.AddExtensionOption(

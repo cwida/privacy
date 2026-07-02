@@ -657,6 +657,71 @@ SELECT AVG(v) IS NOT NULL FROM sass_users;
 ----
 true
 
+# --- AVG estimator flag (dp_sass_avg_method) ---
+# 'lane_average' (default): median/mean of the 64 per-lane averages (NRS/GUPT sample-and-aggregate of
+# the mean). 'ratio': two independent SAA mechanisms for SUM and COUNT, released as noised_sum /
+# noised_count (Google-DP-style). Both satisfy DP; the flag lets us compare utility.
+statement ok
+CREATE PU TABLE sass_avg_flag(uid INTEGER, v DOUBLE, PRIVACY_KEY(uid));
+
+statement ok
+INSERT INTO sass_avg_flag SELECT i, (i % 10) * 1.0 FROM range(200) t(i);
+
+statement ok
+SET dp_sass_release = 'average';
+
+statement ok
+SET dp_sum_bound = 100.0;
+
+statement ok
+SET dp_count_bound = 1.0;
+
+statement ok
+SET dp_sass_sum_output_bound = 100000.0;
+
+statement ok
+SET dp_sass_count_output_bound = 100000.0;
+
+statement ok
+SET dp_sass_avg_lower_bound = 0.0;
+
+statement ok
+SET dp_sass_avg_upper_bound = 10.0;
+
+# ratio: noise off + generous output bounds → noised_sum / noised_count = 900 / 200 = 4.5 exactly.
+statement ok
+SET dp_sass_avg_method = 'ratio';
+
+query I
+SELECT AVG(v) FROM sass_avg_flag;
+----
+4.5
+
+# lane_average (default): median/mean of the per-lane averages, close to the true mean 4.5.
+statement ok
+SET dp_sass_avg_method = 'lane_average';
+
+query I
+SELECT abs(AVG(v) - 4.5) < 1.0 FROM sass_avg_flag;
+----
+true
+
+# Invalid estimator is rejected at query time.
+statement ok
+SET dp_sass_avg_method = 'bogus';
+
+statement error
+SELECT AVG(v) FROM sass_avg_flag;
+----
+must be 'lane_average' or 'ratio'
+
+statement ok
+SET dp_sass_avg_method = 'lane_average';
+
+# Restore the default median release for the subsequent tests.
+statement ok
+SET dp_sass_release = 'median';
+
 statement ok
 CREATE PU TABLE sass_many(uid INTEGER, v DOUBLE, PRIVACY_KEY(uid));
 
