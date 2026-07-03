@@ -1869,6 +1869,63 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 	agg->ResolveOperatorTypes();
 }
 
+static unique_ptr<Expression> BuildStableDpSassPuHashExpression(OptimizerExtensionInput &input,
+                                                                unique_ptr<LogicalOperator> &plan,
+                                                                LogicalAggregate *agg,
+                                                                const PrivacyCompatibilityResult &check,
+                                                                const vector<string> &privacy_units,
+                                                                const PrivPUHashingSetup &pu_setup,
+                                                                bool allow_self_joins) {
+	if (pu_setup.pu_names.size() != 1) {
+		return nullptr;
+	}
+	const auto &pu_table_name = pu_setup.pu_names[0];
+	auto meta_it = check.table_metadata.find(pu_table_name);
+	if (meta_it == check.table_metadata.end() || meta_it->second.pks.empty()) {
+		throw InternalException("dp_sass: PU table '" + pu_table_name + "' has no PRIVACY_KEY metadata");
+	}
+
+	LogicalGet *key_get = FindAccessibleGetInSubtree(plan, agg, pu_table_name);
+	vector<string> key_columns = meta_it->second.pks;
+	if (!key_get) {
+		vector<LogicalGet *> gets;
+		FindAllGetNodes(plan.get(), gets);
+		auto chain = ExtractFKChain(check, gets, privacy_units, /*include_fk_cols=*/true, allow_self_joins);
+		if (chain.tables.size() >= 2 && !chain.fk_cols.empty()) {
+			const string &linked_table = chain.tables[chain.tables.size() - 2];
+			key_get = FindAccessibleGetInSubtree(plan, agg, linked_table);
+			if (key_get) {
+				key_columns = {chain.fk_cols.back()};
+			}
+		}
+	}
+	if (!key_get) {
+		return nullptr;
+	}
+
+	vector<unique_ptr<Expression>> key_exprs;
+	key_exprs.reserve(key_columns.size());
+	for (auto &key_column : key_columns) {
+		idx_t proj_idx = EnsureProjectedColumn(*key_get, key_column);
+		if (proj_idx == DConstants::INVALID_INDEX) {
+			throw InternalException("dp_sass: failed to project PU key column '" + key_column + "'");
+		}
+		auto col_index = key_get->GetColumnIds()[proj_idx];
+		auto col_type = key_get->GetColumnType(col_index);
+		ColumnBinding source_binding(key_get->table_index, proj_idx);
+		auto propagated = PropagateSingleBinding(*plan, key_get->table_index, source_binding, col_type, agg);
+		if (propagated.table_index == DConstants::INVALID_INDEX) {
+			return nullptr;
+		}
+		key_exprs.push_back(make_uniq<BoundColumnRefExpression>(col_type, propagated));
+	}
+	auto pu_hash_expr = BuildXorHash(input, std::move(key_exprs));
+	pu_hash_expr = BoundCastExpression::AddCastToType(input.context, std::move(pu_hash_expr), LogicalType::UBIGINT);
+	pu_hash_expr->alias = "dp_sass_lane_key";
+	PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] using stable hash-based sample lanes");
+	return pu_hash_expr;
+}
+
 // ----------------------------------------------------------------------------
 // Entry point
 // ----------------------------------------------------------------------------
@@ -2100,18 +2157,13 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	CheckDPFKChainShape(plan, privacy_units, check, allow_self_joins);
 	auto *single_agg = CheckDPAggregates(plan, "dp_sass");
 	auto pu_setup = PreparePlanForPUHashing(check, input, plan, privacy_units);
-	auto hash_infos = BuildPUHashExpressionsForAggregates(input, plan, pu_setup.pu_names, check, pu_setup.cte_map);
-	if (hash_infos.empty()) {
-		throw InvalidInputException("dp_sample_median: no aggregate with a reachable privacy-unit hash found");
-	}
-	if (hash_infos.size() != 1) {
-		throw InvalidInputException("dp_sample_median: expected exactly one privacy-unit aggregate");
-	}
-	auto *agg = hash_infos[0].aggregate;
-	if (agg != single_agg) {
-		throw InternalException("dp_sample_median: privacy-unit aggregate does not match the single aggregate node");
-	}
+	auto *agg = single_agg;
 	CheckDPAggregateNode(agg, "dp_sass", true);
+	auto pu_hash_expr =
+	    BuildStableDpSassPuHashExpression(input, plan, agg, check, privacy_units, pu_setup, allow_self_joins);
+	if (!pu_hash_expr) {
+		throw InvalidInputException("dp_sass: could not build a stable privacy-unit hash for this query shape");
+	}
 
 	// AVG estimator selection. 'lane_average' (default): keep AVG as one as_sample_avg cell (the
 	// NRS/GUPT sample-and-aggregate of the mean). 'ratio': decompose AVG → SUM + COUNT and privatize
@@ -2136,56 +2188,6 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		avg_infos = RewriteAvgAggregates(input, agg, /*use_bounded_mean=*/false, 0.0);
 	}
 	std::unordered_set<idx_t> avg_components = BuildAvgComponentSet(avg_infos);
-
-	if (GetDpSampleLanes(input.context) == 1 && pu_setup.pu_names.size() == 1) {
-		const auto &pu_table_name = pu_setup.pu_names[0];
-		auto meta_it = check.table_metadata.find(pu_table_name);
-		if (meta_it == check.table_metadata.end() || meta_it->second.pks.empty()) {
-			throw InternalException("dp_sass: PU table '" + pu_table_name + "' has no PRIVACY_KEY metadata");
-		}
-
-		// Build the balanced disjoint sample lanes. Preferred source: a scan of the PU table itself
-		// (one row per PU → ROW_NUMBER). If the PU table is not in the plan (implicit FK path — the
-		// query is over a PRIVACY_LINK table and never names the PU table), fall back to the PU-adjacent
-		// linked table's FK column, which identifies the PU on every contributing row; DENSE_RANK then
-		// maps a PU's many rows to a single lane so the lanes stay disjoint. This mirrors how
-		// dp_standard derives the PU key from the FK column (BuildPuKeyExpression) rather than requiring
-		// the PU-table scan.
-		LogicalGet *lane_get = FindAccessibleGetInSubtree(plan, agg, pu_table_name);
-		vector<string> lane_key_columns = meta_it->second.pks;
-		bool per_distinct_key = false;
-		if (!lane_get) {
-			vector<LogicalGet *> gets;
-			FindAllGetNodes(plan.get(), gets);
-			auto chain = ExtractFKChain(check, gets, privacy_units, /*include_fk_cols=*/true, allow_self_joins);
-			if (chain.tables.size() >= 2 && !chain.fk_cols.empty()) {
-				const string &linked_table = chain.tables[chain.tables.size() - 2];
-				lane_get = FindAccessibleGetInSubtree(plan, agg, linked_table);
-				if (lane_get) {
-					lane_key_columns = {chain.fk_cols.back()};
-					per_distinct_key = true;
-				}
-			}
-		}
-		if (lane_get) {
-			std::unordered_map<idx_t, ColumnBinding> lane_cache;
-			auto lane_binding = GetOrInsertBalancedSampleLaneProjection(input, plan, *lane_get, lane_key_columns,
-			                                                            lane_cache, per_distinct_key);
-			auto propagated_lane =
-			    PropagateSingleBinding(*plan, lane_binding.table_index, lane_binding, LogicalType::UBIGINT, agg);
-			if (propagated_lane.table_index == DConstants::INVALID_INDEX) {
-				throw InvalidInputException("dp_sass: could not propagate balanced privacy-unit lane to aggregate");
-			}
-			hash_infos[0].hash_expr = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated_lane);
-			hash_infos[0].hash_binding = propagated_lane;
-			PRIVACY_DEBUG_PRINT(string("[DP_SAMPLE_MEDIAN] using exact balanced disjoint sample lanes") +
-			                    (per_distinct_key ? " (implicit FK: DENSE_RANK over linked-table FK column)" : ""));
-		} else {
-			// No PU-table or linked-table scan reachable (e.g. through a CTE): keep the hash built by
-			// BuildPUHashExpressionsForAggregates rather than the balanced-lane projection.
-			PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] no balanced-lane source found; keeping default PU hash");
-		}
-	}
 
 	// AVG→SUM+COUNT decomposition (ratio mode) appends a COUNT per AVG; the appended components are not
 	// separate user aggregates, so exclude them from the budget-splitting count k (AVG stays one cell).
@@ -2295,8 +2297,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	}
 
 	bool distinct_support_filter = apply_support_filter && IsDpSampleCountDistinct(agg);
-	RewriteAggregateToSampleMedian(input, agg, std::move(hash_infos[0].hash_expr), contribution_bounds,
-	                               distinct_support_filter);
+	RewriteAggregateToSampleMedian(input, agg, std::move(pu_hash_expr), contribution_bounds, distinct_support_filter);
 
 	LogicalOperator *projection_anchor = agg;
 	if (distinct_support_filter) {

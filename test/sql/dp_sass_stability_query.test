@@ -65,10 +65,10 @@ SELECT aggregate_name, lane_count, valid_count, median::INTEGER,
        stable_stddev_1::INTEGER, stable_mad_1::INTEGER
 FROM dp_sass_stability_query($$SELECT COUNT(*) AS c FROM users$$);
 ----
-c	64	64	128	1	1
+c	64	64	128	0	0
 
-# Implicit FK path (events links to the users PU, which is not scanned): the balanced sample lanes
-# are derived from the linked table's FK column, so these medians match the explicit-join result.
+# Implicit FK path (events links to the users PU, which is not scanned): stable sample lanes are
+# derived from the linked table's FK column, so these medians match the explicit-join result.
 query ITTIII
 SELECT aggregate_index, aggregate_name, group_key_json, lane_count, valid_count, median::INTEGER
 FROM dp_sass_stability_query($$
@@ -81,8 +81,8 @@ ORDER BY aggregate_index, group_key_json;
 ----
 0	c	{"category":"even"}	64	64	64
 0	c	{"category":"odd"}	64	64	64
-1	s	{"category":"even"}	64	64	3712
-1	s	{"category":"odd"}	64	64	4000
+1	s	{"category":"even"}	64	64	2304
+1	s	{"category":"odd"}	64	64	2432
 
 statement error
 SELECT *

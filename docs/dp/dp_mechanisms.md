@@ -275,16 +275,17 @@ Song 2018) and its follow-up Chorus.
 > lanes, each PU in one of them.
 
 **Membership function (paper's `H(pu) mod m`).** With `dp_sample_lanes = 1` (the
-default) each PU is assigned to exactly one lane by a balanced, disjoint projection
-(`GetOrInsertBalancedSampleLaneProjection`) — disjoint subsamples, as GUPT/the paper
-assume.
+default) each PU is assigned to exactly one lane by a stable hash of its PU key —
+disjoint subsamples, as GUPT/the paper assume. The hash is computed after ordinary
+filters have been pushed to scans, and it is a pure function of the PU key, so
+adding/removing one PU does not renumber any other PU's sample lane.
 
 > **Note — lanes are not disjoint when `dp_sample_lanes > 1`.** For `sample_lanes > 1`
 > a PU is hashed into up to `sample_lanes` lanes by `DpSampleHash`
 > (`sample_hash |= 1 << ((key_hash >> 6i) & 63)`), so the subsamples **overlap** — a
 > PU appears in several lanes, and there is currently **no mechanism to force the
-> subsets to be disjoint** (the balanced/disjoint assignment exists only for
-> `sample_lanes = 1`; two 6-bit chunks can even collide onto the same lane). The DP
+> subsets to be disjoint** (disjointness is the `sample_lanes = 1` case; two 6-bit
+> chunks can even collide onto the same lane). The DP
 > guarantee still holds because the noise scales already charge the overlap
 > (`Laplace(sample_lanes·(U−L)/m)` for the mean, `beta_eff = β/sample_lanes` for the
 > median — §12), but the disjoint-subsample assumption the SAA analysis relies on is
@@ -355,9 +356,9 @@ Aggregate `FILTER (WHERE …)` is folded into the value (`CASE WHEN cond THEN x 
 than kept as a separate filter, so it survives the per-PU rewrite (`FoldFilterIntoValue`).
 
 **Implicit FK paths.** A `dp_sass` query over a `PRIVACY_LINK` table that never names the
-PU table (e.g. `SELECT SUM(v) FROM events`) is fully supported: the balanced disjoint
-sample lanes are built from the PU-adjacent table's FK column (`DENSE_RANK`, so a PU's
-many rows share one lane), matching the explicit-join result — the same way `dp_standard`
+PU table (e.g. `SELECT SUM(v) FROM events`) is fully supported: the stable sample lanes
+are built from the PU-adjacent table's FK column, so a PU's many rows share the same
+lane, matching the explicit-join result — the same way `dp_standard`
 derives the PU key from the FK column.
 
 **`COUNT(DISTINCT)` in `dp_sass` (low level).** `RewriteDistinctCountToSampleMedian`
@@ -467,8 +468,8 @@ releasing the raw value; `privacy_noise = false` zeroes noise for deterministic 
   utility than `dp_sass`'s median-of-lane-extrema; Google DP supports them too.
   `dp_elastic` still cannot (elastic sensitivity is defined only for counting queries).
 - **Implicit FK paths in `dp_sass`.** Previously `dp_sass` silently returned garbage for a
-  query that never named the PU table (the balanced lanes needed the PU-table scan); now
-  the lanes are derived from the linked table's FK column and the result matches the
+  query that never named the PU table; now the lanes are derived from the linked table's
+  FK column and the result matches the
   explicit join (§13).
 
 ### Still open

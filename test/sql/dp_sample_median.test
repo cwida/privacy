@@ -1026,12 +1026,12 @@ FROM counters;
 ----
 32	32	false
 
-# --- Implicit FK path (PU table not named in FROM) — regression for balanced sample lanes ---
+# --- Implicit FK path (PU table not named in FROM) — regression for stable sample lanes ---
 # Before this fix, dp_sass silently mis-handled a query over a PRIVACY_LINK table that never scans the
-# PU table: the balanced disjoint lanes were skipped (they required the PU-table scan), so SUM/COUNT
-# returned 0 and AVG returned the empty-lane midpoint. The lanes are now built from the PU-adjacent
-# linked table's FK column (DENSE_RANK, so a PU's many rows share one lane). With a constant value the
-# mean is exact, so the implicit result must equal the explicit-join result.
+# PU table: the stable lane key was unavailable, so SUM/COUNT returned 0 and AVG returned the empty-lane
+# midpoint. The lanes are now built from the PU-adjacent linked table's FK column, so a PU's many rows
+# share one lane. With a constant value the mean is exact, so the implicit result must equal the
+# explicit-join result.
 statement ok
 SET privacy_mode = 'dp_sass';
 
