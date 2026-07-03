@@ -1869,13 +1869,11 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 	agg->ResolveOperatorTypes();
 }
 
-static unique_ptr<Expression> BuildStableDpSassPuHashExpression(OptimizerExtensionInput &input,
-                                                                unique_ptr<LogicalOperator> &plan,
-                                                                LogicalAggregate *agg,
-                                                                const PrivacyCompatibilityResult &check,
-                                                                const vector<string> &privacy_units,
-                                                                const PrivPUHashingSetup &pu_setup,
-                                                                bool allow_self_joins) {
+static unique_ptr<Expression>
+BuildStableDpSassPuHashExpression(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                  LogicalAggregate *agg, const PrivacyCompatibilityResult &check,
+                                  const vector<string> &privacy_units, const PrivPUHashingSetup &pu_setup,
+                                  bool allow_self_joins) {
 	if (pu_setup.pu_names.size() != 1) {
 		return nullptr;
 	}

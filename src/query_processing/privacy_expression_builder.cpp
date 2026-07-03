@@ -93,7 +93,7 @@ idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name) {
 	for (idx_t cid = 0; cid < g.GetColumnIds().size(); ++cid) {
 		auto col_idx = g.GetColumnIds()[cid];
 		if (!col_idx.IsVirtualColumn()) {
-			auto existing_name = g.GetColumnName(col_idx);
+			const auto &existing_name = g.GetColumnName(col_idx);
 			if (!existing_name.empty() && StringUtil::CIEquals(existing_name, col_name)) {
 				return cid;
 			}

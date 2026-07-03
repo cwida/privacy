@@ -176,15 +176,18 @@ static void DpSassStabilityFunction(DataChunk &args, ExpressionState &, Vector &
 	}
 }
 
-static thread_local vector<DpSassStabilityQueryRecord> dp_sass_stability_query_records;
+static vector<DpSassStabilityQueryRecord> &DpSassStabilityQueryRecords() {
+	static thread_local vector<DpSassStabilityQueryRecord> records;
+	return records;
+}
 
 void ClearDpSassStabilityQueryRecords() {
-	dp_sass_stability_query_records.clear();
+	DpSassStabilityQueryRecords().clear();
 }
 
 vector<DpSassStabilityQueryRecord> TakeDpSassStabilityQueryRecords() {
-	auto records = std::move(dp_sass_stability_query_records);
-	dp_sass_stability_query_records.clear();
+	auto records = std::move(DpSassStabilityQueryRecords());
+	DpSassStabilityQueryRecords().clear();
 	return records;
 }
 
@@ -255,7 +258,7 @@ static void DpSassRecordStabilityFunction(DataChunk &args, ExpressionState &, Ve
 
 		DpSassStabilityStats stats;
 		bool valid = ComputeDpSassStabilityStats(list_entries[list_idx], child_data, child_values, stats);
-		dp_sass_stability_query_records.push_back(
+		DpSassStabilityQueryRecords().push_back(
 		    {aggregate_indexes[aggregate_index_idx], valid ? DpSassStatsToValues(stats) : NullDpSassStatsValues()});
 		if (valid) {
 			result_data[i] = stats.median;
