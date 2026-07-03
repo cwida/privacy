@@ -1529,6 +1529,53 @@ static bool HasDistinctAggregate(const LogicalAggregate *agg) {
 	return false;
 }
 
+static bool IsSinglePuKeyDistinctCount(unique_ptr<LogicalOperator> &plan, LogicalAggregate *agg,
+                                       const PrivacyCompatibilityResult &check, const vector<string> &privacy_units,
+                                       const PrivPUHashingSetup &pu_setup, bool allow_self_joins) {
+	if (!IsDpSampleCountDistinct(agg) || !agg->groups.empty() || pu_setup.pu_names.size() != 1) {
+		return false;
+	}
+	const auto &pu_table_name = pu_setup.pu_names[0];
+	auto meta_it = check.table_metadata.find(pu_table_name);
+	if (meta_it == check.table_metadata.end() || meta_it->second.pks.size() != 1) {
+		return false;
+	}
+
+	LogicalGet *key_get = FindAccessibleGetInSubtree(plan, agg, pu_table_name);
+	vector<string> key_columns = meta_it->second.pks;
+	if (!key_get) {
+		vector<LogicalGet *> gets;
+		FindAllGetNodes(plan.get(), gets);
+		auto chain = ExtractFKChain(check, gets, privacy_units, /*include_fk_cols=*/true, allow_self_joins);
+		if (chain.tables.size() >= 2 && !chain.fk_cols.empty()) {
+			const string &linked_table = chain.tables[chain.tables.size() - 2];
+			key_get = FindAccessibleGetInSubtree(plan, agg, linked_table);
+			if (key_get) {
+				key_columns = {chain.fk_cols.back()};
+			}
+		}
+	}
+	if (!key_get || key_columns.size() != 1) {
+		return false;
+	}
+
+	idx_t proj_idx = EnsureProjectedColumn(*key_get, key_columns[0]);
+	if (proj_idx == DConstants::INVALID_INDEX) {
+		throw InternalException("dp_sass: failed to project PU key column '" + key_columns[0] + "'");
+	}
+	auto col_index = key_get->GetColumnIds()[proj_idx];
+	auto col_type = key_get->GetColumnType(col_index);
+	ColumnBinding source_binding(key_get->table_index, proj_idx);
+	auto propagated = PropagateSingleBinding(*plan, key_get->table_index, source_binding, col_type, agg);
+	if (propagated.table_index == DConstants::INVALID_INDEX) {
+		return false;
+	}
+
+	auto &aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
+	auto key_ref = make_uniq<BoundColumnRefExpression>(col_type, propagated);
+	return Expression::Equals(*aggr.children[0], *key_ref);
+}
+
 struct DpSassContributionBounds {
 	double count_bound = 0.0;
 	double sum_bound = 0.0;
@@ -1742,6 +1789,36 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 	agg->ResolveOperatorTypes();
 }
 
+static void RewritePuDistinctCountToSampleMedian(OptimizerExtensionInput &input, LogicalAggregate *agg,
+                                                 unique_ptr<Expression> pu_hash_expr) {
+	auto &binder = input.optimizer.binder;
+	auto &old_aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
+	auto distinct_value = old_aggr.children[0]->Copy();
+	auto distinct_type = distinct_value->return_type;
+
+	idx_t inner_group_index = binder.GenerateTableIndex();
+	idx_t inner_agg_index = binder.GenerateTableIndex();
+	vector<unique_ptr<Expression>> inner_expressions;
+	auto inner_agg = make_uniq<LogicalAggregate>(inner_group_index, inner_agg_index, std::move(inner_expressions));
+	inner_agg->groups.push_back(std::move(pu_hash_expr));
+	inner_agg->groups.push_back(std::move(distinct_value));
+	inner_agg->children.push_back(std::move(agg->children[0]));
+	inner_agg->ResolveOperatorTypes();
+
+	auto hash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, ColumnBinding(inner_group_index, 0));
+	auto value_ref = make_uniq<BoundColumnRefExpression>(distinct_type, ColumnBinding(inner_group_index, 1));
+	vector<unique_ptr<Expression>> top_expressions;
+	vector<unique_ptr<Expression>> count_children;
+	count_children.push_back(std::move(hash_ref));
+	count_children.push_back(std::move(value_ref));
+	top_expressions.push_back(BindAggregateLocal(input, "as_sample_count", std::move(count_children)));
+
+	agg->children[0] = std::move(inner_agg);
+	agg->expressions = std::move(top_expressions);
+	agg->ResolveOperatorTypes();
+	PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] specialized COUNT(DISTINCT PU key) -> distinct PU rows + as_sample_count");
+}
+
 static void RemapExpressionBindingsLocal(Expression &e, const std::unordered_map<idx_t, idx_t> &map) {
 	if (e.type == ExpressionType::BOUND_COLUMN_REF) {
 		auto &col_ref = e.Cast<BoundColumnRefExpression>();
@@ -1867,8 +1944,12 @@ static unique_ptr<Expression> BuildSampleMedianAggregateRef(OptimizerExtensionIn
 
 static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, LogicalAggregate *agg,
                                            unique_ptr<Expression> pu_hash_expr, const DpSassContributionBounds &bounds,
-                                           bool apply_distinct_support_filter) {
+                                           bool apply_distinct_support_filter, bool distinct_count_is_pu_key = false) {
 	if (IsDpSampleCountDistinct(agg)) {
+		if (distinct_count_is_pu_key) {
+			RewritePuDistinctCountToSampleMedian(input, agg, std::move(pu_hash_expr));
+			return;
+		}
 		D_ASSERT(bounds.has_integer_count_bound);
 		int64_t count_bound = bounds.count_bound_integer;
 		int64_t group_bound =
@@ -2193,6 +2274,8 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	auto pu_setup = PreparePlanForPUHashing(check, input, plan, privacy_units);
 	auto *agg = single_agg;
 	CheckDPAggregateNode(agg, "dp_sass", true);
+	bool distinct_count_is_pu_key =
+	    IsSinglePuKeyDistinctCount(plan, agg, check, privacy_units, pu_setup, allow_self_joins);
 	auto pu_hash_expr =
 	    BuildStableDpSassPuHashExpression(input, plan, agg, check, privacy_units, pu_setup, allow_self_joins);
 	if (!pu_hash_expr) {
@@ -2331,7 +2414,8 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	}
 
 	bool distinct_support_filter = apply_support_filter && IsDpSampleCountDistinct(agg);
-	RewriteAggregateToSampleMedian(input, agg, std::move(pu_hash_expr), contribution_bounds, distinct_support_filter);
+	RewriteAggregateToSampleMedian(input, agg, std::move(pu_hash_expr), contribution_bounds, distinct_support_filter,
+	                               distinct_count_is_pu_key);
 
 	LogicalOperator *projection_anchor = agg;
 	if (distinct_support_filter) {

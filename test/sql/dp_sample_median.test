@@ -917,6 +917,109 @@ SELECT COUNT(*) FROM sass_balanced_events;
 ----
 128
 
+statement ok
+CREATE TABLE sass_distinct_pu_opt(uid INTEGER, payload INTEGER);
+
+statement ok
+INSERT INTO sass_distinct_pu_opt
+SELECT i, i % 7 FROM range(130) t(i)
+UNION ALL
+SELECT i, 10 + (i % 7) FROM range(130) t(i);
+
+statement ok
+ALTER TABLE sass_distinct_pu_opt ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE sass_distinct_pu_opt SET PU;
+
+query I nosort explain_sass_distinct_pu_fast
+EXPLAIN SELECT COUNT(DISTINCT uid) FROM sass_distinct_pu_opt;
+----
+as_sample_count
+
+query I
+SELECT COUNT(DISTINCT uid) FROM sass_distinct_pu_opt;
+----
+128
+
+query I nosort explain_sass_distinct_non_pu_generic
+EXPLAIN SELECT COUNT(DISTINCT payload) FROM sass_distinct_pu_opt;
+----
+as_sample_count_mask
+
+statement ok
+CREATE TABLE sass_sum_offset_opt(uid INTEGER, v INTEGER);
+
+statement ok
+INSERT INTO sass_sum_offset_opt
+SELECT i, 1 FROM range(130) t(i);
+
+statement ok
+ALTER TABLE sass_sum_offset_opt ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE sass_sum_offset_opt SET PU;
+
+query I nosort explain_sass_sum_offset_generic
+EXPLAIN SELECT SUM(v), SUM(v + 1), SUM(1 + v), SUM(v + 2) FROM sass_sum_offset_opt;
+----
+as_sample_sum
+
+query IIII
+SELECT SUM(v), SUM(v + 1), SUM(1 + v), SUM(v + 2) FROM sass_sum_offset_opt;
+----
+128	256	256	384
+
+statement ok
+CREATE TABLE sass_sum_offset_bound_guard(uid INTEGER, v INTEGER);
+
+statement ok
+INSERT INTO sass_sum_offset_bound_guard
+SELECT i, -1000 FROM range(130) t(i);
+
+statement ok
+ALTER TABLE sass_sum_offset_bound_guard ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE sass_sum_offset_bound_guard SET PU;
+
+statement ok
+SET dp_sum_bound = 1.0;
+
+query I
+SELECT SUM(v + 1000) FROM sass_sum_offset_bound_guard;
+----
+0
+
+query II
+SELECT SUM(v), SUM(v + 1000) FROM sass_sum_offset_bound_guard;
+----
+-128	0
+
+statement ok
+SET dp_sum_bound = 2.0;
+
+statement ok
+CREATE TABLE sass_sum_cast_offset_opt(uid INTEGER, v DOUBLE);
+
+statement ok
+INSERT INTO sass_sum_cast_offset_opt
+SELECT i, 1.2 FROM range(130) t(i);
+
+statement ok
+ALTER TABLE sass_sum_cast_offset_opt ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE sass_sum_cast_offset_opt SET PU;
+
+query II
+SELECT SUM(CAST(v AS INTEGER)), SUM(CAST(v AS INTEGER) + 1) FROM sass_sum_cast_offset_opt;
+----
+128	256
+
+statement ok
+SET dp_sum_bound = 500.0;
+
 # GUPT-style mean release (pure-ε; no delta required).
 statement ok
 SET dp_sass_release = 'average';
