@@ -371,6 +371,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "NRS/GUPT-native; default) or 'ratio' (two independent SAA mechanisms for SUM and "
 	                             "COUNT, released as their ratio; Google-DP-style).",
 	                             LogicalType::VARCHAR, Value("lane_average"));
+	db.config.AddExtensionOption(
+	    "dp_sass_fast_count_star",
+	    "[INTERNAL] Enable a fast Laplace COUNT(*) path for ungrouped dp_sass single-table PU queries. "
+	    "This treats dp_count_bound as a public data-validity assumption instead of enforcing clipping.",
+	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	// Privacy failure probability δ for (ε,δ)-DP smooth sensitivity. Required by dp_elastic and
 	// dp_sass; ignored by dp_standard, which gives pure ε-DP. PRAGMA refresh_dp_stats(epsilon) can set it.
 	db.config.AddExtensionOption(

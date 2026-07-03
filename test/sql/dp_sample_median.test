@@ -160,6 +160,71 @@ statement ok
 PRAGMA clear_privacy_metadata;
 
 statement ok
+CREATE TABLE sass_fast_count_events(uid INTEGER, g INTEGER);
+
+statement ok
+INSERT INTO sass_fast_count_events VALUES (1, 0), (1, 1), (2, 0), (3, 1), (3, 1);
+
+statement ok
+ALTER TABLE sass_fast_count_events ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE sass_fast_count_events SET PU;
+
+statement ok
+SET dp_sample_lanes = 1;
+
+statement ok
+SET dp_count_bound = 10;
+
+statement ok
+SET dp_max_groups_contributed = 1;
+
+statement ok
+SET dp_sass_count_output_bound = NULL;
+
+statement ok
+SET dp_sass_fast_count_star = false;
+
+statement error
+SELECT COUNT(*) FROM sass_fast_count_events;
+----
+dp_sass_count_output_bound
+
+statement ok
+SET dp_sass_fast_count_star = true;
+
+statement ok
+SET privacy_noise = true;
+
+query I nosort explain_sass_fast_count_star
+EXPLAIN SELECT COUNT(*) FROM sass_fast_count_events;
+----
+dp_noise
+
+statement ok
+SET privacy_noise = false;
+
+query I
+SELECT COUNT(*) FROM sass_fast_count_events;
+----
+5
+
+statement error
+SELECT COUNT(*) FILTER (WHERE g = 1) FROM sass_fast_count_events;
+----
+dp_sass_count_output_bound
+
+statement ok
+SET dp_sass_fast_count_star = false;
+
+statement ok
+SET dp_sass_count_output_bound = 1000;
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
 CREATE TABLE _sass_part (
     p_partkey INTEGER,
     p_brand VARCHAR,

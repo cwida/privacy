@@ -359,13 +359,6 @@ static DPFKChain ExtractDPFKChain(unique_ptr<LogicalOperator> &plan, const vecto
 	return ExtractFKChain(check, gets, privacy_units, true, allow_self_joins);
 }
 
-static void CheckDPFKChainShape(unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                                const PrivacyCompatibilityResult &check, bool allow_self_joins = false) {
-	vector<LogicalGet *> gets;
-	FindAllGetNodes(plan.get(), gets);
-	ExtractFKChain(check, gets, privacy_units, false, allow_self_joins);
-}
-
 static bool IsRightSideHiddenJoin(JoinType join_type) {
 	return join_type == JoinType::MARK || join_type == JoinType::SEMI || join_type == JoinType::ANTI ||
 	       join_type == JoinType::SINGLE;
@@ -1284,6 +1277,45 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 	                                n_aggs, 0, "dp: could not locate noise insertion slot in plan");
 }
 
+static bool IsPlainCountStarAggregate(const BoundAggregateExpression &aggr) {
+	return aggr.function.name == "count_star" && !aggr.IsDistinct() && aggr.children.empty() && !aggr.filter;
+}
+
+static bool IsDPSassFastCountStarEligible(const LogicalAggregate *agg, const DPFKChain &chain) {
+	if (!agg->groups.empty() || agg->expressions.size() != 1) {
+		return false;
+	}
+	if (chain.tables.size() != 1 || !chain.fk_cols.empty()) {
+		return false;
+	}
+	auto &aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
+	return IsPlainCountStarAggregate(aggr);
+}
+
+static bool TryCompileDPSassFastCountStar(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                          LogicalAggregate *agg, const DPFKChain &chain, double epsilon) {
+	if (!GetBooleanSetting(input.context, "dp_sass_fast_count_star", false)) {
+		return false;
+	}
+	if (!IsDPSassFastCountStarEligible(agg, chain)) {
+		PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] dp_sass_fast_count_star enabled but query is not eligible");
+		return false;
+	}
+
+	// This is intentionally not an SAA release. The internal flag is for COUNT(*) workloads such as
+	// ClickBench Q1 where the user accepts dp_count_bound as a public validity assumption.
+	double count_bound = GetRequiredDpBound(input.context, "dp_count_bound", "dp_sass");
+	bool noise_enabled = GetBooleanSetting(input.context, "privacy_noise", true);
+	double scale = noise_enabled ? (count_bound / epsilon) : 0.0;
+
+	agg->ResolveOperatorTypes();
+	vector<double> agg_scales {scale};
+	vector<LogicalType> output_types {agg->types[agg->groups.size()]};
+	PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] using fast COUNT(*) Laplace path; scale=" + std::to_string(scale));
+	WrapAggregateWithLaplace(input, plan, agg, agg, agg_scales, output_types);
+	return true;
+}
+
 // ----------------------------------------------------------------------------
 // AVG ratio projection — inserts a LogicalProjection above `insert_above` that
 // computes noised_SUM / max(1, noised_COUNT) for each AVG-rewritten position.
@@ -2138,6 +2170,13 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 
 	double epsilon = GetValidatedDpEpsilon(input.context, "dp_sample_median");
 	string release_method = GetDpSassReleaseMethod(input.context);
+	bool allow_self_joins = ValidateDPSelfJoins(plan, "dp_sample_median") > 1.0;
+	auto fk_chain = ExtractDPFKChain(plan, privacy_units, check, allow_self_joins);
+	auto *single_agg = CheckDPAggregates(plan, "dp_sass");
+	if (TryCompileDPSassFastCountStar(input, plan, single_agg, fk_chain, epsilon)) {
+		return;
+	}
+
 	// The GUPT-style mean release ('average') is pure ε-DP and needs no δ. The smooth-sensitivity
 	// median release ('median') is (ε,δ)-DP and requires δ ∈ (0, 0.5).
 	double delta = 0.0;
@@ -2151,9 +2190,6 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		}
 	}
 
-	bool allow_self_joins = ValidateDPSelfJoins(plan, "dp_sample_median") > 1.0;
-	CheckDPFKChainShape(plan, privacy_units, check, allow_self_joins);
-	auto *single_agg = CheckDPAggregates(plan, "dp_sass");
 	auto pu_setup = PreparePlanForPUHashing(check, input, plan, privacy_units);
 	auto *agg = single_agg;
 	CheckDPAggregateNode(agg, "dp_sass", true);
