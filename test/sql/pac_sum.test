@@ -276,6 +276,17 @@ SELECT as_noised_sum(hash(5)::UBIGINT, 1.0) FROM range(1000) t(i)
 ----
 detected absence of sample diversity
 
+statement ok
+SET pac_sample_diversity_check = false
+
+query I
+SELECT as_noised_sum(hash(5)::UBIGINT, 1.0) IS NOT NULL FROM range(1000) t(i)
+----
+true
+
+statement ok
+SET pac_sample_diversity_check = true
+
 # Grouped: each group has rows from the same privacy unit → should trigger diversity error
 statement error
 SELECT key, as_noised_sum(hash(5)::UBIGINT, 1.0) FROM (SELECT i % 3 AS key FROM range(3000) t(i)) sub GROUP BY key

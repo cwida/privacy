@@ -464,6 +464,7 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 		// Set thread count
 		Log("Setting threads to " + std::to_string(threads));
 		con.Query("SET threads TO " + std::to_string(threads) + ";");
+		con.Query("SET pac_sample_diversity_check=false;");
 
 		// Enable spilling to disk when memory is insufficient
 		auto r_temp = con.Query("SET temp_directory='/tmp/duckdb_temp';");
@@ -714,7 +715,8 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 									csv << entry.label << ",Naive-AS,-1\n";
 								} else {
 									double naive_as_median = Median(naive_as_times_ms) * 64.0;
-									Log("Naive-AS " + entry.label + " median*64 (ms): " + FormatNumber(naive_as_median));
+									Log("Naive-AS " + entry.label +
+									    " median*64 (ms): " + FormatNumber(naive_as_median));
 									csv << entry.label << ",Naive-AS," << FormatNumber(naive_as_median) << "\n";
 								}
 							}
@@ -769,16 +771,15 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 
 // Add a small helper for printing usage (placed outside of namespace to avoid analyzer warnings)
 static void PrintUsageMain() {
-	std::cout
-	    << "Usage: as_tpch_benchmark [sf] [db_path] [queries_dir] [out_csv] [--run-simple-hash]\n"
-	    << "  sf: TPCH scale factor (int, default 10)\n"
-	    << "  db_path: DuckDB database file (default 'tpch.db')\n"
-	    << "  queries_dir: root directory containing AS SQL variants (default 'benchmark').\n"
-	    << "               subdirectories expected: 'tpch/tpch_as_queries' (bitslice), "
-	       "'tpch/tpch_as_simple_hash_queries' (simple hash), 'tpch/tpch_naive_as_queries' (Naive-AS)\n"
-	    << "  out_csv: optional output CSV path (auto-named if omitted)\n"
-	    << "  --run-simple-hash: optional flag to run a simple hash AS variant as well\n"
-	    << "  --threads=N: number of DuckDB threads (default 8)\n";
+	std::cout << "Usage: as_tpch_benchmark [sf] [db_path] [queries_dir] [out_csv] [--run-simple-hash]\n"
+	          << "  sf: TPCH scale factor (int, default 10)\n"
+	          << "  db_path: DuckDB database file (default 'tpch.db')\n"
+	          << "  queries_dir: root directory containing AS SQL variants (default 'benchmark').\n"
+	          << "               subdirectories expected: 'tpch/tpch_as_queries' (bitslice), "
+	             "'tpch/tpch_as_simple_hash_queries' (simple hash), 'tpch/tpch_naive_as_queries' (Naive-AS)\n"
+	          << "  out_csv: optional output CSV path (auto-named if omitted)\n"
+	          << "  --run-simple-hash: optional flag to run a simple hash AS variant as well\n"
+	          << "  --threads=N: number of DuckDB threads (default 8)\n";
 }
 
 // Add a small main so this file builds to an executable

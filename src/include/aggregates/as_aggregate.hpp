@@ -225,14 +225,15 @@ inline double GetPacMiFromSetting(ClientContext &ctx) {
 // query_hash is XOR'd with per-row key_hash inside priv_hash() (centralized) and used as
 // the counter selector for PacNoisySampleFrom64Counters in finalize functions.
 struct PrivBindData : public FunctionData {
-	double mi;                // mutual information parameter from pac_mi setting (controls noise/NULL probability)
-	double correction;        // correction factor: multiplies sum/avg/count results, reduces NULL prob for min/max
-	uint64_t seed;            // RNG seed: privacy_seed setting value, or query-id if not set
-	uint64_t query_hash;      // derived from seed: used inside priv_hash() for XOR and as counter selector
-	double scale_divisor;     // for DECIMAL as_avg: divide result by 10^scale (default 1.0)
-	bool hash_repair;         // if true, priv_hash() repairs hash to exactly 32 bits set
-	int sample_lanes;         // SASS mode: number of sampled lanes per PU hash; 0 means identity hash
-	double utility_threshold; // z-score threshold for utility NULLing (NaN = disabled, any value = enabled)
+	double mi;                   // mutual information parameter from pac_mi setting (controls noise/NULL probability)
+	double correction;           // correction factor: multiplies sum/avg/count results, reduces NULL prob for min/max
+	uint64_t seed;               // RNG seed: privacy_seed setting value, or query-id if not set
+	uint64_t query_hash;         // derived from seed: used inside priv_hash() for XOR and as counter selector
+	double scale_divisor;        // for DECIMAL as_avg: divide result by 10^scale (default 1.0)
+	bool hash_repair;            // if true, priv_hash() repairs hash to exactly 32 bits set
+	bool sample_diversity_check; // if true, reject aggregates without sample diversity
+	int sample_lanes;            // SASS mode: number of sampled lanes per PU hash; 0 means identity hash
+	double utility_threshold;    // z-score threshold for utility NULLing (NaN = disabled, any value = enabled)
 
 	// Persistent secret p-tracking: shared across all aggregates in the same query (same query_hash).
 	// When active (mi > 0 and pac_ptracking enabled), noise calibration uses p-weighted variance
@@ -249,8 +250,13 @@ struct PrivBindData : public FunctionData {
 	explicit PrivBindData(ClientContext &ctx, double mi_val, double correction_val = 1.0, double scale_div = 1.0,
 	                      bool hash_repair_val = false, int sample_lanes_val = 0)
 	    : mi(mi_val), correction(correction_val), scale_divisor(scale_div), hash_repair(hash_repair_val),
-	      sample_lanes(sample_lanes_val), utility_threshold(std::numeric_limits<double>::quiet_NaN()),
-	      total_update_count(0), suspicious_count(0), nonsuspicious_count(0) {
+	      sample_diversity_check(true), sample_lanes(sample_lanes_val),
+	      utility_threshold(std::numeric_limits<double>::quiet_NaN()), total_update_count(0), suspicious_count(0),
+	      nonsuspicious_count(0) {
+		Value sd_val;
+		if (ctx.TryGetCurrentSetting("pac_sample_diversity_check", sd_val) && !sd_val.IsNull()) {
+			sample_diversity_check = sd_val.GetValue<bool>();
+		}
 		// Read utility threshold: if set (non-null), enables probabilistic NULLing of low-SNR cells
 		Value ut_val;
 		if (ctx.TryGetCurrentSetting("privacy_min_group_count", ut_val) && !ut_val.IsNull()) {

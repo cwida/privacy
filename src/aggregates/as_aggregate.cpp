@@ -59,6 +59,10 @@ uint64_t PacGenerateRandomSeed() {
 // Accumulates per-group stats into bind_data, then checks the population-level condition.
 void CheckPacSampleDiversity(uint64_t key_hash, const PAC_FLOAT *buf, uint64_t update_count, const char *aggr_name,
                              PrivBindData &bind_data) {
+	if (!bind_data.sample_diversity_check) {
+		return;
+	}
+
 	bind_data.total_update_count += update_count;
 
 	// Classify this group as suspicious or not

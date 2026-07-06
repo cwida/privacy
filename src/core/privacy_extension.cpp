@@ -388,6 +388,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Enable/disable PAC noise application (useful for testing, since noise affects result determinism)
 	db.config.AddExtensionOption("privacy_noise", "Enable/disable PAC noise application (set to false for debugging)",
 	                             LogicalType::BOOLEAN);
+	db.config.AddExtensionOption("pac_sample_diversity_check",
+	                             "[INTERNAL] Reject PAC/AS aggregates that lack sample diversity", LogicalType::BOOLEAN,
+	                             Value::BOOLEAN(true));
 	// Correction factor: multiplies sum/avg/count results; reduces NULL probability for all aggregates
 	db.config.AddExtensionOption("pac_correction", "Correction factor multiplied into aggregate results (default: 1.0)",
 	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));
