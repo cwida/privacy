@@ -876,11 +876,11 @@ static double ReadTpchPrivacyUnitCount(Connection &con, PrivacyProfile profile) 
 }
 
 static double DefaultDelta(double epsilon, double privacy_units) {
+	(void)epsilon;
 	if (privacy_units <= 1.0 || !std::isfinite(privacy_units)) {
 		return 1e-6;
 	}
-	double log_pu = std::log(privacy_units);
-	return std::exp(-epsilon * log_pu * log_pu);
+	return 1.0 / privacy_units;
 }
 
 static double DeriveSassOutputBound(double per_pu_bound, double pu_count, int sample_lanes,
@@ -1275,8 +1275,7 @@ static void RunDataset(const Config &config, const DatasetConfig &dataset, std::
 				try {
 					ApplyDatasetPrivacy(con, dataset, query);
 					double pu_count = ReadBenchmarkPrivacyUnitCount(con, dataset, query);
-					if (delta <= 0.0 && point.mode != "dp_standard" &&
-					    !(point.mode == "dp_sass" && point.release == "average")) {
+					if (delta <= 0.0) {
 						delta = DefaultDelta(point.epsilon, pu_count);
 					}
 					if (point.mode == "dp_sass") {
