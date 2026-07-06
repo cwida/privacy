@@ -12,7 +12,18 @@ cmake --build build/release --target dp_benchmark_runner
 Run a config:
 
 ```bash
-build/release/extension/privacy/dp_benchmark_runner --config benchmark/dp/configs/tpch_smoke.json
+build/release/extension/privacy/dp_benchmark_runner --config benchmark/dp/configs/tpch_jcch_stock_dp_sf3_bounds.json
+```
+
+The runner has one built-in TPC-H/JCC-H DP query set:
+
+- `tpch_stock_dp` / `jcch_stock_dp`: stock customer-linked queries supported by both `dp_standard` and
+  `dp_sass` (`Q01`, `Q05`, `Q06`, `Q14`, `Q19`).
+
+For built-in query sets, use `query_names` to run or tune only selected queries:
+
+```json
+{"name": "tpch", "workload": "tpch_stock_dp", "query_names": ["q06", "q19"]}
 ```
 
 Validate config/query discovery without running queries:
@@ -33,6 +44,7 @@ The JSON config accepts scalar or array sweeps for:
 - `bound_multiplier` / `bound_multipliers`
 - `sample_lanes`
 - `sass_releases`: `median` or `average`
+- `query_names`: optional built-in query-name filter, e.g., `["q01", "q05"]`
 
 CSV rows include the concrete values used for each run, including `epsilon`,
 `delta`, `sf`, `c_u`, bounds, sample lanes, utility metrics, and timing metadata.

@@ -78,6 +78,7 @@ struct DatasetConfig {
 	string queries_dir;
 	string queries_file;
 	vector<string> query_paths;
+	vector<string> query_names;
 	string privacy_sql;
 	string setup_sql;
 	string load_sql;
@@ -642,6 +643,7 @@ static Config LoadConfig(const string &path) {
 		ds.queries_dir = JsonString(entry, "queries_dir");
 		ds.queries_file = JsonString(entry, "queries_file");
 		ds.query_paths = JsonStringList(entry, "queries", {});
+		ds.query_names = JsonStringList(entry, "query_names", {});
 		ds.privacy_sql = JsonString(entry, "privacy_sql");
 		ds.setup_sql = JsonString(entry, "setup_sql");
 		ds.load_sql = JsonString(entry, "load_sql");
@@ -736,77 +738,85 @@ static vector<QuerySpec> ReadQueriesFromPaths(const vector<string> &paths, idx_t
 	return queries;
 }
 
-static vector<QuerySpec> GetTpchUtilityQueries() {
-	return {{"q1", "TPC-H Q1 count by return flag/status", 2, PrivacyProfile::CUSTOMER,
-	         R"(SELECT l_returnflag, l_linestatus, COUNT(*) AS count_order
+static vector<QuerySpec> GetTpchStockDpQueries() {
+	return {{"q01", "TPC-H Q1 pricing summary report", 2, PrivacyProfile::CUSTOMER,
+	         R"(SELECT
+    l_returnflag,
+    l_linestatus,
+    sum(l_quantity) AS sum_qty,
+    sum(l_extendedprice) AS sum_base_price,
+    sum(l_extendedprice * (1 - l_discount)) AS sum_disc_price,
+    sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge,
+    avg(l_quantity) AS avg_qty,
+    avg(l_extendedprice) AS avg_price,
+    avg(l_discount) AS avg_disc,
+    count(*) AS count_order
 FROM lineitem
-WHERE l_shipdate <= DATE '1998-12-01' - INTERVAL 90 DAY
+WHERE l_shipdate <= CAST('1998-09-02' AS date)
 GROUP BY l_returnflag, l_linestatus
 ORDER BY l_returnflag, l_linestatus)"},
-	        {"q4", "TPC-H Q4 count by order priority", 1, PrivacyProfile::CUSTOMER,
-	         R"(SELECT o_orderpriority, COUNT(*) AS order_count
-FROM orders
-WHERE o_orderdate >= DATE '1993-07-01'
-  AND o_orderdate < DATE '1993-07-01' + INTERVAL 3 MONTH
-  AND EXISTS (
-    SELECT *
-    FROM lineitem
-    WHERE l_orderkey = o_orderkey
-      AND l_commitdate < l_receiptdate
-  )
-GROUP BY o_orderpriority
-ORDER BY o_orderpriority)"},
-	        {"q13", "TPC-H Q13 customer order-count histogram", 1, PrivacyProfile::CUSTOMER,
-	         R"(SELECT c_count, COUNT(*) AS custdist
-FROM (
-  SELECT c_custkey, COUNT(o_orderkey) AS c_count
-  FROM customer
-  LEFT OUTER JOIN orders
-    ON c_custkey = o_custkey
-   AND o_comment NOT LIKE '%special%requests%'
-  GROUP BY c_custkey
-) AS c_orders
-GROUP BY c_count
-ORDER BY custdist DESC, c_count DESC)"},
-	        {"q16", "TPC-H Q16 distinct suppliers by part attributes", 3, PrivacyProfile::PART,
-	         R"(SELECT p_brand, p_type, p_size, COUNT(DISTINCT ps_suppkey) AS supplier_cnt
-FROM partsupp, part
-WHERE p_partkey = ps_partkey
-  AND p_brand <> 'Brand#45'
-  AND p_type NOT LIKE 'MEDIUM POLISHED%'
-  AND p_size IN (49, 14, 23, 45, 19, 3, 36, 9)
-  AND ps_suppkey NOT IN (
-    SELECT s_suppkey
-    FROM supplier
-    WHERE s_comment LIKE '%Customer%Complaints%'
-)
-GROUP BY p_brand, p_type, p_size
-ORDER BY supplier_cnt DESC, p_brand, p_type, p_size)"},
-	        {"q21", "TPC-H Q21 suppliers who kept orders waiting", 1, PrivacyProfile::CUSTOMER,
-	         R"(SELECT s_name, COUNT(*) AS numwait
-FROM supplier, lineitem l1, orders, nation
-WHERE s_suppkey = l1.l_suppkey
-  AND o_orderkey = l1.l_orderkey
-  AND o_orderstatus = 'F'
-  AND l1.l_receiptdate > l1.l_commitdate
-  AND EXISTS (
-    SELECT *
-    FROM lineitem l2
-    WHERE l2.l_orderkey = l1.l_orderkey
-      AND l2.l_suppkey <> l1.l_suppkey
-  )
-  AND NOT EXISTS (
-    SELECT *
-    FROM lineitem l3
-    WHERE l3.l_orderkey = l1.l_orderkey
-      AND l3.l_suppkey <> l1.l_suppkey
-      AND l3.l_receiptdate > l3.l_commitdate
-  )
+	        {"q05", "TPC-H Q5 local supplier volume", 1, PrivacyProfile::CUSTOMER,
+	         R"(SELECT
+    n_name,
+    sum(l_extendedprice * (1 - l_discount)) AS revenue
+FROM customer, orders, lineitem, supplier, nation, region
+WHERE c_custkey = o_custkey
+  AND l_orderkey = o_orderkey
+  AND l_suppkey = s_suppkey
+  AND c_nationkey = s_nationkey
   AND s_nationkey = n_nationkey
-  AND n_name = 'SAUDI ARABIA'
-GROUP BY s_name
-ORDER BY numwait DESC, s_name
-LIMIT 100)"}};
+  AND n_regionkey = r_regionkey
+  AND r_name = 'ASIA'
+  AND o_orderdate >= CAST('1994-01-01' AS date)
+  AND o_orderdate < CAST('1995-01-01' AS date)
+GROUP BY n_name
+ORDER BY revenue DESC)"},
+	        {"q06", "TPC-H Q6 forecast revenue change", 0, PrivacyProfile::CUSTOMER,
+	         R"(SELECT
+    sum(l_extendedprice * l_discount) AS revenue
+FROM lineitem
+WHERE l_shipdate >= CAST('1994-01-01' AS date)
+  AND l_shipdate < CAST('1995-01-01' AS date)
+  AND l_discount BETWEEN 0.05 AND 0.07
+  AND l_quantity < 24)"},
+	        {"q14", "TPC-H Q14 promotion effect", 0, PrivacyProfile::CUSTOMER,
+	         R"(SELECT
+    100.00 * sum(CASE
+        WHEN p_type LIKE 'PROMO%'
+        THEN l_extendedprice * (1 - l_discount)
+        ELSE 0
+    END) / sum(l_extendedprice * (1 - l_discount)) AS promo_revenue
+FROM lineitem, part
+WHERE l_partkey = p_partkey
+  AND l_shipdate >= CAST('1995-09-01' AS date)
+  AND l_shipdate < CAST('1995-10-01' AS date))"},
+	        {"q19", "TPC-H Q19 discount revenue", 0, PrivacyProfile::CUSTOMER,
+	         R"(SELECT
+    sum(l_extendedprice * (1 - l_discount)) AS revenue
+FROM lineitem, part
+WHERE p_partkey = l_partkey
+  AND l_shipmode IN ('AIR', 'AIR REG')
+  AND l_shipinstruct = 'DELIVER IN PERSON'
+  AND (
+    (
+      p_brand = 'Brand#12'
+      AND p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')
+      AND l_quantity >= 1 AND l_quantity <= 11
+      AND p_size BETWEEN 1 AND 5
+    )
+    OR (
+      p_brand = 'Brand#23'
+      AND p_container IN ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK')
+      AND l_quantity >= 10 AND l_quantity <= 20
+      AND p_size BETWEEN 1 AND 10
+    )
+    OR (
+      p_brand = 'Brand#34'
+      AND p_container IN ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')
+      AND l_quantity >= 20 AND l_quantity <= 30
+      AND p_size BETWEEN 1 AND 15
+    )
+  ))"}};
 }
 
 static void LoadTpch(Connection &con) {
@@ -931,7 +941,10 @@ static string DefaultDbPath(const DatasetConfig &dataset) {
 
 static vector<QuerySpec> LoadDatasetQueries(const DatasetConfig &dataset) {
 	if (dataset.name == "tpch" || dataset.name == "jcch") {
-		auto queries = GetTpchUtilityQueries();
+		if (dataset.workload != "tpch_stock_dp" && dataset.workload != "jcch_stock_dp") {
+			throw std::runtime_error("unknown built-in TPC-H/JCC-H workload: " + dataset.workload);
+		}
+		auto queries = GetTpchStockDpQueries();
 		if (dataset.query_limit > 0 && queries.size() > dataset.query_limit) {
 			queries.resize(dataset.query_limit);
 		}
@@ -1016,6 +1029,35 @@ static vector<string> NonEmptyString(const vector<string> &values, const vector<
 	return values.empty() ? fallback : values;
 }
 
+static bool ContainsString(const vector<string> &values, const string &needle) {
+	return std::find(values.begin(), values.end(), needle) != values.end();
+}
+
+static vector<QuerySpec> FilterQueriesByName(vector<QuerySpec> queries, const vector<string> &names) {
+	if (names.empty()) {
+		return queries;
+	}
+	vector<QuerySpec> filtered;
+	for (auto &query : queries) {
+		if (ContainsString(names, query.name)) {
+			filtered.push_back(std::move(query));
+		}
+	}
+	for (auto &name : names) {
+		bool found = false;
+		for (auto &query : filtered) {
+			if (query.name == name) {
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			throw std::runtime_error("query_names requested unknown query: " + name);
+		}
+	}
+	return filtered;
+}
+
 static vector<RunPoint> BuildRunPoints(const DatasetConfig &dataset) {
 	vector<RunPoint> points;
 	auto c_u_values = dataset.c_u_values.empty() ? dataset.group_bounds : dataset.c_u_values;
@@ -1071,7 +1113,7 @@ static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta
                             double sass_sum_output_bound) {
 	RunStatement(con, "SET privacy_mode='" + point.mode + "'");
 	RunStatement(con, "SET dp_epsilon=" + FormatNumber(point.epsilon));
-	if (point.mode == "dp_standard" || (point.mode == "dp_sass" && point.release == "average")) {
+	if ((point.mode == "dp_standard" && delta <= 0.0) || (point.mode == "dp_sass" && point.release == "average")) {
 		RunStatement(con, "SET dp_delta=NULL");
 	} else {
 		RunStatement(con, "SET dp_delta=" + FormatNumber(delta));
@@ -1188,7 +1230,7 @@ static double ReadBenchmarkPrivacyUnitCount(Connection &con, const DatasetConfig
 
 static void RunDataset(const Config &config, const DatasetConfig &dataset, std::ofstream &csv) {
 	ValidateDataset(dataset);
-	auto queries = LoadDatasetQueries(dataset);
+	auto queries = FilterQueriesByName(LoadDatasetQueries(dataset), dataset.query_names);
 	if (queries.empty()) {
 		throw std::runtime_error("dataset " + dataset.name + " has no queries");
 	}
