@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 # TPC-H benchmark plotter
 # Reads CSV with columns: query, mode, median_ms
-# When "simple hash PAC" data is present, splits PAC bars into core + PU-key join overhead
+# When "simple hash AS" data is present, splits AS bars into core + PU-key join overhead
 
 # Configure user-local library path for package installation
 user_lib <- Sys.getenv("R_LIBS_USER")
@@ -71,8 +71,8 @@ if (nrow(raw) == 0) stop("No valid data to plot.")
 # Extract query number
 raw <- raw %>% mutate(qnum = as.integer(str_extract(query, "\\d+")))
 
-# Omit queries that don't use PAC or are not allowed
-omit_queries <- c(2, 3, 10, 11, 16, 18)
+# Omit queries that are not part of the customer-level AS benchmark.
+omit_queries <- c(2, 11, 16)
 raw <- raw %>% filter(!(qnum %in% omit_queries))
 
 # Keep only base queries (no variants like q08-nolambda)
@@ -83,7 +83,8 @@ if (nrow(raw) == 0) stop("No data left after filtering.")
 # Rename modes
 raw <- raw %>% mutate(mode = case_when(
   mode == "baseline" ~ "DuckDB",
-  mode == "SIMD PAC" ~ "SIMD-PAC",
+  mode == "SIMD AS" ~ "SIMD-AS",
+  mode == "simple hash AS" ~ "simple hash AS",
   TRUE ~ mode
 ))
 
@@ -118,8 +119,8 @@ if (nrow(slowdown_df) > 0) {
   message("===================================\n")
 }
 
-# Check if simple hash PAC data is available for the split
-has_simple_hash <- "simple hash PAC" %in% raw$mode
+# Check if simple hash AS data is available for the split
+has_simple_hash <- "simple hash AS" %in% raw$mode
 
 # Compute y-axis upper limit and failed bar position
 valid_max <- max(raw$median_ms[!raw$is_failed], na.rm = TRUE)
@@ -129,31 +130,31 @@ fail_y <- y_upper * 1.7      # failed bars extend above the top border
 # Build plot data
 # Each row: query, x_pos (numeric), component (fill), time
 duckdb_df <- raw %>% filter(mode == "DuckDB") %>% select(query, median_ms)
-pac_df <- raw %>% filter(mode == "SIMD-PAC") %>% select(query, pac_time = median_ms)
+as_df <- raw %>% filter(mode == "SIMD-AS") %>% select(query, as_time = median_ms)
 
 if (has_simple_hash) {
-  hash_df <- raw %>% filter(mode == "simple hash PAC") %>% select(query, hash_time = median_ms)
+  hash_df <- raw %>% filter(mode == "simple hash AS") %>% select(query, hash_time = median_ms)
   # Join all three
   combined <- duckdb_df %>%
-    inner_join(pac_df, by = "query") %>%
+    inner_join(as_df, by = "query") %>%
     inner_join(hash_df, by = "query") %>%
     mutate(
-      pac_failed = pac_time < 0 | hash_time < 0,
-      join_overhead = ifelse(pac_failed, 0, pmax(0, pac_time - hash_time)),
-      core_time = ifelse(pac_failed, -1, hash_time)
+      as_failed = as_time < 0 | hash_time < 0,
+      join_overhead = ifelse(as_failed, 0, pmax(0, as_time - hash_time)),
+      core_time = ifelse(as_failed, -1, hash_time)
     )
   # Build long-format plot data
   plot_data <- bind_rows(
     combined %>% transmute(query, bar = "DuckDB", component = "DuckDB", time = median_ms),
-    combined %>% transmute(query, bar = "SIMD-PAC", component = "SIMD-PAC", time = core_time),
-    combined %>% transmute(query, bar = "SIMD-PAC", component = "PU-key join", time = join_overhead)
+    combined %>% transmute(query, bar = "SIMD-AS", component = "SIMD-AS", time = core_time),
+    combined %>% transmute(query, bar = "SIMD-AS", component = "PU-key join", time = join_overhead)
   )
 } else {
-  # No split: simple DuckDB vs PAC
-  combined <- duckdb_df %>% inner_join(pac_df, by = "query")
+  # No split: simple DuckDB vs AS
+  combined <- duckdb_df %>% inner_join(as_df, by = "query")
   plot_data <- bind_rows(
     combined %>% transmute(query, bar = "DuckDB", component = "DuckDB", time = median_ms),
-    combined %>% transmute(query, bar = "SIMD-PAC", component = "SIMD-PAC", time = pac_time)
+    combined %>% transmute(query, bar = "SIMD-AS", component = "SIMD-AS", time = as_time)
   )
 }
 
@@ -161,7 +162,7 @@ if (has_simple_hash) {
 plot_data <- plot_data %>%
   mutate(
     qidx = match(query, query_order),
-    x_pos = qidx + ifelse(bar == "DuckDB", -0.2, 0.2)  # SIMD-PAC on the right
+    x_pos = qidx + ifelse(bar == "DuckDB", -0.2, 0.2)  # SIMD-AS on the right
   )
 
 # Track original times and replace failures with visual position
@@ -170,11 +171,11 @@ plot_data <- plot_data %>% mutate(time = ifelse(time < 0, fail_y, time))
 
 # Component ordering: PU-key join on top, core on bottom, DuckDB separate
 if (has_simple_hash) {
-  comp_levels <- c("PU-key join", "SIMD-PAC", "DuckDB")
-  comp_colors <- c("DuckDB" = "#95a5a6", "SIMD-PAC" = "#4dff4d", "PU-key join" = "#009900")
+  comp_levels <- c("PU-key join", "SIMD-AS", "DuckDB")
+  comp_colors <- c("DuckDB" = "#95a5a6", "SIMD-AS" = "#4dff4d", "PU-key join" = "#009900")
 } else {
-  comp_levels <- c("DuckDB", "SIMD-PAC")
-  comp_colors <- c("DuckDB" = "#95a5a6", "SIMD-PAC" = "#4dff4d")
+  comp_levels <- c("DuckDB", "SIMD-AS")
+  comp_colors <- c("DuckDB" = "#95a5a6", "SIMD-AS" = "#4dff4d")
 }
 plot_data$component <- factor(plot_data$component, levels = comp_levels)
 
@@ -187,23 +188,23 @@ sf_for_name <- ifelse(is.na(sf_str), "unknown", gsub("\\.", "_", sf_str))
 # ============================================================================
 # Performance plot
 # ============================================================================
-has_pacdb <- "PAC-DB" %in% raw$mode
+has_naive_as <- "Naive-AS" %in% raw$mode
 
-if (!has_pacdb) {
-  # No PAC-DB data: simple DuckDB vs SIMD-PAC plot
+if (!has_naive_as) {
+  # No Naive-AS data: simple DuckDB vs SIMD-AS plot
   if (has_simple_hash) {
-    pac_total <- plot_data %>% filter(bar == "SIMD-PAC") %>%
+    as_total <- plot_data %>% filter(bar == "SIMD-AS") %>%
       group_by(query, x_pos) %>%
       summarize(total = sum(time), .groups = "drop")
-    pac_core <- plot_data %>% filter(component == "SIMD-PAC")
+    as_core <- plot_data %>% filter(component == "SIMD-AS")
     duckdb_bars <- plot_data %>% filter(bar == "DuckDB")
 
     p <- ggplot() +
       geom_col(data = duckdb_bars, aes(x = x_pos, y = time, fill = component), width = 0.35) +
-      geom_col(data = pac_total, aes(x = x_pos, y = total, fill = "PU-key join"), width = 0.35) +
-      geom_col(data = pac_core, aes(x = x_pos, y = time, fill = component), width = 0.35) +
+      geom_col(data = as_total, aes(x = x_pos, y = total, fill = "PU-key join"), width = 0.35) +
+      geom_col(data = as_core, aes(x = x_pos, y = time, fill = component), width = 0.35) +
       scale_fill_manual(values = comp_colors, name = NULL,
-                        breaks = c("DuckDB", "SIMD-PAC", "PU-key join")) +
+                        breaks = c("DuckDB", "SIMD-AS", "PU-key join")) +
       scale_x_continuous(breaks = seq_along(query_order), labels = query_labels, expand = expansion(add = 0.4)) +
       labs(x = NULL, y = NULL)
   } else {
@@ -215,7 +216,7 @@ if (!has_pacdb) {
   }
 
   slowdown_labels <- slowdown_df %>%
-    filter(mode == "SIMD-PAC") %>%
+    filter(mode == "SIMD-AS") %>%
     mutate(
       qidx = match(query, query_order),
       x_pos = qidx + 0.2,
@@ -263,47 +264,47 @@ if (!has_pacdb) {
   message("Plot saved to: ", out_file)
 
 } else {
-  pacdb_plot_df <- raw %>% filter(mode == "PAC-DB") %>% select(query, pacdb_time = median_ms)
+  naive_as_plot_df <- raw %>% filter(mode == "Naive-AS") %>% select(query, naive_as_time = median_ms)
 
   if (has_simple_hash) {
     paper_combined <- duckdb_df %>%
-      inner_join(pac_df, by = "query") %>%
-      inner_join(pacdb_plot_df, by = "query") %>%
+      inner_join(as_df, by = "query") %>%
+      inner_join(naive_as_plot_df, by = "query") %>%
       inner_join(hash_df, by = "query") %>%
       mutate(
-        pac_failed = pac_time < 0 | hash_time < 0,
-        join_overhead = ifelse(pac_failed, 0, pmax(0, pac_time - hash_time)),
-        core_time = ifelse(pac_failed, -1, hash_time)
+        as_failed = as_time < 0 | hash_time < 0,
+        join_overhead = ifelse(as_failed, 0, pmax(0, as_time - hash_time)),
+        core_time = ifelse(as_failed, -1, hash_time)
       )
     paper_plot_data <- bind_rows(
       paper_combined %>% transmute(query, bar = "DuckDB", component = "DuckDB", time = median_ms),
-      paper_combined %>% transmute(query, bar = "PAC-DB", component = "PAC-DB", time = pacdb_time),
-      paper_combined %>% transmute(query, bar = "SIMD-PAC", component = "SIMD-PAC", time = core_time),
-      paper_combined %>% transmute(query, bar = "SIMD-PAC", component = "PU-key join", time = join_overhead)
+      paper_combined %>% transmute(query, bar = "Naive-AS", component = "Naive-AS", time = naive_as_time),
+      paper_combined %>% transmute(query, bar = "SIMD-AS", component = "SIMD-AS", time = core_time),
+      paper_combined %>% transmute(query, bar = "SIMD-AS", component = "PU-key join", time = join_overhead)
     )
-    paper_comp_levels <- c("PU-key join", "SIMD-PAC", "PAC-DB", "DuckDB")
-    paper_comp_colors <- c("DuckDB" = "#95a5a6", "PAC-DB" = "#a8d4ff", "SIMD-PAC" = "#4dff4d", "PU-key join" = "#009900")
+    paper_comp_levels <- c("PU-key join", "SIMD-AS", "Naive-AS", "DuckDB")
+    paper_comp_colors <- c("DuckDB" = "#95a5a6", "Naive-AS" = "#a8d4ff", "SIMD-AS" = "#4dff4d", "PU-key join" = "#009900")
   } else {
     paper_combined <- duckdb_df %>%
-      inner_join(pac_df, by = "query") %>%
-      inner_join(pacdb_plot_df, by = "query")
+      inner_join(as_df, by = "query") %>%
+      inner_join(naive_as_plot_df, by = "query")
     paper_plot_data <- bind_rows(
       paper_combined %>% transmute(query, bar = "DuckDB", component = "DuckDB", time = median_ms),
-      paper_combined %>% transmute(query, bar = "PAC-DB", component = "PAC-DB", time = pacdb_time),
-      paper_combined %>% transmute(query, bar = "SIMD-PAC", component = "SIMD-PAC", time = pac_time)
+      paper_combined %>% transmute(query, bar = "Naive-AS", component = "Naive-AS", time = naive_as_time),
+      paper_combined %>% transmute(query, bar = "SIMD-AS", component = "SIMD-AS", time = as_time)
     )
-    paper_comp_levels <- c("SIMD-PAC", "PAC-DB", "DuckDB")
-    paper_comp_colors <- c("DuckDB" = "#95a5a6", "PAC-DB" = "#a8d4ff", "SIMD-PAC" = "#4dff4d")
+    paper_comp_levels <- c("SIMD-AS", "Naive-AS", "DuckDB")
+    paper_comp_colors <- c("DuckDB" = "#95a5a6", "Naive-AS" = "#a8d4ff", "SIMD-AS" = "#4dff4d")
   }
 
-  # Assign x positions: DuckDB left, PAC-DB center, SIMD-PAC right
+  # Assign x positions: DuckDB left, Naive-AS center, SIMD-AS right
   paper_plot_data <- paper_plot_data %>%
     mutate(
       qidx = match(query, query_order),
       x_pos = qidx + case_when(
         bar == "DuckDB"   ~ -0.27,
-        bar == "PAC-DB"   ~  0.0,
-        bar == "SIMD-PAC" ~  0.27
+        bar == "Naive-AS"   ~  0.0,
+        bar == "SIMD-AS" ~  0.27
       )
     )
   paper_plot_data$component <- factor(paper_plot_data$component, levels = paper_comp_levels)
@@ -312,33 +313,33 @@ if (!has_pacdb) {
   paper_plot_data <- paper_plot_data %>% mutate(original_time = time)
   paper_plot_data <- paper_plot_data %>% mutate(time = ifelse(time < 0, fail_y, time))
 
-  # Slowdown labels for both PAC-DB and SIMD-PAC
+  # Slowdown labels for both Naive-AS and SIMD-AS
   paper_slowdown <- raw %>%
-    filter(mode %in% c("PAC-DB", "SIMD-PAC"), !is_failed) %>%
+    filter(mode %in% c("Naive-AS", "SIMD-AS"), !is_failed) %>%
     left_join(baseline_df, by = "query") %>%
     filter(!is.na(baseline_time) & baseline_time > 0) %>%
     mutate(
       slowdown = median_ms / baseline_time,
-      bar = ifelse(mode == "PAC-DB", "PAC-DB", "SIMD-PAC"),
+      bar = ifelse(mode == "Naive-AS", "Naive-AS", "SIMD-AS"),
       qidx = match(query, query_order),
-      x_pos = qidx + ifelse(bar == "PAC-DB", 0.0, 0.27),
+      x_pos = qidx + ifelse(bar == "Naive-AS", 0.0, 0.27),
       y_pos = median_ms * 1.15,
       label = { s <- pmax(slowdown, 1.0); ifelse(s >= 10, sprintf("%.0fx", s), sprintf("%.1fx", s)) }
     )
 
   if (has_simple_hash) {
-    paper_pac_total <- paper_plot_data %>% filter(bar == "SIMD-PAC") %>%
+    paper_as_total <- paper_plot_data %>% filter(bar == "SIMD-AS") %>%
       group_by(query, x_pos) %>%
       summarize(total = sum(time), .groups = "drop")
-    paper_pac_core <- paper_plot_data %>% filter(component == "SIMD-PAC")
-    paper_other_bars <- paper_plot_data %>% filter(bar %in% c("DuckDB", "PAC-DB"))
+    paper_as_core <- paper_plot_data %>% filter(component == "SIMD-AS")
+    paper_other_bars <- paper_plot_data %>% filter(bar %in% c("DuckDB", "Naive-AS"))
 
     p_paper <- ggplot() +
       geom_col(data = paper_other_bars, aes(x = x_pos, y = time, fill = component), width = 0.25) +
-      geom_col(data = paper_pac_total, aes(x = x_pos, y = total, fill = "PU-key join"), width = 0.25) +
-      geom_col(data = paper_pac_core, aes(x = x_pos, y = time, fill = component), width = 0.25) +
+      geom_col(data = paper_as_total, aes(x = x_pos, y = total, fill = "PU-key join"), width = 0.25) +
+      geom_col(data = paper_as_core, aes(x = x_pos, y = time, fill = component), width = 0.25) +
       scale_fill_manual(values = paper_comp_colors, name = NULL,
-                        breaks = c("DuckDB", "PAC-DB", "SIMD-PAC", "PU-key join")) +
+                        breaks = c("DuckDB", "Naive-AS", "SIMD-AS", "PU-key join")) +
       scale_x_continuous(breaks = seq_along(query_order), labels = query_labels, expand = expansion(add = 0.4)) +
       labs(x = NULL, y = NULL)
   } else {

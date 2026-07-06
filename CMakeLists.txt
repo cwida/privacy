@@ -98,9 +98,9 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
         src/test/test_privacy_parser.cpp)
     target_link_libraries(pac_test_runner ${PRIVACY_LINK_LIBS})
 
-    # TPCH + PAC benchmark runner
-    add_executable(pac_tpch_benchmark benchmark/tpch/pac_tpch_benchmark.cpp)
-    target_link_libraries(pac_tpch_benchmark ${PRIVACY_LINK_LIBS})
+    # TPCH + AS benchmark runner
+    add_executable(as_tpch_benchmark benchmark/tpch/as_tpch_benchmark.cpp)
+    target_link_libraries(as_tpch_benchmark ${PRIVACY_LINK_LIBS})
 
     # TPCH Compiler benchmark runner (compares PAC vs regular TPC-H)
     add_executable(pac_tpch_compiler_benchmark benchmark/tpch/pac_tpch_compiler_benchmark.cpp)

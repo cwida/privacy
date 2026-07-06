@@ -8,14 +8,14 @@ SELECT o_year,
               list_transform(
                 list_zip(
                   list_transform(
-                    as_sum(pac_pu, (CASE WHEN nation = 'BRAZIL' THEN volume ELSE 0 END)),
+                    as_sum(as_key, (CASE WHEN nation = 'BRAZIL' THEN volume ELSE 0 END)),
                     lambda y: CAST(y AS DECIMAL(18,2))),
                   list_transform(
-                    as_sum(pac_pu, volume),
+                    as_sum(as_key, volume),
                     lambda y: CAST(y AS DECIMAL(18,2)))),
                 lambda x: CAST(x[1] / x[2] AS FLOAT))) AS FLOAT) AS mkt_share
   FROM (SELECT EXTRACT(year FROM o_orderdate) AS o_year, l_extendedprice * (1 - l_discount) AS volume, n2.n_name AS nation,
-               priv_hash(hash(c_custkey)) AS pac_pu
+               priv_hash(hash(c_custkey)) AS as_key
           FROM part JOIN lineitem ON p_partkey = l_partkey
                     JOIN orders ON l_orderkey = o_orderkey
                     JOIN customer ON o_custkey = c_custkey

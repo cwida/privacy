@@ -4,7 +4,7 @@
 
 // Implement the TPCH benchmark runner.
 
-#include "pac_tpch_benchmark.hpp"
+#include "as_tpch_benchmark.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/connection.hpp"
@@ -322,17 +322,17 @@ static bool InvokePlotScript(const string &abs_actual_out, const string &out_dir
 	return false;
 }
 
-// Drop all PAC-DB helper tables
-static void PacDBDropTables(Connection &con) {
+// Drop all Naive-AS helper tables
+static void NaiveASDropTables(Connection &con) {
 	con.Query("DROP INDEX IF EXISTS idx_lineitem_enhanced_order_supp;");
 	con.Query("DROP TABLE IF EXISTS lineitem_enhanced;");
 	con.Query("DROP TABLE IF EXISTS random_samples;");
 	con.Query("DROP TABLE IF EXISTS random_samples_orders;");
 }
 
-// Create all PAC-DB sampling tables once (customer-based, orders-based, q21 extras)
+// Create all Naive-AS sampling tables once (customer-based, orders-based, q21 extras)
 // Uses IF NOT EXISTS so tables persist across runs on existing databases.
-static void PacDBCreateTables(Connection &con) {
+static void NaiveASCreateTables(Connection &con) {
 	Log("Creating random_samples (customer-based, batched)...");
 	{
 		auto chk = con.Query("SELECT 1 FROM random_samples LIMIT 1;");
@@ -432,12 +432,10 @@ static void PacDBCreateTables(Connection &con) {
 	}
 }
 
-int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv, bool run_naive,
-                     bool run_simple_hash, bool run_pacdb, int threads) {
+int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv,
+                       bool run_simple_hash, int threads) {
 	try {
-		Log(string("run_naive flag: ") + (run_naive ? string("true") : string("false")));
 		Log(string("run_simple_hash flag: ") + (run_simple_hash ? string("true") : string("false")));
-		Log(string("run_pacdb flag: ") + (run_pacdb ? string("true") : string("false")));
 
 		// Open (file-backed) DuckDB database
 		// Decide whether the caller explicitly provided a DB path (not the default) so we can
@@ -503,29 +501,6 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
 		// tables)
 		// - If the DB file exists and the DB was derived from sf (user didn't provide a path) -> skip dbgen
 		if (!db_exists) {
-			// First create schema with PK/FK constraints
-			Log("Creating TPC-H schema with constraints...");
-			string schema_file = FindSchemaFile("pac_tpch_schema.sql");
-			if (schema_file.empty()) {
-				throw std::runtime_error("Cannot find pac_tpch_schema.sql");
-			}
-
-			/*
-			std::ifstream schema_ifs(schema_file);
-			if (!schema_ifs.is_open()) {
-			    throw std::runtime_error("Cannot open pac_tpch_schema.sql: " + schema_file);
-			}
-			std::stringstream schema_ss;
-			schema_ss << schema_ifs.rdbuf();
-			string schema_sql = schema_ss.str();
-
-			auto schema_result = con.Query(schema_sql);
-			if (schema_result->HasError()) {
-			    throw std::runtime_error("Failed to create schema: " + schema_result->GetError());
-			}
-			*/
-
-			// Now generate data
 			char callbuf[128];
 			snprintf(callbuf, sizeof(callbuf), "CALL dbgen(sf=%g);", sf);
 			auto r_dbgen = con.Query(callbuf);
@@ -544,11 +519,10 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
 		// CSV columns: query,mode,median_ms (median of 5 hot runs)
 		csv << "query,mode,median_ms\n";
 
-		// Locate PAC query directories
-		string bitslice_dir = queries_dir + string("/tpch/tpch_pac_queries");
-		string naive_dir = queries_dir + string("/tpch/tpch_pac_naive_queries");
-		string simple_hash_dir = queries_dir + string("/tpch/tpch_pac_simple_hash_queries");
-		string pacdb_dir = queries_dir + string("/tpch/tpch_pacdb_queries");
+		// Locate AS query directories
+		string bitslice_dir = queries_dir + string("/tpch/tpch_as_queries");
+		string simple_hash_dir = queries_dir + string("/tpch/tpch_as_simple_hash_queries");
+		string naive_as_dir = queries_dir + string("/tpch/tpch_naive_as_queries");
 
 		// Discover all .sql files in the bitslice directory
 		auto query_entries = DiscoverQueryFiles(bitslice_dir);
@@ -565,10 +539,10 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
 
 		// Always create sampling/helper tables at startup (uses IF NOT EXISTS,
 		// so this is a no-op when the tables already exist in a persistent DB).
-		// These tables may be needed by pacdb, simple_hash, or other modes.
-		Log("Creating PAC-DB sampling tables (if not already present)...");
-		PacDBCreateTables(con);
-		Log("PAC-DB sampling tables ready.");
+		// These tables may be needed by Naive-AS, simple_hash, or other modes.
+		Log("Creating Naive-AS sampling tables (if not already present)...");
+		NaiveASCreateTables(con);
+		Log("Naive-AS sampling tables ready.");
 
 		for (auto &entry : query_entries) {
 			Log("=== " + entry.label + " (Q" + std::to_string(entry.query_number) + ") ===");
@@ -635,139 +609,128 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
 			// Write baseline row for this entry (reuse cached median)
 			csv << entry.label << ",baseline," << FormatNumber(baseline_cache[entry.query_number]) << "\n";
 
-			// Read the PAC query file
-			string pac_sql_bits = ReadFileToString(bitslice_dir + "/" + entry.filename);
-			if (pac_sql_bits.empty()) {
-				throw std::runtime_error("PAC query file " + entry.filename + " is empty or unreadable");
+			// Read the AS query file
+			string as_sql_bits = ReadFileToString(bitslice_dir + "/" + entry.filename);
+			if (as_sql_bits.empty()) {
+				throw std::runtime_error("AS query file " + entry.filename + " is empty or unreadable");
 			}
 
-			// Build variant list: bitslice always; naive and simple_hash if requested and file exists
-			vector<pair<string, string>> pac_variants;
-			pac_variants.emplace_back("SIMD PAC", pac_sql_bits);
-			if (run_naive) {
-				string naive_qfile = FindQueryFile(naive_dir, entry.query_number);
-				if (FileExists(naive_qfile)) {
-					string sql = ReadFileToString(naive_qfile);
-					if (!sql.empty()) {
-						pac_variants.emplace_back("naive PAC", sql);
-					}
-				}
-			}
+			// Build variant list: bitslice always; simple_hash if requested and file exists.
+			vector<pair<string, string>> as_variants;
+			as_variants.emplace_back("SIMD AS", as_sql_bits);
 			if (run_simple_hash) {
 				string sh_qfile = FindQueryFile(simple_hash_dir, entry.query_number);
 				if (FileExists(sh_qfile)) {
 					string sql = ReadFileToString(sh_qfile);
 					if (!sql.empty()) {
-						pac_variants.emplace_back("simple hash PAC", sql);
+						as_variants.emplace_back("simple hash AS", sql);
 					}
 				}
 			}
 
-			for (auto &pv : pac_variants) {
+			for (auto &pv : as_variants) {
 				const string &mode_str = pv.first;
-				const string &pac_sql = pv.second;
+				const string &as_sql = pv.second;
 				try {
-					// Run PAC query 5 times, take median
-					vector<double> pac_times_ms;
-					bool pac_failed = false;
+					// Run AS query 5 times, take median
+					vector<double> as_times_ms;
+					bool as_failed = false;
 					for (int run = 1; run <= 5; ++run) {
 						con.Query("SET priv_rewrite=false;");
 						auto t0 = std::chrono::steady_clock::now();
-						auto r_pac = con.Query(pac_sql);
+						auto r_as = con.Query(as_sql);
 						auto t1 = std::chrono::steady_clock::now();
 						con.Query("SET priv_rewrite=true;");
-						double pac_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-						if (r_pac && r_pac->HasError()) {
-							Log("PAC (" + mode_str + ") " + entry.label + " run " + std::to_string(run) +
-							    " error: " + r_pac->GetError());
-							pac_failed = true;
+						double as_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+						if (r_as && r_as->HasError()) {
+							Log("AS (" + mode_str + ") " + entry.label + " run " + std::to_string(run) +
+							    " error: " + r_as->GetError());
+							as_failed = true;
 							break;
 						}
-						pac_times_ms.push_back(pac_time_ms);
-						Log("PAC (" + mode_str + ") " + entry.label + " run " + std::to_string(run) +
-						    " time (ms): " + FormatNumber(pac_time_ms));
+						as_times_ms.push_back(as_time_ms);
+						Log("AS (" + mode_str + ") " + entry.label + " run " + std::to_string(run) +
+						    " time (ms): " + FormatNumber(as_time_ms));
 					}
-					if (pac_failed) {
+					if (as_failed) {
 						csv << entry.label << "," << mode_str << ",-1\n";
 					} else {
-						double pac_median = Median(pac_times_ms);
-						Log("PAC (" + mode_str + ") " + entry.label + " median (ms): " + FormatNumber(pac_median));
-						csv << entry.label << "," << mode_str << "," << FormatNumber(pac_median) << "\n";
+						double as_median = Median(as_times_ms);
+						Log("AS (" + mode_str + ") " + entry.label + " median (ms): " + FormatNumber(as_median));
+						csv << entry.label << "," << mode_str << "," << FormatNumber(as_median) << "\n";
 					}
 				} catch (const std::exception &e) {
-					Log("PAC (" + mode_str + ") " + entry.label + " exception: " + string(e.what()));
+					Log("AS (" + mode_str + ") " + entry.label + " exception: " + string(e.what()));
 					csv << entry.label << "," << mode_str << ",-1\n";
 				}
 			}
 
-			// PAC-DB mode: run on a 50% random sample, multiply median by 64
-			if (run_pacdb) {
-				string pacdb_qfile = FindQueryFile(pacdb_dir, entry.query_number);
-				if (FileExists(pacdb_qfile)) {
-					string pacdb_sql = ReadFileToString(pacdb_qfile);
-					if (!pacdb_sql.empty()) {
-						try {
-							// Split at EXECUTE to get prepare_sql and execute_sql
-							auto exec_pos = pacdb_sql.rfind("EXECUTE");
-							if (exec_pos == string::npos) {
-								Log("PAC-DB " + entry.label + ": no EXECUTE found in query file, skipping");
-								csv << entry.label << ",PAC-DB,-1\n";
-							} else {
-								string prepare_sql = pacdb_sql.substr(0, exec_pos);
-								string execute_sql = pacdb_sql.substr(exec_pos);
+			// Naive-AS mode: run on a 50% random sample, multiply median by 64.
+			string naive_as_qfile = FindQueryFile(naive_as_dir, entry.query_number);
+			if (FileExists(naive_as_qfile)) {
+				string naive_as_sql = ReadFileToString(naive_as_qfile);
+				if (!naive_as_sql.empty()) {
+					try {
+						// Split at EXECUTE to get prepare_sql and execute_sql
+						auto exec_pos = naive_as_sql.rfind("EXECUTE");
+						if (exec_pos == string::npos) {
+							Log("Naive-AS " + entry.label + ": no EXECUTE found in query file, skipping");
+							csv << entry.label << ",Naive-AS,-1\n";
+						} else {
+							string prepare_sql = naive_as_sql.substr(0, exec_pos);
+							string execute_sql = naive_as_sql.substr(exec_pos);
 
-								// Prepare the query (not timed)
-								bool setup_ok = true;
-								con.Query("DEALLOCATE PREPARE run_query;");
-								auto r_prep = con.Query(prepare_sql);
-								if (r_prep && r_prep->HasError()) {
-									Log("PAC-DB " + entry.label + " prepare error: " + r_prep->GetError());
-									setup_ok = false;
-								}
-
-								if (!setup_ok) {
-									csv << entry.label << ",PAC-DB,-1\n";
-								} else {
-									// Time EXECUTE 5 times, take median
-									vector<double> pacdb_times_ms;
-									bool pacdb_failed = false;
-									for (int run = 1; run <= 5; ++run) {
-										auto t0 = std::chrono::steady_clock::now();
-										auto r_exec = con.Query(execute_sql);
-										auto t1 = std::chrono::steady_clock::now();
-										double t_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-										if (r_exec && r_exec->HasError()) {
-											Log("PAC-DB " + entry.label + " run " + std::to_string(run) +
-											    " error: " + r_exec->GetError());
-											pacdb_failed = true;
-											break;
-										}
-										pacdb_times_ms.push_back(t_ms);
-										Log("PAC-DB " + entry.label + " run " + std::to_string(run) +
-										    " time (ms): " + FormatNumber(t_ms));
-									}
-									if (pacdb_failed) {
-										csv << entry.label << ",PAC-DB,-1\n";
-									} else {
-										double pacdb_median = Median(pacdb_times_ms) * 64.0;
-										Log("PAC-DB " + entry.label + " median*64 (ms): " + FormatNumber(pacdb_median));
-										csv << entry.label << ",PAC-DB," << FormatNumber(pacdb_median) << "\n";
-									}
-								}
-								con.Query("DEALLOCATE PREPARE run_query;");
+							// Prepare the query (not timed)
+							bool setup_ok = true;
+							con.Query("DEALLOCATE PREPARE run_query;");
+							auto r_prep = con.Query(prepare_sql);
+							if (r_prep && r_prep->HasError()) {
+								Log("Naive-AS " + entry.label + " prepare error: " + r_prep->GetError());
+								setup_ok = false;
 							}
-						} catch (const std::exception &e) {
-							Log("PAC-DB " + entry.label + " exception: " + string(e.what()));
-							csv << entry.label << ",PAC-DB,-1\n";
+
+							if (!setup_ok) {
+								csv << entry.label << ",Naive-AS,-1\n";
+							} else {
+								// Time EXECUTE 5 times, take median
+								vector<double> naive_as_times_ms;
+								bool naive_as_failed = false;
+								for (int run = 1; run <= 5; ++run) {
+									auto t0 = std::chrono::steady_clock::now();
+									auto r_exec = con.Query(execute_sql);
+									auto t1 = std::chrono::steady_clock::now();
+									double t_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+									if (r_exec && r_exec->HasError()) {
+										Log("Naive-AS " + entry.label + " run " + std::to_string(run) +
+										    " error: " + r_exec->GetError());
+										naive_as_failed = true;
+										break;
+									}
+									naive_as_times_ms.push_back(t_ms);
+									Log("Naive-AS " + entry.label + " run " + std::to_string(run) +
+									    " time (ms): " + FormatNumber(t_ms));
+								}
+								if (naive_as_failed) {
+									csv << entry.label << ",Naive-AS,-1\n";
+								} else {
+									double naive_as_median = Median(naive_as_times_ms) * 64.0;
+									Log("Naive-AS " + entry.label + " median*64 (ms): " + FormatNumber(naive_as_median));
+									csv << entry.label << ",Naive-AS," << FormatNumber(naive_as_median) << "\n";
+								}
+							}
+							con.Query("DEALLOCATE PREPARE run_query;");
 						}
+					} catch (const std::exception &e) {
+						Log("Naive-AS " + entry.label + " exception: " + string(e.what()));
+						csv << entry.label << ",Naive-AS,-1\n";
 					}
-				} else {
-					Log("PAC-DB " + entry.label + ": no query file found at " + pacdb_qfile + ", skipping");
 				}
+			} else {
+				Log("Naive-AS " + entry.label + ": no query file found at " + naive_as_qfile + ", skipping");
 			}
 		}
 
-		// Keep PAC-DB tables in the database so they are reused on the next run
+		// Keep Naive-AS tables in the database so they are reused on the next run
 
 		csv.close();
 		Log(string("Benchmark finished. Results written to ") + actual_out);
@@ -807,18 +770,14 @@ int RunTPCHBenchmark(const string &db_path, const string &queries_dir, double sf
 // Add a small helper for printing usage (placed outside of namespace to avoid analyzer warnings)
 static void PrintUsageMain() {
 	std::cout
-	    << "Usage: pac_tpch_benchmark [sf] [db_path] [queries_dir] [out_csv] [--run-naive] [--run-simple-hash] "
-	       "[--run-pacdb]\n"
+	    << "Usage: as_tpch_benchmark [sf] [db_path] [queries_dir] [out_csv] [--run-simple-hash]\n"
 	    << "  sf: TPCH scale factor (int, default 10)\n"
 	    << "  db_path: DuckDB database file (default 'tpch.db')\n"
-	    << "  queries_dir: root directory containing PAC SQL variants (default 'benchmark').\n"
-	    << "               subdirectories expected: 'tpch/tpch_pac_queries' (bitslice), 'tpch/tpch_pac_naive_queries' "
-	       "(naive), 'tpch/tpch_pac_simple_hash_queries' (simple hash)\n"
+	    << "  queries_dir: root directory containing AS SQL variants (default 'benchmark').\n"
+	    << "               subdirectories expected: 'tpch/tpch_as_queries' (bitslice), "
+	       "'tpch/tpch_as_simple_hash_queries' (simple hash), 'tpch/tpch_naive_as_queries' (Naive-AS)\n"
 	    << "  out_csv: optional output CSV path (auto-named if omitted)\n"
-	    << "  --run-naive: optional flag to instruct the benchmark to run a naive PAC variant as well\n"
-	    << "  --run-simple-hash: optional flag to instruct the benchmark to run a simple hash PAC variant as well\n"
-	    << "  --run-pacdb: optional flag to run PAC-DB (sampling) mode — runs each query on a 50% sample, multiplies "
-	       "median by 64\n"
+	    << "  --run-simple-hash: optional flag to run a simple hash AS variant as well\n"
 	    << "  --threads=N: number of DuckDB threads (default 8)\n";
 }
 
@@ -839,25 +798,15 @@ int main(int argc, char **argv) {
 	}
 
 	// Preprocess argv to detect optional flags and remove them from positional parsing
-	bool run_naive = false;
 	bool run_simple_hash = false;
-	bool run_pacdb = false;
 	int threads = 8;
 	std::vector<char *> filtered_argv;
 	filtered_argv.reserve(argc);
 	filtered_argv.push_back(argv[0]);
 	for (int i = 1; i < argc; ++i) {
 		std::string a = argv[i];
-		if (a == "--run-naive") {
-			run_naive = true;
-			continue;
-		}
 		if (a == "--run-simple-hash") {
 			run_simple_hash = true;
-			continue;
-		}
-		if (a == "--run-pacdb") {
-			run_pacdb = true;
 			continue;
 		}
 		if (a.rfind("--threads=", 0) == 0) {
@@ -882,5 +831,5 @@ int main(int argc, char **argv) {
 	if (filtered_argc > 4)
 		out_csv = filtered_argv[4];
 
-	return duckdb::RunTPCHBenchmark(db_path, queries_dir, sf, out_csv, run_naive, run_simple_hash, run_pacdb, threads);
+	return duckdb::RunASTPCHBenchmark(db_path, queries_dir, sf, out_csv, run_simple_hash, threads);
 }

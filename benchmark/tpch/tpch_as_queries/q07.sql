@@ -1,5 +1,5 @@
-SELECT supp_nation, cust_nation, l_year, as_noised_sum(pac_pu, volume) AS revenue
-  FROM (SELECT priv_hash(hash(c_custkey)) AS pac_pu, n1.n_name AS supp_nation, n2.n_name AS cust_nation,
+SELECT supp_nation, cust_nation, l_year, as_noised_sum(as_key, volume) AS revenue
+  FROM (SELECT priv_hash(hash(c_custkey)) AS as_key, n1.n_name AS supp_nation, n2.n_name AS cust_nation,
                extract(year FROM l_shipdate) AS l_year, l_extendedprice * (1 - l_discount) AS volume
           FROM supplier, lineitem, orders, customer, nation n1, nation n2
          WHERE s_suppkey = l_suppkey AND o_orderkey = l_orderkey AND c_custkey = o_custkey
