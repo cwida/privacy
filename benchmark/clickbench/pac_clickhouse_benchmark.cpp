@@ -101,6 +101,10 @@ static string FormatNumber(double v) {
     return s;
 }
 
+static double PositiveOrDefault(double value, double fallback) {
+    return value > 0.0 && std::isfinite(value) ? value : fallback;
+}
+
 static void Log(const string &msg) {
     Printer::Print("[" + Timestamp() + "] " + msg);
 }
@@ -432,6 +436,16 @@ struct BenchmarkQueryResult {
     string pac_mi;
     int64_t seed = 0;
 };
+
+static bool IsCommonDpUnsupportedClickBenchQuery(int qnum) {
+    // Keep DP mechanism support comparable in this benchmark. These queries currently
+    // hit dp_sass resource/worker failures, so treat them as outside the common DP set.
+    return qnum == 30 || qnum == 34 || qnum == 35;
+}
+
+static string CommonDpUnsupportedReason() {
+    return "ClickBench query excluded from common DP support set";
+}
 
 // =====================================================================
 // Child worker process
@@ -878,10 +892,13 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
         const string pac_mi_default = "0.0078125";
         double privacy_unit_count = 0.0;
         vector<bool> query_has_sum_avg(queries.size(), false);
+        vector<bool> query_has_group_by(queries.size(), false);
         vector<double> perfect_bounds(queries.size(), 0.0);
         vector<double> perfect_count_bounds(queries.size(), 0.0);
         for (idx_t q = 0; q < queries.size(); q++) {
             query_has_sum_avg[q] = !ExtractSumAvgArgs(queries[q]).empty();
+            query_has_group_by[q] =
+                FindKeywordOutsideParens(ToLowerAscii(queries[q]), " group by ") != string::npos;
         }
 
         // =====================================================================
@@ -1236,12 +1253,31 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 
                 // ----------------------------------------------------------
                 // DP modes (recorded) — one run per selected mode, single epsilon + single
-                // sensitivity (no sweep). dp_standard: pure-eps (no delta). dp_elastic/dp_sass:
-                // auto_flex delta. dp_sass: additionally needs dp_count_bound.
+                // sensitivity (no sweep). Grouped dp_standard queries need delta for private
+                // partition selection; dp_elastic/dp_sass use delta for smooth sensitivity.
+                // dp_sass additionally needs dp_count_bound.
                 // ----------------------------------------------------------
                 auto run_dp_mode = [&](const string &mode_name) {
                     if (worker.child_pid <= 0) {
                         worker.Start();
+                    }
+                    if (IsCommonDpUnsupportedClickBenchQuery(qnum)) {
+                        int64_t seed = static_cast<int64_t>(run * 997 + qnum);
+                        BenchmarkQueryResult result;
+                        result.query_num = qnum;
+                        result.mode = mode_name;
+                        result.run = run;
+                        result.time_ms = 0;
+                        result.success = false;
+                        result.error_msg = CommonDpUnsupportedReason();
+                        result.epsilon = FormatNumber(dp_epsilon_fixed);
+                        result.bound_scenario = "common_support";
+                        result.seed = seed;
+                        all_results.push_back(result);
+
+                        Log(string("Q") + std::to_string(qnum) + " " + mode_name + " run " +
+                            std::to_string(run) + " REJECTED: " + result.error_msg);
+                        return;
                     }
                     string utility_path = "/tmp/clickbench_utility_" + mode_name + "_q" + std::to_string(qnum) + "_r" +
                                           std::to_string(run) + "_" + std::to_string(getpid()) + ".csv";
@@ -1250,8 +1286,9 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                     int64_t seed = static_cast<int64_t>(run * 997 + qnum);
                     double dp_bound = 0.0;
                     double dp_count_bound = 0.0;
+                    double dp_group_bound = 0.0;
                     double dp_delta = 0.0;
-                    bool needs_delta = (mode_name != "dp_standard");
+                    bool needs_delta = (mode_name != "dp_standard") || query_has_group_by[q];
                     vector<string> dp_setup = setup_stmts;
                     dp_setup.push_back("SET privacy_mode='" + mode_name + "';");
                     dp_setup.push_back("SET privacy_seed=" + std::to_string(seed) + ";");
@@ -1263,14 +1300,36 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                         dp_setup.push_back("SET dp_delta=NULL;");
                     }
                     if (query_has_sum_avg[q]) {
-                        dp_bound = perfect_bounds[q] > 0 ? perfect_bounds[q] : 1e-9;
+                        dp_bound = PositiveOrDefault(perfect_bounds[q], 1e-9);
                         dp_setup.push_back("SET dp_sum_bound=" + FormatNumber(dp_bound) + ";");
                     } else {
                         dp_setup.push_back("RESET dp_sum_bound;");
                     }
-                    if (mode_name == "dp_sass") {
-                        dp_count_bound = perfect_count_bounds[q] > 0 ? perfect_count_bounds[q] : 1.0;
+                    if (mode_name == "dp_standard" || mode_name == "dp_sass") {
+                        dp_count_bound = PositiveOrDefault(perfect_count_bounds[q], 1.0);
                         dp_setup.push_back("SET dp_count_bound=" + FormatNumber(dp_count_bound) + ";");
+                    }
+                    if (mode_name == "dp_sass") {
+                        // as_sample_count/as_sample_sum rescale each lane to the full-output estimator before
+                        // dp_smooth_median_noise clamps to the public output domain. These bounds must therefore
+                        // cover the rescaled answer, not the raw per-lane sample contribution.
+                        double pu_bound = std::ceil(privacy_unit_count);
+                        double sass_count_output_bound = dp_count_bound * pu_bound;
+                        dp_setup.push_back("SET dp_sass_count_output_bound=" +
+                                           FormatNumber(sass_count_output_bound) + ";");
+                        if (query_has_sum_avg[q]) {
+                            double sass_sum_output_bound = dp_bound * pu_bound;
+                            dp_setup.push_back("SET dp_sass_sum_output_bound=" +
+                                               FormatNumber(sass_sum_output_bound) + ";");
+                            dp_setup.push_back("SET dp_sass_avg_lower_bound=" + FormatNumber(-dp_bound) + ";");
+                            dp_setup.push_back("SET dp_sass_avg_upper_bound=" + FormatNumber(dp_bound) + ";");
+                        }
+                        dp_setup.push_back("SET dp_sass_minmax_lower_bound=-1e18;");
+                        dp_setup.push_back("SET dp_sass_minmax_upper_bound=1e18;");
+                    }
+                    if (query_has_group_by[q] && (mode_name == "dp_standard" || mode_name == "dp_sass")) {
+                        dp_group_bound = PositiveOrDefault(perfect_count_bounds[q], 1.0);
+                        dp_setup.push_back("SET dp_max_groups_contributed=" + FormatNumber(dp_group_bound) + ";");
                     }
                     dp_setup.push_back("SET privacy_diffcols=NULL;");
                     bool setup_ok = worker.SendSetupStatements(dp_setup);
@@ -1287,11 +1346,13 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
                     result.success = setup_ok && (res == ForkWorker::SR_OK && worker.result_ok);
                     result.error_msg = setup_ok ? worker.result_error : worker.setup_error;
                     result.epsilon = FormatNumber(dp_epsilon_fixed);
-                    result.delta_scenario = needs_delta ? "auto_flex" : "";
+                    result.delta_scenario =
+                        needs_delta ? (mode_name == "dp_standard" ? "auto_partition" : "auto_flex") : "";
                     result.dp_delta = needs_delta ? FormatNumber(dp_delta) : "";
                     result.bound_scenario = "single";
                     result.dp_sum_bound = query_has_sum_avg[q] ? FormatNumber(dp_bound) : "";
-                    result.dp_count_bound = (mode_name == "dp_sass") ? FormatNumber(dp_count_bound) : "";
+                    result.dp_count_bound =
+                        (mode_name == "dp_standard" || mode_name == "dp_sass") ? FormatNumber(dp_count_bound) : "";
                     result.seed = seed;
                     if (result.success && worker.child_pid > 0) {
                         vector<string> dp_diff_setup = dp_setup;

@@ -26,8 +26,9 @@ SELECT current_setting('privacy_mode');
 dp_standard
 
 # ---------------------------------------------------------------------------
-# Single PU table, no joins: global sensitivity of COUNT(*) is 1 → scale = 1/ε.
-# Pure ε-DP, so NO dp_delta is required (unlike dp_elastic).
+# Single PU table, no joins: dp_standard is user-level, so the table is first
+# pre-aggregated by the PRIVACY_KEY and COUNT needs a per-PU contribution bound.
+# Ungrouped queries are pure ε-DP, so NO dp_delta is required (unlike dp_elastic).
 # ---------------------------------------------------------------------------
 
 statement ok
@@ -43,11 +44,22 @@ statement ok
 ALTER TABLE u SET PU;
 
 statement ok
+ALTER PU TABLE u ADD PROTECTED (region);
+
+statement ok
 SET dp_epsilon = 1.0;
 
 # No dp_delta set — dp_standard must still compile (pure ε-DP).
 statement ok
 SET dp_delta = NULL;
+
+statement error
+SELECT COUNT(*) FROM u;
+----
+dp_standard: dp_count_bound must be set
+
+statement ok
+SET dp_count_bound = 1.0;
 
 # 100 samples, scale = 1/ε = 1 → P(|noise| > 50) is astronomically small.
 query I
@@ -61,7 +73,7 @@ SELECT typeof(COUNT(*)) FROM u;
 ----
 BIGINT
 
-# With noise disabled the single-table count is exact and needs no bound.
+# With noise disabled and a non-binding per-PU bound, the single-table count is exact.
 statement ok
 SET privacy_noise = false;
 
@@ -70,7 +82,65 @@ SELECT COUNT(*) FROM u;
 ----
 100
 
-# Single-table SUM still requires dp_sum_bound (per-row == per-PU here).
+# Repeated PRIVACY_KEY values are one privacy unit, not independent rows.
+statement ok
+CREATE TABLE repeated_pu (uid BIGINT, region VARCHAR, amount DOUBLE);
+
+statement ok
+INSERT INTO repeated_pu VALUES
+  (1, 'a', 10.0), (1, 'a', 10.0), (1, 'b', 10.0),
+  (2, 'a', 4.0), (2, 'b', 5.0);
+
+statement ok
+ALTER TABLE repeated_pu ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE repeated_pu SET PU;
+
+statement ok
+ALTER PU TABLE repeated_pu ADD PROTECTED (amount);
+
+# Count bound 2 clips user 1's three rows to 2 and leaves user 2's two rows intact.
+statement ok
+SET dp_count_bound = 2.0;
+
+query I
+SELECT COUNT(*) FROM repeated_pu;
+----
+4
+
+statement ok
+SET dp_sum_bound = 10.0;
+
+# Per-user sums are 30 and 9; clipping to 10 gives 19. Per-row clipping would give 39.
+query I
+SELECT SUM(amount) FROM repeated_pu;
+----
+19.000000
+
+statement ok
+SET dp_epsilon = 2.0;
+
+statement ok
+SET dp_delta = 0.49;
+
+statement ok
+SET dp_max_groups_contributed = 2.0;
+
+# Partition selection for grouped single-table queries must also use C_u=2. Each group has
+# two contributing PUs; with the old C_u=1 tau these groups would pass, but with C_u=2 they
+# are suppressed deterministically when noise is disabled.
+query II
+SELECT region, COUNT(*) AS cnt FROM repeated_pu GROUP BY region ORDER BY region;
+----
+
+statement ok
+SET dp_epsilon = 1.0;
+
+statement ok
+SET dp_delta = NULL;
+
+# Single-table SUM still requires dp_sum_bound.
 statement ok
 SET dp_sum_bound = NULL;
 
@@ -99,6 +169,9 @@ statement ok
 SET privacy_noise = false;
 
 # COUNT over a join needs dp_count_bound (one PU can own many rows).
+statement ok
+SET dp_count_bound = NULL;
+
 statement error
 SELECT COUNT(*) FROM orders;
 ----
@@ -231,6 +304,9 @@ SET dp_count_bound = 10.0;
 
 # Grouped joins require an L0 group-contribution bound (dp_max_groups_contributed = C_u): one PU may
 # affect multiple output groups, and C_u enters both the value sensitivity and the τ formula.
+statement ok
+SET dp_max_groups_contributed = NULL;
+
 statement error
 SELECT store, COUNT(*) FROM orders GROUP BY store;
 ----
@@ -305,9 +381,9 @@ SELECT store, COUNT(*) AS cnt
 FROM orders_l0
 GROUP BY store;
 ----
-a	18
-b	33
-c	29
+a	20
+b	30
+c	30
 
 # Public side tables are allowed in Google-style DP. COUNT(DISTINCT) is computed per PU
 # before clipping, then summed.
@@ -460,6 +536,11 @@ dp_minmax_lower_bound must be smaller than
 
 statement ok
 SET dp_minmax_lower_bound = 0.0;
+
+statement error
+SELECT MIN('x') FROM avg_values;
+----
+min argument must be a numeric type
 
 statement ok
 SET privacy_noise = true;

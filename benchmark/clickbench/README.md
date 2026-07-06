@@ -26,6 +26,9 @@ The non-private **`baseline`** always runs regardless of `--modes`.
 
 Each selected DP/PAC mechanism runs **once per query** at a single operating point —
 `dp_epsilon = 1.0` and the inferred "perfect" sensitivity bound (no epsilon/sensitivity sweep).
+The DP mechanisms use a common ClickBench support set for reporting; queries outside that
+intersection are recorded as failed for all DP modes instead of letting one mechanism report a
+larger successful-query set than another.
 
 ## Modes in the output `mode` column
 

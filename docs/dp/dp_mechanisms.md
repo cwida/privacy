@@ -97,7 +97,7 @@ loudly rather than releasing something unproven:
 | `dp_sample_lanes` | number of sample lanes a PU is hashed into (`m` is fixed at 64) | subsample assignment (`m`; see §11) |
 | `dp_sass_release` | `'median'` (smooth-sensitivity, (ε,δ)) or `'average'` (GUPT mean, pure ε) | release rule |
 | `dp_sass_avg_method` | `dp_sass` AVG estimator: `'lane_average'` (default) or `'ratio'` (§13) | — |
-| `dp_sass_count_output_bound` / `dp_sass_sum_output_bound` | public output domain `[L,Λ]` for COUNT/SUM lane answers | `L_i, Λ_i` |
+| `dp_sass_count_output_bound` / `dp_sass_sum_output_bound` | public output domain `[L,Λ]` for rescaled COUNT/SUM lane answers | `L_i, Λ_i` |
 | `dp_sass_avg_lower/upper_bound`, `dp_sass_minmax_lower/upper_bound` | public output domain for `dp_sass` AVG / MIN-MAX | `L_i, Λ_i` |
 | `dp_minmax_lower/upper_bound` | public domain `[L,U]` for MIN/MAX under **`dp_standard`** (sensitivity = `U−L`) | `L_i, Λ_i` |
 | `privacy_noise` | `false` zeroes all noise (deterministic testing) | — |
@@ -340,7 +340,7 @@ smooth sensitivity, same NRS `β`.
 | aggregate | `dp_standard` / `dp_elastic` | `dp_sass` |
 |---|---|---|
 | `COUNT(*)` | clip per-PU row count (join: `dp_count_bound`), Laplace | per-lane count, median/mean of 64 |
-| `COUNT(DISTINCT x)` | per-PU distinct count, clip, sum, Laplace | dedicated per-lane distinct path (bit-mask of distinct values per lane), median/mean |
+| `COUNT(DISTINCT x)` | per-PU distinct count, clip, sum, Laplace | per-PU distinct count, clip, sample-sum, median/mean; single DISTINCT may use the lane-mask specialization |
 | `SUM(x)` | clip `x` to `dp_sum_bound`, sum, Laplace | per-lane sum, median/mean |
 | `AVG(x)` | decomposed → `SUM(clip x)` + `COUNT`; released as `noised_sum / max(noised_count, 1)` (Google bounded-mean shape) | **two estimators** (`dp_sass_avg_method`): `lane_average` (default) = median/mean of the 64 per-lane averages; `ratio` = two independent SAA mechanisms for SUM and COUNT, released as `noised_sum / noised_count` |
 | `MIN(x)` / `MAX(x)` | **`dp_standard`: supported** — values clipped to the public domain `[dp_minmax_lower_bound, dp_minmax_upper_bound]`, global sensitivity = range `U−L` (`×C_u` grouped), `Laplace`, output clamped back into the domain. `dp_elastic`: unsupported (elastic sensitivity is defined only for counting queries) | per-lane min/max, median/mean; empty-lane identity = Λ (min) / L (max) |
@@ -361,17 +361,14 @@ are built from the PU-adjacent table's FK column, so a PU's many rows share the 
 lane, matching the explicit-join result — the same way `dp_standard`
 derives the PU key from the FK column.
 
-**`COUNT(DISTINCT)` in `dp_sass` (low level).** `RewriteDistinctCountToSampleMedian`
-builds a three-stage plan. (1) An **inner aggregate** groups by `[groups…, PU, distinct
-value]` and computes `bit_or(dp_sample_mask(pu_hash))` — `dp_sample_mask` maps the PU to
-its lane bitmask, so each distinct `(group, PU, value)` row records *which of the 64
-lanes that PU occupies*. (2) The **contribution caps** above it (the two `BuildRankCapFilter`
-windows from §8) bound each PU to `C_u` groups and `dp_count_bound` distinct values per
-`(PU, group)`. (3) A **merge aggregate** groups by `[groups…, distinct value]` and
-`bit_or`s the per-PU masks, yielding, for each distinct value, the set of lanes in which
-it appeared; the terminal then counts distinct values per lane (a popcount across the 64
-bits) to get 64 lane counts, and releases their median/mean. Per-lane distinct counting
-is thus a `bit_or`-of-lane-masks reduction, not 64 separate `COUNT(DISTINCT)`s.
+**`COUNT(DISTINCT)` in `dp_sass` (low level).** Mixed aggregate lists use the generic
+per-PU path, matching `dp_standard`: the lower aggregate computes `COUNT(DISTINCT x)`
+per `(PU, group)`, contribution caps bound each PU to `C_u` groups and `dp_count_bound`
+distinct values per group, and the top aggregate releases an `as_sample_sum` over the
+bounded per-PU counts. Single `COUNT(DISTINCT)` queries may use the optimized
+`RewriteDistinctCountToSampleMedian` lane-mask path: it groups by `[groups..., PU,
+distinct value]`, computes `bit_or(dp_sample_mask(pu_hash))`, applies the same caps, then
+merges masks by `[groups..., distinct value]` before releasing 64 lane counts.
 
 ---
 

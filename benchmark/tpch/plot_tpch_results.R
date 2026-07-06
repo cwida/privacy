@@ -1,7 +1,7 @@
 #!/usr/bin/env Rscript
 # TPC-H benchmark plotter
 # Reads CSV with columns: query, mode, median_ms
-# When "simple hash AS" data is present, splits AS bars into core + PU-key join overhead
+# When "simple hash AS" data is present, splits AS bars into core + sampling key join overhead
 
 # Configure user-local library path for package installation
 user_lib <- Sys.getenv("R_LIBS_USER")
@@ -147,7 +147,7 @@ if (has_simple_hash) {
   plot_data <- bind_rows(
     combined %>% transmute(query, bar = "DuckDB", component = "DuckDB", time = median_ms),
     combined %>% transmute(query, bar = "SIMD-AS", component = "SIMD-AS", time = core_time),
-    combined %>% transmute(query, bar = "SIMD-AS", component = "PU-key join", time = join_overhead)
+    combined %>% transmute(query, bar = "SIMD-AS", component = "sampling key join", time = join_overhead)
   )
 } else {
   # No split: simple DuckDB vs AS
@@ -169,10 +169,10 @@ plot_data <- plot_data %>%
 plot_data <- plot_data %>% mutate(original_time = time)
 plot_data <- plot_data %>% mutate(time = ifelse(time < 0, fail_y, time))
 
-# Component ordering: PU-key join on top, core on bottom, DuckDB separate
+# Component ordering: sampling key join on top, core on bottom, DuckDB separate
 if (has_simple_hash) {
-  comp_levels <- c("PU-key join", "SIMD-AS", "DuckDB")
-  comp_colors <- c("DuckDB" = "#95a5a6", "SIMD-AS" = "#4dff4d", "PU-key join" = "#009900")
+  comp_levels <- c("sampling key join", "SIMD-AS", "DuckDB")
+  comp_colors <- c("DuckDB" = "#95a5a6", "SIMD-AS" = "#4dff4d", "sampling key join" = "#009900")
 } else {
   comp_levels <- c("DuckDB", "SIMD-AS")
   comp_colors <- c("DuckDB" = "#95a5a6", "SIMD-AS" = "#4dff4d")
@@ -201,10 +201,10 @@ if (!has_naive_as) {
 
     p <- ggplot() +
       geom_col(data = duckdb_bars, aes(x = x_pos, y = time, fill = component), width = 0.35) +
-      geom_col(data = as_total, aes(x = x_pos, y = total, fill = "PU-key join"), width = 0.35) +
+      geom_col(data = as_total, aes(x = x_pos, y = total, fill = "sampling key join"), width = 0.35) +
       geom_col(data = as_core, aes(x = x_pos, y = time, fill = component), width = 0.35) +
       scale_fill_manual(values = comp_colors, name = NULL,
-                        breaks = c("DuckDB", "SIMD-AS", "PU-key join")) +
+                        breaks = c("DuckDB", "SIMD-AS", "sampling key join")) +
       scale_x_continuous(breaks = seq_along(query_order), labels = query_labels, expand = expansion(add = 0.4)) +
       labs(x = NULL, y = NULL)
   } else {
@@ -280,10 +280,10 @@ if (!has_naive_as) {
       paper_combined %>% transmute(query, bar = "DuckDB", component = "DuckDB", time = median_ms),
       paper_combined %>% transmute(query, bar = "Naive-AS", component = "Naive-AS", time = naive_as_time),
       paper_combined %>% transmute(query, bar = "SIMD-AS", component = "SIMD-AS", time = core_time),
-      paper_combined %>% transmute(query, bar = "SIMD-AS", component = "PU-key join", time = join_overhead)
+      paper_combined %>% transmute(query, bar = "SIMD-AS", component = "sampling key join", time = join_overhead)
     )
-    paper_comp_levels <- c("PU-key join", "SIMD-AS", "Naive-AS", "DuckDB")
-    paper_comp_colors <- c("DuckDB" = "#95a5a6", "Naive-AS" = "#a8d4ff", "SIMD-AS" = "#4dff4d", "PU-key join" = "#009900")
+    paper_comp_levels <- c("sampling key join", "SIMD-AS", "Naive-AS", "DuckDB")
+    paper_comp_colors <- c("DuckDB" = "#95a5a6", "Naive-AS" = "#a8d4ff", "SIMD-AS" = "#4dff4d", "sampling key join" = "#009900")
   } else {
     paper_combined <- duckdb_df %>%
       inner_join(as_df, by = "query") %>%
@@ -336,10 +336,10 @@ if (!has_naive_as) {
 
     p_paper <- ggplot() +
       geom_col(data = paper_other_bars, aes(x = x_pos, y = time, fill = component), width = 0.25) +
-      geom_col(data = paper_as_total, aes(x = x_pos, y = total, fill = "PU-key join"), width = 0.25) +
+      geom_col(data = paper_as_total, aes(x = x_pos, y = total, fill = "sampling key join"), width = 0.25) +
       geom_col(data = paper_as_core, aes(x = x_pos, y = time, fill = component), width = 0.25) +
       scale_fill_manual(values = paper_comp_colors, name = NULL,
-                        breaks = c("DuckDB", "Naive-AS", "SIMD-AS", "PU-key join")) +
+                        breaks = c("DuckDB", "Naive-AS", "SIMD-AS", "sampling key join")) +
       scale_x_continuous(breaks = seq_along(query_order), labels = query_labels, expand = expansion(add = 0.4)) +
       labs(x = NULL, y = NULL)
   } else {

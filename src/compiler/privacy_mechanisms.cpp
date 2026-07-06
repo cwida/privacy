@@ -766,26 +766,59 @@ static void EnsurePuAdjacentTableAvailable(OptimizerExtensionInput &input, uniqu
 	ReplaceNode(agg->children[0], *start_ref, current, &binder);
 }
 
-// Locate the PU-identifying FK column for per-PU grouping: the FK on the table *adjacent* to
-// the PU (chain.fk_cols.back() on chain.tables[size-2]). That value uniquely identifies the PU
-// and, because the join is already in the aggregate's input subtree, is available on every
-// contributing row regardless of how many hops deep the queried table sits. Caller guarantees a
-// join (chain.tables.size() >= 2).
-static unique_ptr<Expression> BuildPuKeyExpression(unique_ptr<LogicalOperator> &plan, const DPFKChain &chain,
-                                                   const string &mech) {
-	const string &adj_table = chain.tables[chain.tables.size() - 2];
-	const string &fk_col = chain.fk_cols.back();
-	auto *get = FindTableScanInSubtree(plan.get(), adj_table);
-	if (!get) {
-		throw InternalException(mech + ": could not find PU-adjacent table '" + adj_table + "' for per-PU clipping");
+static unique_ptr<Expression> BuildPerPuGroupExpression(OptimizerExtensionInput &input,
+                                                        unique_ptr<LogicalOperator> &plan, LogicalAggregate *agg,
+                                                        const PrivacyCompatibilityResult &check, const DPFKChain &chain,
+                                                        const string &mech) {
+	if (chain.tables.empty()) {
+		throw InternalException(mech + ": empty privacy-unit FK chain");
 	}
-	idx_t proj_idx = EnsureProjectedColumn(*get, fk_col);
-	if (proj_idx == DConstants::INVALID_INDEX) {
-		throw InternalException(mech + ": failed to project PU key column '" + fk_col + "'");
+
+	string key_table;
+	vector<string> key_columns;
+	if (chain.tables.size() >= 2) {
+		key_table = chain.tables[chain.tables.size() - 2];
+		if (chain.fk_cols.empty()) {
+			throw InternalException(mech + ": missing FK columns for privacy-unit grouping");
+		}
+		key_columns.push_back(chain.fk_cols.back());
+	} else {
+		key_table = chain.tables[0];
+		auto meta_it = check.table_metadata.find(key_table);
+		if (meta_it == check.table_metadata.end() || meta_it->second.pks.empty()) {
+			throw InternalException(mech + ": PU table '" + key_table + "' has no PRIVACY_KEY metadata");
+		}
+		key_columns = meta_it->second.pks;
 	}
-	auto col_index = get->GetColumnIds()[proj_idx];
-	auto col_type = get->GetColumnType(col_index);
-	return make_uniq<BoundColumnRefExpression>(col_type, ColumnBinding(get->table_index, proj_idx));
+
+	LogicalGet *key_get = FindTableScanInSubtree(agg, key_table);
+	if (!key_get) {
+		throw InternalException(mech + ": could not find PU key source table '" + key_table +
+		                        "' below aggregate input");
+	}
+
+	vector<unique_ptr<Expression>> key_exprs;
+	key_exprs.reserve(key_columns.size());
+	for (auto &key_column : key_columns) {
+		idx_t proj_idx = EnsureProjectedColumn(*key_get, key_column);
+		if (proj_idx == DConstants::INVALID_INDEX) {
+			throw InternalException(mech + ": failed to project PU key column '" + key_column + "'");
+		}
+		auto col_index = key_get->GetColumnIds()[proj_idx];
+		auto col_type = key_get->GetColumnType(col_index);
+		ColumnBinding source_binding(key_get->table_index, proj_idx);
+		auto propagated = PropagateSingleBinding(*plan, key_get->table_index, source_binding, col_type, agg);
+		if (propagated.table_index == DConstants::INVALID_INDEX) {
+			throw InternalException(mech + ": could not propagate PU key column '" + key_column +
+			                        "' to aggregate input");
+		}
+		key_exprs.push_back(make_uniq<BoundColumnRefExpression>(col_type, propagated));
+	}
+
+	auto pu_group_expr = BuildXorHash(input, std::move(key_exprs));
+	pu_group_expr = BoundCastExpression::AddCastToType(input.context, std::move(pu_group_expr), LogicalType::UBIGINT);
+	pu_group_expr->alias = mech + "_pu_key";
+	return pu_group_expr;
 }
 
 static unique_ptr<Expression> BuildLowerGroupRef(LogicalAggregate *lower_agg, idx_t lower_group_index, idx_t column) {
@@ -879,14 +912,16 @@ static void ApplyMaxGroupsContributed(OptimizerExtensionInput &input, LogicalAgg
 }
 
 // Standard (global-sensitivity) clipping. Bounds each privacy unit's total contribution to a
-// fixed constant so global sensitivity equals that constant (data-independent → pure ε-DP).
+// fixed constant so global sensitivity equals that constant (data-independent → pure ε-DP for
+// ungrouped queries; grouped queries additionally need private partition selection).
 //
-//  - Single table (1 row == 1 PU): per-row clipping suffices. COUNT sensitivity = 1 (no bound
-//    needed); SUM clipped to dp_sum_bound, sensitivity = dp_sum_bound.
-//  - Join: pre-aggregate per PU (group by the PU-adjacent FK), clip each PU's partial to the
-//    bound, then SUM the clipped partials. SUM→dp_sum_bound, COUNT→dp_count_bound.
-//  - Grouped join: one PU may affect multiple output groups, so the vector sensitivity is also
-//    multiplied by dp_max_groups_contributed (Google DP's L0 contribution bound).
+//  - Every query is pre-aggregated per PU. If the scanned table is the PU table, the PRIVACY_KEY
+//    identifies the PU; if the scanned table is linked by PRIVACY_LINK, the PU-adjacent FK identifies
+//    the PU.
+//  - Each per-PU partial is clipped, then the final aggregate sums/clamps the clipped partials.
+//    SUM→dp_sum_bound, COUNT→dp_count_bound.
+//  - Grouped queries multiply vector sensitivity by dp_max_groups_contributed (Google DP's L0
+//    contribution bound), and partition selection reserves an extra budget cell in FinalizeDPLaplace.
 //
 // Fold an aggregate's FILTER (WHERE cond) into its value: value → CASE WHEN cond THEN value END
 // Fold an aggregate's FILTER (WHERE cond) into its value: value → CASE WHEN cond THEN value ELSE e.
@@ -920,18 +955,14 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
                                          LogicalAggregate *agg, const PrivacyCompatibilityResult &check,
                                          const DPFKChain &chain, const string &mech, const vector<AvgInfo> &avg_infos,
                                          bool &per_pu_out) {
-	bool is_join = chain.tables.size() >= 2;
 	bool has_sum = AggregateContainsSum(agg);
 	bool has_count = AggregateContainsCount(agg);
-	per_pu_out = is_join;
+	per_pu_out = true;
 
 	double sum_bound = has_sum ? GetRequiredDpBound(input.context, "dp_sum_bound", mech) : 0.0;
-	// COUNT has data-independent sensitivity 1 on a single table, but on a join one PU can own
-	// arbitrarily many rows — so a join with COUNT requires dp_count_bound.
-	double count_bound = (is_join && has_count) ? GetRequiredDpBound(input.context, "dp_count_bound", mech) : 0.0;
-	int64_t group_bound = (is_join && !agg->groups.empty())
-	                          ? GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", mech)
-	                          : 1;
+	double count_bound = has_count ? GetRequiredDpBound(input.context, "dp_count_bound", mech) : 0.0;
+	int64_t group_bound =
+	    !agg->groups.empty() ? GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", mech) : 1;
 
 	// MIN/MAX: values are clipped to the public domain [mm_lower, mm_upper], so removing/adding one PU
 	// moves the extremum by at most the range mm_range = mm_upper - mm_lower (per affected group).
@@ -947,39 +978,9 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 	vector<double> sens;
 	sens.reserve(n);
 
-	if (!is_join) {
-		if (has_sum) {
-			ClipSumInputs(input, agg, sum_bound, &avg_infos);
-		}
-		// Clip MIN/MAX inputs to the public domain so the extremum's sensitivity is bounded by mm_range.
-		if (has_min_max) {
-			PRIVACY_DEBUG_PRINT("[" + mech + "] clipping single-table MIN/MAX inputs to [" + std::to_string(mm_lower) +
-			                    ", " + std::to_string(mm_upper) + "]");
-			for (idx_t i = 0; i < n; i++) {
-				auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-				if (IsMinMaxAggregate(aggr) && !aggr.children.empty()) {
-					auto child_type = aggr.children[0]->return_type;
-					aggr.children[0] = ClipToBounds(input, std::move(aggr.children[0]), mm_lower, mm_upper, child_type);
-				}
-			}
-			agg->ResolveOperatorTypes();
-		}
-		for (idx_t i = 0; i < n; i++) {
-			auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-			if (IsMinMaxAggregate(aggr)) {
-				sens.push_back(mm_range); // single table: one row per PU → one group affected (group_bound = 1)
-			} else if (IsCountAggregate(aggr)) {
-				sens.push_back(1.0);
-			} else {
-				sens.push_back(StandardSumContributionBound(i, avg_infos, false, sum_bound, count_bound));
-			}
-		}
-		return sens;
-	}
-
-	// Join: build plain per-PU lower aggregates mirroring each top aggregate.
+	// Build plain per-PU lower aggregates mirroring each top aggregate.
 	EnsurePuAdjacentTableAvailable(input, plan, agg, check, chain, mech);
-	auto pu_key = BuildPuKeyExpression(plan, chain, mech);
+	auto pu_key = BuildPerPuGroupExpression(input, plan, agg, check, chain, mech);
 	vector<bool> is_count;
 	is_count.reserve(n);
 	vector<unique_ptr<Expression>> lower_exprs;
@@ -1517,18 +1518,6 @@ static bool IsDpSampleCountDistinct(const LogicalAggregate *agg) {
 	return aggr.IsDistinct() && (name == "count" || name == "count_star") && aggr.children.size() == 1;
 }
 
-static bool HasDistinctAggregate(const LogicalAggregate *agg) {
-	for (auto &expr : agg->expressions) {
-		if (expr->GetExpressionClass() != ExpressionClass::BOUND_AGGREGATE) {
-			continue;
-		}
-		if (expr->Cast<BoundAggregateExpression>().IsDistinct()) {
-			return true;
-		}
-	}
-	return false;
-}
-
 static bool IsSinglePuKeyDistinctCount(unique_ptr<LogicalOperator> &plan, LogicalAggregate *agg,
                                        const PrivacyCompatibilityResult &check, const vector<string> &privacy_units,
                                        const PrivPUHashingSetup &pu_setup, bool allow_self_joins) {
@@ -1874,7 +1863,9 @@ static void BuildSampleMedianLowerExpression(OptimizerExtensionInput &input, con
 		if (!aggr.children.empty()) {
 			children.push_back(CopyMaybeRemapped(*aggr.children[0], index_map));
 		}
-		lower_expressions.push_back(BindPlainAggregate(input, "count", std::move(children)));
+		lower_expressions.push_back(
+		    BindPlainAggregate(input, "count", std::move(children),
+		                       aggr.IsDistinct() ? AggregateType::DISTINCT : AggregateType::NON_DISTINCT));
 		rewrites.push_back(
 		    {"as_sample_sum", lower_value_pos, optional_idx(), true, 0.0, bounds.count_bound, false, 0.0});
 	} else if (name == "sum") {
@@ -2103,15 +2094,9 @@ static void FinalizeDPLaplace(OptimizerExtensionInput &input, unique_ptr<Logical
 				    "dp_standard: grouped queries require dp_delta in (0, 0.5) for DP partition selection (the "
 				    "released set of group keys is data-dependent). Ungrouped dp_standard queries remain pure ε-DP.");
 			}
-			bool is_join = chain.tables.size() >= 2;
-			// C_u = max output groups one PU can affect. On a join a PU owns many fact rows spanning
-			// groups → dp_max_groups_contributed. On a single PU table we assume one row per PU (unique
-			// PRIVACY_KEY) → each PU is in exactly one group → C_u = 1. (A single PU table with a
-			// non-unique PRIVACY_KEY, i.e. multiple rows per PU across groups, would need C_u > 1.)
-			double cu =
-			    is_join
-			        ? static_cast<double>(GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", mech))
-			        : 1.0;
+			// C_u = max output groups one PU can affect. This is required for every grouped dp_standard
+			// query, including single-table PU queries where repeated PRIVACY_KEY values may span groups.
+			double cu = static_cast<double>(GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", mech));
 			double eps_eta = epsilon / (k + 1.0);
 			double delta_eta = delta / (k + 1.0);
 			tau = 1.0 - (cu * std::log(2.0 - 2.0 * std::pow(1.0 - delta_eta, 1.0 / cu))) / eps_eta;
@@ -2407,11 +2392,6 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		epsilons.push_back(epsilon / cell_divisor);
 		deltas.push_back(delta / cell_divisor);
 		sample_output_positions.push_back(ai);
-	}
-
-	if (HasDistinctAggregate(agg) && !IsDpSampleCountDistinct(agg)) {
-		throw InvalidInputException("dp_sass: clipped COUNT(DISTINCT) is supported only as a single aggregate; "
-		                            "mixed DISTINCT aggregate lists are not supported yet");
 	}
 
 	bool distinct_support_filter = apply_support_filter && IsDpSampleCountDistinct(agg);

@@ -141,6 +141,29 @@ FROM counters;
 ----
 true
 
+# SASS lanes are rescaled to full-output estimators before the terminal release clamps
+# them to [lower, upper]. With sample_lanes=1, the lane median for 130 keys is 128,
+# so a raw per-lane bound like ceil(130/64)=3 clips the release to 3.
+query I
+WITH counters AS (
+    SELECT as_sample_count(i::UBIGINT) AS l
+    FROM range(130) t(i)
+)
+SELECT dp_smooth_median_noise(l, 1.0, 1e-6, 1, 0.0, 3.0, 0.0)::INTEGER
+FROM counters;
+----
+3
+
+query I
+WITH counters AS (
+    SELECT as_sample_count(i::UBIGINT) AS l
+    FROM range(130) t(i)
+)
+SELECT dp_smooth_median_noise(l, 1.0, 1e-6, 1, 0.0, 130.0, 0.0)::INTEGER
+FROM counters;
+----
+128
+
 statement ok
 SET privacy_noise = false;
 
@@ -377,19 +400,23 @@ WHERE ps_suppkey NOT IN (
 ----
 dp_sass: scalar or mark subqueries are not supported by DP mechanisms
 
-statement error
+# Mixed COUNT(DISTINCT) aggregate lists use the same bounded per-PU distinct-count semantics as
+# dp_standard: lower aggregation computes COUNT(DISTINCT x) per (PU, group), clips it by
+# dp_count_bound, then releases the SASS sample sum.
+query I nosort explain_sass_mixed_distinct_count
 EXPLAIN SELECT p_brand, COUNT(DISTINCT ps_suppkey), COUNT(*)
 FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
 GROUP BY p_brand;
 ----
-mixed DISTINCT
+as_sample_sum
 
-statement error
+query III rowsort
 SELECT p_brand, COUNT(DISTINCT ps_suppkey) AS supplier_cnt, COUNT(*) AS row_cnt
 FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
 GROUP BY p_brand;
 ----
-mixed DISTINCT
+Brand#11	59	59
+Brand#22	59	59
 
 statement ok
 SET dp_count_bound = NULL;
@@ -871,6 +898,11 @@ query I
 SELECT MAX(v) IS NOT NULL FROM sass_many;
 ----
 true
+
+statement error
+SELECT MIN('x') FROM sass_many;
+----
+min argument must be a numeric type
 
 query I
 SELECT AVG(v) IS NOT NULL FROM sass_many;

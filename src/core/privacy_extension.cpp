@@ -376,13 +376,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "[INTERNAL] Enable a fast Laplace COUNT(*) path for ungrouped dp_sass single-table PU queries. "
 	    "This treats dp_count_bound as a public data-validity assumption instead of enforcing clipping.",
 	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
-	// Privacy failure probability δ for (ε,δ)-DP smooth sensitivity. Required by dp_elastic and
-	// dp_sass; ignored by dp_standard, which gives pure ε-DP. PRAGMA refresh_dp_stats(epsilon) can set it.
-	db.config.AddExtensionOption(
-	    "dp_delta",
-	    "Privacy failure probability δ for (ε,δ)-DP smooth sensitivity (dp_elastic and dp_sass; "
-	    "ignored by dp_standard). Use SET dp_delta=<value> or PRAGMA refresh_dp_stats(<epsilon>).",
-	    LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	// Privacy failure probability δ. Required by dp_elastic, smooth-sensitivity dp_sass, and grouped
+	// dp_standard/dp_sass queries that privately threshold the released group-key set.
+	db.config.AddExtensionOption("dp_delta",
+	                             "Privacy failure probability δ for DP partition selection and smooth sensitivity. Use "
+	                             "SET dp_delta=<value> or PRAGMA refresh_dp_stats(<epsilon>).",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
 	// Set deterministic RNG seed for PAC functions (useful for tests)
 	db.config.AddExtensionOption("privacy_seed", "RNG seed for reproducible noised results", LogicalType::BIGINT);
 	// Enable/disable PAC noise application (useful for testing, since noise affects result determinism)

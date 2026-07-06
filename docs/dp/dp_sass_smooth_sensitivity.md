@@ -363,9 +363,9 @@ by running many independent SQL queries.
 - `dp_sum_bound` and `dp_count_bound` are required user-provided bounds.
 - MIN and MAX are supported only as bounded-domain sample medians; utility may be
   poor.
-- `privacy_min_group_count`, when set, is treated as the admin-provided support
-  threshold for DP grouped queries.
-- Grouped `COUNT(DISTINCT)` under `dp_sass` applies `privacy_min_group_count`
-  to contributing privacy units, not to the number of distinct values.
+- Grouped `dp_sass` queries compute an automatic noised `COUNT(DISTINCT pu)` support
+  threshold from `dp_delta`, `dp_epsilon`, and `dp_max_groups_contributed`.
+- Grouped `COUNT(DISTINCT)` under `dp_sass` thresholds contributing privacy units,
+  not the number of distinct values.
 - Nested aggregates are not supported; use one aggregate node with one or more
   aggregate expressions.

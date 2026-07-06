@@ -183,15 +183,18 @@ set them explicitly. The paper should describe those as public/oracle benchmark
 parameters. This isolates mechanism overhead without making private bound inference part
 of the DP claim.
 
-For 64 disjoint lanes, public SASS output-domain bounds can be derived conservatively:
+The SASS aggregate finalizers rescale each sampled lane by `DpSampleRescale(sample_lanes)`
+before `dp_smooth_median_noise` / `dp_gupt_mean_noise` clamps to the public output
+domain. Public SASS output-domain bounds must therefore cover the rescaled full-answer
+estimator, not the raw per-lane sample partial:
 
 ```text
-dp_sass_count_output_bound = dp_count_bound * ceil(N_PU / 64)
-dp_sass_sum_output_bound   = dp_sum_bound   * ceil(N_PU / 64)
+dp_sass_count_output_bound = dp_count_bound * ceil(N_PU)
+dp_sass_sum_output_bound   = dp_sum_bound   * ceil(N_PU)
 ```
 
-This derivation is valid when `N_PU`, `dp_count_bound`, `dp_sum_bound`, and `m = 64` are
-treated as public.
+This derivation is valid when `N_PU`, `dp_count_bound`, and `dp_sum_bound` are treated
+as public.
 
 ## Validation
 
