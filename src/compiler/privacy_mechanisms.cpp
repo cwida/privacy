@@ -2258,18 +2258,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		return;
 	}
 
-	// The GUPT-style mean release ('average') is pure ε-DP and needs no δ. The smooth-sensitivity
-	// median release ('median') is (ε,δ)-DP and requires δ ∈ (0, 0.5).
 	double delta = 0.0;
-	if (release_method != "average") {
-		if (!TryGetDpDelta(input.context, delta)) {
-			throw InvalidInputException("dp_sample_median: dp_delta must be set. Use SET dp_delta=<value> or PRAGMA "
-			                            "refresh_dp_stats(<epsilon>).");
-		}
-		if (delta <= 0.0 || delta >= 0.5 || !std::isfinite(delta)) {
-			throw InvalidInputException("dp_sample_median: dp_delta must be in (0, 0.5)");
-		}
-	}
 
 	auto pu_setup = PreparePlanForPUHashing(check, input, plan, privacy_units);
 	auto *agg = single_agg;
@@ -2310,6 +2299,18 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	// separate user aggregates, so exclude them from the budget-splitting count k (AVG stays one cell).
 	idx_t n_original_aggs = agg->expressions.size() - avg_infos.size();
 	idx_t n_groups = agg->groups.size();
+	// The GUPT-style mean release ('average') is pure ε-DP for the release itself, but grouped
+	// queries still need δ for private partition selection. The smooth-sensitivity median release
+	// uses δ for both partition selection and the per-cell smooth-sensitivity release.
+	if (release_method != "average" || n_groups > 0) {
+		if (!TryGetDpDelta(input.context, delta)) {
+			throw InvalidInputException("dp_sample_median: dp_delta must be set. Use SET dp_delta=<value> or PRAGMA "
+			                            "refresh_dp_stats(<epsilon>).");
+		}
+		if (delta <= 0.0 || delta >= 0.5 || !std::isfinite(delta)) {
+			throw InvalidInputException("dp_sample_median: dp_delta must be in (0, 0.5)");
+		}
+	}
 	auto contribution_bounds = GetDpSassContributionBounds(input.context, agg);
 
 	vector<LogicalType> output_types;

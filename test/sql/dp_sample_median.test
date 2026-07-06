@@ -1076,6 +1076,12 @@ SELECT g, COUNT(*) FROM sass_group_events GROUP BY g;
 dp_delta
 
 statement ok
+SET dp_delta = 1e-6;
+
+statement ok
+SELECT g, SUM(uid) FROM sass_group_events GROUP BY g;
+
+statement ok
 SET dp_sass_release = 'median';
 
 statement ok
