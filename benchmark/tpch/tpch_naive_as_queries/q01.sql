@@ -1,7 +1,7 @@
 -- Modified TPC-H q1 to run on 50% subsamples
 
 
---var:SAMPLES = 128
+--var:SAMPLES = 64
 --var:INDEX_COLS = ['l_returnflag', 'l_linestatus']
 --var:OUTPUT_COLS = ['sum_qty', 'sum_base_price', 'sum_disc_price', 'sum_charge', 'avg_qty', 'avg_price', 'avg_disc', 'count_order']
 

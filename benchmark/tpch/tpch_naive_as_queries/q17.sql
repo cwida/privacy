@@ -1,4 +1,4 @@
---var:SAMPLES = 128
+--var:SAMPLES = 64
 --var:INDEX_COLS = []
 --var:OUTPUT_COLS = ['avg_yearly']
 

@@ -1,4 +1,4 @@
---var:SAMPLES = 128
+--var:SAMPLES = 64
 --var:INDEX_COLS = ['supp_nation', 'cust_nation', 'l_year']
 --var:OUTPUT_COLS = ['revenue']
 

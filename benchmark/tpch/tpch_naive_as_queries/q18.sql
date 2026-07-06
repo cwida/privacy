@@ -1,4 +1,4 @@
---var:SAMPLES = 128
+--var:SAMPLES = 64
 --var:INDEX_COLS = ['c_custkey', 'o_orderkey']
 --var:OUTPUT_COLS = ['sum_quantity']
 

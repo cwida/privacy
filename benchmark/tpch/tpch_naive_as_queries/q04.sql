@@ -1,4 +1,4 @@
---var:SAMPLES = 128
+--var:SAMPLES = 64
 --var:INDEX_COLS = ['o_orderpriority']
 --var:OUTPUT_COLS = ['order_count']
 

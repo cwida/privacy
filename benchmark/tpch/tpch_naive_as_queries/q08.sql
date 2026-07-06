@@ -1,4 +1,4 @@
---var:SAMPLES = 128
+--var:SAMPLES = 64
 --var:INDEX_COLS = ['o_year']
 --var:OUTPUT_COLS = ['mkt_share']
 

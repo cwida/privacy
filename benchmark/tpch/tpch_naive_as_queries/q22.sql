@@ -1,4 +1,4 @@
---var:SAMPLES = 128
+--var:SAMPLES = 64
 --var:INDEX_COLS = ['cntrycode']
 --var:OUTPUT_COLS = ['numcust', 'totacctbal']
 

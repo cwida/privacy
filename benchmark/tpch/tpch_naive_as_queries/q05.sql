@@ -1,4 +1,4 @@
---var:SAMPLES = 128
+--var:SAMPLES = 64
 --var:INDEX_COLS = ['n_name']
 --var:OUTPUT_COLS = ['revenue']
 

@@ -1,4 +1,4 @@
---var:SAMPLES = 128
+--var:SAMPLES = 64
 --var:INDEX_COLS = ['l_orderkey', 'o_orderdate', 'o_shippriority']
 --var:OUTPUT_COLS = ['revenue']
 

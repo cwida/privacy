@@ -1,4 +1,4 @@
---var:SAMPLES = 128
+--var:SAMPLES = 64
 --var:INDEX_COLS = ['l_shipmode']
 --var:OUTPUT_COLS = ['high_line_count', 'low_line_count']
 
