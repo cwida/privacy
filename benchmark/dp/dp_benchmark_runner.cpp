@@ -1113,7 +1113,7 @@ static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta
                             double sass_sum_output_bound) {
 	RunStatement(con, "SET privacy_mode='" + point.mode + "'");
 	RunStatement(con, "SET dp_epsilon=" + FormatNumber(point.epsilon));
-	if ((point.mode == "dp_standard" && delta <= 0.0) || (point.mode == "dp_sass" && point.release == "average")) {
+	if (delta <= 0.0 && (point.mode == "dp_standard" || (point.mode == "dp_sass" && point.release == "average"))) {
 		RunStatement(con, "SET dp_delta=NULL");
 	} else {
 		RunStatement(con, "SET dp_delta=" + FormatNumber(delta));
