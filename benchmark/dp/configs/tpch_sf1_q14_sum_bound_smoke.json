@@ -1,0 +1,24 @@
+{
+  "out": "/tmp/tpch_sf1_q14_sum_bound_smoke_results.csv",
+  "runs": 3,
+  "threads": 4,
+  "modes": ["duckdb", "dp_standard", "dp_sass"],
+  "epsilons": [1.0],
+  "deltas": [0.000006666666666666667],
+  "bound_multipliers": [1.0],
+  "sample_lanes": [1],
+  "sass_releases": ["average", "median"],
+  "datasets": [
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 1,
+      "db": "tpch_sass_sf1.db",
+      "query_names": ["q14"],
+      "count_bounds": [1.0],
+      "sum_bounds": [1000000.0],
+      "c_u": [1.0],
+      "sass_sum_output_bounds": [3000000000.0, 5000000000.0, 10000000000.0]
+    }
+  ]
+}

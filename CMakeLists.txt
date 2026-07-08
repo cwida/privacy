@@ -102,6 +102,10 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
     add_executable(as_tpch_benchmark benchmark/tpch/as_tpch_benchmark.cpp)
     target_link_libraries(as_tpch_benchmark ${PRIVACY_LINK_LIBS})
 
+    # ClickBench + AS benchmark runner
+    add_executable(as_clickbench_benchmark benchmark/clickbench/as_clickbench_benchmark.cpp)
+    target_link_libraries(as_clickbench_benchmark ${PRIVACY_LINK_LIBS})
+
     # TPCH Compiler benchmark runner (compares PAC vs regular TPC-H)
     add_executable(pac_tpch_compiler_benchmark benchmark/tpch/pac_tpch_compiler_benchmark.cpp)
     target_link_libraries(pac_tpch_compiler_benchmark ${PRIVACY_LINK_LIBS})

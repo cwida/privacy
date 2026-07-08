@@ -35,6 +35,10 @@ build/release/extension/privacy/dp_benchmark_runner --config benchmark/dp/config
 The JSON config accepts scalar or array sweeps for:
 
 - `modes`: `dp_standard`, `dp_elastic`, `dp_sass`, or `all`
+  - `duckdb` is also accepted as a benchmark-only exact baseline. It runs the query with privacy rewriting
+    disabled and emits perfect utility metrics.
+  - `dp_sass_bounded_ratio` is a benchmark-only Q14 mechanism that releases the lane-wise sampled
+    promotion-revenue percentage in the public range `[0,100]`.
 - `epsilon` / `epsilons`
 - `delta` / `deltas`
 - `count_bound` / `count_bounds`

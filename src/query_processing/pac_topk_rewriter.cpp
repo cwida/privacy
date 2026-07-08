@@ -17,6 +17,7 @@
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_order.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
+#include "duckdb/planner/logical_operator_visitor.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
@@ -105,6 +106,107 @@ struct PacTopKAggInfo {
 	LogicalType original_type; // Return type before converting to LIST
 	ColumnBinding agg_binding; // Binding in the aggregate's output (aggregate_index, agg_index)
 };
+
+static void RemapExpressionTableIndices(Expression &expr, const std::unordered_map<idx_t, idx_t> &index_map) {
+	if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+		auto &col_ref = expr.Cast<BoundColumnRefExpression>();
+		auto it = index_map.find(col_ref.binding.table_index);
+		if (it != index_map.end()) {
+			col_ref.binding.table_index = it->second;
+		}
+	}
+	ExpressionIterator::EnumerateChildren(expr,
+	                                      [&](Expression &child) { RemapExpressionTableIndices(child, index_map); });
+}
+
+static unique_ptr<Expression> CopyExpressionWithTableMap(const Expression &expr,
+                                                         const std::unordered_map<idx_t, idx_t> &index_map) {
+	auto copy = expr.Copy();
+	RemapExpressionTableIndices(*copy, index_map);
+	return copy;
+}
+
+static Expression *StripCastsMutable(Expression *expr) {
+	while (expr && expr->type == ExpressionType::OPERATOR_CAST) {
+		expr = expr->Cast<BoundCastExpression>().child.get();
+	}
+	return expr;
+}
+
+static const Expression *StripCastsConst(const Expression *expr) {
+	while (expr && expr->type == ExpressionType::OPERATOR_CAST) {
+		expr = expr->Cast<BoundCastExpression>().child.get();
+	}
+	return expr;
+}
+
+static bool GetDirectColumnBinding(const Expression &expr, ColumnBinding &binding) {
+	auto stripped = StripCastsConst(&expr);
+	if (!stripped || stripped->type != ExpressionType::BOUND_COLUMN_REF) {
+		return false;
+	}
+	binding = stripped->Cast<BoundColumnRefExpression>().binding;
+	return true;
+}
+
+static bool RemapDirectOrderExpression(unique_ptr<Expression> &expr,
+                                       const std::unordered_map<uint64_t, ColumnBinding> &map) {
+	auto *stripped = StripCastsMutable(expr.get());
+	if (!stripped || stripped->type != ExpressionType::BOUND_COLUMN_REF) {
+		return false;
+	}
+	auto &ref = stripped->Cast<BoundColumnRefExpression>();
+	auto it = map.find(HashBinding(ref.binding));
+	if (it == map.end()) {
+		return false;
+	}
+	ref.binding = it->second;
+	return true;
+}
+
+static void RemapExpressionBindingsExact(Expression &expr, const std::unordered_map<uint64_t, ColumnBinding> &map) {
+	if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+		auto &col_ref = expr.Cast<BoundColumnRefExpression>();
+		auto it = map.find(HashBinding(col_ref.binding));
+		if (it != map.end()) {
+			col_ref.binding = it->second;
+		}
+	}
+	ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) { RemapExpressionBindingsExact(child, map); });
+}
+
+static unique_ptr<Expression> CopyExpressionWithBindingMap(const Expression &expr,
+                                                           const std::unordered_map<uint64_t, ColumnBinding> &map) {
+	auto copy = expr.Copy();
+	RemapExpressionBindingsExact(*copy, map);
+	return copy;
+}
+
+class VolatileExpressionFinder : public LogicalOperatorVisitor {
+public:
+	bool found = false;
+
+	void VisitOperator(LogicalOperator &op) override {
+		VisitOperatorExpressions(op);
+		if (!found) {
+			VisitOperatorChildren(op);
+		}
+	}
+
+	void VisitExpression(unique_ptr<Expression> *expression) override {
+		if ((*expression)->IsVolatile()) {
+			found = true;
+			return;
+		}
+		VisitExpressionChildren(**expression);
+	}
+};
+
+static bool PlanContainsVolatileExpressions(LogicalOperator &op) {
+	VolatileExpressionFinder finder;
+	finder.VisitOperator(op);
+	return finder.found;
+}
 
 // Find the LogicalAggregate below the TopN (possibly through projections).
 // Returns nullptr if the structure is not suitable for rewriting.
@@ -272,6 +374,13 @@ static void RemapBindingsInOperator(LogicalOperator &op, const vector<ColumnBind
 		Rewrite(expr);
 	}
 
+	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		auto &agg = op.Cast<LogicalAggregate>();
+		for (auto &group : agg.groups) {
+			Rewrite(group);
+		}
+	}
+
 	// Handle join conditions (stored separately from expressions)
 	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
 		auto &join = op.Cast<LogicalComparisonJoin>();
@@ -290,6 +399,499 @@ static void RemapBindingsInOperator(LogicalOperator &op, const vector<ColumnBind
 	}
 
 	op.ResolveOperatorTypes();
+}
+
+static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                            TopKContext &ctx, const vector<PacTopKAggInfo> &pac_aggs) {
+	if (ctx.has_intermediate_projection && ctx.intermediate_projections.size() == 1 && ctx.topn && ctx.aggregate) {
+		auto &topn = *ctx.topn;
+		auto &proj = *ctx.intermediate_projections[0];
+		auto &agg = *ctx.aggregate;
+		if (topn.offset != 0 || agg.groups.empty() || agg.children.empty() ||
+		    pac_aggs.size() != agg.expressions.size()) {
+			return false;
+		}
+
+		std::unordered_set<idx_t> pac_agg_indices;
+		for (auto &info : pac_aggs) {
+			if (info.agg_index >= agg.expressions.size() ||
+			    agg.expressions[info.agg_index]->type != ExpressionType::BOUND_AGGREGATE) {
+				return false;
+			}
+			auto &bound_agg = agg.expressions[info.agg_index]->Cast<BoundAggregateExpression>();
+			if (bound_agg.IsDistinct()) {
+				return false;
+			}
+			pac_agg_indices.insert(info.agg_index);
+		}
+
+		std::unordered_set<idx_t> order_agg_set;
+		vector<idx_t> order_proj_cols;
+		for (auto &order : topn.orders) {
+			ColumnBinding proj_binding;
+			if (!GetDirectColumnBinding(*order.expression, proj_binding) ||
+			    proj_binding.table_index != proj.table_index || proj_binding.column_index >= proj.expressions.size()) {
+				return false;
+			}
+			ColumnBinding agg_binding;
+			if (!GetDirectColumnBinding(*proj.expressions[proj_binding.column_index], agg_binding)) {
+				return false;
+			}
+			if (agg_binding.table_index == agg.group_index) {
+				continue;
+			}
+			if (agg_binding.table_index != agg.aggregate_index || agg_binding.column_index >= agg.expressions.size() ||
+			    pac_agg_indices.find(agg_binding.column_index) == pac_agg_indices.end()) {
+				return false;
+			}
+			order_agg_set.insert(agg_binding.column_index);
+			if (std::find(order_proj_cols.begin(), order_proj_cols.end(), proj_binding.column_index) ==
+			    order_proj_cols.end()) {
+				order_proj_cols.push_back(proj_binding.column_index);
+			}
+		}
+		if (order_agg_set.empty()) {
+			return false;
+		}
+
+		vector<idx_t> group_proj_cols;
+		for (idx_t gi = 0; gi < agg.groups.size(); gi++) {
+			bool found = false;
+			for (idx_t pi = 0; pi < proj.expressions.size(); pi++) {
+				ColumnBinding binding;
+				if (GetDirectColumnBinding(*proj.expressions[pi], binding) &&
+				    binding == ColumnBinding(agg.group_index, gi)) {
+					group_proj_cols.push_back(pi);
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				return false;
+			}
+		}
+
+		vector<idx_t> order_agg_indices;
+		vector<idx_t> payload_agg_indices;
+		for (idx_t i = 0; i < agg.expressions.size(); i++) {
+			if (order_agg_set.find(i) != order_agg_set.end()) {
+				order_agg_indices.push_back(i);
+			} else {
+				payload_agg_indices.push_back(i);
+			}
+		}
+		if (payload_agg_indices.empty()) {
+			return false;
+		}
+		if (PlanContainsVolatileExpressions(*agg.children[0])) {
+#if PRIVACY_DEBUG
+			PRIVACY_DEBUG_PRINT("PACTopKRule: skipping late payload aggregate rewrite over volatile child");
+#endif
+			return false;
+		}
+
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("PACTopKRule: applying projection-aware late payload aggregate rewrite");
+#endif
+
+		auto &binder = input.optimizer.binder;
+		auto original_group_index = agg.group_index;
+		auto original_agg_index = agg.aggregate_index;
+		auto original_proj_index = proj.table_index;
+		vector<LogicalType> original_agg_types = agg.types;
+		vector<LogicalType> original_proj_types = proj.types;
+
+		vector<unique_ptr<Expression>> original_groups;
+		for (auto &group : agg.groups) {
+			original_groups.push_back(group->Copy());
+		}
+		vector<unique_ptr<Expression>> original_aggs;
+		for (auto &expr : agg.expressions) {
+			original_aggs.push_back(expr->Copy());
+		}
+		vector<unique_ptr<Expression>> original_proj_exprs;
+		for (auto &expr : proj.expressions) {
+			original_proj_exprs.push_back(expr->Copy());
+		}
+		vector<BoundOrderByNode> original_orders;
+		for (auto &order : topn.orders) {
+			original_orders.push_back(order.Copy());
+		}
+
+		std::unordered_set<idx_t> all_plan_indices;
+		CollectTableIndicesRecursive(plan.get(), all_plan_indices);
+		auto right_child = agg.children[0]->Copy(input.context);
+		auto right_index_map = RemapSubtreeIndices(right_child.get(), binder, all_plan_indices);
+
+		std::unordered_map<idx_t, idx_t> order_old_to_new;
+		vector<unique_ptr<Expression>> top_expressions;
+		for (idx_t new_idx = 0; new_idx < order_agg_indices.size(); new_idx++) {
+			auto old_idx = order_agg_indices[new_idx];
+			order_old_to_new[old_idx] = new_idx;
+			top_expressions.push_back(original_aggs[old_idx]->Copy());
+		}
+
+		std::unordered_map<uint64_t, ColumnBinding> agg_to_top_remap;
+		for (idx_t gi = 0; gi < agg.groups.size(); gi++) {
+			agg_to_top_remap[HashBinding(ColumnBinding(original_group_index, gi))] =
+			    ColumnBinding(original_group_index, gi);
+		}
+		for (auto &kv : order_old_to_new) {
+			agg_to_top_remap[HashBinding(ColumnBinding(original_agg_index, kv.first))] =
+			    ColumnBinding(original_agg_index, kv.second);
+		}
+
+		agg.expressions = std::move(top_expressions);
+		agg.types.clear();
+		for (auto &group : agg.groups) {
+			agg.types.push_back(group->return_type);
+		}
+		for (auto old_idx : order_agg_indices) {
+			agg.types.push_back(original_agg_types[agg.groups.size() + old_idx]);
+		}
+		agg.ResolveOperatorTypes();
+
+		vector<idx_t> kept_proj_cols = group_proj_cols;
+		for (auto col : order_proj_cols) {
+			if (std::find(kept_proj_cols.begin(), kept_proj_cols.end(), col) == kept_proj_cols.end()) {
+				kept_proj_cols.push_back(col);
+			}
+		}
+		std::unordered_map<idx_t, idx_t> proj_old_to_new;
+		vector<unique_ptr<Expression>> new_proj_exprs;
+		for (idx_t new_idx = 0; new_idx < kept_proj_cols.size(); new_idx++) {
+			auto old_idx = kept_proj_cols[new_idx];
+			proj_old_to_new[old_idx] = new_idx;
+			new_proj_exprs.push_back(CopyExpressionWithBindingMap(*original_proj_exprs[old_idx], agg_to_top_remap));
+		}
+		std::unordered_map<uint64_t, ColumnBinding> proj_to_top_remap;
+		for (auto &kv : proj_old_to_new) {
+			proj_to_top_remap[HashBinding(ColumnBinding(original_proj_index, kv.first))] =
+			    ColumnBinding(original_proj_index, kv.second);
+		}
+		for (auto &order : topn.orders) {
+			if (!RemapDirectOrderExpression(order.expression, proj_to_top_remap)) {
+				return false;
+			}
+		}
+		proj.expressions = std::move(new_proj_exprs);
+		proj.ResolveOperatorTypes();
+		plan->ResolveOperatorTypes();
+
+		auto left_topn = std::move(plan);
+		auto join = make_uniq<LogicalComparisonJoin>(JoinType::INNER);
+		for (idx_t gi = 0; gi < group_proj_cols.size(); gi++) {
+			JoinCondition cond;
+			auto left_col = proj_old_to_new[group_proj_cols[gi]];
+			cond.left = make_uniq<BoundColumnRefExpression>(original_proj_types[group_proj_cols[gi]],
+			                                                ColumnBinding(original_proj_index, left_col));
+			cond.right = CopyExpressionWithTableMap(*original_groups[gi], right_index_map);
+			cond.comparison = ExpressionType::COMPARE_NOT_DISTINCT_FROM;
+			join->conditions.push_back(std::move(cond));
+		}
+		join->children.push_back(std::move(left_topn));
+		join->children.push_back(std::move(right_child));
+		join->ResolveOperatorTypes();
+
+		std::unordered_map<idx_t, idx_t> payload_old_to_new;
+		vector<unique_ptr<Expression>> payload_expressions;
+		for (idx_t new_idx = 0; new_idx < payload_agg_indices.size(); new_idx++) {
+			auto old_idx = payload_agg_indices[new_idx];
+			payload_old_to_new[old_idx] = new_idx;
+			payload_expressions.push_back(CopyExpressionWithTableMap(*original_aggs[old_idx], right_index_map));
+		}
+
+		auto payload_group_index = binder.GenerateTableIndex();
+		auto payload_agg_index = binder.GenerateTableIndex();
+		vector<unique_ptr<Expression>> payload_groups;
+		for (auto old_col : group_proj_cols) {
+			auto new_col = proj_old_to_new[old_col];
+			payload_groups.push_back(make_uniq<BoundColumnRefExpression>(original_proj_types[old_col],
+			                                                             ColumnBinding(original_proj_index, new_col)));
+		}
+		for (auto old_col : order_proj_cols) {
+			auto new_col = proj_old_to_new[old_col];
+			payload_groups.push_back(make_uniq<BoundColumnRefExpression>(original_proj_types[old_col],
+			                                                             ColumnBinding(original_proj_index, new_col)));
+		}
+
+		auto payload_agg =
+		    make_uniq<LogicalAggregate>(payload_group_index, payload_agg_index, std::move(payload_expressions));
+		payload_agg->groups = std::move(payload_groups);
+		payload_agg->children.push_back(std::move(join));
+		payload_agg->ResolveOperatorTypes();
+
+		std::unordered_map<uint64_t, ColumnBinding> final_expr_remap;
+		for (idx_t gi = 0; gi < group_proj_cols.size(); gi++) {
+			final_expr_remap[HashBinding(ColumnBinding(original_group_index, gi))] =
+			    ColumnBinding(payload_group_index, gi);
+		}
+		for (idx_t oi = 0; oi < order_proj_cols.size(); oi++) {
+			ColumnBinding agg_binding;
+			if (!GetDirectColumnBinding(*original_proj_exprs[order_proj_cols[oi]], agg_binding)) {
+				return false;
+			}
+			final_expr_remap[HashBinding(agg_binding)] =
+			    ColumnBinding(payload_group_index, group_proj_cols.size() + oi);
+		}
+		for (auto &kv : payload_old_to_new) {
+			final_expr_remap[HashBinding(ColumnBinding(original_agg_index, kv.first))] =
+			    ColumnBinding(payload_agg_index, kv.second);
+		}
+
+		auto final_proj_index = binder.GenerateTableIndex();
+		vector<unique_ptr<Expression>> final_exprs;
+		std::unordered_map<uint64_t, ColumnBinding> final_order_remap;
+		for (idx_t pi = 0; pi < original_proj_exprs.size(); pi++) {
+			final_order_remap[HashBinding(ColumnBinding(original_proj_index, pi))] =
+			    ColumnBinding(final_proj_index, final_exprs.size());
+			final_exprs.push_back(CopyExpressionWithBindingMap(*original_proj_exprs[pi], final_expr_remap));
+		}
+		auto final_proj = make_uniq<LogicalProjection>(final_proj_index, std::move(final_exprs));
+		final_proj->children.push_back(std::move(payload_agg));
+		final_proj->ResolveOperatorTypes();
+
+		vector<BoundOrderByNode> final_orders;
+		for (auto &order : original_orders) {
+			auto expr = order.expression->Copy();
+			if (!RemapDirectOrderExpression(expr, final_order_remap)) {
+				return false;
+			}
+			final_orders.push_back(BoundOrderByNode(order.type, order.null_order, std::move(expr)));
+		}
+		auto final_order = make_uniq<LogicalOrder>(std::move(final_orders));
+		final_order->children.push_back(std::move(final_proj));
+		final_order->ResolveOperatorTypes();
+		plan = std::move(final_order);
+		return true;
+	}
+
+	if (ctx.has_intermediate_projection || !ctx.topn || !ctx.aggregate) {
+		return false;
+	}
+	auto &topn = *ctx.topn;
+	auto &agg = *ctx.aggregate;
+	if (topn.offset != 0 || agg.groups.empty() || agg.children.empty()) {
+		return false;
+	}
+	if (pac_aggs.size() != agg.expressions.size()) {
+		return false;
+	}
+
+	std::unordered_set<idx_t> pac_agg_indices;
+	for (auto &info : pac_aggs) {
+		if (info.agg_index >= agg.expressions.size()) {
+			return false;
+		}
+		auto &expr = agg.expressions[info.agg_index];
+		if (expr->type != ExpressionType::BOUND_AGGREGATE) {
+			return false;
+		}
+		auto &bound_agg = expr->Cast<BoundAggregateExpression>();
+		if (bound_agg.IsDistinct()) {
+			return false;
+		}
+		pac_agg_indices.insert(info.agg_index);
+	}
+
+	std::unordered_set<idx_t> order_agg_set;
+	for (auto &order : topn.orders) {
+		ColumnBinding binding;
+		if (!GetDirectColumnBinding(*order.expression, binding)) {
+			return false;
+		}
+		if (binding.table_index == agg.group_index) {
+			if (binding.column_index >= agg.groups.size()) {
+				return false;
+			}
+			continue;
+		}
+		if (binding.table_index != agg.aggregate_index || binding.column_index >= agg.expressions.size()) {
+			return false;
+		}
+		if (pac_agg_indices.find(binding.column_index) == pac_agg_indices.end()) {
+			return false;
+		}
+		order_agg_set.insert(binding.column_index);
+	}
+	if (order_agg_set.empty()) {
+		return false;
+	}
+
+	vector<idx_t> order_agg_indices;
+	vector<idx_t> payload_agg_indices;
+	for (idx_t i = 0; i < agg.expressions.size(); i++) {
+		if (order_agg_set.find(i) != order_agg_set.end()) {
+			order_agg_indices.push_back(i);
+		} else {
+			payload_agg_indices.push_back(i);
+		}
+	}
+	if (payload_agg_indices.empty()) {
+		return false;
+	}
+	if (PlanContainsVolatileExpressions(*agg.children[0])) {
+#if PRIVACY_DEBUG
+		PRIVACY_DEBUG_PRINT("PACTopKRule: skipping late payload aggregate rewrite over volatile child");
+#endif
+		return false;
+	}
+
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT(
+	    "PACTopKRule: applying late payload aggregate rewrite (order_aggs=" + std::to_string(order_agg_indices.size()) +
+	    ", payload_aggs=" + std::to_string(payload_agg_indices.size()) + ")");
+#endif
+
+	auto &binder = input.optimizer.binder;
+	auto original_group_index = agg.group_index;
+	auto original_agg_index = agg.aggregate_index;
+	vector<LogicalType> original_types = agg.types;
+
+	vector<unique_ptr<Expression>> original_groups;
+	original_groups.reserve(agg.groups.size());
+	for (auto &group : agg.groups) {
+		original_groups.push_back(group->Copy());
+	}
+	vector<unique_ptr<Expression>> original_aggs;
+	original_aggs.reserve(agg.expressions.size());
+	for (auto &expr : agg.expressions) {
+		original_aggs.push_back(expr->Copy());
+	}
+	vector<BoundOrderByNode> original_orders;
+	for (auto &order : topn.orders) {
+		original_orders.push_back(order.Copy());
+	}
+
+	std::unordered_set<idx_t> all_plan_indices;
+	CollectTableIndicesRecursive(plan.get(), all_plan_indices);
+	auto right_child = agg.children[0]->Copy(input.context);
+	auto right_index_map = RemapSubtreeIndices(right_child.get(), binder, all_plan_indices);
+
+	std::unordered_map<idx_t, idx_t> order_old_to_new;
+	vector<unique_ptr<Expression>> top_expressions;
+	top_expressions.reserve(order_agg_indices.size());
+	for (idx_t new_idx = 0; new_idx < order_agg_indices.size(); new_idx++) {
+		auto old_idx = order_agg_indices[new_idx];
+		order_old_to_new[old_idx] = new_idx;
+		top_expressions.push_back(original_aggs[old_idx]->Copy());
+	}
+
+	std::unordered_map<uint64_t, ColumnBinding> top_order_remap;
+	for (idx_t gi = 0; gi < agg.groups.size(); gi++) {
+		top_order_remap[HashBinding(ColumnBinding(original_group_index, gi))] = ColumnBinding(original_group_index, gi);
+	}
+	for (auto &kv : order_old_to_new) {
+		top_order_remap[HashBinding(ColumnBinding(original_agg_index, kv.first))] =
+		    ColumnBinding(original_agg_index, kv.second);
+	}
+
+	for (auto &order : topn.orders) {
+		if (!RemapDirectOrderExpression(order.expression, top_order_remap)) {
+			return false;
+		}
+	}
+
+	agg.expressions = std::move(top_expressions);
+	agg.types.clear();
+	for (auto &group : agg.groups) {
+		agg.types.push_back(group->return_type);
+	}
+	for (auto old_idx : order_agg_indices) {
+		agg.types.push_back(original_types[agg.groups.size() + old_idx]);
+	}
+	agg.ResolveOperatorTypes();
+	plan->ResolveOperatorTypes();
+
+	auto left_topn = std::move(plan);
+	auto join = make_uniq<LogicalComparisonJoin>(JoinType::INNER);
+	for (idx_t gi = 0; gi < original_groups.size(); gi++) {
+		JoinCondition cond;
+		cond.left = make_uniq<BoundColumnRefExpression>(original_groups[gi]->return_type,
+		                                                ColumnBinding(original_group_index, gi));
+		cond.right = CopyExpressionWithTableMap(*original_groups[gi], right_index_map);
+		cond.comparison = ExpressionType::COMPARE_NOT_DISTINCT_FROM;
+		join->conditions.push_back(std::move(cond));
+	}
+	join->children.push_back(std::move(left_topn));
+	join->children.push_back(std::move(right_child));
+	join->ResolveOperatorTypes();
+
+	std::unordered_map<idx_t, idx_t> payload_old_to_new;
+	vector<unique_ptr<Expression>> payload_expressions;
+	payload_expressions.reserve(payload_agg_indices.size());
+	for (idx_t new_idx = 0; new_idx < payload_agg_indices.size(); new_idx++) {
+		auto old_idx = payload_agg_indices[new_idx];
+		payload_old_to_new[old_idx] = new_idx;
+		payload_expressions.push_back(CopyExpressionWithTableMap(*original_aggs[old_idx], right_index_map));
+	}
+
+	auto payload_group_index = binder.GenerateTableIndex();
+	auto payload_agg_index = binder.GenerateTableIndex();
+	vector<unique_ptr<Expression>> payload_groups;
+	payload_groups.reserve(original_groups.size() + order_agg_indices.size());
+	for (idx_t gi = 0; gi < original_groups.size(); gi++) {
+		payload_groups.push_back(make_uniq<BoundColumnRefExpression>(original_groups[gi]->return_type,
+		                                                             ColumnBinding(original_group_index, gi)));
+	}
+	for (auto old_idx : order_agg_indices) {
+		auto new_idx = order_old_to_new[old_idx];
+		payload_groups.push_back(make_uniq<BoundColumnRefExpression>(original_types[original_groups.size() + old_idx],
+		                                                             ColumnBinding(original_agg_index, new_idx)));
+	}
+
+	auto payload_agg =
+	    make_uniq<LogicalAggregate>(payload_group_index, payload_agg_index, std::move(payload_expressions));
+	payload_agg->groups = std::move(payload_groups);
+	payload_agg->children.push_back(std::move(join));
+	payload_agg->ResolveOperatorTypes();
+
+	auto final_proj_index = binder.GenerateTableIndex();
+	vector<unique_ptr<Expression>> final_exprs;
+	final_exprs.reserve(original_types.size());
+	std::unordered_map<uint64_t, ColumnBinding> final_order_remap;
+	for (idx_t gi = 0; gi < original_groups.size(); gi++) {
+		auto final_binding = ColumnBinding(final_proj_index, final_exprs.size());
+		final_order_remap[HashBinding(ColumnBinding(original_group_index, gi))] = final_binding;
+		final_exprs.push_back(
+		    make_uniq<BoundColumnRefExpression>(original_types[gi], ColumnBinding(payload_group_index, gi)));
+	}
+	for (idx_t ai = 0; ai < original_aggs.size(); ai++) {
+		auto final_binding = ColumnBinding(final_proj_index, final_exprs.size());
+		final_order_remap[HashBinding(ColumnBinding(original_agg_index, ai))] = final_binding;
+		auto original_type = original_types[original_groups.size() + ai];
+		auto order_it = order_old_to_new.find(ai);
+		if (order_it != order_old_to_new.end()) {
+			auto group_pos = original_groups.size() + order_it->second;
+			final_exprs.push_back(
+			    make_uniq<BoundColumnRefExpression>(original_type, ColumnBinding(payload_group_index, group_pos)));
+			continue;
+		}
+		auto payload_it = payload_old_to_new.find(ai);
+		if (payload_it == payload_old_to_new.end()) {
+			return false;
+		}
+		final_exprs.push_back(
+		    make_uniq<BoundColumnRefExpression>(original_type, ColumnBinding(payload_agg_index, payload_it->second)));
+	}
+
+	auto final_proj = make_uniq<LogicalProjection>(final_proj_index, std::move(final_exprs));
+	final_proj->children.push_back(std::move(payload_agg));
+	final_proj->ResolveOperatorTypes();
+
+	vector<BoundOrderByNode> final_orders;
+	for (auto &order : original_orders) {
+		auto expr = order.expression->Copy();
+		if (!RemapDirectOrderExpression(expr, final_order_remap)) {
+			return false;
+		}
+		final_orders.push_back(BoundOrderByNode(order.type, order.null_order, std::move(expr)));
+	}
+	auto final_order = make_uniq<LogicalOrder>(std::move(final_orders));
+	final_order->children.push_back(std::move(final_proj));
+	final_order->ResolveOperatorTypes();
+	plan = std::move(final_order);
+	return true;
 }
 
 // The main rewrite function
@@ -394,6 +996,11 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 #if PRIVACY_DEBUG
 		PRIVACY_DEBUG_PRINT("PACTopKRule: No TopN order expression references a PAC aggregate, skipping");
 #endif
+		return;
+	}
+
+	if (TryRewriteLatePayloadAggregates(input, plan, ctx, pac_aggs)) {
+		PACTopKOptimizeFunction(input, plan);
 		return;
 	}
 

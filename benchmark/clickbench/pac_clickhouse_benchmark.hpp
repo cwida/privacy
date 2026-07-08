@@ -28,6 +28,9 @@ namespace duckdb {
 //              clickbench_naive_dp_queries) that are present in --modes
 // - modes: which privacy mechanisms to measure (subset of {pac,dp_standard,dp_elastic,dp_sass});
 //          baseline always runs regardless
+// - query_filter: optional 1-based ClickBench query ids to run; empty means all
+// - bound_multipliers: optional sensitivity-bound multipliers; empty means {1.0}
+// - sass_releases: optional dp_sass release methods to run; empty means {"median"}
 //
 // Returns 0 on success, non-zero on error.
 int RunClickHouseBenchmark(const string &db_path = "clickbench.db",
@@ -35,7 +38,10 @@ int RunClickHouseBenchmark(const string &db_path = "clickbench.db",
                            const string &out_csv = "",
                            bool micro = false,
                            bool run_naive = false,
-                           const std::set<string> &modes = {"pac", "dp_standard", "dp_elastic", "dp_sass"});
+                           const std::set<string> &modes = {"pac", "dp_standard", "dp_elastic", "dp_sass"},
+                           const std::set<int> &query_filter = {},
+                           const vector<double> &bound_multipliers = {1.0},
+                           const vector<string> &sass_releases = {"median"});
 
 } // namespace duckdb
 

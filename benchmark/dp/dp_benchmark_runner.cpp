@@ -585,7 +585,8 @@ static vector<int> JsonIntList(const JsonValue &obj, const string &array_key, co
 }
 
 static bool IsValidMode(const string &mode) {
-	return mode == "dp_standard" || mode == "dp_elastic" || mode == "dp_sass";
+	return mode == "duckdb" || mode == "dp_standard" || mode == "dp_elastic" || mode == "dp_sass" ||
+	       mode == "dp_sass_bounded_ratio";
 }
 
 static vector<string> NormalizeModes(vector<string> modes) {
@@ -1033,6 +1034,33 @@ static bool ContainsString(const vector<string> &values, const string &needle) {
 	return std::find(values.begin(), values.end(), needle) != values.end();
 }
 
+static string BuildQ14BoundedSampledRatioSql(double epsilon, int sample_lanes) {
+	return "WITH lanes AS ("
+	       "SELECT "
+	       "as_sample_sum(hash(o_custkey)::UBIGINT, "
+	       "CASE WHEN p_type LIKE 'PROMO%' THEN (l_extendedprice * (1 - l_discount))::DOUBLE ELSE 0.0 END) AS promo, "
+	       "as_sample_sum(hash(o_custkey)::UBIGINT, (l_extendedprice * (1 - l_discount))::DOUBLE) AS total "
+	       "FROM lineitem JOIN orders ON l_orderkey = o_orderkey JOIN part ON l_partkey = p_partkey "
+	       "WHERE l_shipdate >= CAST('1995-09-01' AS date) "
+	       "AND l_shipdate < CAST('1995-10-01' AS date)) "
+	       "SELECT dp_gupt_mean_noise("
+	       "list_transform(range(1, 65), lambda i: "
+	       "CASE WHEN list_extract(total, i) <= 0 THEN 0.0 "
+	       "ELSE least(100.0, greatest(0.0, 100.0 * list_extract(promo, i) / list_extract(total, i))) END), " +
+	       FormatNumber(epsilon) + ", " + std::to_string(sample_lanes) +
+	       ", 0.0, 100.0, 0.0) AS promo_revenue "
+	       "FROM lanes";
+}
+
+static void FillScalarUtility(double released_value, double reference_value, UtilityMetrics &metrics) {
+	double abs_ref = std::max(0.00001, std::fabs(reference_value));
+	double error_pct = 100.0 * std::fabs(released_value - reference_value) / abs_ref;
+	metrics.utility = FormatNumber(error_pct);
+	metrics.recall = "1";
+	metrics.precision = "1";
+	metrics.median_error_pct = FormatNumber(error_pct);
+}
+
 static vector<QuerySpec> FilterQueriesByName(vector<QuerySpec> queries, const vector<string> &names) {
 	if (names.empty()) {
 		return queries;
@@ -1065,11 +1093,22 @@ static vector<RunPoint> BuildRunPoints(const DatasetConfig &dataset) {
 		c_u_values.push_back(1.0);
 	}
 	for (auto &mode : dataset.modes) {
-		auto releases = mode == "dp_sass" ? dataset.sass_releases : vector<string> {"-"};
+		if (mode == "duckdb") {
+			RunPoint point;
+			point.mode = mode;
+			points.push_back(std::move(point));
+			continue;
+		}
+		auto releases = mode == "dp_sass"
+		                    ? dataset.sass_releases
+		                    : (mode == "dp_sass_bounded_ratio" ? vector<string> {"average"} : vector<string> {"-"});
 		auto sass_count_output_bounds =
 		    mode == "dp_sass" ? NonEmpty(dataset.sass_count_output_bounds, {0.0}) : vector<double> {0.0};
 		auto sass_sum_output_bounds =
 		    mode == "dp_sass" ? NonEmpty(dataset.sass_sum_output_bounds, {0.0}) : vector<double> {0.0};
+		auto lane_values = (mode == "dp_sass" || mode == "dp_sass_bounded_ratio")
+		                       ? NonEmptyInt(dataset.sample_lanes, {1})
+		                       : vector<int> {1};
 		for (double epsilon : dataset.epsilons) {
 			auto deltas = dataset.deltas.empty() ? vector<double> {0.0} : dataset.deltas;
 			for (double delta : deltas) {
@@ -1079,7 +1118,7 @@ static vector<RunPoint> BuildRunPoints(const DatasetConfig &dataset) {
 							for (double multiplier : dataset.bound_multipliers) {
 								for (double sass_count_output_bound : sass_count_output_bounds) {
 									for (double sass_sum_output_bound : sass_sum_output_bounds) {
-										for (int lanes : NonEmptyInt(dataset.sample_lanes, {1})) {
+										for (int lanes : lane_values) {
 											for (auto &release : releases) {
 												RunPoint point;
 												point.mode = mode;
@@ -1111,6 +1150,18 @@ static vector<RunPoint> BuildRunPoints(const DatasetConfig &dataset) {
 
 static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta, double sass_count_output_bound,
                             double sass_sum_output_bound) {
+	if (point.mode == "duckdb") {
+		RunStatement(con, "SET priv_rewrite=false");
+		RunStatement(con, "SET privacy_diffcols=NULL");
+		return;
+	}
+	if (point.mode == "dp_sass_bounded_ratio") {
+		RunStatement(con, "SET priv_rewrite=false");
+		RunStatement(con, "SET privacy_diffcols=NULL");
+		RunStatement(con, "SET dp_sample_lanes=" + std::to_string(point.sample_lanes));
+		return;
+	}
+	RunStatement(con, "SET priv_rewrite=true");
 	RunStatement(con, "SET privacy_mode='" + point.mode + "'");
 	RunStatement(con, "SET dp_epsilon=" + FormatNumber(point.epsilon));
 	if (delta <= 0.0 && (point.mode == "dp_standard" || (point.mode == "dp_sass" && point.release == "average"))) {
@@ -1273,12 +1324,16 @@ static void RunDataset(const Config &config, const DatasetConfig &dataset, std::
 				double sass_sum_output_bound = 0.0;
 				std::remove(utility_path.c_str());
 				try {
-					ApplyDatasetPrivacy(con, dataset, query);
-					double pu_count = ReadBenchmarkPrivacyUnitCount(con, dataset, query);
-					if (delta <= 0.0) {
-						delta = DefaultDelta(point.epsilon, pu_count);
-					}
-					if (point.mode == "dp_sass") {
+					if (point.mode == "dp_sass_bounded_ratio") {
+						if (query.name != "q14") {
+							throw std::runtime_error("dp_sass_bounded_ratio is only implemented for built-in q14");
+						}
+					} else if (point.mode == "dp_sass") {
+						ApplyDatasetPrivacy(con, dataset, query);
+						double pu_count = ReadBenchmarkPrivacyUnitCount(con, dataset, query);
+						if (delta <= 0.0) {
+							delta = DefaultDelta(point.epsilon, pu_count);
+						}
 						sass_count_output_bound =
 						    point.sass_count_output_bound > 0.0
 						        ? point.sass_count_output_bound
@@ -1289,16 +1344,39 @@ static void RunDataset(const Config &config, const DatasetConfig &dataset, std::
 						        ? point.sass_sum_output_bound
 						        : DeriveSassOutputBound(point.sum_bound, pu_count, point.sample_lanes,
 						                                "dp_sass_sum_output_bound");
+					} else if (point.mode != "duckdb") {
+						ApplyDatasetPrivacy(con, dataset, query);
+						double pu_count = ReadBenchmarkPrivacyUnitCount(con, dataset, query);
+						if (delta <= 0.0) {
+							delta = DefaultDelta(point.epsilon, pu_count);
+						}
 					}
 					ApplyDpSettings(con, point, delta, sass_count_output_bound, sass_sum_output_bound);
 					RunStatement(con, "SET privacy_seed=" + std::to_string(seed));
-					RunStatement(con, "SET privacy_diffcols=" +
-					                      SqlQuote(std::to_string(query.key_cols) + ":" + utility_path));
+					if (point.mode != "duckdb" && point.mode != "dp_sass_bounded_ratio") {
+						RunStatement(con, "SET privacy_diffcols=" +
+						                      SqlQuote(std::to_string(query.key_cols) + ":" + utility_path));
+					}
 					auto start = std::chrono::steady_clock::now();
-					MaterializeQuery(con, query.sql);
+					double released_scalar = 0.0;
+					double reference_scalar = 0.0;
+					if (point.mode == "dp_sass_bounded_ratio") {
+						reference_scalar = ReadScalarDouble(con, query.sql);
+						released_scalar =
+						    ReadScalarDouble(con, BuildQ14BoundedSampledRatioSql(point.epsilon, point.sample_lanes));
+					} else {
+						MaterializeQuery(con, query.sql);
+					}
 					auto end = std::chrono::steady_clock::now();
 					time_ms = std::chrono::duration<double, std::milli>(end - start).count();
-					if (!ReadLastUtilityLine(utility_path, metrics)) {
+					if (point.mode == "duckdb") {
+						metrics.utility = "0";
+						metrics.recall = "1";
+						metrics.precision = "1";
+						metrics.median_error_pct = "0";
+					} else if (point.mode == "dp_sass_bounded_ratio") {
+						FillScalarUtility(released_scalar, reference_scalar, metrics);
+					} else if (!ReadLastUtilityLine(utility_path, metrics)) {
 						throw std::runtime_error("privacy_diffcols did not write utility output");
 					}
 					success = true;

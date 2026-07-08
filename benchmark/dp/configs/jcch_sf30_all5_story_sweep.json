@@ -1,0 +1,69 @@
+{
+  "out": "benchmark/dp/jcch_sf30_all5_story_sweep_results.csv",
+  "runs": 1,
+  "threads": 4,
+  "modes": ["dp_standard", "dp_elastic", "dp_sass"],
+  "epsilons": [1.0],
+  "deltas": [2.2222222222222222e-7],
+  "bound_multipliers": [1.0],
+  "sample_lanes": [1],
+  "sass_releases": ["median", "average"],
+  "datasets": [
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": ["q01"],
+      "count_bounds": [1000.0],
+      "sum_bounds": [1000000.0, 100000000.0],
+      "c_u": [5.0],
+      "sass_count_output_bounds": [100000000.0],
+      "sass_sum_output_bounds": [10000000000000.0]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": ["q05"],
+      "count_bounds": [1.0],
+      "sum_bounds": [10000.0, 1000000.0],
+      "c_u": [5.0],
+      "sass_sum_output_bounds": [10000000000.0, 100000000000.0]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": ["q06"],
+      "count_bounds": [1.0],
+      "sum_bounds": [10000.0, 100000.0, 1000000.0],
+      "c_u": [1.0],
+      "sass_sum_output_bounds": [4000000000.0, 10000000000.0]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": ["q14"],
+      "count_bounds": [1.0],
+      "sum_bounds": [1000.0, 100000.0, 1000000.0],
+      "c_u": [1.0],
+      "sass_sum_output_bounds": [1000.0, 1000000.0, 1000000000.0]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": ["q19"],
+      "count_bounds": [1.0],
+      "sum_bounds": [100000.0, 1000000.0],
+      "c_u": [1.0],
+      "sass_sum_output_bounds": [100000000.0, 1000000000.0]
+    }
+  ]
+}
