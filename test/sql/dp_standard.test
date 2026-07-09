@@ -542,5 +542,49 @@ SELECT MIN('x') FROM avg_values;
 ----
 min argument must be a numeric type
 
+# Tiny delta should not make the Wilson partition threshold numerically infinite.
+# Before the stable log1p/expm1 form, (1 - delta_eta) rounded to 1 and suppressed this group.
+statement ok
+CREATE TABLE dp_standard_tiny_delta_users AS
+SELECT i::INTEGER AS uid
+FROM range(600) AS t(i);
+
+statement ok
+CREATE TABLE dp_standard_tiny_delta_events AS
+SELECT i::INTEGER AS uid, 0::INTEGER AS g
+FROM range(600) AS t(i);
+
+statement ok
+ALTER TABLE dp_standard_tiny_delta_users ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE dp_standard_tiny_delta_users SET PU;
+
+statement ok
+ALTER TABLE dp_standard_tiny_delta_events ADD PRIVACY_LINK (uid) REFERENCES dp_standard_tiny_delta_users (uid);
+
+statement ok
+SET privacy_mode = 'dp_standard';
+
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET dp_epsilon = 1.0;
+
+statement ok
+SET dp_delta = 1e-100;
+
+statement ok
+SET dp_count_bound = 1.0;
+
+statement ok
+SET dp_max_groups_contributed = 1.0;
+
+query II
+SELECT g, COUNT(*) FROM dp_standard_tiny_delta_events GROUP BY g;
+----
+0	600
+
 statement ok
 SET privacy_noise = true;

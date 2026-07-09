@@ -533,6 +533,21 @@ static double ComputeElasticSensitivity(ClientContext &context, const DPFKChain 
 	return 2.0 * ses;
 }
 
+static double ComputeWilsonPartitionThreshold(double epsilon_eta, double delta_eta, double cu) {
+	if (!(epsilon_eta > 0.0) || !(delta_eta > 0.0) || !(delta_eta < 0.5) || !(cu > 0.0)) {
+		throw InvalidInputException("dp partition selection: invalid epsilon, delta, or C_u");
+	}
+	// Wilson et al.: tau = 1 - C_u * log(2 - 2(1 - delta_eta)^(1/C_u)) / epsilon_eta.
+	// Use log1p/expm1 so tiny delta_eta/C_u does not round (1 - delta_eta)^(1/C_u) to 1.
+	double log_survival_per_group = std::log1p(-delta_eta) / cu;
+	double log_release_probability = std::log(2.0) + std::log(-std::expm1(log_survival_per_group));
+	double tau = 1.0 - (cu * log_release_probability) / epsilon_eta;
+	if (!std::isfinite(tau)) {
+		throw InvalidInputException("dp partition selection: computed non-finite threshold");
+	}
+	return tau;
+}
+
 // Which clipping + sensitivity strategy the shared Laplace pipeline uses.
 //
 // GLOBAL (standard DP): bound each privacy unit's *total* contribution to a fixed constant
@@ -2096,10 +2111,11 @@ static void FinalizeDPLaplace(OptimizerExtensionInput &input, unique_ptr<Logical
 			}
 			// C_u = max output groups one PU can affect. This is required for every grouped dp_standard
 			// query, including single-table PU queries where repeated PRIVACY_KEY values may span groups.
-			double cu = static_cast<double>(GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", mech));
+			double cu =
+			    static_cast<double>(GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", mech));
 			double eps_eta = epsilon / (k + 1.0);
 			double delta_eta = delta / (k + 1.0);
-			tau = 1.0 - (cu * std::log(2.0 - 2.0 * std::pow(1.0 - delta_eta, 1.0 / cu))) / eps_eta;
+			tau = ComputeWilsonPartitionThreshold(eps_eta, delta_eta, cu);
 			support_noise_scale = noise_enabled ? (cu / eps_eta) : 0.0;
 			support_gate = 1.0;
 			budget_units = k + 1.0;
@@ -2337,7 +2353,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		double delta_eta = delta / (k + 1.0);
 		double cu = static_cast<double>(group_bound);
 		// Google DP / Wilson et al. threshold: P[releasing a group backed by a single PU] ≤ δ_η.
-		tau = 1.0 - (cu * std::log(2.0 - 2.0 * std::pow(1.0 - delta_eta, 1.0 / cu))) / eps_eta;
+		tau = ComputeWilsonPartitionThreshold(eps_eta, delta_eta, cu);
 		bool noise_enabled = GetBooleanSetting(input.context, "privacy_noise", true);
 		// One PU changes the per-group distinct count in up to C_u groups by 1 → L1 sensitivity C_u.
 		support_noise_scale = noise_enabled ? (cu / eps_eta) : 0.0;
