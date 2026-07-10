@@ -1,6 +1,6 @@
 #!/usr/bin/env Rscript
 # ClickBench DP bound-sweep plotter.
-# Reads pac_clickhouse_benchmark CSV output and summarizes dp_standard vs dp_sass
+# Reads pac_clickhouse_benchmark CSV output and summarizes DP mechanisms
 # over all ClickBench queries without faceting 43 queries into unreadable panels.
 
 user_lib <- Sys.getenv("R_LIBS_USER")
@@ -57,14 +57,18 @@ if (length(missing_cols) > 0) {
   stop("Missing expected columns in CSV: ", paste(missing_cols, collapse = ", "))
 }
 
-mechanism_levels <- c("Bounded DP", "DP-SAA average")
+mechanism_levels <- c("DP standard", "DP elastic", "SASS median", "SASS average")
 mechanism_colors <- c(
-  "Bounded DP" = "#d55e00",
-  "DP-SAA average" = "#009900"
+  "DP standard" = "#95a5a6",
+  "DP elastic" = "#a8d4ff",
+  "SASS median" = "#4dff4d",
+  "SASS average" = "#009900"
 )
 winner_colors <- c(
-  "Bounded DP" = "#d55e00",
-  "DP-SAA" = "#009900",
+  "DP standard" = "#95a5a6",
+  "DP elastic" = "#a8d4ff",
+  "SASS median" = "#4dff4d",
+  "SASS average" = "#009900",
   "Tie" = "#bdbdbd",
   "Suppressed" = "#f0f0f0",
   "Unsupported" = "#252525"
@@ -87,8 +91,10 @@ plot_data <- raw %>%
     time_ms = as.numeric(time_ms),
     total_time_ms = as.numeric(total_time_ms),
     mechanism = case_when(
-      mode == "dp_standard" ~ "Bounded DP",
-      mode == "dp_sass" ~ "DP-SAA average",
+      mode == "dp_standard" ~ "DP standard",
+      mode == "dp_elastic" ~ "DP elastic",
+      mode == "dp_sass" & sass_release == "median" ~ "SASS median",
+      mode == "dp_sass" & sass_release == "average" ~ "SASS average",
       TRUE ~ mode
     )
   ) %>%
@@ -120,14 +126,19 @@ summary_by_query <- plot_data %>%
   )
 
 distribution_summary <- summary_by_query %>%
+  rename(
+    query_median_error_pct = median_error_pct,
+    query_median_total_time_ms = median_total_time_ms
+  ) %>%
   group_by(bound_multiplier, bound_label, mechanism) %>%
   summarize(
     supported_queries = sum(success_runs > 0),
     released_queries = sum(released_runs > 0),
-    median_error_pct = median(median_error_pct[released_runs > 0], na.rm = TRUE),
-    p25_error_pct = quantile(median_error_pct[released_runs > 0], 0.25, na.rm = TRUE),
-    p75_error_pct = quantile(median_error_pct[released_runs > 0], 0.75, na.rm = TRUE),
-    median_total_time_ms = median(median_total_time_ms[success_runs > 0], na.rm = TRUE),
+    median_error_pct = median(query_median_error_pct[released_runs > 0], na.rm = TRUE),
+    mean_error_pct = mean(query_median_error_pct[released_runs > 0], na.rm = TRUE),
+    p25_error_pct = quantile(query_median_error_pct[released_runs > 0], 0.25, na.rm = TRUE),
+    p75_error_pct = quantile(query_median_error_pct[released_runs > 0], 0.75, na.rm = TRUE),
+    median_total_time_ms = median(query_median_total_time_ms[success_runs > 0], na.rm = TRUE),
     .groups = "drop"
   )
 
@@ -138,21 +149,46 @@ paired <- summary_by_query %>%
     names_from = mechanism,
     values_from = c(success_runs, released_runs, mean_recall, median_error_pct)
   ) %>%
+  rename_with(make.names, -c(query_id, query, bound_multiplier, bound_label))
+
+required_paired_cols <- c(
+  "success_runs_DP.standard", "success_runs_DP.elastic", "success_runs_SASS.median", "success_runs_SASS.average",
+  "released_runs_DP.standard", "released_runs_DP.elastic", "released_runs_SASS.median", "released_runs_SASS.average",
+  "mean_recall_DP.standard", "mean_recall_DP.elastic", "mean_recall_SASS.median", "mean_recall_SASS.average",
+  "median_error_pct_DP.standard", "median_error_pct_DP.elastic", "median_error_pct_SASS.median",
+  "median_error_pct_SASS.average"
+)
+for (col in required_paired_cols) {
+  if (!(col %in% names(paired))) {
+    paired[[col]] <- NA_real_
+  }
+}
+
+paired <- paired %>%
   mutate(
-    both_unsupported = coalesce(success_runs_Bounded.DP, 0) == 0 & coalesce(success_runs_DP.SAA.average, 0) == 0,
-    both_suppressed = !both_unsupported &
-      coalesce(released_runs_Bounded.DP, 0) == 0 & coalesce(released_runs_DP.SAA.average, 0) == 0,
-    standard_recall = coalesce(mean_recall_Bounded.DP, 0),
-    sass_recall = coalesce(mean_recall_DP.SAA.average, 0),
-    standard_error = coalesce(median_error_pct_Bounded.DP, Inf),
-    sass_error = coalesce(median_error_pct_DP.SAA.average, Inf),
+    best_recall = pmax(
+      coalesce(mean_recall_DP.standard, 0),
+      coalesce(mean_recall_DP.elastic, 0),
+      coalesce(mean_recall_SASS.median, 0),
+      coalesce(mean_recall_SASS.average, 0)
+    ),
+    best_error = pmin(
+      coalesce(median_error_pct_DP.standard, Inf),
+      coalesce(median_error_pct_DP.elastic, Inf),
+      coalesce(median_error_pct_SASS.median, Inf),
+      coalesce(median_error_pct_SASS.average, Inf)
+    ),
+    total_success = coalesce(success_runs_DP.standard, 0) + coalesce(success_runs_DP.elastic, 0) +
+      coalesce(success_runs_SASS.median, 0) + coalesce(success_runs_SASS.average, 0),
+    total_released = coalesce(released_runs_DP.standard, 0) + coalesce(released_runs_DP.elastic, 0) +
+      coalesce(released_runs_SASS.median, 0) + coalesce(released_runs_SASS.average, 0),
     winner = case_when(
-      both_unsupported ~ "Unsupported",
-      both_suppressed ~ "Suppressed",
-      sass_recall > standard_recall ~ "DP-SAA",
-      standard_recall > sass_recall ~ "Bounded DP",
-      sass_error < standard_error ~ "DP-SAA",
-      standard_error < sass_error ~ "Bounded DP",
+      total_success == 0 ~ "Unsupported",
+      total_released == 0 ~ "Suppressed",
+      coalesce(mean_recall_DP.standard, 0) == best_recall & coalesce(median_error_pct_DP.standard, Inf) == best_error ~ "DP standard",
+      coalesce(mean_recall_DP.elastic, 0) == best_recall & coalesce(median_error_pct_DP.elastic, Inf) == best_error ~ "DP elastic",
+      coalesce(mean_recall_SASS.median, 0) == best_recall & coalesce(median_error_pct_SASS.median, Inf) == best_error ~ "SASS median",
+      coalesce(mean_recall_SASS.average, 0) == best_recall & coalesce(median_error_pct_SASS.average, Inf) == best_error ~ "SASS average",
       TRUE ~ "Tie"
     ),
     winner = factor(winner, levels = names(winner_colors))
@@ -184,29 +220,21 @@ base_theme <- theme_bw(base_size = 34, base_family = base_font) +
   )
 
 utility_distribution <- ggplot(
-  summary_by_query %>% filter(released_runs > 0),
-  aes(x = bound_label, y = plot_error_pct, color = mechanism)
+  distribution_summary,
+  aes(x = bound_label, y = pmax(median_error_pct, 0.001), color = mechanism, group = mechanism)
 ) +
-  geom_boxplot(
-    aes(group = interaction(bound_label, mechanism)),
-    position = position_dodge(width = 0.72),
-    width = 0.56,
-    outlier.size = 1.2,
-    linewidth = 0.8,
-    na.rm = TRUE
-  ) +
   geom_line(
-    data = distribution_summary,
-    aes(x = bound_label, y = pmax(median_error_pct, 0.001), color = mechanism, group = mechanism),
-    position = position_dodge(width = 0.72),
-    linewidth = 1.0,
+    linewidth = 1.2,
     na.rm = TRUE
   ) +
   geom_point(
-    data = distribution_summary,
-    aes(x = bound_label, y = pmax(median_error_pct, 0.001), color = mechanism),
-    position = position_dodge(width = 0.72),
-    size = 2.6,
+    size = 3.2,
+    na.rm = TRUE
+  ) +
+  geom_errorbar(
+    aes(ymin = pmax(p25_error_pct, 0.001), ymax = pmax(p75_error_pct, 0.001)),
+    width = 0.08,
+    linewidth = 0.8,
     na.rm = TRUE
   ) +
   scale_color_manual(values = mechanism_colors, name = NULL) +
@@ -218,35 +246,21 @@ utility_distribution <- ggplot(
   base_theme
 
 utility_plot <- file.path(output_dir, "clickbench_dp_sweep_utility_distribution_paper.png")
-png(filename = utility_plot, width = 4000, height = 1900, res = 350)
+png(filename = utility_plot, width = 4200, height = 1700, res = 350)
 print(utility_distribution)
 dev.off()
 message("Utility distribution plot saved to: ", utility_plot)
 
 runtime_distribution <- ggplot(
-  summary_by_query %>% filter(success_runs > 0),
-  aes(x = bound_label, y = plot_total_time_ms, color = mechanism)
+  distribution_summary,
+  aes(x = bound_label, y = pmax(median_total_time_ms, 0.001), color = mechanism, group = mechanism)
 ) +
-  geom_boxplot(
-    aes(group = interaction(bound_label, mechanism)),
-    position = position_dodge(width = 0.72),
-    width = 0.56,
-    outlier.size = 1.2,
-    linewidth = 0.8,
-    na.rm = TRUE
-  ) +
   geom_line(
-    data = distribution_summary,
-    aes(x = bound_label, y = pmax(median_total_time_ms, 0.001), color = mechanism, group = mechanism),
-    position = position_dodge(width = 0.72),
-    linewidth = 1.0,
+    linewidth = 1.2,
     na.rm = TRUE
   ) +
   geom_point(
-    data = distribution_summary,
-    aes(x = bound_label, y = pmax(median_total_time_ms, 0.001), color = mechanism),
-    position = position_dodge(width = 0.72),
-    size = 2.6,
+    size = 3.2,
     na.rm = TRUE
   ) +
   scale_color_manual(values = mechanism_colors, name = NULL) +
@@ -255,7 +269,7 @@ runtime_distribution <- ggplot(
   base_theme
 
 runtime_plot <- file.path(output_dir, "clickbench_dp_sweep_runtime_distribution_paper.png")
-png(filename = runtime_plot, width = 4000, height = 1900, res = 350)
+png(filename = runtime_plot, width = 4200, height = 1700, res = 350)
 print(runtime_distribution)
 dev.off()
 message("Runtime distribution plot saved to: ", runtime_plot)

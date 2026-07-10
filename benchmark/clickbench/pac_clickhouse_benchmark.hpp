@@ -31,17 +31,20 @@ namespace duckdb {
 // - query_filter: optional 1-based ClickBench query ids to run; empty means all
 // - bound_multipliers: optional sensitivity-bound multipliers; empty means {1.0}
 // - sass_releases: optional dp_sass release methods to run; empty means {"median"}
+// - requested_dp_delta: optional explicit delta for DP modes that need (epsilon,delta);
+//                       <= 0 means use the benchmark default exp(-epsilon*log(N_PU)^2)
+// - sass_output_bounds: SASS public output-domain strategy
+// - common_dp_queries: if true, run only the aggregate-only ClickBench queries supported by
+//                      dp_standard, dp_elastic, and dp_sass without protected/privacy-key output
 //
 // Returns 0 on success, non-zero on error.
 int RunClickHouseBenchmark(const string &db_path = "clickbench.db",
                            const string &queries_dir = "benchmark/clickbench/clickbench_queries",
-                           const string &out_csv = "",
-                           bool micro = false,
-                           bool run_naive = false,
+                           const string &out_csv = "", bool micro = false, bool run_naive = false,
                            const std::set<string> &modes = {"pac", "dp_standard", "dp_elastic", "dp_sass"},
-                           const std::set<int> &query_filter = {},
-                           const vector<double> &bound_multipliers = {1.0},
-                           const vector<string> &sass_releases = {"median"});
+                           const std::set<int> &query_filter = {}, const vector<double> &bound_multipliers = {1.0},
+                           const vector<string> &sass_releases = {"median"}, double requested_dp_delta = -1.0,
+                           const string &sass_output_bounds = "contribution", bool common_dp_queries = false);
 
 } // namespace duckdb
 

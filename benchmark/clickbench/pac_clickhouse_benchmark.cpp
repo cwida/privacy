@@ -168,6 +168,73 @@ static bool IsSelectedQuery(int qnum, const std::set<int> &query_filter) {
 	return query_filter.empty() || query_filter.count(qnum) > 0;
 }
 
+static bool IsCommonDpClickBenchQuery(int qnum) {
+	static const std::set<int> common_queries = {1,  2,  3,  5,  6,  8,  9,  10, 11, 12, 13, 14, 15,
+	                                             21, 28, 30, 34, 35, 37, 38, 39, 40, 41, 42, 43};
+	return common_queries.count(qnum) > 0;
+}
+
+static string ClickBenchQueryCategory(int qnum) {
+	if (!IsCommonDpClickBenchQuery(qnum)) {
+		switch (qnum) {
+		case 4:
+			return "excluded_privacy_key_aggregate";
+		case 7:
+		case 22:
+		case 23:
+		case 29:
+			return "excluded_min_max";
+		case 16:
+		case 17:
+		case 18:
+		case 19:
+			return "excluded_privacy_key_group";
+		case 20:
+		case 24:
+		case 25:
+		case 26:
+		case 27:
+			return "excluded_non_aggregate";
+		case 31:
+		case 32:
+		case 33:
+		case 36:
+			return "excluded_protected_group";
+		default:
+			return "excluded_other";
+		}
+	}
+	switch (qnum) {
+	case 1:
+	case 2:
+	case 5:
+	case 6:
+	case 21:
+		return "ungrouped_count";
+	case 3:
+	case 30:
+		return "ungrouped_sum_avg";
+	case 10:
+	case 12:
+	case 15:
+	case 28:
+	case 40:
+	case 41:
+		return "grouped_sum_avg_count";
+	default:
+		return "grouped_count";
+	}
+}
+
+static bool ParseDoubleMetric(const string &s, double &out) {
+	if (s.empty()) {
+		return false;
+	}
+	char *end = nullptr;
+	out = std::strtod(s.c_str(), &end);
+	return end != s.c_str() && std::isfinite(out);
+}
+
 static string CsvQuote(const string &s) {
 	string out = "\"";
 	for (char c : s) {
@@ -503,6 +570,65 @@ static vector<string> NormalizeSassReleases(const vector<string> &releases) {
 	return normalized;
 }
 
+static string NormalizeSassOutputBounds(string mode) {
+	mode = ToLowerAscii(Trim(mode));
+	if (mode.empty()) {
+		return "contribution";
+	}
+	if (mode != "contribution" && mode != "public-count" && mode != "oracle-output") {
+		throw std::runtime_error("unknown --sass-output-bounds mode: " + mode);
+	}
+	return mode;
+}
+
+static vector<idx_t> ExtractAggregateResultIndexes(const string &query) {
+	vector<idx_t> indexes;
+	vector<string> select_items = SplitTopLevelComma(ExtractSelectClause(query));
+	for (idx_t i = 0; i < select_items.size(); i++) {
+		string alias;
+		string expr = ToLowerAscii(StripSelectAlias(select_items[i], alias));
+		if (expr.find("count(") != string::npos || expr.find("sum(") != string::npos ||
+		    expr.find("avg(") != string::npos || expr.find("min(") != string::npos ||
+		    expr.find("max(") != string::npos) {
+			indexes.push_back(i);
+		}
+	}
+	return indexes;
+}
+
+static double InferOracleOutputBound(Connection &con, const string &query) {
+	vector<idx_t> aggregate_indexes = ExtractAggregateResultIndexes(query);
+	if (aggregate_indexes.empty()) {
+		return 0.0;
+	}
+	auto result = con.Query(query);
+	if (!result || result->HasError()) {
+		return 0.0;
+	}
+	double max_abs_value = 0.0;
+	while (auto chunk = result->Fetch()) {
+		for (idx_t row = 0; row < chunk->size(); row++) {
+			for (auto col : aggregate_indexes) {
+				if (col >= result->ColumnCount()) {
+					continue;
+				}
+				auto value = chunk->GetValue(col, row);
+				if (value.IsNull()) {
+					continue;
+				}
+				try {
+					double numeric = value.DefaultCastAs(LogicalType::DOUBLE).GetValue<double>();
+					if (std::isfinite(numeric)) {
+						max_abs_value = std::max(max_abs_value, std::abs(numeric));
+					}
+				} catch (...) {
+				}
+			}
+		}
+	}
+	return max_abs_value;
+}
+
 static std::set<int> ParseIntSetCSV(const string &list) {
 	std::set<int> values;
 	std::stringstream ss(list);
@@ -643,10 +769,14 @@ static bool ReadAllBytes(int fd, void *buf, size_t n) {
 
 struct BenchmarkQueryResult {
 	int query_num;
+	string query_category;
+	string common_dp_query;
 	string mode;
 	string sass_release;
 	int run;
 	double time_ms;
+	string duckdb_baseline_ms;
+	string slowdown_vs_duckdb;
 	bool success;
 	string error_msg;
 	string utility;
@@ -666,16 +796,6 @@ struct BenchmarkQueryResult {
 	string pac_mi;
 	int64_t seed = 0;
 };
-
-static bool IsCommonDpUnsupportedClickBenchQuery(int qnum) {
-	// Keep DP mechanism support comparable in this benchmark. These queries currently
-	// hit dp_sass resource/worker failures, so treat them as outside the common DP set.
-	return qnum == 30 || qnum == 34 || qnum == 35;
-}
-
-static string CommonDpUnsupportedReason() {
-	return "ClickBench query excluded from common DP support set";
-}
 
 // =====================================================================
 // Child worker process
@@ -712,8 +832,11 @@ static void WriteStatus(int write_fd, const string &error) {
 		if (r->HasError()) {
 			_exit(2);
 		}
-		con.Query("SET memory_limit='60GB'");
+		con.Query("SET memory_limit='16GB'");
+		con.Query("SET threads=16");
+		con.Query("SET preserve_insertion_order=false");
 		con.Query("SET temp_directory='" + db_path + ".tmp'");
+		con.Query("SET max_temp_directory_size='12GB'");
 
 		while (true) {
 			uint8_t cmd = 0;
@@ -1067,7 +1190,8 @@ struct ForkWorker {
 int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, const string &out_csv, bool micro,
                            bool run_naive, const std::set<string> &modes, const std::set<int> &query_filter,
                            const vector<double> &requested_bound_multipliers,
-                           const vector<string> &requested_sass_releases) {
+                           const vector<string> &requested_sass_releases, double requested_dp_delta,
+                           const string &requested_sass_output_bounds, bool common_dp_queries) {
 	// Ignore SIGPIPE so writing to a dead child's pipe returns EPIPE instead of killing us
 	signal(SIGPIPE, SIG_IGN);
 
@@ -1144,9 +1268,13 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 		if (queries.empty())
 			throw std::runtime_error("No queries found in queries.sql");
 
+		auto should_run_query = [&](int qnum) {
+			return IsSelectedQuery(qnum, query_filter) && (!common_dp_queries || IsCommonDpClickBenchQuery(qnum));
+		};
+
 		int selected_query_count = 0;
 		for (idx_t q = 0; q < queries.size(); q++) {
-			if (IsSelectedQuery(static_cast<int>(q + 1), query_filter)) {
+			if (should_run_query(static_cast<int>(q + 1))) {
 				selected_query_count++;
 			}
 		}
@@ -1155,6 +1283,9 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 		}
 		Log(string("Found ") + std::to_string(queries.size()) + " queries, selected " +
 		    std::to_string(selected_query_count) + " for benchmark");
+		if (common_dp_queries) {
+			Log("Using the common DP ClickBench query set");
+		}
 
 		vector<int> diff_key_cols = {0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 1, 1, 2, 1, 2, 2, 3, 0, 0, 1,
 		                             1, 0, 0, 0, 0, 1, 1, 0, 2, 2, 2, 1, 2, 4, 1, 1, 1, 5, 2, 2, 1};
@@ -1165,21 +1296,32 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 		// Single DP operating point (no epsilon/sensitivity sweep): each selected DP mode runs once
 		// per query with dp_epsilon = 1.0 and the inferred "perfect" sensitivity bound.
 		const double dp_epsilon_fixed = 1.0;
+		if (requested_dp_delta > 0.0 && requested_dp_delta >= 0.5) {
+			throw std::runtime_error("--dp-delta must be in (0, 0.5)");
+		}
 		const string pac_mi_default = "0.0078125";
 		vector<double> bound_multipliers = NormalizeBoundMultipliers(requested_bound_multipliers);
 		vector<string> sass_releases = NormalizeSassReleases(requested_sass_releases);
+		string sass_output_bounds = NormalizeSassOutputBounds(requested_sass_output_bounds);
 		double privacy_unit_count = 0.0;
+		double table_row_count = 0.0;
 		vector<bool> query_has_sum_avg(queries.size(), false);
 		vector<bool> query_has_group_by(queries.size(), false);
+		vector<bool> query_has_count_distinct(queries.size(), false);
 		vector<double> perfect_bounds(queries.size(), 0.0);
 		vector<double> perfect_count_bounds(queries.size(), 0.0);
 		vector<double> perfect_group_bounds(queries.size(), 1.0);
+		vector<double> oracle_output_bounds(queries.size(), 0.0);
 		vector<double> sum_bound_times_ms(queries.size(), 0.0);
 		vector<double> count_bound_times_ms(queries.size(), 0.0);
 		vector<double> group_bound_times_ms(queries.size(), 0.0);
+		vector<double> output_bound_times_ms(queries.size(), 0.0);
 		for (idx_t q = 0; q < queries.size(); q++) {
 			query_has_sum_avg[q] = !ExtractSumAvgArgs(queries[q]).empty();
-			query_has_group_by[q] = FindKeywordOutsideParens(ToLowerAscii(queries[q]), " group by ") != string::npos;
+			string lower_query = ToLowerAscii(queries[q]);
+			query_has_group_by[q] = FindKeywordOutsideParens(lower_query, " group by ") != string::npos;
+			query_has_count_distinct[q] = lower_query.find("count(distinct") != string::npos ||
+			                              lower_query.find("count( distinct") != string::npos;
 		}
 
 		// =====================================================================
@@ -1295,9 +1437,26 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 			}
 			Log("ClickBench privacy units (distinct UserID): " + FormatNumber(privacy_unit_count));
 
+			auto table_count_result = con.Query("SELECT COUNT(*) FROM hits");
+			if (!table_count_result || table_count_result->HasError()) {
+				throw std::runtime_error("Failed to compute ClickBench row count: " +
+				                         (table_count_result ? table_count_result->GetError() : "unknown error"));
+			}
+			auto table_count_chunk = table_count_result->Fetch();
+			if (table_count_chunk && table_count_chunk->size() > 0) {
+				auto value = table_count_chunk->GetValue(0, 0);
+				if (!value.IsNull()) {
+					table_row_count = value.DefaultCastAs(LogicalType::DOUBLE).GetValue<double>();
+				}
+			}
+			if (table_row_count <= 1.0 || !std::isfinite(table_row_count)) {
+				throw std::runtime_error("Invalid ClickBench row count");
+			}
+			Log("ClickBench rows: " + FormatNumber(table_row_count));
+
 			Log("Inferring per-query perfect dp_sum_bound values...");
 			for (idx_t q = 0; q < queries.size(); q++) {
-				if (!IsSelectedQuery(static_cast<int>(q + 1), query_filter)) {
+				if (!should_run_query(static_cast<int>(q + 1))) {
 					continue;
 				}
 				string bound_sql = BuildBoundQuery(queries[q]);
@@ -1328,7 +1487,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 
 			Log("Inferring per-query perfect dp_count_bound values (max rows per privacy unit)...");
 			for (idx_t q = 0; q < queries.size(); q++) {
-				if (!IsSelectedQuery(static_cast<int>(q + 1), query_filter)) {
+				if (!should_run_query(static_cast<int>(q + 1))) {
 					continue;
 				}
 				string count_sql = BuildCountBoundQuery(queries[q]);
@@ -1359,7 +1518,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 
 			Log("Inferring per-query perfect dp_max_groups_contributed values...");
 			for (idx_t q = 0; q < queries.size(); q++) {
-				if (!IsSelectedQuery(static_cast<int>(q + 1), query_filter)) {
+				if (!should_run_query(static_cast<int>(q + 1))) {
 					continue;
 				}
 				string group_sql = BuildGroupBoundQuery(queries[q]);
@@ -1386,6 +1545,22 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 				if (perfect_group_bounds[q] > 0) {
 					Log(string("Q") + std::to_string(q + 1) +
 					    " perfect dp_max_groups_contributed=" + FormatNumber(perfect_group_bounds[q]));
+				}
+			}
+
+			if (sass_output_bounds == "oracle-output") {
+				Log("Inferring per-query oracle SASS output-domain values...");
+				for (idx_t q = 0; q < queries.size(); q++) {
+					if (!should_run_query(static_cast<int>(q + 1))) {
+						continue;
+					}
+					auto output_start = std::chrono::steady_clock::now();
+					oracle_output_bounds[q] = InferOracleOutputBound(con, queries[q]);
+					output_bound_times_ms[q] = MillisecondsSince(output_start);
+					if (oracle_output_bounds[q] > 0) {
+						Log(string("Q") + std::to_string(q + 1) +
+						    " oracle dp_sass output_bound=" + FormatNumber(oracle_output_bounds[q]));
+					}
 				}
 			}
 
@@ -1428,7 +1603,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 
 			for (size_t q = 0; q < queries.size(); ++q) {
 				int qnum = static_cast<int>(q + 1);
-				if (!IsSelectedQuery(qnum, query_filter)) {
+				if (!should_run_query(qnum)) {
 					continue;
 				}
 				const string &query = queries[q];
@@ -1600,32 +1775,13 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 								value += group_bound_times_ms[q];
 							}
 						}
+						if (mode_name == "dp_sass" && sass_output_bounds == "oracle-output") {
+							value += output_bound_times_ms[q];
+						}
 						return value;
 					}();
 					if (worker.child_pid <= 0) {
 						worker.Start();
-					}
-					if (IsCommonDpUnsupportedClickBenchQuery(qnum)) {
-						int64_t seed = static_cast<int64_t>(run * 997 + qnum);
-						BenchmarkQueryResult result;
-						result.query_num = qnum;
-						result.mode = mode_name;
-						result.sass_release = sass_release;
-						result.run = run;
-						result.time_ms = 0;
-						result.bound_time_ms = FormatNumber(bound_time_ms);
-						result.total_time_ms = FormatNumber(bound_time_ms);
-						result.success = false;
-						result.error_msg = CommonDpUnsupportedReason();
-						result.epsilon = FormatNumber(dp_epsilon_fixed);
-						result.bound_scenario = "common_support";
-						result.bound_multiplier = FormatNumber(bound_multiplier);
-						result.seed = seed;
-						all_results.push_back(result);
-
-						Log(string("Q") + std::to_string(qnum) + " " + mode_name + " run " + std::to_string(run) +
-						    " REJECTED: " + result.error_msg);
-						return;
 					}
 					string utility_path = "/tmp/clickbench_utility_" + mode_name + "_q" + std::to_string(qnum) + "_r" +
 					                      std::to_string(run) + "_" + std::to_string(getpid()) + ".csv";
@@ -1642,7 +1798,9 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 					dp_setup.push_back("SET privacy_seed=" + std::to_string(seed) + ";");
 					dp_setup.push_back("SET dp_epsilon=" + FormatNumber(dp_epsilon_fixed) + ";");
 					if (needs_delta) {
-						dp_delta = std::exp(-dp_epsilon_fixed * std::pow(std::log(privacy_unit_count), 2.0));
+						dp_delta = requested_dp_delta > 0.0
+						               ? requested_dp_delta
+						               : std::exp(-dp_epsilon_fixed * std::pow(std::log(privacy_unit_count), 2.0));
 						dp_setup.push_back("SET dp_delta=" + FormatNumber(dp_delta) + ";");
 					} else {
 						dp_setup.push_back("SET dp_delta=NULL;");
@@ -1665,6 +1823,13 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 						// cover the rescaled answer, not the raw per-lane sample contribution.
 						double pu_bound = std::ceil(privacy_unit_count);
 						double sass_count_output_bound = dp_count_bound * pu_bound;
+						if (sass_output_bounds == "public-count") {
+							double public_count_bound =
+							    query_has_count_distinct[q] ? pu_bound : std::ceil(table_row_count);
+							sass_count_output_bound = std::min(sass_count_output_bound, public_count_bound);
+						} else if (sass_output_bounds == "oracle-output" && oracle_output_bounds[q] > 0.0) {
+							sass_count_output_bound = std::min(sass_count_output_bound, oracle_output_bounds[q]);
+						}
 						dp_setup.push_back("SET dp_sass_count_output_bound=" + FormatNumber(sass_count_output_bound) +
 						                   ";");
 						if (query_has_sum_avg[q]) {
@@ -1701,7 +1866,10 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 					result.bound_time_ms = FormatNumber(bound_time_ms);
 					result.total_time_ms = FormatNumber(result.time_ms + bound_time_ms);
 					result.delta_scenario =
-					    needs_delta ? (mode_name == "dp_standard" ? "auto_partition" : "auto_flex") : "";
+					    needs_delta
+					        ? (requested_dp_delta > 0.0 ? "explicit"
+					                                    : (mode_name == "dp_standard" ? "auto_partition" : "auto_flex"))
+					        : "";
 					result.dp_delta = needs_delta ? FormatNumber(dp_delta) : "";
 					result.bound_scenario = "x" + FormatNumber(bound_multiplier);
 					result.dp_sum_bound = query_has_sum_avg[q] ? FormatNumber(dp_bound) : "";
@@ -1866,14 +2034,48 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 		}
 
 		// =====================================================================
+		// Post-process: attach query metadata and DuckDB baseline slowdowns
+		// =====================================================================
+		std::map<int, double> baseline_total_per_q;
+		std::map<int, int> baseline_count_per_q;
+		for (const auto &r : all_results) {
+			if (r.mode == "baseline" && r.success) {
+				baseline_total_per_q[r.query_num] += r.time_ms;
+				baseline_count_per_q[r.query_num]++;
+			}
+		}
+		for (auto &r : all_results) {
+			r.query_category = ClickBenchQueryCategory(r.query_num);
+			r.common_dp_query = IsCommonDpClickBenchQuery(r.query_num) ? "true" : "false";
+			auto count_entry = baseline_count_per_q.find(r.query_num);
+			if (count_entry == baseline_count_per_q.end() || count_entry->second == 0) {
+				continue;
+			}
+			double baseline_ms = baseline_total_per_q[r.query_num] / static_cast<double>(count_entry->second);
+			if (baseline_ms <= 0.0 || !std::isfinite(baseline_ms)) {
+				continue;
+			}
+			r.duckdb_baseline_ms = FormatNumber(baseline_ms);
+			double total_ms = 0.0;
+			if (!ParseDoubleMetric(r.total_time_ms, total_ms)) {
+				total_ms = r.time_ms;
+			}
+			if (total_ms >= 0.0 && std::isfinite(total_ms)) {
+				r.slowdown_vs_duckdb = FormatNumber(total_ms / baseline_ms);
+			}
+		}
+
+		// =====================================================================
 		// Write CSV
 		// =====================================================================
-		csv << "query,mode,sass_release,run,time_ms,bound_time_ms,total_time_ms,success,error,utility,recall,precision,"
-		       "median_error_pct,epsilon,delta_scenario,dp_delta,bound_scenario,dp_sum_bound,dp_count_bound,dp_max_"
-		       "groups_contributed,bound_multiplier,pac_mi,seed\n";
+		csv << "query,query_category,common_dp_query,mode,sass_release,run,time_ms,bound_time_ms,total_time_ms,"
+		       "duckdb_baseline_ms,slowdown_vs_duckdb,success,error,utility,recall,precision,median_error_pct,epsilon,"
+		       "delta_scenario,dp_delta,bound_scenario,dp_sum_bound,dp_count_bound,dp_max_groups_contributed,"
+		       "bound_multiplier,pac_mi,seed\n";
 		for (const auto &r : all_results) {
-			csv << r.query_num << "," << r.mode << "," << r.sass_release << "," << r.run << ","
-			    << FormatNumber(r.time_ms) << "," << r.bound_time_ms << "," << r.total_time_ms << ","
+			csv << r.query_num << "," << r.query_category << "," << r.common_dp_query << "," << r.mode << ","
+			    << r.sass_release << "," << r.run << "," << FormatNumber(r.time_ms) << "," << r.bound_time_ms << ","
+			    << r.total_time_ms << "," << r.duckdb_baseline_ms << "," << r.slowdown_vs_duckdb << ","
 			    << (r.success ? "true" : "false") << "," << CsvQuote(r.error_msg) << "," << r.utility << "," << r.recall
 			    << "," << r.precision << "," << r.median_error_pct << "," << r.epsilon << "," << r.delta_scenario << ","
 			    << r.dp_delta << "," << r.bound_scenario << "," << r.dp_sum_bound << "," << r.dp_count_bound << ","
@@ -2042,26 +2244,35 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 
 // Helper for printing usage
 static void PrintUsageMain() {
-	std::cout << "Usage: pac_clickhouse_benchmark [options]\n"
-	          << "Options:\n"
-	          << "  --micro           Run with a smaller dataset (5000000 rows) for quick testing\n"
-	          << "                    Uses clickbench_micro.db by default\n"
-	          << "  --db <path>       DuckDB database file (default: clickbench.db or clickbench_micro.db)\n"
-	          << "  --queries <dir>   Directory containing create.sql, load.sql, queries.sql\n"
-	          << "                    (default: benchmark/clickbench/clickbench_queries)\n"
-	          << "  --out <csv>       Output CSV path (default: benchmark/clickbench_results.csv)\n"
-	          << "  --modes <csv>     Comma-separated privacy mechanisms to measure\n"
-	          << "                    (subset of pac,dp_standard,dp_elastic,dp_sass; default: all four).\n"
-	          << "                    The non-private baseline always runs.\n"
-	          << "  --query-list <csv>\n"
-	          << "                    1-based ClickBench query ids to run (default: all queries).\n"
-	          << "  --bound-multipliers <csv>\n"
-	          << "                    DP bound multipliers to sweep (default: 1.0).\n"
-	          << "  --sass-releases <csv>\n"
-	          << "                    dp_sass release methods to run: median,average (default: median).\n"
-	          << "  --run-naive       Also run the explicit sample-table-join naive variants for the\n"
-	          << "                    sampling mechanisms in --modes (pac, dp_sass).\n"
-	          << "  -h, --help        Show this help message\n";
+	std::cout
+	    << "Usage: pac_clickhouse_benchmark [options]\n"
+	    << "Options:\n"
+	    << "  --micro           Run with a smaller dataset (5000000 rows) for quick testing\n"
+	    << "                    Uses clickbench_micro.db by default\n"
+	    << "  --db <path>       DuckDB database file (default: clickbench.db or clickbench_micro.db)\n"
+	    << "  --queries <dir>   Directory containing create.sql, load.sql, queries.sql\n"
+	    << "                    (default: benchmark/clickbench/clickbench_queries)\n"
+	    << "  --out <csv>       Output CSV path (default: benchmark/clickbench_results.csv)\n"
+	    << "  --modes <csv>     Comma-separated privacy mechanisms to measure\n"
+	    << "                    (subset of pac,dp_standard,dp_elastic,dp_sass; default: all four).\n"
+	    << "                    The non-private baseline always runs.\n"
+	    << "  --query-list <csv>\n"
+	    << "                    1-based ClickBench query ids to run (default: all queries).\n"
+	    << "  --bound-multipliers <csv>\n"
+	    << "                    DP bound multipliers to sweep (default: 1.0).\n"
+	    << "  --sass-releases <csv>\n"
+	    << "                    dp_sass release methods to run: median,average (default: median).\n"
+	    << "  --sass-output-bounds <mode>\n"
+	    << "                    SASS public output-domain strategy: contribution, public-count, or oracle-output\n"
+	    << "                    (default: contribution).\n"
+	    << "  --dp-delta <value>\n"
+	    << "                    Explicit DP delta for modes that need delta. Default is\n"
+	    << "                    exp(-epsilon*log(N_PU)^2).\n"
+	    << "  --common-dp-queries\n"
+	    << "                    Run only the aggregate-only ClickBench queries in the common DP support set.\n"
+	    << "  --run-naive       Also run the explicit sample-table-join naive variants for the\n"
+	    << "                    sampling mechanisms in --modes (pac, dp_sass).\n"
+	    << "  -h, --help        Show this help message\n";
 }
 
 int main(int argc, char **argv) {
@@ -2075,6 +2286,9 @@ int main(int argc, char **argv) {
 	std::set<int> query_filter;
 	duckdb::vector<double> bound_multipliers = {1.0};
 	duckdb::vector<std::string> sass_releases = {"median"};
+	double requested_dp_delta = -1.0;
+	std::string sass_output_bounds = "contribution";
+	bool common_dp_queries = false;
 
 	for (int i = 1; i < argc; ++i) {
 		std::string arg = argv[i];
@@ -2097,6 +2311,12 @@ int main(int argc, char **argv) {
 			bound_multipliers = duckdb::ParseDoubleCSV(argv[++i]);
 		} else if (arg == "--sass-releases" && i + 1 < argc) {
 			sass_releases = duckdb::ParseStringCSV(argv[++i]);
+		} else if (arg == "--sass-output-bounds" && i + 1 < argc) {
+			sass_output_bounds = argv[++i];
+		} else if (arg == "--dp-delta" && i + 1 < argc) {
+			requested_dp_delta = std::stod(argv[++i]);
+		} else if (arg == "--common-dp-queries") {
+			common_dp_queries = true;
 		} else if (arg == "--modes" && i + 1 < argc) {
 			modes.clear();
 			std::string list = argv[++i];
@@ -2128,5 +2348,6 @@ int main(int argc, char **argv) {
 	}
 
 	return duckdb::RunClickHouseBenchmark(db_path, queries_dir, out_csv, micro, run_naive, modes, query_filter,
-	                                      bound_multipliers, sass_releases);
+	                                      bound_multipliers, sass_releases, requested_dp_delta, sass_output_bounds,
+	                                      common_dp_queries);
 }

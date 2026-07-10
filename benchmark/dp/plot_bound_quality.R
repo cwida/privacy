@@ -57,8 +57,7 @@ if (length(missing_cols) > 0) {
   stop("Missing expected columns in CSV: ", paste(missing_cols, collapse = ", "))
 }
 
-scenario_levels <- c("terrible tight", "bad tight", "good", "bad loose", "terrible loose")
-scenario_breaks <- c(0.01, 0.1, 1.0, 10.0, 100.0)
+scenario_levels <- c("0.01", "0.1", "1", "10", "100")
 
 mechanism_levels <- c("DP standard", "DP elastic", "SASS median", "SASS average", "SASS bounded ratio")
 mechanism_colors <- c(
@@ -86,11 +85,11 @@ plot_data <- raw %>%
       TRUE ~ mode
     ),
     scenario = case_when(
-      abs(bound_multiplier - 0.01) < 1e-12 ~ "terrible tight",
-      abs(bound_multiplier - 0.1) < 1e-12 ~ "bad tight",
-      abs(bound_multiplier - 1.0) < 1e-12 ~ "good",
-      abs(bound_multiplier - 10.0) < 1e-12 ~ "bad loose",
-      abs(bound_multiplier - 100.0) < 1e-12 ~ "terrible loose",
+      abs(bound_multiplier - 0.01) < 1e-12 ~ "0.01",
+      abs(bound_multiplier - 0.1) < 1e-12 ~ "0.1",
+      abs(bound_multiplier - 1.0) < 1e-12 ~ "1",
+      abs(bound_multiplier - 10.0) < 1e-12 ~ "10",
+      abs(bound_multiplier - 100.0) < 1e-12 ~ "100",
       TRUE ~ paste0(bound_multiplier, "x")
     ),
     usable = success & !is.na(recall) & recall > 0 & !is.na(median_error_pct)
@@ -147,7 +146,7 @@ make_plot <- function(df, dataset_name, out_file) {
       breaks = c(0.01, 1, 100, 10000, 1000000),
       labels = c("0.01", "1", "100", "10K", "1M")
     ) +
-    labs(x = NULL, y = "median error (%)") +
+    labs(x = "bound multiplier", y = "median error (%)") +
     theme_bw(base_size = 40, base_family = base_font) +
     theme(
       panel.border = element_rect(linewidth = 1.0),
@@ -158,7 +157,7 @@ make_plot <- function(df, dataset_name, out_file) {
       legend.text = element_text(size = 21),
       legend.margin = margin(0, 0, -5, 0),
       legend.box.margin = margin(0, 0, -20, 0),
-      axis.text.x = element_text(angle = 35, hjust = 1, size = 15),
+      axis.text.x = element_text(size = 18),
       axis.text.y = element_text(size = 20),
       axis.title = element_text(size = 30),
       strip.text = element_text(size = 24, face = "bold"),
@@ -187,7 +186,7 @@ make_combined_plot <- function(df, out_file) {
       breaks = c(0.01, 1, 100, 10000, 1000000),
       labels = c("0.01", "1", "100", "10K", "1M")
     ) +
-    labs(x = NULL, y = "median error (%)") +
+    labs(x = "bound multiplier", y = "median error (%)") +
     theme_bw(base_size = 40, base_family = base_font) +
     theme(
       panel.border = element_rect(linewidth = 1.0),
@@ -198,7 +197,7 @@ make_combined_plot <- function(df, out_file) {
       legend.text = element_text(size = 21),
       legend.margin = margin(0, 0, -5, 0),
       legend.box.margin = margin(0, 0, -20, 0),
-      axis.text.x = element_text(angle = 35, hjust = 1, size = 12),
+      axis.text.x = element_text(size = 16),
       axis.text.y = element_text(size = 18),
       axis.title = element_text(size = 30),
       strip.text = element_text(size = 22, face = "bold"),
