@@ -8,7 +8,6 @@
 #include "duckdb/common/exception.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <limits>
 #include <random>
@@ -343,8 +342,8 @@ static double LaplaceNoise(double scale, uint64_t seed) {
 	return -scale * sign * std::log(std::max(1e-300, 1.0 - 2.0 * std::abs(u)));
 }
 
-static double MedianLocalSensitivity(const std::array<double, 64> &values, int changed_lanes) {
-	const int median_idx = 31;
+static double MedianLocalSensitivity(const vector<double> &values, int changed_lanes) {
+	const int median_idx = static_cast<int>((values.size() + 1) / 2 - 1);
 	int lo_idx = median_idx - changed_lanes;
 	int hi_idx = median_idx + changed_lanes;
 	D_ASSERT(lo_idx >= 0);
@@ -352,12 +351,13 @@ static double MedianLocalSensitivity(const std::array<double, 64> &values, int c
 	return std::max(0.0, values[hi_idx] - values[lo_idx]);
 }
 
-static double SmoothMedianSensitivity(const std::array<double, 64> &values, double beta, int sample_lanes) {
+static double SmoothMedianSensitivity(const vector<double> &values, double beta, int sample_lanes) {
 	const int step_size = sample_lanes;
+	const int median_idx = static_cast<int>((values.size() + 1) / 2 - 1);
 	double smooth = 0.0;
-	for (int distance = 0; distance < 64; distance++) {
+	for (int distance = 0; distance < static_cast<int>(values.size()); distance++) {
 		int changed_lanes = step_size * (distance + 1);
-		if (changed_lanes >= 32) {
+		if (changed_lanes > median_idx || median_idx + changed_lanes >= static_cast<int>(values.size())) {
 			break;
 		}
 		double local = MedianLocalSensitivity(values, changed_lanes);
@@ -366,47 +366,12 @@ static double SmoothMedianSensitivity(const std::array<double, 64> &values, doub
 	return smooth;
 }
 
-// Exact smooth sensitivity of the median via the Nissim-Raskhodnikova-Smith divide-and-conquer
-// algorithm (Algorithm 1 SmoothSensitivityMedian + Algorithm 2 JList). The padded array `x` holds
-// the 64 clipped+sorted sample answers in x[1..64], bracketed by domain sentinels x[0]=lower_bound
-// and x[65]=upper_bound; the median index is p = ceil(64/2) = 32 (released median = values[31]).
-// SCORE(i, j) = (x[j] - x[i]) * exp(-beta_eff * (j - i - 1)) over pairs i <= p <= j; JList exploits
-// the monotonicity of the optimal j*(b) in b to find all maximizers in O(n log n).
-namespace {
-
-constexpr int SMOOTH_MEDIAN_N = 64;
-constexpr int SMOOTH_MEDIAN_P = 32; // ceil(64/2): 1-indexed median rank
-
-// argmax_{L <= j <= U} SCORE(b, j)
-int SmoothMedianArgMax(const std::array<double, SMOOTH_MEDIAN_N + 2> &x, double beta_eff, int b, int lower, int upper) {
-	int best_j = lower;
-	double best = -1.0;
-	for (int j = lower; j <= upper; j++) {
-		double score = (x[j] - x[b]) * std::exp(-beta_eff * static_cast<double>(j - b - 1));
-		if (score > best) {
-			best = score;
-			best_j = j;
-		}
-	}
-	return best_j;
-}
-
-// JList(a, c, L, U): fills j_star[b] for b in [a, c] using the monotone search-range narrowing.
-void SmoothMedianJList(const std::array<double, SMOOTH_MEDIAN_N + 2> &x, double beta_eff,
-                       std::array<int, SMOOTH_MEDIAN_P + 1> &j_star, int a, int c, int lower, int upper) {
-	if (c < a) {
-		return;
-	}
-	int b = (a + c) / 2;
-	int jb = SmoothMedianArgMax(x, beta_eff, b, lower, upper);
-	j_star[b] = jb;
-	SmoothMedianJList(x, beta_eff, j_star, a, b - 1, lower, jb);
-	SmoothMedianJList(x, beta_eff, j_star, b + 1, c, jb, upper);
-}
-
-} // namespace
-
-static double SmoothMedianSensitivityExact(const std::array<double, 64> &values, double beta, int sample_lanes,
+// Exact smooth sensitivity of the median via the Nissim-Raskhodnikova-Smith envelope. The padded
+// array `x` holds the clipped+sorted sample answers in x[1..n], bracketed by public domain sentinels
+// x[0]=lower_bound and x[n+1]=upper_bound. We use the lower median rank p=ceil(n/2), matching the
+// existing 64-lane behavior (p=32, released median=values[31]). n is at most 512 here, so the direct
+// O(n^2) score scan is simpler than the JList optimization and still negligible.
+static double SmoothMedianSensitivityExact(const vector<double> &values, double beta, int sample_lanes,
                                            double lower_bound, double upper_bound) {
 	// One PU can move up to `sample_lanes` lane answers, so a PU-neighbor at PU-distance d is an
 	// element-distance ≤ sample_lanes·d change. Reweighting the element-level NRS envelope by
@@ -416,53 +381,56 @@ static double SmoothMedianSensitivityExact(const std::array<double, 64> &values,
 	// max_k e^{-beta_eff·k}·LS^(k)_elem, and maxing over all k only grows it. So it over-noises if
 	// anything. (Also valid with the public empty-lane padding: padded values stay in [L,Λ], so a
 	// PU-neighbor still differs in ≤ sample_lanes bracketed positions.)
+	idx_t n = values.size();
+	idx_t p = (n + 1) / 2;
 	double beta_eff = beta / static_cast<double>(sample_lanes);
-	std::array<double, SMOOTH_MEDIAN_N + 2> x;
+	vector<double> x(n + 2);
 	x[0] = lower_bound;
-	for (int i = 0; i < SMOOTH_MEDIAN_N; i++) {
+	for (idx_t i = 0; i < n; i++) {
 		x[i + 1] = values[i];
 	}
-	x[SMOOTH_MEDIAN_N + 1] = upper_bound;
-
-	std::array<int, SMOOTH_MEDIAN_P + 1> j_star;
-	j_star.fill(SMOOTH_MEDIAN_P);
-	SmoothMedianJList(x, beta_eff, j_star, 0, SMOOTH_MEDIAN_P, SMOOTH_MEDIAN_P, SMOOTH_MEDIAN_N + 1);
+	x[n + 1] = upper_bound;
 
 	double smooth = 0.0;
-	for (int i = 0; i <= SMOOTH_MEDIAN_P; i++) {
-		int j = j_star[i];
-		double score = (x[j] - x[i]) * std::exp(-beta_eff * static_cast<double>(j - i - 1));
-		smooth = std::max(smooth, score);
+	for (idx_t i = 0; i <= p; i++) {
+		for (idx_t j = p; j <= n + 1; j++) {
+			double score = (x[j] - x[i]) * std::exp(-beta_eff * static_cast<double>(j - i - 1));
+			smooth = std::max(smooth, score);
+		}
 	}
 	return std::max(0.0, smooth);
 }
 
 // Shared per-row core for the sample-and-aggregate median release. Validates the inputs,
-// clips (when bounded) and sorts the 64 sample answers, takes the median (values[31]),
+// clips (when bounded) and sorts the sample answers, takes the lower median,
 // computes the smooth-sensitivity scale, and adds Laplace noise. Returns false when the row
 // is invalid (caller marks the result NULL); otherwise writes the released value to `out`.
 static bool SmoothMedianNoiseRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
                                  const PAC_FLOAT *child_values, double epsilon, double delta, int sample_lanes_raw,
                                  bool bounded, double lower_bound, double upper_bound, double empty_default,
                                  bool noise_enabled, uint64_t seed, double &out) {
-	if (entry.length != 64) {
+	if (entry.length < 64 || entry.length > DP_SASS_MAX_M || (entry.length & (entry.length - 1)) != 0) {
 		return false;
 	}
 	int sample_lanes = ValidateDpSampleLanes(sample_lanes_raw);
+	if (entry.length > 64 && sample_lanes != 1) {
+		return false;
+	}
 	if (epsilon <= 0.0 || delta <= 0.0 || delta >= 0.5 || !std::isfinite(epsilon) || !std::isfinite(delta)) {
 		return false;
 	}
 	if (bounded && (!std::isfinite(lower_bound) || !std::isfinite(upper_bound) || lower_bound >= upper_bound)) {
 		return false;
 	}
-	std::array<double, 64> values;
+	vector<double> values;
+	values.resize(entry.length);
 	if (bounded) {
 		// GUPT-style: fill EVERY lane. An empty subsample gets a public, in-range default, so the
-		// number of populated lanes is data-independent (always 64). This removes the data-dependent
+		// number of populated lanes is data-independent (always m). This removes the data-dependent
 		// NULL that would otherwise leak whether the group crossed the 32-lane support boundary;
 		// group suppression is handled solely by the noised η'>τ partition-selection gate upstream.
 		double fill = std::max(lower_bound, std::min(upper_bound, empty_default));
-		for (idx_t j = 0; j < 64; j++) {
+		for (idx_t j = 0; j < entry.length; j++) {
 			auto child_idx = child_data.sel->get_index(entry.offset + j);
 			values[j] = child_data.validity.RowIsValid(child_idx)
 			                ? std::max(lower_bound, std::min(upper_bound, static_cast<double>(child_values[child_idx])))
@@ -470,15 +438,16 @@ static bool SmoothMedianNoiseRow(const list_entry_t &entry, const UnifiedVectorF
 		}
 		std::sort(values.begin(), values.end());
 	} else {
-		// Unbounded (legacy, no public domain to fill from): skip empty lanes; require ≥32 present.
+		// Unbounded (legacy, no public domain to fill from): skip empty lanes; require ≥m/2 present.
 		idx_t valid_count = 0;
-		for (idx_t j = 0; j < 64; j++) {
+		for (idx_t j = 0; j < entry.length; j++) {
 			auto child_idx = child_data.sel->get_index(entry.offset + j);
 			if (child_data.validity.RowIsValid(child_idx)) {
 				values[valid_count++] = static_cast<double>(child_values[child_idx]);
 			}
 		}
-		if (valid_count < 32) {
+		idx_t min_valid = entry.length / 2;
+		if (valid_count < min_valid) {
 			return false;
 		}
 		std::sort(values.begin(), values.begin() + valid_count);
@@ -486,7 +455,8 @@ static bool SmoothMedianNoiseRow(const list_entry_t &entry, const UnifiedVectorF
 			values[j] = values[valid_count - 1];
 		}
 	}
-	double median = values[31];
+	idx_t median_idx = (entry.length + 1) / 2 - 1;
+	double median = values[median_idx];
 	if (!noise_enabled) {
 		out = median;
 		return true;
@@ -767,6 +737,114 @@ static void DpGuptMeanNoiseFunction(DataChunk &args, ExpressionState &state, Vec
 	}
 }
 
+static bool GuptMeanMNoiseRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
+                              const PAC_FLOAT *child_values, double epsilon, int sample_lanes_raw, double lower_bound,
+                              double upper_bound, double empty_default, bool noise_enabled, uint64_t seed,
+                              double &out) {
+	if (entry.length <= DP_SASS_DEFAULT_M || entry.length > DP_SASS_MAX_M || (entry.length & (entry.length - 1)) != 0) {
+		return false;
+	}
+	int sample_lanes = ValidateDpSampleLanes(sample_lanes_raw);
+	if (sample_lanes != 1) {
+		return false;
+	}
+	if (epsilon <= 0.0 || !std::isfinite(epsilon)) {
+		return false;
+	}
+	if (!std::isfinite(lower_bound) || !std::isfinite(upper_bound) || lower_bound >= upper_bound) {
+		return false;
+	}
+
+	double fill = std::max(lower_bound, std::min(upper_bound, empty_default));
+	double sum = 0.0;
+	for (idx_t j = 0; j < entry.length; j++) {
+		auto child_idx = child_data.sel->get_index(entry.offset + j);
+		sum += child_data.validity.RowIsValid(child_idx)
+		           ? std::max(lower_bound, std::min(upper_bound, static_cast<double>(child_values[child_idx])))
+		           : fill;
+	}
+	double sample_count = static_cast<double>(entry.length);
+	double mean = sum / sample_count;
+	if (!noise_enabled) {
+		out = mean;
+		return true;
+	}
+	double scale = (upper_bound - lower_bound) / (sample_count * epsilon);
+	PRIVACY_DEBUG_PRINT("dp_sass gupt-mean-m: m=" + std::to_string(entry.length) + " mean=" + std::to_string(mean) +
+	                    " range=[" + std::to_string(lower_bound) + "," + std::to_string(upper_bound) +
+	                    "] scale=" + std::to_string(scale));
+	out = mean + LaplaceNoise(scale, seed ^ (entry.offset * PAC_MAGIC_HASH));
+	return true;
+}
+
+static void DpGuptMeanMNoiseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &context = state.GetContext();
+	Value seed_val;
+	uint64_t seed = (context.TryGetCurrentSetting("privacy_seed", seed_val) && !seed_val.IsNull())
+	                    ? uint64_t(seed_val.GetValue<int64_t>())
+	                    : uint64_t(std::random_device {}());
+	if (seed_val.IsNull()) {
+		seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(context.ActiveTransaction().GetActiveQuery());
+	}
+	bool noise_enabled = true;
+	Value noise_val;
+	if (context.TryGetCurrentSetting("privacy_noise", noise_val) && !noise_val.IsNull()) {
+		noise_enabled = noise_val.GetValue<bool>();
+	}
+
+	idx_t count = args.size();
+	bool has_empty_default = args.ColumnCount() == 6;
+	auto &list_vec = args.data[0];
+	UnifiedVectorFormat list_data, epsilon_data, sample_lanes_data, lower_data, upper_data, empty_data;
+	list_vec.ToUnifiedFormat(count, list_data);
+	args.data[1].ToUnifiedFormat(count, epsilon_data);
+	args.data[2].ToUnifiedFormat(count, sample_lanes_data);
+	args.data[3].ToUnifiedFormat(count, lower_data);
+	args.data[4].ToUnifiedFormat(count, upper_data);
+	if (has_empty_default) {
+		args.data[5].ToUnifiedFormat(count, empty_data);
+	}
+
+	auto &child_vec = ListVector::GetEntry(list_vec);
+	UnifiedVectorFormat child_data;
+	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
+	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+	auto epsilons = UnifiedVectorFormat::GetData<double>(epsilon_data);
+	auto sample_lanes_values = UnifiedVectorFormat::GetData<int32_t>(sample_lanes_data);
+	auto lower_values = UnifiedVectorFormat::GetData<double>(lower_data);
+	auto upper_values = UnifiedVectorFormat::GetData<double>(upper_data);
+	auto empty_values = has_empty_default ? UnifiedVectorFormat::GetData<double>(empty_data) : nullptr;
+	auto result_data = FlatVector::GetData<double>(result);
+	auto &result_validity = FlatVector::Validity(result);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto list_idx = list_data.sel->get_index(i);
+		auto eps_idx = epsilon_data.sel->get_index(i);
+		auto sample_lanes_idx = sample_lanes_data.sel->get_index(i);
+		auto lower_idx = lower_data.sel->get_index(i);
+		auto upper_idx = upper_data.sel->get_index(i);
+		if (!list_data.validity.RowIsValid(list_idx) || !epsilon_data.validity.RowIsValid(eps_idx) ||
+		    !sample_lanes_data.validity.RowIsValid(sample_lanes_idx) || !lower_data.validity.RowIsValid(lower_idx) ||
+		    !upper_data.validity.RowIsValid(upper_idx)) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+		double lower_bound = lower_values[lower_idx];
+		double upper_bound = upper_values[upper_idx];
+		double empty_default =
+		    has_empty_default ? empty_values[empty_data.sel->get_index(i)] : (lower_bound + upper_bound) / 2.0;
+		double released = 0.0;
+		if (GuptMeanMNoiseRow(list_entries[list_idx], child_data, child_values, epsilons[eps_idx],
+		                      sample_lanes_values[sample_lanes_idx], lower_bound, upper_bound, empty_default,
+		                      noise_enabled, seed, released)) {
+			result_data[i] = released;
+		} else {
+			result_validity.SetInvalid(i);
+		}
+	}
+}
+
 void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
 	ScalarFunction mask_function("dp_sample_mask", {LogicalType::UBIGINT}, LogicalType::UBIGINT, DpSampleMaskFunction);
 	CreateScalarFunctionInfo mask_info(mask_function);
@@ -823,7 +901,7 @@ void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
 	                               LogicalType::DOUBLE, DpSmoothMedianNoiseFunction));
 	CreateScalarFunctionInfo info(set);
 	FunctionDescription desc;
-	desc.description = "Applies smooth-sensitivity median release to 64 sample counters.";
+	desc.description = "Applies smooth-sensitivity median release to SASS sample counters.";
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 
@@ -843,6 +921,21 @@ void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
 	gupt_desc.description = "Applies GUPT-style mean release (pure-ε Laplace) to 64 sample lane answers.";
 	gupt_info.descriptions.push_back(std::move(gupt_desc));
 	loader.RegisterFunction(std::move(gupt_info));
+
+	ScalarFunctionSet gupt_m_set("dp_gupt_mean_m_noise");
+	gupt_m_set.AddFunction(
+	    ScalarFunction("dp_gupt_mean_m_noise",
+	                   {list_type, LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::DOUBLE, LogicalType::DOUBLE},
+	                   LogicalType::DOUBLE, DpGuptMeanMNoiseFunction));
+	gupt_m_set.AddFunction(ScalarFunction("dp_gupt_mean_m_noise",
+	                                      {list_type, LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::DOUBLE,
+	                                       LogicalType::DOUBLE, LogicalType::DOUBLE},
+	                                      LogicalType::DOUBLE, DpGuptMeanMNoiseFunction));
+	CreateScalarFunctionInfo gupt_m_info(gupt_m_set);
+	FunctionDescription gupt_m_desc;
+	gupt_m_desc.description = "Applies experimental variable-m GUPT-style mean release to sample lane answers.";
+	gupt_m_info.descriptions.push_back(std::move(gupt_m_desc));
+	loader.RegisterFunction(std::move(gupt_m_info));
 
 	// dp_aggregate: naive DP sample-and-aggregate terminal, mirroring pac_aggregate's shape
 	// (samples, counts, ...). `counts` is accepted for symmetry and ignored by the median path.

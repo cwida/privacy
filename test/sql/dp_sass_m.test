@@ -1,0 +1,236 @@
+# name: test/sql/dp_sass_m.test
+# description: Experimental variable-m SAA path for dp_sass average release
+# group: [sql]
+
+require privacy
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET privacy_seed = 42;
+
+statement ok
+SET privacy_mode = 'dp_sass';
+
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET dp_epsilon = 1.0;
+
+statement ok
+SET dp_delta = 1e-6;
+
+query I
+SELECT current_setting('dp_sass_m');
+----
+64
+
+statement error
+SET dp_sass_m = 96;
+----
+dp_sass_m
+
+statement error
+SET dp_sass_m = 1024;
+----
+dp_sass_m
+
+statement ok
+SET dp_sass_m = 128;
+
+query III
+SELECT len(as_sample_m_count(0::UBIGINT)),
+       as_sample_m_count(0::UBIGINT)[1]::INTEGER,
+       as_sample_m_count(0::UBIGINT)[2]::INTEGER;
+----
+128	128	0
+
+query III
+SELECT len(as_sample_m_sum(0::UBIGINT, 2.0)),
+       as_sample_m_sum(0::UBIGINT, 2.0)[1]::INTEGER,
+       as_sample_m_sum(0::UBIGINT, 2.0)[2]::INTEGER;
+----
+128	256	0
+
+query III
+SELECT len(as_sample_m_avg(0::UBIGINT, 10.0, 2.0)),
+       as_sample_m_avg(0::UBIGINT, 10.0, 2.0)[1]::INTEGER,
+       as_sample_m_avg(0::UBIGINT, 10.0, 2.0)[2] IS NULL;
+----
+128	5	true
+
+query I
+SELECT dp_gupt_mean_m_noise(as_sample_m_count(0::UBIGINT), 1.0, 1, 0.0, 128.0, 0.0)::INTEGER;
+----
+1
+
+query I
+SELECT dp_smooth_median_noise(as_sample_m_sum(i::UBIGINT, 1.0), 1.0, 1e-6, 1, 0.0, 1000.0, 0.0)::INTEGER
+FROM range(128) t(i);
+----
+128
+
+statement ok
+SET dp_sample_lanes = 2;
+
+statement error
+SELECT as_sample_m_count(0::UBIGINT);
+----
+dp_sample_lanes
+
+statement ok
+SET dp_sample_lanes = 1;
+
+statement ok
+CREATE TABLE sass_m_users AS
+SELECT i::INTEGER AS uid, 1.0::DOUBLE AS v
+FROM range(128) t(i);
+
+statement ok
+ALTER TABLE sass_m_users ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE sass_m_users SET PU;
+
+statement ok
+CREATE TABLE sass_m_events AS
+SELECT i::INTEGER AS uid,
+       CASE WHEN i % 2 = 0 THEN 'even' ELSE 'odd' END AS category,
+       1.0::DOUBLE AS v
+FROM range(128) t(i);
+
+statement ok
+ALTER TABLE sass_m_events ADD PRIVACY_LINK (uid) REFERENCES sass_m_users (uid);
+
+statement ok
+SET dp_sass_release = 'average';
+
+statement ok
+SET dp_count_bound = 1;
+
+statement ok
+SET dp_sum_bound = 1;
+
+statement ok
+SET dp_sass_count_output_bound = 10000;
+
+statement ok
+SET dp_sass_sum_output_bound = 10000;
+
+statement ok
+SET dp_sass_avg_lower_bound = 0;
+
+statement ok
+SET dp_sass_avg_upper_bound = 2;
+
+query I nosort explain_sass_m_sum
+EXPLAIN SELECT SUM(v) FROM sass_m_users;
+----
+as_sample_m_sum
+
+query I nosort explain_sass_m_terminal
+EXPLAIN SELECT SUM(v) FROM sass_m_users;
+----
+dp_gupt_mean_m_noise
+
+query II
+SELECT COUNT(*)::INTEGER, SUM(v)::INTEGER FROM sass_m_users;
+----
+128	128
+
+query I
+SELECT AVG(v)::INTEGER FROM sass_m_users;
+----
+1
+
+statement ok
+SET dp_sass_avg_method = 'ratio';
+
+query I
+SELECT AVG(v)::INTEGER FROM sass_m_users;
+----
+1
+
+statement ok
+SET dp_sass_avg_method = 'lane_average';
+
+statement ok
+SET dp_epsilon = 100.0;
+
+statement ok
+SET dp_delta = 0.1;
+
+statement ok
+SET dp_max_groups_contributed = 1;
+
+query TII
+SELECT category, COUNT(*)::INTEGER, SUM(v)::INTEGER
+FROM sass_m_events
+GROUP BY category
+ORDER BY category;
+----
+even	64	64
+odd	64	64
+
+statement ok
+SET dp_epsilon = 1.0;
+
+statement ok
+SET dp_delta = 1e-6;
+
+statement ok
+SET dp_sass_m = 256;
+
+query II
+SELECT COUNT(*)::INTEGER, SUM(v)::INTEGER FROM sass_m_users;
+----
+128	128
+
+statement ok
+SET dp_sass_m = 512;
+
+query II
+SELECT COUNT(*)::INTEGER, SUM(v)::INTEGER FROM sass_m_users;
+----
+128	128
+
+statement ok
+SET dp_sass_m = 128;
+
+statement ok
+SET dp_sass_release = 'median';
+
+query I
+SELECT COUNT(*) IS NOT NULL FROM sass_m_users;
+----
+true
+
+statement ok
+SET dp_sass_release = 'average';
+
+statement error
+SELECT MIN(v) FROM sass_m_users;
+----
+COUNT, SUM, and AVG
+
+statement ok
+SET dp_sample_lanes = 2;
+
+statement error
+SELECT COUNT(*) FROM sass_m_users;
+----
+dp_sample_lanes = 1
+
+statement ok
+SET dp_sample_lanes = 1;
+
+query I
+SELECT lane_count
+FROM dp_sass_stability_query($$SELECT COUNT(*) AS c FROM sass_m_users$$);
+----
+128

@@ -36,6 +36,8 @@
 
 constexpr int DP_SAMPLE_DEFAULT_LANES = 1;
 constexpr int DP_SAMPLE_MAX_LANES = 8;
+constexpr int DP_SASS_DEFAULT_M = 64;
+constexpr int DP_SASS_MAX_M = 512;
 
 static inline int ValidateDpSampleLanes(int64_t sample_lanes) {
 	if (sample_lanes < 1 || sample_lanes > DP_SAMPLE_MAX_LANES) {
@@ -50,6 +52,21 @@ static inline int GetDpSampleLanes(duckdb::ClientContext &ctx) {
 		return ValidateDpSampleLanes(sample_lanes_val.GetValue<int64_t>());
 	}
 	return DP_SAMPLE_DEFAULT_LANES;
+}
+
+static inline int ValidateDpSassM(int64_t m) {
+	if (m < DP_SASS_DEFAULT_M || m > DP_SASS_MAX_M || (m & (m - 1)) != 0) {
+		throw duckdb::InvalidInputException("dp_sass_m must be a power of two between 64 and 512");
+	}
+	return static_cast<int>(m);
+}
+
+static inline int GetDpSassM(duckdb::ClientContext &ctx) {
+	duckdb::Value m_val;
+	if (ctx.TryGetCurrentSetting("dp_sass_m", m_val) && !m_val.IsNull()) {
+		return ValidateDpSassM(m_val.GetValue<int64_t>());
+	}
+	return DP_SASS_DEFAULT_M;
 }
 
 static inline uint64_t DpSampleHash(uint64_t key_hash, int sample_lanes) {
@@ -233,6 +250,7 @@ struct PrivBindData : public FunctionData {
 	bool hash_repair;            // if true, priv_hash() repairs hash to exactly 32 bits set
 	bool sample_diversity_check; // if true, reject aggregates without sample diversity
 	int sample_lanes;            // SASS mode: number of sampled lanes per PU hash; 0 means identity hash
+	int sample_count;            // SASS mode: total number of sample lanes (m); 64 uses the SIMD bitmask path
 	double utility_threshold;    // z-score threshold for utility NULLing (NaN = disabled, any value = enabled)
 
 	// Persistent secret p-tracking: shared across all aggregates in the same query (same query_hash).
@@ -248,9 +266,10 @@ struct PrivBindData : public FunctionData {
 	// Primary constructor - reads seed from privacy_seed setting, or uses query-id if not set.
 	// All aggregates in the same query get the same seed and query_hash.
 	explicit PrivBindData(ClientContext &ctx, double mi_val, double correction_val = 1.0, double scale_div = 1.0,
-	                      bool hash_repair_val = false, int sample_lanes_val = 0)
+	                      bool hash_repair_val = false, int sample_lanes_val = 0,
+	                      int sample_count_val = DP_SASS_DEFAULT_M)
 	    : mi(mi_val), correction(correction_val), scale_divisor(scale_div), hash_repair(hash_repair_val),
-	      sample_diversity_check(true), sample_lanes(sample_lanes_val),
+	      sample_diversity_check(true), sample_lanes(sample_lanes_val), sample_count(sample_count_val),
 	      utility_threshold(std::numeric_limits<double>::quiet_NaN()), total_update_count(0), suspicious_count(0),
 	      nonsuspicious_count(0) {
 		Value sd_val;
@@ -297,7 +316,7 @@ struct PrivBindData : public FunctionData {
 		auto &o = other.Cast<PrivBindData>();
 		return mi == o.mi && correction == o.correction && seed == o.seed && query_hash == o.query_hash &&
 		       scale_divisor == o.scale_divisor && hash_repair == o.hash_repair && sample_lanes == o.sample_lanes &&
-		       utility_threshold == o.utility_threshold;
+		       sample_count == o.sample_count && utility_threshold == o.utility_threshold;
 	}
 };
 
@@ -305,14 +324,27 @@ static inline int GetPrivSampleLanes(AggregateInputData &aggr) {
 	return aggr.bind_data ? aggr.bind_data->Cast<PrivBindData>().sample_lanes : 0;
 }
 
+static inline int GetPrivSampleCount(AggregateInputData &aggr) {
+	return aggr.bind_data ? aggr.bind_data->Cast<PrivBindData>().sample_count : DP_SASS_DEFAULT_M;
+}
+
 static inline uint64_t TransformPacUpdateHash(uint64_t key_hash, int sample_lanes) {
 	return sample_lanes > 0 ? DpSampleHash(key_hash, sample_lanes) : key_hash;
+}
+
+static inline idx_t DpSassLaneIndex(uint64_t key_hash, int sample_count) {
+	D_ASSERT(sample_count > 0);
+	return static_cast<idx_t>(key_hash & static_cast<uint64_t>(sample_count - 1));
 }
 
 // Shared bind for SASS sample-* aggregates: no mi/correction, just the active
 // dp_sample_lanes setting. Used by as_sample_sum, as_sample_count, etc.
 inline unique_ptr<FunctionData> MakeDpSampleBindData(ClientContext &ctx) {
 	return make_uniq<PrivBindData>(ctx, 0.0, 1.0, 1.0, false, GetDpSampleLanes(ctx));
+}
+
+inline unique_ptr<FunctionData> MakeDpSampleMBindData(ClientContext &ctx) {
+	return make_uniq<PrivBindData>(ctx, 0.0, 1.0, 1.0, false, GetDpSampleLanes(ctx), GetDpSassM(ctx));
 }
 
 // Common bind helper: reads mi from setting, extracts correction from args[correction_arg_index],

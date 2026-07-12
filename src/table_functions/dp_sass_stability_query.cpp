@@ -125,6 +125,7 @@ static void ConfigureNestedConnection(ClientContext &context, Connection &conn) 
 	    "dp_sass_minmax_upper_bound",
 	    "dp_sass_release",
 	    "dp_sample_lanes",
+	    "dp_sass_m",
 	    "privacy_min_group_count",
 	    "privacy_seed",
 	    "priv_check",
@@ -209,11 +210,11 @@ static vector<DpSassStabilityQueryRow> ExecuteStabilityQuery(ClientContext &cont
 		max_aggregate_index = std::max(max_aggregate_index, record.aggregate_index);
 	}
 	idx_t aggregate_count = static_cast<idx_t>(max_aggregate_index + 1);
-	if (aggregate_count == 0 || aggregate_count > result->ColumnCount()) {
-		throw InvalidInputException(
-		    "dp_sass_stability_query: could not align SASS aggregate records with query result");
+	if (aggregate_count == 0) {
+		throw InvalidInputException("dp_sass_stability_query: query produced no SASS aggregate stability records");
 	}
-	idx_t group_cols = result->ColumnCount() - aggregate_count;
+	bool result_columns_align = aggregate_count <= result->ColumnCount();
+	idx_t group_cols = result_columns_align ? result->ColumnCount() - aggregate_count : 0;
 
 	vector<string> group_keys;
 	group_keys.reserve(result_rows.size());
@@ -232,7 +233,7 @@ static vector<DpSassStabilityQueryRow> ExecuteStabilityQuery(ClientContext &cont
 		values.push_back(Value::BIGINT(static_cast<int64_t>(group_row)));
 		values.push_back(Value::INTEGER(record.aggregate_index));
 		idx_t result_name_idx = group_cols + aggregate_index;
-		if (result_name_idx < result->names.size()) {
+		if (result_columns_align && result_name_idx < result->names.size()) {
 			values.push_back(Value(result->names[result_name_idx]));
 		} else {
 			values.push_back(Value("agg_" + std::to_string(record.aggregate_index)));

@@ -105,6 +105,10 @@ static void ValidateDpSampleLanesSetting(ClientContext &, SetScope, Value &param
 	ValidateDpSampleLanes(parameter.GetValue<int64_t>());
 }
 
+static void ValidateDpSassMSetting(ClientContext &, SetScope, Value &parameter) {
+	ValidateDpSassM(parameter.GetValue<int64_t>());
+}
+
 static double ComputePrivacyUnitCardinality(ClientContext &context) {
 	auto table_names = PrivacyMetadataManager::Get().GetAllTableNames();
 	vector<std::pair<string, PrivacyTableMetadata>> pu_tables;
@@ -318,6 +322,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption(
 	    "dp_sample_lanes", "Number of sample lanes a privacy unit contributes in privacy_mode='dp_sass'",
 	    LogicalType::INTEGER, Value::INTEGER(DP_SAMPLE_DEFAULT_LANES), ValidateDpSampleLanesSetting);
+	db.config.AddExtensionOption("dp_sass_m",
+	                             "Total number of SAA subsamples for privacy_mode='dp_sass'. The default 64 uses the "
+	                             "SIMD bitmask path; larger powers of two use the experimental variable-m path.",
+	                             LogicalType::INTEGER, Value::INTEGER(DP_SASS_DEFAULT_M), ValidateDpSassMSetting);
 	// Differential privacy budget (ε), used by the dp_standard / dp_elastic / dp_sass modes.
 	db.config.AddExtensionOption("dp_epsilon",
 	                             "Differential privacy budget ε (used by dp_standard, dp_elastic, and dp_sass)",
@@ -477,6 +485,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacSumCountersFunctions(loader);
 	RegisterDpSampleSumFunctions(loader);
 	RegisterDpSampleAvgFunctions(loader);
+	RegisterDpSampleMSumFunctions(loader);
+	RegisterDpSampleMAvgFunctions(loader);
 	RegisterPacClipSumFunctions(loader);
 	RegisterPacNoisedClipSumFunctions(loader);
 	RegisterPacNoisedClipSumCountFunctions(loader);
@@ -484,6 +494,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacCountFunctions(loader);
 	RegisterPacCountCountersFunctions(loader);
 	RegisterDpSampleCountFunctions(loader);
+	RegisterDpSampleMCountFunctions(loader);
 	RegisterPacClipCountFunctions(loader);
 	RegisterPacNoisedClipCountFunctions(loader);
 	// Register as_min/as_max aggregate functions

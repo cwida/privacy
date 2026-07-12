@@ -47,8 +47,16 @@ The JSON config accepts scalar or array sweeps for:
 - `c_u`
 - `bound_multiplier` / `bound_multipliers`
 - `sample_lanes`
+- `sass_m` / `sass_ms` (default `64`; larger values use the experimental variable-m SASS path)
 - `sass_releases`: `median` or `average`
 - `query_names`: optional built-in query-name filter, e.g., `["q01", "q05"]`
 
 CSV rows include the concrete values used for each run, including `epsilon`,
 `delta`, `sf`, `c_u`, bounds, sample lanes, utility metrics, and timing metadata.
+The main `utility`/`median_error_pct` columns compare the private output against
+the full-data DuckDB answer. For `dp_sass`, the runner also emits:
+
+- `saa_estimator_*`: private SAA output compared with the same SAA estimator run with
+  `privacy_noise=false` (DP error around the estimator).
+- `saa_sampling_*`: no-noise SAA estimator compared with the full-data DuckDB answer
+  (sampling/clipping/thresholding error relative to the full answer).

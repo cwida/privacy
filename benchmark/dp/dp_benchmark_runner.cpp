@@ -96,6 +96,7 @@ struct DatasetConfig {
 	vector<double> c_u_values;
 	vector<double> bound_multipliers;
 	vector<int> sample_lanes;
+	vector<int> sass_m_values;
 	vector<string> modes;
 	vector<string> sass_releases;
 };
@@ -116,6 +117,7 @@ struct Config {
 	vector<double> c_u_values;
 	vector<double> bound_multipliers = {1.0};
 	vector<int> sample_lanes = {1};
+	vector<int> sass_m_values = {64};
 	vector<string> sass_releases = {"median"};
 	vector<DatasetConfig> datasets;
 	bool dry_run = false;
@@ -126,6 +128,14 @@ struct UtilityMetrics {
 	string recall;
 	string precision;
 	string median_error_pct;
+	string saa_estimator_utility;
+	string saa_estimator_recall;
+	string saa_estimator_precision;
+	string saa_estimator_median_error_pct;
+	string saa_sampling_utility;
+	string saa_sampling_recall;
+	string saa_sampling_precision;
+	string saa_sampling_median_error_pct;
 };
 
 struct RunPoint {
@@ -141,6 +151,7 @@ struct RunPoint {
 	double c_u = 1.0;
 	double bound_multiplier = 1.0;
 	int sample_lanes = 1;
+	int sass_m = 64;
 };
 
 static string Timestamp() {
@@ -627,6 +638,7 @@ static Config LoadConfig(const string &path) {
 	config.c_u_values = JsonNumberList(root, "c_u", "c_u", config.c_u_values);
 	config.bound_multipliers = JsonNumberList(root, "bound_multipliers", "bound_multiplier", config.bound_multipliers);
 	config.sample_lanes = JsonIntList(root, "sample_lanes", "sample_lanes", config.sample_lanes);
+	config.sass_m_values = JsonIntList(root, "sass_ms", "sass_m", config.sass_m_values);
 	config.sass_releases = JsonStringList(root, "sass_releases", config.sass_releases);
 
 	const auto &datasets = root.Get("datasets");
@@ -665,6 +677,7 @@ static Config LoadConfig(const string &path) {
 		ds.c_u_values = JsonNumberList(entry, "c_u", "c_u", config.c_u_values);
 		ds.bound_multipliers = JsonNumberList(entry, "bound_multipliers", "bound_multiplier", config.bound_multipliers);
 		ds.sample_lanes = JsonIntList(entry, "sample_lanes", "sample_lanes", config.sample_lanes);
+		ds.sass_m_values = JsonIntList(entry, "sass_ms", "sass_m", config.sass_m_values);
 		ds.sass_releases = JsonStringList(entry, "sass_releases", config.sass_releases);
 		if (ds.name.empty()) {
 			throw std::runtime_error("dataset is missing name");
@@ -1061,6 +1074,242 @@ static void FillScalarUtility(double released_value, double reference_value, Uti
 	metrics.median_error_pct = FormatNumber(error_pct);
 }
 
+static bool TryCastDouble(const Value &value, double &out) {
+	if (value.IsNull()) {
+		return false;
+	}
+	try {
+		out = value.DefaultCastAs(LogicalType::DOUBLE).GetValue<double>();
+		return std::isfinite(out);
+	} catch (...) {
+		return false;
+	}
+}
+
+static string ComparisonKey(const vector<Value> &row, idx_t key_cols, idx_t row_index) {
+	if (key_cols == 0) {
+		return "#" + std::to_string(row_index);
+	}
+	string key;
+	for (idx_t col = 0; col < key_cols; col++) {
+		string part = row[col].IsNull() ? "<NULL>" : row[col].ToString();
+		key += std::to_string(part.size()) + ":" + part + "|";
+	}
+	return key;
+}
+
+struct ResultSnapshot {
+	idx_t column_count = 0;
+	vector<vector<Value>> rows;
+};
+
+static ResultSnapshot ReadResultSnapshot(Connection &con, const string &table_name) {
+	auto result = con.Query("SELECT * FROM " + table_name);
+	if (!result || result->HasError()) {
+		throw std::runtime_error(result ? result->GetError() : "null query result");
+	}
+	ResultSnapshot snapshot;
+	snapshot.column_count = result->ColumnCount();
+	while (true) {
+		auto chunk = result->Fetch();
+		if (!chunk || chunk->size() == 0) {
+			break;
+		}
+		for (idx_t row_idx = 0; row_idx < chunk->size(); row_idx++) {
+			vector<Value> row;
+			row.reserve(snapshot.column_count);
+			for (idx_t col = 0; col < snapshot.column_count; col++) {
+				row.push_back(chunk->GetValue(col, row_idx));
+			}
+			snapshot.rows.push_back(std::move(row));
+		}
+	}
+	return snapshot;
+}
+
+static std::map<string, vector<Value>> RowsByKey(const ResultSnapshot &snapshot, idx_t key_cols, const string &label) {
+	if (key_cols >= snapshot.column_count) {
+		throw std::runtime_error(label + " comparison has no measure columns");
+	}
+	std::map<string, vector<Value>> by_key;
+	for (idx_t row_idx = 0; row_idx < snapshot.rows.size(); row_idx++) {
+		auto key = ComparisonKey(snapshot.rows[row_idx], key_cols, row_idx);
+		if (!by_key.emplace(key, snapshot.rows[row_idx]).second) {
+			throw std::runtime_error(label + " comparison found duplicate output key: " + key);
+		}
+	}
+	return by_key;
+}
+
+static UtilityMetrics CompareResultTables(Connection &con, const string &released_table, const string &reference_table,
+                                          idx_t key_cols, const string &label) {
+	auto released = ReadResultSnapshot(con, released_table);
+	auto reference = ReadResultSnapshot(con, reference_table);
+	if (released.column_count != reference.column_count) {
+		throw std::runtime_error(label + " comparison column-count mismatch");
+	}
+	if (reference.column_count == 0) {
+		throw std::runtime_error(label + " comparison saw zero output columns");
+	}
+	auto released_by_key = RowsByKey(released, key_cols, label + " released");
+	auto reference_by_key = RowsByKey(reference, key_cols, label + " reference");
+
+	idx_t measure_count = reference.column_count - key_cols;
+	vector<double> utility_sum(measure_count, 0.0);
+	vector<idx_t> utility_count(measure_count, 0);
+	vector<double> cell_errors;
+	idx_t matched_rows = 0;
+	idx_t missing_rows = 0;
+	idx_t released_only_rows = 0;
+
+	for (auto &entry : reference_by_key) {
+		auto found = released_by_key.find(entry.first);
+		if (found == released_by_key.end()) {
+			missing_rows++;
+			continue;
+		}
+		auto &released_row = found->second;
+		auto &reference_row = entry.second;
+		bool any_released_measure_null = false;
+		for (idx_t col = key_cols; col < reference.column_count; col++) {
+			if (released_row[col].IsNull()) {
+				any_released_measure_null = true;
+				break;
+			}
+		}
+		if (any_released_measure_null) {
+			released_only_rows++;
+			continue;
+		}
+		matched_rows++;
+		for (idx_t col = key_cols; col < reference.column_count; col++) {
+			double released_value;
+			double reference_value;
+			if (!TryCastDouble(released_row[col], released_value) ||
+			    !TryCastDouble(reference_row[col], reference_value)) {
+				continue;
+			}
+			double abs_ref = std::max(0.00001, std::fabs(reference_value));
+			double error_pct = 100.0 * std::fabs(released_value - reference_value) / abs_ref;
+			idx_t metric_idx = col - key_cols;
+			utility_sum[metric_idx] += error_pct;
+			utility_count[metric_idx]++;
+			cell_errors.push_back(error_pct);
+		}
+	}
+	for (auto &entry : released_by_key) {
+		if (reference_by_key.find(entry.first) == reference_by_key.end()) {
+			released_only_rows++;
+		}
+	}
+
+	double recall = (matched_rows + missing_rows) > 0
+	                    ? static_cast<double>(matched_rows) / static_cast<double>(matched_rows + missing_rows)
+	                    : 1.0;
+	double precision = (matched_rows + released_only_rows) > 0
+	                       ? static_cast<double>(matched_rows) / static_cast<double>(matched_rows + released_only_rows)
+	                       : 1.0;
+	double utility = 0.0;
+	idx_t cols_with_data = 0;
+	for (idx_t i = 0; i < measure_count; i++) {
+		if (utility_count[i] > 0) {
+			utility += utility_sum[i] / static_cast<double>(utility_count[i]);
+			cols_with_data++;
+		}
+	}
+	if (cols_with_data > 0) {
+		utility /= static_cast<double>(cols_with_data);
+	}
+	double median_error_pct = 0.0;
+	if (!cell_errors.empty()) {
+		std::sort(cell_errors.begin(), cell_errors.end());
+		idx_t mid = cell_errors.size() / 2;
+		median_error_pct =
+		    (cell_errors.size() % 2) ? cell_errors[mid] : (cell_errors[mid - 1] + cell_errors[mid]) / 2.0;
+	}
+
+	UtilityMetrics metrics;
+	metrics.utility = FormatNumber(utility);
+	metrics.recall = FormatNumber(recall);
+	metrics.precision = FormatNumber(precision);
+	metrics.median_error_pct = FormatNumber(median_error_pct);
+	return metrics;
+}
+
+static string StripTrailingSemicolon(string sql) {
+	sql = Trim(sql);
+	while (!sql.empty() && sql.back() == ';') {
+		sql.pop_back();
+		sql = Trim(sql);
+	}
+	return sql;
+}
+
+static void CreateTempResultTable(Connection &con, const string &table_name, const string &sql) {
+	RunStatement(con, "DROP TABLE IF EXISTS " + table_name);
+	RunStatement(con, "CREATE TEMP TABLE " + table_name + " AS " + StripTrailingSemicolon(sql));
+}
+
+struct SaaEstimatorMetricCleanup {
+	Connection &con;
+	vector<string> table_names;
+	uint64_t seed;
+
+	SaaEstimatorMetricCleanup(Connection &con_p, vector<string> table_names_p, uint64_t seed_p)
+	    : con(con_p), table_names(std::move(table_names_p)), seed(seed_p) {
+	}
+
+	~SaaEstimatorMetricCleanup() {
+		for (auto &table_name : table_names) {
+			TryRun("DROP TABLE IF EXISTS " + table_name);
+		}
+		TryRun("SET privacy_diffcols=NULL");
+		TryRun("SET priv_rewrite=true");
+		TryRun("SET privacy_noise=true");
+		TryRun("SET privacy_seed=" + std::to_string(seed));
+	}
+
+private:
+	void TryRun(const string &sql) {
+		try {
+			RunStatement(con, sql);
+		} catch (...) {
+		}
+	}
+};
+
+static void FillSaaEstimatorMetrics(Connection &con, const QuerySpec &query, uint64_t seed, UtilityMetrics &metrics) {
+	string suffix = std::to_string(getpid());
+	string private_table = "__dp_sass_private_" + suffix;
+	string estimator_table = "__dp_sass_estimator_" + suffix;
+	string full_table = "__dp_sass_full_" + suffix;
+	SaaEstimatorMetricCleanup cleanup(con, {private_table, estimator_table, full_table}, seed);
+
+	RunStatement(con, "SET privacy_diffcols=NULL");
+	RunStatement(con, "SET privacy_seed=" + std::to_string(seed));
+	RunStatement(con, "SET priv_rewrite=true");
+	RunStatement(con, "SET privacy_noise=true");
+	CreateTempResultTable(con, private_table, query.sql);
+
+	RunStatement(con, "SET privacy_noise=false");
+	CreateTempResultTable(con, estimator_table, query.sql);
+
+	RunStatement(con, "SET priv_rewrite=false");
+	RunStatement(con, "SET privacy_noise=false");
+	CreateTempResultTable(con, full_table, query.sql);
+
+	auto estimator_metrics = CompareResultTables(con, private_table, estimator_table, query.key_cols, "SAA estimator");
+	auto sampling_metrics = CompareResultTables(con, estimator_table, full_table, query.key_cols, "SAA sampling");
+	metrics.saa_estimator_utility = estimator_metrics.utility;
+	metrics.saa_estimator_recall = estimator_metrics.recall;
+	metrics.saa_estimator_precision = estimator_metrics.precision;
+	metrics.saa_estimator_median_error_pct = estimator_metrics.median_error_pct;
+	metrics.saa_sampling_utility = sampling_metrics.utility;
+	metrics.saa_sampling_recall = sampling_metrics.recall;
+	metrics.saa_sampling_precision = sampling_metrics.precision;
+	metrics.saa_sampling_median_error_pct = sampling_metrics.median_error_pct;
+}
+
 static vector<QuerySpec> FilterQueriesByName(vector<QuerySpec> queries, const vector<string> &names) {
 	if (names.empty()) {
 		return queries;
@@ -1109,6 +1358,7 @@ static vector<RunPoint> BuildRunPoints(const DatasetConfig &dataset) {
 		auto lane_values = (mode == "dp_sass" || mode == "dp_sass_bounded_ratio")
 		                       ? NonEmptyInt(dataset.sample_lanes, {1})
 		                       : vector<int> {1};
+		auto sass_m_values = mode == "dp_sass" ? NonEmptyInt(dataset.sass_m_values, {64}) : vector<int> {64};
 		for (double epsilon : dataset.epsilons) {
 			auto deltas = dataset.deltas.empty() ? vector<double> {0.0} : dataset.deltas;
 			for (double delta : deltas) {
@@ -1119,21 +1369,24 @@ static vector<RunPoint> BuildRunPoints(const DatasetConfig &dataset) {
 								for (double sass_count_output_bound : sass_count_output_bounds) {
 									for (double sass_sum_output_bound : sass_sum_output_bounds) {
 										for (int lanes : lane_values) {
-											for (auto &release : releases) {
-												RunPoint point;
-												point.mode = mode;
-												point.release = release;
-												point.epsilon = epsilon;
-												point.delta = delta;
-												point.count_bound = count_bound * multiplier;
-												point.sum_bound = sum_bound * multiplier;
-												point.sass_count_output_bound = sass_count_output_bound;
-												point.sass_sum_output_bound = sass_sum_output_bound;
-												point.group_bound = c_u;
-												point.c_u = c_u;
-												point.bound_multiplier = multiplier;
-												point.sample_lanes = lanes;
-												points.push_back(std::move(point));
+											for (int sass_m : sass_m_values) {
+												for (auto &release : releases) {
+													RunPoint point;
+													point.mode = mode;
+													point.release = release;
+													point.epsilon = epsilon;
+													point.delta = delta;
+													point.count_bound = count_bound * multiplier;
+													point.sum_bound = sum_bound * multiplier;
+													point.sass_count_output_bound = sass_count_output_bound;
+													point.sass_sum_output_bound = sass_sum_output_bound;
+													point.group_bound = c_u;
+													point.c_u = c_u;
+													point.bound_multiplier = multiplier;
+													point.sample_lanes = lanes;
+													point.sass_m = sass_m;
+													points.push_back(std::move(point));
+												}
 											}
 										}
 									}
@@ -1174,6 +1427,7 @@ static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta
 	RunStatement(con, "SET dp_max_groups_contributed=" + FormatNumber(point.group_bound));
 	if (point.mode == "dp_sass") {
 		RunStatement(con, "SET dp_sample_lanes=" + std::to_string(point.sample_lanes));
+		RunStatement(con, "SET dp_sass_m=" + std::to_string(point.sass_m));
 		RunStatement(con, "SET dp_sass_release='" + point.release + "'");
 		RunStatement(con, "SET dp_sass_count_output_bound=" + FormatNumber(sass_count_output_bound));
 		RunStatement(con, "SET dp_sass_sum_output_bound=" + FormatNumber(sass_sum_output_bound));
@@ -1186,9 +1440,11 @@ static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta
 
 static void WriteHeader(std::ofstream &csv) {
 	csv << "dataset,workload,query,query_id,mode,release,profile,run,success,error,primary_metric,time_ms,"
-	       "utility,recall,precision,median_error_pct,epsilon,delta,sf,dp_sum_bound,dp_count_bound,"
+	       "utility,recall,precision,median_error_pct,saa_estimator_utility,saa_estimator_recall,"
+	       "saa_estimator_precision,saa_estimator_median_error_pct,saa_sampling_utility,saa_sampling_recall,"
+	       "saa_sampling_precision,saa_sampling_median_error_pct,epsilon,delta,sf,dp_sum_bound,dp_count_bound,"
 	       "dp_max_groups_contributed,c_u,dp_sass_count_output_bound,dp_sass_sum_output_bound,bound_multiplier,"
-	       "dp_sample_lanes,seed,db_path,query_path\n";
+	       "dp_sample_lanes,dp_sass_m,seed,db_path,query_path\n";
 }
 
 static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const QuerySpec &query, idx_t query_id,
@@ -1199,12 +1455,16 @@ static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const Que
 	    << point.release << "," << (query.profile == PrivacyProfile::PART ? "part" : "customer") << "," << run << ","
 	    << (success ? "true" : "false") << "," << CsvQuote(error) << ",utility," << FormatNumber(time_ms) << ","
 	    << metrics.utility << "," << metrics.recall << "," << metrics.precision << "," << metrics.median_error_pct
-	    << "," << FormatNumber(point.epsilon) << "," << FormatNumber(delta) << "," << FormatNumber(dataset.scale_factor)
-	    << "," << FormatNumber(point.sum_bound) << "," << FormatNumber(point.count_bound) << ","
-	    << FormatNumber(point.group_bound) << "," << FormatNumber(point.c_u) << ","
-	    << FormatNumber(sass_count_output_bound) << "," << FormatNumber(sass_sum_output_bound) << ","
-	    << FormatNumber(point.bound_multiplier) << "," << point.sample_lanes << "," << seed << "," << CsvQuote(db_path)
-	    << "," << CsvQuote(query.path) << "\n";
+	    << "," << metrics.saa_estimator_utility << "," << metrics.saa_estimator_recall << ","
+	    << metrics.saa_estimator_precision << "," << metrics.saa_estimator_median_error_pct << ","
+	    << metrics.saa_sampling_utility << "," << metrics.saa_sampling_recall << "," << metrics.saa_sampling_precision
+	    << "," << metrics.saa_sampling_median_error_pct << "," << FormatNumber(point.epsilon) << ","
+	    << FormatNumber(delta) << "," << FormatNumber(dataset.scale_factor) << "," << FormatNumber(point.sum_bound)
+	    << "," << FormatNumber(point.count_bound) << "," << FormatNumber(point.group_bound) << ","
+	    << FormatNumber(point.c_u) << "," << FormatNumber(sass_count_output_bound) << ","
+	    << FormatNumber(sass_sum_output_bound) << "," << FormatNumber(point.bound_multiplier) << ","
+	    << point.sample_lanes << "," << point.sass_m << "," << seed << "," << CsvQuote(db_path) << ","
+	    << CsvQuote(query.path) << "\n";
 	csv.flush();
 }
 
@@ -1379,6 +1639,9 @@ static void RunDataset(const Config &config, const DatasetConfig &dataset, std::
 					} else if (!ReadLastUtilityLine(utility_path, metrics)) {
 						throw std::runtime_error("privacy_diffcols did not write utility output");
 					}
+					if (point.mode == "dp_sass") {
+						FillSaaEstimatorMetrics(con, query, seed, metrics);
+					}
 					success = true;
 					Log(dataset.name + " " + point.mode + " " + query.name + " run " + std::to_string(run) +
 					    " utility=" + metrics.utility);
@@ -1399,15 +1662,25 @@ static void RunDataset(const Config &config, const DatasetConfig &dataset, std::
 	std::remove(utility_path.c_str());
 }
 
+static idx_t ParseRunCount(const string &value) {
+	size_t parsed = 0;
+	auto runs = std::stoull(value, &parsed);
+	if (parsed != value.size() || runs == 0) {
+		throw std::runtime_error("--runs must be a positive integer");
+	}
+	return static_cast<idx_t>(runs);
+}
+
 static void PrintUsage() {
-	std::cout << "Usage: dp_benchmark_runner --config PATH [--dry-run] [--out PATH]\n"
+	std::cout << "Usage: dp_benchmark_runner --config PATH [--dry-run] [--out PATH] [--runs N]\n"
 	          << "JSON supports scalar or array sweeps for epsilon(s), delta(s), count_bound(s), sum_bound(s),\n"
-	          << "group_bound(s), c_u, bound_multiplier(s), sample_lanes, modes, and sass_releases.\n";
+	          << "group_bound(s), c_u, bound_multiplier(s), sample_lanes, sass_ms, modes, and sass_releases.\n";
 }
 
 static int Main(int argc, char **argv) {
 	string config_path;
 	string out_override;
+	idx_t runs_override = 0;
 	bool dry_run = false;
 	for (int i = 1; i < argc; i++) {
 		string arg = argv[i];
@@ -1427,6 +1700,10 @@ static int Main(int argc, char **argv) {
 			out_override = argv[++i];
 			continue;
 		}
+		if (arg == "--runs" && i + 1 < argc) {
+			runs_override = ParseRunCount(argv[++i]);
+			continue;
+		}
 		auto eq = arg.find('=');
 		if (eq != string::npos) {
 			string key = arg.substr(0, eq);
@@ -1439,6 +1716,10 @@ static int Main(int argc, char **argv) {
 				out_override = value;
 				continue;
 			}
+			if (key == "--runs") {
+				runs_override = ParseRunCount(value);
+				continue;
+			}
 		}
 		throw std::runtime_error("unknown argument: " + arg);
 	}
@@ -1449,6 +1730,9 @@ static int Main(int argc, char **argv) {
 	auto config = LoadConfig(config_path);
 	if (!out_override.empty()) {
 		config.out_path = out_override;
+	}
+	if (runs_override > 0) {
+		config.runs = runs_override;
 	}
 	if (dry_run) {
 		config.dry_run = true;
