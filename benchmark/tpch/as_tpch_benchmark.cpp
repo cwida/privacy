@@ -12,6 +12,7 @@
 #include <cstdio>
 
 #include <chrono>
+#include <cctype>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -120,6 +121,26 @@ static string FormatNumber(double v) {
 	return s;
 }
 
+static vector<int> ParseIntListCSV(const string &list) {
+	vector<int> values;
+	std::stringstream ss(list);
+	string tok;
+	while (std::getline(ss, tok, ',')) {
+		tok.erase(tok.begin(),
+		          std::find_if(tok.begin(), tok.end(), [](unsigned char ch) { return !std::isspace(ch); }));
+		tok.erase(std::find_if(tok.rbegin(), tok.rend(), [](unsigned char ch) { return !std::isspace(ch); }).base(),
+		          tok.end());
+		if (!tok.empty()) {
+			values.push_back(std::stoi(tok));
+		}
+	}
+	return values;
+}
+
+static bool IsValidSampleCount(int m) {
+	return m >= 64 && m <= 512 && (m & (m - 1)) == 0;
+}
+
 static double Median(vector<double> v) {
 	std::sort(v.begin(), v.end());
 	size_t n = v.size();
@@ -200,6 +221,368 @@ static string ReadFileToString(const string &path) {
 	std::ostringstream ss;
 	ss << in.rdbuf();
 	return ss.str();
+}
+
+static bool IsIdentifierChar(char c) {
+	return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+static idx_t FindMatchingParen(const string &sql, idx_t open_pos) {
+	int depth = 0;
+	bool in_single_quote = false;
+	bool in_double_quote = false;
+	for (idx_t i = open_pos; i < sql.size(); i++) {
+		char c = sql[i];
+		if (in_single_quote) {
+			if (c == '\'' && i + 1 < sql.size() && sql[i + 1] == '\'') {
+				i++;
+			} else if (c == '\'') {
+				in_single_quote = false;
+			}
+			continue;
+		}
+		if (in_double_quote) {
+			if (c == '"' && i + 1 < sql.size() && sql[i + 1] == '"') {
+				i++;
+			} else if (c == '"') {
+				in_double_quote = false;
+			}
+			continue;
+		}
+		if (c == '\'') {
+			in_single_quote = true;
+		} else if (c == '"') {
+			in_double_quote = true;
+		} else if (c == '(') {
+			depth++;
+		} else if (c == ')') {
+			depth--;
+			if (depth == 0) {
+				return i;
+			}
+		}
+	}
+	return string::npos;
+}
+
+static string TrimCopy(const string &value) {
+	auto begin = std::find_if(value.begin(), value.end(), [](unsigned char ch) { return !std::isspace(ch); });
+	auto end = std::find_if(value.rbegin(), value.rend(), [](unsigned char ch) { return !std::isspace(ch); }).base();
+	if (begin >= end) {
+		return string();
+	}
+	return string(begin, end);
+}
+
+static vector<string> SplitTopLevelArgs(const string &args) {
+	vector<string> result;
+	idx_t start = 0;
+	int depth = 0;
+	bool in_single_quote = false;
+	bool in_double_quote = false;
+	for (idx_t i = 0; i < args.size(); i++) {
+		char c = args[i];
+		if (in_single_quote) {
+			if (c == '\'' && i + 1 < args.size() && args[i + 1] == '\'') {
+				i++;
+			} else if (c == '\'') {
+				in_single_quote = false;
+			}
+			continue;
+		}
+		if (in_double_quote) {
+			if (c == '"' && i + 1 < args.size() && args[i + 1] == '"') {
+				i++;
+			} else if (c == '"') {
+				in_double_quote = false;
+			}
+			continue;
+		}
+		if (c == '\'') {
+			in_single_quote = true;
+		} else if (c == '"') {
+			in_double_quote = true;
+		} else if (c == '(') {
+			depth++;
+		} else if (c == ')') {
+			depth--;
+		} else if (c == ',' && depth == 0) {
+			result.push_back(TrimCopy(args.substr(start, i - start)));
+			start = i + 1;
+		}
+	}
+	result.push_back(TrimCopy(args.substr(start)));
+	return result;
+}
+
+static bool StartsWithFunctionCall(const string &sql, idx_t pos, const string &name, idx_t &open_pos) {
+	if (pos > 0 && IsIdentifierChar(sql[pos - 1])) {
+		return false;
+	}
+	if (sql.compare(pos, name.size(), name) != 0) {
+		return false;
+	}
+	idx_t next = pos + name.size();
+	if (next < sql.size() && IsIdentifierChar(sql[next])) {
+		return false;
+	}
+	while (next < sql.size() && std::isspace(static_cast<unsigned char>(sql[next]))) {
+		next++;
+	}
+	if (next >= sql.size() || sql[next] != '(') {
+		return false;
+	}
+	open_pos = next;
+	return true;
+}
+
+static string StripFunctionCalls(const string &sql, const string &name) {
+	string result;
+	idx_t pos = 0;
+	while (pos < sql.size()) {
+		idx_t open_pos;
+		if (StartsWithFunctionCall(sql, pos, name, open_pos)) {
+			idx_t close_pos = FindMatchingParen(sql, open_pos);
+			if (close_pos == string::npos) {
+				throw std::runtime_error("could not find closing parenthesis for " + name);
+			}
+			result += StripFunctionCalls(sql.substr(open_pos + 1, close_pos - open_pos - 1), name);
+			pos = close_pos + 1;
+			continue;
+		}
+		result.push_back(sql[pos++]);
+	}
+	return result;
+}
+
+static string StripSqlLineComments(const string &sql) {
+	string result;
+	bool in_single_quote = false;
+	for (idx_t i = 0; i < sql.size(); i++) {
+		char c = sql[i];
+		if (c == '\'' && (i + 1 >= sql.size() || sql[i + 1] != '\'')) {
+			in_single_quote = !in_single_quote;
+			result.push_back(c);
+			continue;
+		}
+		if (!in_single_quote && c == '-' && i + 1 < sql.size() && sql[i + 1] == '-') {
+			while (i < sql.size() && sql[i] != '\n') {
+				i++;
+			}
+			if (i < sql.size()) {
+				result.push_back(sql[i]);
+			}
+			continue;
+		}
+		result.push_back(c);
+		if (c == '\'' && i + 1 < sql.size() && sql[i + 1] == '\'') {
+			result.push_back(sql[++i]);
+		}
+	}
+	return result;
+}
+
+static bool ParseEntireFunctionCall(const string &expr, const string &name, vector<string> &args) {
+	string trimmed = TrimCopy(expr);
+	idx_t open_pos;
+	if (!StartsWithFunctionCall(trimmed, 0, name, open_pos)) {
+		return false;
+	}
+	idx_t close_pos = FindMatchingParen(trimmed, open_pos);
+	if (close_pos == string::npos) {
+		return false;
+	}
+	for (idx_t i = close_pos + 1; i < trimmed.size(); i++) {
+		if (!std::isspace(static_cast<unsigned char>(trimmed[i]))) {
+			return false;
+		}
+	}
+	args = SplitTopLevelArgs(trimmed.substr(open_pos + 1, close_pos - open_pos - 1));
+	return true;
+}
+
+static string RewriteAsFunctionCall(const string &name, const vector<string> &args, int sample_count) {
+	string sample_suffix = sample_count == 64 ? "" : "_m";
+	if (name == "as_noised") {
+		if (args.size() != 1) {
+			throw std::runtime_error("as_noised rewrite expected one argument");
+		}
+		return "list_avg(" + args[0] + ")";
+	}
+	if (name == "as_noised_count") {
+		if (args.empty()) {
+			throw std::runtime_error("as_noised_count rewrite expected at least one argument");
+		}
+		std::ostringstream out;
+		out << "list_avg(as_sample" << sample_suffix << "_count(";
+		for (idx_t i = 0; i < args.size(); i++) {
+			if (i > 0) {
+				out << ", ";
+			}
+			out << args[i];
+		}
+		out << "))";
+		return out.str();
+	}
+	if (name == "as_noised_sum") {
+		if (args.size() != 2) {
+			throw std::runtime_error("as_noised_sum rewrite expected two arguments");
+		}
+		return "list_avg(as_sample" + sample_suffix + "_sum(" + args[0] + ", CAST(" + args[1] + " AS DOUBLE)))";
+	}
+	if (name == "as_noised_avg") {
+		if (args.size() != 2) {
+			throw std::runtime_error("as_noised_avg rewrite expected two arguments");
+		}
+		return "list_avg(as_sample" + sample_suffix + "_avg(" + args[0] + ", CAST(" + args[1] + " AS DOUBLE), 1.0))";
+	}
+	if (name == "as_noised_min" || name == "as_noised_max") {
+		if (args.size() != 2) {
+			throw std::runtime_error(name + " rewrite expected two arguments");
+		}
+		string sample_name = name == "as_noised_min" ? "min" : "max";
+		return "list_avg(as_sample" + sample_suffix + "_" + sample_name + "(" + args[0] + ", " + args[1] + "))";
+	}
+	if (name == "as_sum") {
+		if (args.size() != 2) {
+			throw std::runtime_error("as_sum rewrite expected two arguments");
+		}
+		return "as_sample" + sample_suffix + "_sum(" + args[0] + ", CAST(" + args[1] + " AS DOUBLE))";
+	}
+	if (name == "as_count") {
+		if (args.empty()) {
+			throw std::runtime_error("as_count rewrite expected at least one argument");
+		}
+		std::ostringstream out;
+		out << "as_sample" << sample_suffix << "_count(";
+		for (idx_t i = 0; i < args.size(); i++) {
+			if (i > 0) {
+				out << ", ";
+			}
+			out << args[i];
+		}
+		out << ")";
+		return out.str();
+	}
+	if (name == "as_min" || name == "as_max") {
+		if (args.size() != 2) {
+			throw std::runtime_error(name + " rewrite expected two arguments");
+		}
+		string sample_name = name == "as_min" ? "min" : "max";
+		return "as_sample" + sample_suffix + "_" + sample_name + "(" + args[0] + ", " + args[1] + ")";
+	}
+	if (name == "as_noised_div") {
+		if (args.size() != 2) {
+			throw std::runtime_error("as_noised_div rewrite expected two arguments");
+		}
+		vector<string> sum_args;
+		vector<string> count_args;
+		if (!ParseEntireFunctionCall(args[0], "as_sum", sum_args) ||
+		    !ParseEntireFunctionCall(args[1], "as_count", count_args) || sum_args.size() != 2 ||
+		    count_args.size() < 1 || TrimCopy(sum_args[0]) != TrimCopy(count_args[0])) {
+			throw std::runtime_error("variable-m AS rewrite only supports as_noised_div(as_sum(key, value), "
+			                         "as_count(key, value)) AVG patterns");
+		}
+		return "list_avg(as_sample" + sample_suffix + "_avg(" + sum_args[0] + ", CAST(" + sum_args[1] +
+		       " AS DOUBLE), 1.0))";
+	}
+	throw std::runtime_error("unsupported AS aggregate rewrite: " + name);
+}
+
+static bool ContainsFunctionCall(const string &sql, const vector<string> &names) {
+	for (idx_t pos = 0; pos < sql.size(); pos++) {
+		for (auto &name : names) {
+			idx_t open_pos;
+			if (StartsWithFunctionCall(sql, pos, name, open_pos)) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+static string RewriteAsQueryForSampleAggregation(const string &sql, int sample_count) {
+	static const vector<string> names = {"as_noised_count", "as_noised_sum", "as_noised_avg", "as_noised_min",
+	                                     "as_noised_max",   "as_noised_div", "as_noised",     "as_sum",
+	                                     "as_count",        "as_min",        "as_max"};
+	string raw_hash_sql = StripFunctionCalls(StripSqlLineComments(sql), "priv_hash");
+	string result;
+	idx_t pos = 0;
+	while (pos < raw_hash_sql.size()) {
+		bool rewritten = false;
+		for (auto &name : names) {
+			idx_t open_pos;
+			if (!StartsWithFunctionCall(raw_hash_sql, pos, name, open_pos)) {
+				continue;
+			}
+			idx_t close_pos = FindMatchingParen(raw_hash_sql, open_pos);
+			if (close_pos == string::npos) {
+				throw std::runtime_error("could not find closing parenthesis for " + name);
+			}
+			auto args = SplitTopLevelArgs(raw_hash_sql.substr(open_pos + 1, close_pos - open_pos - 1));
+			if (name != "as_noised_div") {
+				for (auto &arg : args) {
+					arg = RewriteAsQueryForSampleAggregation(arg, sample_count);
+				}
+			}
+			result += RewriteAsFunctionCall(name, args, sample_count);
+			pos = close_pos + 1;
+			rewritten = true;
+			break;
+		}
+		if (!rewritten) {
+			result.push_back(raw_hash_sql[pos++]);
+		}
+	}
+	static const vector<string> unsupported = {"as_noised", "as_sum", "as_count", "as_min", "as_max"};
+	if (ContainsFunctionCall(result, unsupported) || result.find("priv_select_") != string::npos) {
+		throw std::runtime_error("variable-m AS rewrite does not support remaining 64-world list expressions");
+	}
+	return result;
+}
+
+static bool TryRewriteSelectedTpchQuery(const string &label, int sample_count, string &rewritten_sql) {
+	if (label == "q17") {
+		rewritten_sql = R"(SELECT list_avg(as_sample_m_sum_if(
+                 hash(o_custkey),
+                 CAST(l_extendedprice AS DOUBLE),
+                 list_transform(
+                   (SELECT priv_div(as_sample_m_sum(hash(o_sub.o_custkey), CAST(l_sub.l_quantity AS DOUBLE)),
+                                    as_sample_m_count(hash(o_sub.o_custkey), l_sub.l_quantity))
+                      FROM lineitem AS l_sub JOIN orders AS o_sub ON l_sub.l_orderkey = o_sub.o_orderkey
+                     WHERE l_sub.l_partkey = part.p_partkey),
+                   lambda x: CAST(lineitem.l_quantity * 5 < x AS BOOLEAN)))) / 7.0 AS avg_yearly
+  FROM lineitem JOIN part ON lineitem.l_partkey = part.p_partkey JOIN orders ON lineitem.l_orderkey = orders.o_orderkey
+ WHERE part.p_brand = 'Brand#23' AND part.p_container = 'MED BOX')";
+		return true;
+	}
+	if (label == "q22") {
+		auto mask = static_cast<uint64_t>(sample_count - 1);
+		std::ostringstream out;
+		out << R"(SELECT cntrycode,
+       list_avg(as_sample_m_count_if(as_hash, as_pred)) AS numcust,
+       list_avg(as_sample_m_sum_if(as_hash, CAST(c_acctbal AS DOUBLE), as_pred)) AS totacctbal
+FROM (SELECT substring(c_phone FROM 1 FOR 2) AS cntrycode,
+             c_acctbal,
+             hash(c_custkey) AS as_hash,
+             list_transform(
+               (SELECT priv_div(as_sample_m_sum(hash(c_custkey), CAST(c_acctbal AS DOUBLE)),
+                                as_sample_m_count(hash(c_custkey), c_acctbal))
+                  FROM customer
+                 WHERE c_acctbal > 0.00
+                   AND substring(c_phone FROM 1 FOR 2) IN ('13', '31', '23', '29', '30', '18', '17')),
+               lambda x: CAST(c_acctbal > x AS BOOLEAN)) AS as_pred
+        FROM customer
+       WHERE substring(c_phone FROM 1 FOR 2) IN ('13', '31', '23', '29', '30', '18', '17')
+         AND NOT EXISTS (FROM orders WHERE o_custkey = customer.c_custkey)) AS custsale
+WHERE COALESCE(list_extract(as_pred, CAST((as_hash & )"
+		    << mask << R"(::UBIGINT) + 1::UBIGINT AS BIGINT)), false)
+GROUP BY ALL
+ORDER BY ALL)";
+		rewritten_sql = out.str();
+		return true;
+	}
+	return false;
 }
 
 static string FindSchemaFile(const string &filename) {
@@ -433,9 +816,11 @@ static void NaiveASCreateTables(Connection &con) {
 }
 
 int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv,
-                       bool run_simple_hash, int threads) {
+                       bool run_simple_hash, int threads, const vector<int> &as_m_values, bool skip_naive,
+                       bool skip_plot) {
 	try {
 		Log(string("run_simple_hash flag: ") + (run_simple_hash ? string("true") : string("false")));
+		Log(string("skip_naive flag: ") + (skip_naive ? string("true") : string("false")));
 
 		// Open (file-backed) DuckDB database
 		// Decide whether the caller explicitly provided a DB path (not the default) so we can
@@ -465,6 +850,7 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 		Log("Setting threads to " + std::to_string(threads));
 		con.Query("SET threads TO " + std::to_string(threads) + ";");
 		con.Query("SET pac_sample_diversity_check=false;");
+		con.Query("SET priv_rewrite=false;");
 
 		// Enable spilling to disk when memory is insufficient
 		auto r_temp = con.Query("SET temp_directory='/tmp/duckdb_temp';");
@@ -517,8 +903,8 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 		if (!csv.is_open()) {
 			throw std::runtime_error("Failed to open output CSV: " + actual_out);
 		}
-		// CSV columns: query,mode,median_ms (median of 5 hot runs)
-		csv << "query,mode,median_ms\n";
+		// CSV columns: query,mode,m,median_ms (median of 5 hot runs)
+		csv << "query,mode,m,median_ms\n";
 
 		// Locate AS query directories
 		string bitslice_dir = queries_dir + string("/tpch/tpch_as_queries");
@@ -538,12 +924,12 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 		// Cache baseline median per query number (avoid re-running for variants like q08-nolambda)
 		std::map<int, double> baseline_cache;
 
-		// Always create sampling/helper tables at startup (uses IF NOT EXISTS,
-		// so this is a no-op when the tables already exist in a persistent DB).
-		// These tables may be needed by Naive-AS, simple_hash, or other modes.
-		Log("Creating Naive-AS sampling tables (if not already present)...");
-		NaiveASCreateTables(con);
-		Log("Naive-AS sampling tables ready.");
+		// Create sampling/helper tables only when Naive-AS is requested.
+		if (!skip_naive) {
+			Log("Creating Naive-AS sampling tables (if not already present)...");
+			NaiveASCreateTables(con);
+			Log("Naive-AS sampling tables ready.");
+		}
 
 		for (auto &entry : query_entries) {
 			Log("=== " + entry.label + " (Q" + std::to_string(entry.query_number) + ") ===");
@@ -608,7 +994,7 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 			}
 
 			// Write baseline row for this entry (reuse cached median)
-			csv << entry.label << ",baseline," << FormatNumber(baseline_cache[entry.query_number]) << "\n";
+			csv << entry.label << ",baseline,0," << FormatNumber(baseline_cache[entry.query_number]) << "\n";
 
 			// Read the AS query file
 			string as_sql_bits = ReadFileToString(bitslice_dir + "/" + entry.filename);
@@ -629,46 +1015,61 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 				}
 			}
 
+			bool rewrite_for_m_sweep = as_m_values.size() > 1 || std::any_of(as_m_values.begin(), as_m_values.end(),
+			                                                                 [](int as_m) { return as_m != 64; });
 			for (auto &pv : as_variants) {
 				const string &mode_str = pv.first;
 				const string &as_sql = pv.second;
-				try {
-					// Run AS query 5 times, take median
-					vector<double> as_times_ms;
-					bool as_failed = false;
-					for (int run = 1; run <= 5; ++run) {
-						con.Query("SET priv_rewrite=false;");
-						auto t0 = std::chrono::steady_clock::now();
-						auto r_as = con.Query(as_sql);
-						auto t1 = std::chrono::steady_clock::now();
-						con.Query("SET priv_rewrite=true;");
-						double as_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-						if (r_as && r_as->HasError()) {
-							Log("AS (" + mode_str + ") " + entry.label + " run " + std::to_string(run) +
-							    " error: " + r_as->GetError());
-							as_failed = true;
-							break;
+				for (int as_m : as_m_values) {
+					try {
+						string query_sql = as_sql;
+						if (rewrite_for_m_sweep) {
+							if (mode_str != "SIMD AS" || !TryRewriteSelectedTpchQuery(entry.label, as_m, query_sql)) {
+								query_sql = RewriteAsQueryForSampleAggregation(as_sql, as_m);
+							}
 						}
-						as_times_ms.push_back(as_time_ms);
-						Log("AS (" + mode_str + ") " + entry.label + " run " + std::to_string(run) +
-						    " time (ms): " + FormatNumber(as_time_ms));
+						// Run AS query 5 times, take median
+						vector<double> as_times_ms;
+						bool as_failed = false;
+						for (int run = 1; run <= 5; ++run) {
+							con.Query("SET dp_sample_lanes=1;");
+							con.Query("SET dp_sass_m=" + std::to_string(as_m) + ";");
+							con.Query("SET priv_rewrite=false;");
+							auto t0 = std::chrono::steady_clock::now();
+							auto r_as = con.Query(query_sql);
+							auto t1 = std::chrono::steady_clock::now();
+							con.Query("SET priv_rewrite=false;");
+							double as_time_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+							if (r_as && r_as->HasError()) {
+								Log("AS (" + mode_str + ") " + entry.label + " m=" + std::to_string(as_m) + " run " +
+								    std::to_string(run) + " error: " + r_as->GetError());
+								as_failed = true;
+								break;
+							}
+							as_times_ms.push_back(as_time_ms);
+							Log("AS (" + mode_str + ") " + entry.label + " m=" + std::to_string(as_m) + " run " +
+							    std::to_string(run) + " time (ms): " + FormatNumber(as_time_ms));
+						}
+						if (as_failed) {
+							csv << entry.label << "," << mode_str << "," << as_m << ",-1\n";
+						} else {
+							double as_median = Median(as_times_ms);
+							Log("AS (" + mode_str + ") " + entry.label + " m=" + std::to_string(as_m) +
+							    " median (ms): " + FormatNumber(as_median));
+							csv << entry.label << "," << mode_str << "," << as_m << "," << FormatNumber(as_median)
+							    << "\n";
+						}
+					} catch (const std::exception &e) {
+						Log("AS (" + mode_str + ") " + entry.label + " m=" + std::to_string(as_m) +
+						    " exception: " + string(e.what()));
+						csv << entry.label << "," << mode_str << "," << as_m << ",-1\n";
 					}
-					if (as_failed) {
-						csv << entry.label << "," << mode_str << ",-1\n";
-					} else {
-						double as_median = Median(as_times_ms);
-						Log("AS (" + mode_str + ") " + entry.label + " median (ms): " + FormatNumber(as_median));
-						csv << entry.label << "," << mode_str << "," << FormatNumber(as_median) << "\n";
-					}
-				} catch (const std::exception &e) {
-					Log("AS (" + mode_str + ") " + entry.label + " exception: " + string(e.what()));
-					csv << entry.label << "," << mode_str << ",-1\n";
 				}
 			}
 
 			// Naive-AS mode: run on a 50% random sample, multiply median by 64.
 			string naive_as_qfile = FindQueryFile(naive_as_dir, entry.query_number);
-			if (FileExists(naive_as_qfile)) {
+			if (!skip_naive && FileExists(naive_as_qfile)) {
 				string naive_as_sql = ReadFileToString(naive_as_qfile);
 				if (!naive_as_sql.empty()) {
 					try {
@@ -676,7 +1077,7 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 						auto exec_pos = naive_as_sql.rfind("EXECUTE");
 						if (exec_pos == string::npos) {
 							Log("Naive-AS " + entry.label + ": no EXECUTE found in query file, skipping");
-							csv << entry.label << ",Naive-AS,-1\n";
+							csv << entry.label << ",Naive-AS,64,-1\n";
 						} else {
 							string prepare_sql = naive_as_sql.substr(0, exec_pos);
 							string execute_sql = naive_as_sql.substr(exec_pos);
@@ -691,7 +1092,7 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 							}
 
 							if (!setup_ok) {
-								csv << entry.label << ",Naive-AS,-1\n";
+								csv << entry.label << ",Naive-AS,64,-1\n";
 							} else {
 								// Time EXECUTE 5 times, take median
 								vector<double> naive_as_times_ms;
@@ -712,22 +1113,22 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 									    " time (ms): " + FormatNumber(t_ms));
 								}
 								if (naive_as_failed) {
-									csv << entry.label << ",Naive-AS,-1\n";
+									csv << entry.label << ",Naive-AS,64,-1\n";
 								} else {
 									double naive_as_median = Median(naive_as_times_ms) * 64.0;
 									Log("Naive-AS " + entry.label +
 									    " median*64 (ms): " + FormatNumber(naive_as_median));
-									csv << entry.label << ",Naive-AS," << FormatNumber(naive_as_median) << "\n";
+									csv << entry.label << ",Naive-AS,64," << FormatNumber(naive_as_median) << "\n";
 								}
 							}
 							con.Query("DEALLOCATE PREPARE run_query;");
 						}
 					} catch (const std::exception &e) {
 						Log("Naive-AS " + entry.label + " exception: " + string(e.what()));
-						csv << entry.label << ",Naive-AS,-1\n";
+						csv << entry.label << ",Naive-AS,64,-1\n";
 					}
 				}
-			} else {
+			} else if (!skip_naive) {
 				Log("Naive-AS " + entry.label + ": no query file found at " + naive_as_qfile + ", skipping");
 			}
 		}
@@ -738,7 +1139,11 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 		Log(string("Benchmark finished. Results written to ") + actual_out);
 
 		// Automatically call the R plotting script with the generated CSV file (use absolute paths)
-		{
+		if (!skip_plot) {
+			if (as_m_values.size() > 1) {
+				Log("Skipping default plot because --as-ms produced an m-sweep CSV; use the m-aware plotting script.");
+				return 0;
+			}
 			// compute absolute path to actual_out
 			char out_real[PATH_MAX];
 			string abs_actual_out;
@@ -779,6 +1184,9 @@ static void PrintUsageMain() {
 	             "'tpch/tpch_as_simple_hash_queries' (simple hash), 'tpch/tpch_naive_as_queries' (Naive-AS)\n"
 	          << "  out_csv: optional output CSV path (auto-named if omitted)\n"
 	          << "  --run-simple-hash: optional flag to run a simple hash AS variant as well\n"
+	          << "  --as-ms <csv>: AS sample counts to run, e.g. 64,512 (default 64)\n"
+	          << "  --skip-naive: skip Naive-AS setup and runs\n"
+	          << "  --no-plot: do not invoke the R plotting script\n"
 	          << "  --threads=N: number of DuckDB threads (default 8)\n";
 }
 
@@ -792,7 +1200,7 @@ int main(int argc, char **argv) {
 			return 0;
 		}
 	}
-	if (argc > 8) {
+	if (argc > 16) {
 		std::cout << "Error: too many arguments provided." << '\n';
 		PrintUsageMain();
 		return 1;
@@ -800,7 +1208,10 @@ int main(int argc, char **argv) {
 
 	// Preprocess argv to detect optional flags and remove them from positional parsing
 	bool run_simple_hash = false;
+	bool skip_naive = false;
+	bool skip_plot = false;
 	int threads = 8;
+	duckdb::vector<int> as_m_values = {64};
 	std::vector<char *> filtered_argv;
 	filtered_argv.reserve(argc);
 	filtered_argv.push_back(argv[0]);
@@ -808,6 +1219,22 @@ int main(int argc, char **argv) {
 		std::string a = argv[i];
 		if (a == "--run-simple-hash") {
 			run_simple_hash = true;
+			continue;
+		}
+		if (a == "--skip-naive") {
+			skip_naive = true;
+			continue;
+		}
+		if (a == "--no-plot") {
+			skip_plot = true;
+			continue;
+		}
+		if (a == "--as-ms" && i + 1 < argc) {
+			as_m_values = duckdb::ParseIntListCSV(argv[++i]);
+			continue;
+		}
+		if (a.rfind("--as-ms=", 0) == 0) {
+			as_m_values = duckdb::ParseIntListCSV(a.substr(8));
 			continue;
 		}
 		if (a.rfind("--threads=", 0) == 0) {
@@ -832,5 +1259,17 @@ int main(int argc, char **argv) {
 	if (filtered_argc > 4)
 		out_csv = filtered_argv[4];
 
-	return duckdb::RunASTPCHBenchmark(db_path, queries_dir, sf, out_csv, run_simple_hash, threads);
+	if (as_m_values.empty()) {
+		std::cerr << "--as-ms must contain at least one sample count\n";
+		return 1;
+	}
+	for (int as_m : as_m_values) {
+		if (!duckdb::IsValidSampleCount(as_m)) {
+			std::cerr << "Invalid AS sample count " << as_m << "; expected a power of two between 64 and 512\n";
+			return 1;
+		}
+	}
+
+	return duckdb::RunASTPCHBenchmark(db_path, queries_dir, sf, out_csv, run_simple_hash, threads, as_m_values,
+	                                  skip_naive, skip_plot);
 }

@@ -130,6 +130,7 @@ META_COLUMNS = [
     "c_u",
     "sass_count_output_bound",
     "sass_sum_output_bound",
+    "sass_m",
     "elapsed_ms",
     "success",
     "error",
@@ -147,6 +148,7 @@ SUMMARY_COLUMNS = [
     "c_u",
     "sass_count_output_bound",
     "sass_sum_output_bound",
+    "sass_m",
     "success",
     "aggregate_rows",
     "elapsed_ms",
@@ -210,6 +212,7 @@ SET privacy_noise = false;
 SET dp_epsilon = {format_number(point["epsilon"])};
 SET dp_delta = {format_number(point["delta"])};
 SET dp_sample_lanes = {point["sample_lanes"]};
+SET dp_sass_m = {point["sass_m"]};
 SET dp_sass_release = 'average';
 SET dp_count_bound = {format_number(point["count_bound"])};
 SET dp_sum_bound = {format_number(point["sum_bound"])};
@@ -307,11 +310,13 @@ def load_points(config, args):
     epsilon = first_value(config, "epsilons", 1.0)
     delta = first_value(config, "deltas", 1e-6)
     sample_lanes = first_value(config, "sample_lanes", 1)
+    sass_m_values = config.get("sass_ms", [64])
 
     points = []
     for dataset in config["datasets"]:
         if dataset_filter and dataset["name"] not in dataset_filter:
             continue
+        dataset_sass_m_values = dataset.get("sass_ms", sass_m_values)
         for query in dataset.get("query_names", []):
             if query_filter and query not in query_filter:
                 continue
@@ -320,25 +325,27 @@ def load_points(config, args):
             for multiplier in multipliers:
                 count_bound = first_value(dataset, "count_bounds", 1.0) * multiplier
                 sum_bound = first_value(dataset, "sum_bounds", 1.0) * multiplier
-                points.append(
-                    {
-                        "dataset": dataset["name"],
-                        "workload": dataset.get("workload", ""),
-                        "sf": dataset.get("sf", ""),
-                        "db": dataset["db"],
-                        "query": query,
-                        "bound_multiplier": multiplier,
-                        "count_bound": count_bound,
-                        "sum_bound": sum_bound,
-                        "c_u": first_value(dataset, "c_u", 1.0),
-                        "sass_count_output_bound": first_value(dataset, "sass_count_output_bounds", 1.0),
-                        "sass_sum_output_bound": first_value(dataset, "sass_sum_output_bounds", 1.0),
-                        "threads": threads,
-                        "epsilon": epsilon,
-                        "delta": delta,
-                        "sample_lanes": sample_lanes,
-                    }
-                )
+                for sass_m in dataset_sass_m_values:
+                    points.append(
+                        {
+                            "dataset": dataset["name"],
+                            "workload": dataset.get("workload", ""),
+                            "sf": dataset.get("sf", ""),
+                            "db": dataset["db"],
+                            "query": query,
+                            "bound_multiplier": multiplier,
+                            "count_bound": count_bound,
+                            "sum_bound": sum_bound,
+                            "c_u": first_value(dataset, "c_u", 1.0),
+                            "sass_count_output_bound": first_value(dataset, "sass_count_output_bounds", 1.0),
+                            "sass_sum_output_bound": first_value(dataset, "sass_sum_output_bounds", 1.0),
+                            "sass_m": sass_m,
+                            "threads": threads,
+                            "epsilon": epsilon,
+                            "delta": delta,
+                            "sample_lanes": sample_lanes,
+                        }
+                    )
     return points
 
 
@@ -377,7 +384,7 @@ def main():
         for index, point in enumerate(points, start=1):
             db_path = ROOT / point["db"] if not Path(point["db"]).is_absolute() else Path(point["db"])
             point["db"] = str(db_path)
-            label = f'{point["dataset"]} {point["query"]} x{point["bound_multiplier"]:g}'
+            label = f'{point["dataset"]} {point["query"]} x{point["bound_multiplier"]:g} m={point["sass_m"]}'
             print(f"[{index}/{len(points)}] {label}", flush=True)
             if not db_path.exists():
                 error = f"missing database: {db_path}"

@@ -180,6 +180,11 @@ static vector<DpSassStabilityQueryRecord> &DpSassStabilityQueryRecords() {
 	return records;
 }
 
+static vector<DpSassNoiseScaleQueryRecord> &DpSassNoiseScaleQueryRecords() {
+	static thread_local vector<DpSassNoiseScaleQueryRecord> records;
+	return records;
+}
+
 void ClearDpSassStabilityQueryRecords() {
 	DpSassStabilityQueryRecords().clear();
 }
@@ -187,6 +192,16 @@ void ClearDpSassStabilityQueryRecords() {
 vector<DpSassStabilityQueryRecord> TakeDpSassStabilityQueryRecords() {
 	auto records = std::move(DpSassStabilityQueryRecords());
 	DpSassStabilityQueryRecords().clear();
+	return records;
+}
+
+void ClearDpSassNoiseScaleQueryRecords() {
+	DpSassNoiseScaleQueryRecords().clear();
+}
+
+vector<DpSassNoiseScaleQueryRecord> TakeDpSassNoiseScaleQueryRecords() {
+	auto records = std::move(DpSassNoiseScaleQueryRecords());
+	DpSassNoiseScaleQueryRecords().clear();
 	return records;
 }
 
@@ -402,13 +417,12 @@ static double SmoothMedianSensitivityExact(const vector<double> &values, double 
 }
 
 // Shared per-row core for the sample-and-aggregate median release. Validates the inputs,
-// clips (when bounded) and sorts the sample answers, takes the lower median,
-// computes the smooth-sensitivity scale, and adds Laplace noise. Returns false when the row
-// is invalid (caller marks the result NULL); otherwise writes the released value to `out`.
-static bool SmoothMedianNoiseRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
+// clips (when bounded) and sorts the sample answers, takes the lower median, and computes
+// the smooth-sensitivity Laplace scale. Returns false when the row is invalid.
+static bool SmoothMedianStatsRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
                                  const PAC_FLOAT *child_values, double epsilon, double delta, int sample_lanes_raw,
                                  bool bounded, double lower_bound, double upper_bound, double empty_default,
-                                 bool noise_enabled, uint64_t seed, double &out) {
+                                 double &median, double &scale) {
 	if (entry.length < 64 || entry.length > DP_SASS_MAX_M || (entry.length & (entry.length - 1)) != 0) {
 		return false;
 	}
@@ -456,21 +470,36 @@ static bool SmoothMedianNoiseRow(const list_entry_t &entry, const UnifiedVectorF
 		}
 	}
 	idx_t median_idx = (entry.length + 1) / 2 - 1;
-	double median = values[median_idx];
+	median = values[median_idx];
+	double beta = epsilon / (2.0 * std::log(2.0 / delta));
+	double smooth = bounded ? SmoothMedianSensitivityExact(values, beta, sample_lanes, lower_bound, upper_bound)
+	                        : SmoothMedianSensitivity(values, beta, sample_lanes);
+	scale = (2.0 * smooth) / epsilon;
+	PRIVACY_DEBUG_PRINT("dp_sass smooth-median: median=" + std::to_string(median) +
+	                    " smooth_sensitivity=" + std::to_string(smooth) + " scale=" + std::to_string(scale));
+	return true;
+}
+
+static bool SmoothMedianNoiseRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
+                                 const PAC_FLOAT *child_values, double epsilon, double delta, int sample_lanes_raw,
+                                 bool bounded, double lower_bound, double upper_bound, double empty_default,
+                                 bool noise_enabled, uint64_t seed, double &out) {
+	double median = 0.0;
+	double scale = 0.0;
+	if (!SmoothMedianStatsRow(entry, child_data, child_values, epsilon, delta, sample_lanes_raw, bounded, lower_bound,
+	                          upper_bound, empty_default, median, scale)) {
+		return false;
+	}
 	if (!noise_enabled) {
 		out = median;
 		return true;
 	}
-	double beta = epsilon / (2.0 * std::log(2.0 / delta));
-	double smooth = bounded ? SmoothMedianSensitivityExact(values, beta, sample_lanes, lower_bound, upper_bound)
-	                        : SmoothMedianSensitivity(values, beta, sample_lanes);
-	PRIVACY_DEBUG_PRINT("dp_sass smooth-median: median=" + std::to_string(median) + " smooth_sensitivity=" +
-	                    std::to_string(smooth) + " scale=" + std::to_string((2.0 * smooth) / epsilon));
-	out = median + LaplaceNoise((2.0 * smooth) / epsilon, seed ^ (entry.offset * PAC_MAGIC_HASH));
+	out = median + LaplaceNoise(scale, seed ^ (entry.offset * PAC_MAGIC_HASH));
 	return true;
 }
 
-static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+static void DpSmoothMedianNoiseFunctionInternal(DataChunk &args, ExpressionState &state, Vector &result,
+                                                bool emit_scale, bool record_scale = false) {
 	auto &context = state.GetContext();
 	Value seed_val;
 	uint64_t seed = (context.TryGetCurrentSetting("privacy_seed", seed_val) && !seed_val.IsNull())
@@ -489,10 +518,11 @@ static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state,
 	// Bounded variants: (list, ε, δ, lanes, lower, upper[, empty_default]). The 7-arg form (compiler-
 	// emitted) carries a per-aggregate-kind empty-lane default; the 6-arg form defaults it to the
 	// midpoint. The 4-arg form is the legacy unbounded path.
-	bool bounded = args.ColumnCount() >= 6;
-	bool has_empty_default = args.ColumnCount() == 7;
+	bool bounded = record_scale ? args.ColumnCount() >= 7 : args.ColumnCount() >= 6;
+	bool has_empty_default = record_scale ? args.ColumnCount() == 8 : args.ColumnCount() == 7;
 	auto &list_vec = args.data[0];
-	UnifiedVectorFormat list_data, epsilon_data, delta_data, sample_lanes_data, lower_data, upper_data, empty_data;
+	UnifiedVectorFormat list_data, epsilon_data, delta_data, sample_lanes_data, lower_data, upper_data, empty_data,
+	    aggregate_index_data;
 	list_vec.ToUnifiedFormat(count, list_data);
 	args.data[1].ToUnifiedFormat(count, epsilon_data);
 	args.data[2].ToUnifiedFormat(count, delta_data);
@@ -503,6 +533,9 @@ static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state,
 	}
 	if (has_empty_default) {
 		args.data[6].ToUnifiedFormat(count, empty_data);
+	}
+	if (record_scale) {
+		args.data[args.ColumnCount() - 1].ToUnifiedFormat(count, aggregate_index_data);
 	}
 
 	auto &child_vec = ListVector::GetEntry(list_vec);
@@ -516,6 +549,7 @@ static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state,
 	auto lower_values = bounded ? UnifiedVectorFormat::GetData<double>(lower_data) : nullptr;
 	auto upper_values = bounded ? UnifiedVectorFormat::GetData<double>(upper_data) : nullptr;
 	auto empty_values = has_empty_default ? UnifiedVectorFormat::GetData<double>(empty_data) : nullptr;
+	auto aggregate_indexes = record_scale ? UnifiedVectorFormat::GetData<int32_t>(aggregate_index_data) : nullptr;
 	auto result_data = FlatVector::GetData<double>(result);
 	auto &result_validity = FlatVector::Validity(result);
 
@@ -526,9 +560,11 @@ static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state,
 		auto sample_lanes_idx = sample_lanes_data.sel->get_index(i);
 		auto lower_idx = bounded ? lower_data.sel->get_index(i) : 0;
 		auto upper_idx = bounded ? upper_data.sel->get_index(i) : 0;
+		auto aggregate_index_idx = record_scale ? aggregate_index_data.sel->get_index(i) : 0;
 		if (!list_data.validity.RowIsValid(list_idx) || !epsilon_data.validity.RowIsValid(eps_idx) ||
 		    !delta_data.validity.RowIsValid(delta_idx) || !sample_lanes_data.validity.RowIsValid(sample_lanes_idx) ||
-		    (bounded && (!lower_data.validity.RowIsValid(lower_idx) || !upper_data.validity.RowIsValid(upper_idx)))) {
+		    (bounded && (!lower_data.validity.RowIsValid(lower_idx) || !upper_data.validity.RowIsValid(upper_idx))) ||
+		    (record_scale && !aggregate_index_data.validity.RowIsValid(aggregate_index_idx))) {
 			result_validity.SetInvalid(i);
 			continue;
 		}
@@ -539,14 +575,44 @@ static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state,
 		double upper_bound = bounded ? upper_values[upper_idx] : 0.0;
 		double empty_default = has_empty_default ? empty_values[empty_data.sel->get_index(i)]
 		                                         : (lower_bound + upper_bound) / 2.0; // midpoint fallback
-		double released = 0.0;
-		if (SmoothMedianNoiseRow(entry, child_data, child_values, epsilon, delta, sample_lanes_values[sample_lanes_idx],
-		                         bounded, lower_bound, upper_bound, empty_default, noise_enabled, seed, released)) {
-			result_data[i] = released;
+		if (emit_scale || record_scale) {
+			double median = 0.0;
+			double scale = 0.0;
+			if (SmoothMedianStatsRow(entry, child_data, child_values, epsilon, delta,
+			                         sample_lanes_values[sample_lanes_idx], bounded, lower_bound, upper_bound,
+			                         empty_default, median, scale)) {
+				if (record_scale) {
+					DpSassNoiseScaleQueryRecords().push_back({aggregate_indexes[aggregate_index_idx], scale});
+					result_data[i] = median;
+				} else {
+					result_data[i] = scale;
+				}
+			} else {
+				result_validity.SetInvalid(i);
+			}
 		} else {
-			result_validity.SetInvalid(i);
+			double released = 0.0;
+			if (SmoothMedianNoiseRow(entry, child_data, child_values, epsilon, delta,
+			                         sample_lanes_values[sample_lanes_idx], bounded, lower_bound, upper_bound,
+			                         empty_default, noise_enabled, seed, released)) {
+				result_data[i] = released;
+			} else {
+				result_validity.SetInvalid(i);
+			}
 		}
 	}
+}
+
+static void DpSmoothMedianNoiseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	DpSmoothMedianNoiseFunctionInternal(args, state, result, false);
+}
+
+static void DpSmoothMedianNoiseScaleFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	DpSmoothMedianNoiseFunctionInternal(args, state, result, true);
+}
+
+static void DpSmoothMedianRecordNoiseScaleFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	DpSmoothMedianNoiseFunctionInternal(args, state, result, false, true);
 }
 
 // dp_aggregate: scalar terminal for the "naive" DP sample-and-aggregate path. Mirrors the
@@ -628,9 +694,9 @@ static void DpAggregateFunction(DataChunk &args, ExpressionState &state, Vector 
 // therefore has global sensitivity sample_lanes*(upper-lower)/64, and the Laplace scale is that
 // divided by ε. This is the overlapping-subsample analogue of GUPT's disjoint-block mean (they
 // coincide at sample_lanes = 1), mirroring how the median path reweights via beta_eff = beta/sample_lanes.
-static bool GuptMeanNoiseRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
+static bool GuptMeanStatsRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
                              const PAC_FLOAT *child_values, double epsilon, int sample_lanes_raw, double lower_bound,
-                             double upper_bound, double empty_default, bool noise_enabled, uint64_t seed, double &out) {
+                             double upper_bound, double empty_default, double &mean, double &scale) {
 	if (entry.length != 64) {
 		return false;
 	}
@@ -653,21 +719,34 @@ static bool GuptMeanNoiseRow(const list_entry_t &entry, const UnifiedVectorForma
 		           ? std::max(lower_bound, std::min(upper_bound, static_cast<double>(child_values[child_idx])))
 		           : fill;
 	}
-	double mean = sum / 64.0;
+	mean = sum / 64.0;
+	scale = (static_cast<double>(sample_lanes) * (upper_bound - lower_bound)) / (64.0 * epsilon);
+	PRIVACY_DEBUG_PRINT("dp_sass gupt-mean: mean=" + std::to_string(mean) + " range=[" + std::to_string(lower_bound) +
+	                    "," + std::to_string(upper_bound) + "] scale=" + std::to_string(scale));
+	return true;
+}
+
+static bool GuptMeanNoiseRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
+                             const PAC_FLOAT *child_values, double epsilon, int sample_lanes_raw, double lower_bound,
+                             double upper_bound, double empty_default, bool noise_enabled, uint64_t seed, double &out) {
+	double mean = 0.0;
+	double scale = 0.0;
+	if (!GuptMeanStatsRow(entry, child_data, child_values, epsilon, sample_lanes_raw, lower_bound, upper_bound,
+	                      empty_default, mean, scale)) {
+		return false;
+	}
 	if (!noise_enabled) {
 		out = mean;
 		return true;
 	}
-	double scale = (static_cast<double>(sample_lanes) * (upper_bound - lower_bound)) / (64.0 * epsilon);
-	PRIVACY_DEBUG_PRINT("dp_sass gupt-mean: mean=" + std::to_string(mean) + " range=[" + std::to_string(lower_bound) +
-	                    "," + std::to_string(upper_bound) + "] scale=" + std::to_string(scale));
 	out = mean + LaplaceNoise(scale, seed ^ (entry.offset * PAC_MAGIC_HASH));
 	return true;
 }
 
 // Signature: dp_gupt_mean_noise(LIST<FLOAT> samples, DOUBLE epsilon, INTEGER lanes, DOUBLE lower,
 //                               DOUBLE upper) -> DOUBLE. Pure ε-DP (no delta).
-static void DpGuptMeanNoiseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+static void DpGuptMeanNoiseFunctionInternal(DataChunk &args, ExpressionState &state, Vector &result, bool emit_scale,
+                                            bool record_scale = false) {
 	auto &context = state.GetContext();
 	Value seed_val;
 	uint64_t seed = (context.TryGetCurrentSetting("privacy_seed", seed_val) && !seed_val.IsNull())
@@ -685,9 +764,10 @@ static void DpGuptMeanNoiseFunction(DataChunk &args, ExpressionState &state, Vec
 	idx_t count = args.size();
 	// (list, ε, lanes, lower, upper[, empty_default]). The 6-arg form (compiler-emitted) carries a
 	// per-aggregate-kind empty-lane default; the 5-arg form defaults it to the midpoint.
-	bool has_empty_default = args.ColumnCount() == 6;
+	bool has_empty_default = record_scale ? args.ColumnCount() == 7 : args.ColumnCount() == 6;
 	auto &list_vec = args.data[0];
-	UnifiedVectorFormat list_data, epsilon_data, sample_lanes_data, lower_data, upper_data, empty_data;
+	UnifiedVectorFormat list_data, epsilon_data, sample_lanes_data, lower_data, upper_data, empty_data,
+	    aggregate_index_data;
 	list_vec.ToUnifiedFormat(count, list_data);
 	args.data[1].ToUnifiedFormat(count, epsilon_data);
 	args.data[2].ToUnifiedFormat(count, sample_lanes_data);
@@ -695,6 +775,9 @@ static void DpGuptMeanNoiseFunction(DataChunk &args, ExpressionState &state, Vec
 	args.data[4].ToUnifiedFormat(count, upper_data);
 	if (has_empty_default) {
 		args.data[5].ToUnifiedFormat(count, empty_data);
+	}
+	if (record_scale) {
+		args.data[args.ColumnCount() - 1].ToUnifiedFormat(count, aggregate_index_data);
 	}
 
 	auto &child_vec = ListVector::GetEntry(list_vec);
@@ -707,6 +790,7 @@ static void DpGuptMeanNoiseFunction(DataChunk &args, ExpressionState &state, Vec
 	auto lower_values = UnifiedVectorFormat::GetData<double>(lower_data);
 	auto upper_values = UnifiedVectorFormat::GetData<double>(upper_data);
 	auto empty_values = has_empty_default ? UnifiedVectorFormat::GetData<double>(empty_data) : nullptr;
+	auto aggregate_indexes = record_scale ? UnifiedVectorFormat::GetData<int32_t>(aggregate_index_data) : nullptr;
 	auto result_data = FlatVector::GetData<double>(result);
 	auto &result_validity = FlatVector::Validity(result);
 
@@ -716,9 +800,11 @@ static void DpGuptMeanNoiseFunction(DataChunk &args, ExpressionState &state, Vec
 		auto sample_lanes_idx = sample_lanes_data.sel->get_index(i);
 		auto lower_idx = lower_data.sel->get_index(i);
 		auto upper_idx = upper_data.sel->get_index(i);
+		auto aggregate_index_idx = record_scale ? aggregate_index_data.sel->get_index(i) : 0;
 		if (!list_data.validity.RowIsValid(list_idx) || !epsilon_data.validity.RowIsValid(eps_idx) ||
 		    !sample_lanes_data.validity.RowIsValid(sample_lanes_idx) || !lower_data.validity.RowIsValid(lower_idx) ||
-		    !upper_data.validity.RowIsValid(upper_idx)) {
+		    !upper_data.validity.RowIsValid(upper_idx) ||
+		    (record_scale && !aggregate_index_data.validity.RowIsValid(aggregate_index_idx))) {
 			result_validity.SetInvalid(i);
 			continue;
 		}
@@ -726,21 +812,49 @@ static void DpGuptMeanNoiseFunction(DataChunk &args, ExpressionState &state, Vec
 		double upper_bound = upper_values[upper_idx];
 		double empty_default = has_empty_default ? empty_values[empty_data.sel->get_index(i)]
 		                                         : (lower_bound + upper_bound) / 2.0; // midpoint fallback
-		double released = 0.0;
-		if (GuptMeanNoiseRow(list_entries[list_idx], child_data, child_values, epsilons[eps_idx],
-		                     sample_lanes_values[sample_lanes_idx], lower_bound, upper_bound, empty_default,
-		                     noise_enabled, seed, released)) {
-			result_data[i] = released;
+		if (emit_scale || record_scale) {
+			double mean = 0.0;
+			double scale = 0.0;
+			if (GuptMeanStatsRow(list_entries[list_idx], child_data, child_values, epsilons[eps_idx],
+			                     sample_lanes_values[sample_lanes_idx], lower_bound, upper_bound, empty_default, mean,
+			                     scale)) {
+				if (record_scale) {
+					DpSassNoiseScaleQueryRecords().push_back({aggregate_indexes[aggregate_index_idx], scale});
+					result_data[i] = mean;
+				} else {
+					result_data[i] = scale;
+				}
+			} else {
+				result_validity.SetInvalid(i);
+			}
 		} else {
-			result_validity.SetInvalid(i);
+			double released = 0.0;
+			if (GuptMeanNoiseRow(list_entries[list_idx], child_data, child_values, epsilons[eps_idx],
+			                     sample_lanes_values[sample_lanes_idx], lower_bound, upper_bound, empty_default,
+			                     noise_enabled, seed, released)) {
+				result_data[i] = released;
+			} else {
+				result_validity.SetInvalid(i);
+			}
 		}
 	}
 }
 
-static bool GuptMeanMNoiseRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
+static void DpGuptMeanNoiseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	DpGuptMeanNoiseFunctionInternal(args, state, result, false);
+}
+
+static void DpGuptMeanNoiseScaleFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	DpGuptMeanNoiseFunctionInternal(args, state, result, true);
+}
+
+static void DpGuptMeanRecordNoiseScaleFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	DpGuptMeanNoiseFunctionInternal(args, state, result, false, true);
+}
+
+static bool GuptMeanMStatsRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
                               const PAC_FLOAT *child_values, double epsilon, int sample_lanes_raw, double lower_bound,
-                              double upper_bound, double empty_default, bool noise_enabled, uint64_t seed,
-                              double &out) {
+                              double upper_bound, double empty_default, double &mean, double &scale) {
 	if (entry.length <= DP_SASS_DEFAULT_M || entry.length > DP_SASS_MAX_M || (entry.length & (entry.length - 1)) != 0) {
 		return false;
 	}
@@ -764,20 +878,34 @@ static bool GuptMeanMNoiseRow(const list_entry_t &entry, const UnifiedVectorForm
 		           : fill;
 	}
 	double sample_count = static_cast<double>(entry.length);
-	double mean = sum / sample_count;
+	mean = sum / sample_count;
+	scale = (upper_bound - lower_bound) / (sample_count * epsilon);
+	PRIVACY_DEBUG_PRINT("dp_sass gupt-mean-m: m=" + std::to_string(entry.length) + " mean=" + std::to_string(mean) +
+	                    " range=[" + std::to_string(lower_bound) + "," + std::to_string(upper_bound) +
+	                    "] scale=" + std::to_string(scale));
+	return true;
+}
+
+static bool GuptMeanMNoiseRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
+                              const PAC_FLOAT *child_values, double epsilon, int sample_lanes_raw, double lower_bound,
+                              double upper_bound, double empty_default, bool noise_enabled, uint64_t seed,
+                              double &out) {
+	double mean = 0.0;
+	double scale = 0.0;
+	if (!GuptMeanMStatsRow(entry, child_data, child_values, epsilon, sample_lanes_raw, lower_bound, upper_bound,
+	                       empty_default, mean, scale)) {
+		return false;
+	}
 	if (!noise_enabled) {
 		out = mean;
 		return true;
 	}
-	double scale = (upper_bound - lower_bound) / (sample_count * epsilon);
-	PRIVACY_DEBUG_PRINT("dp_sass gupt-mean-m: m=" + std::to_string(entry.length) + " mean=" + std::to_string(mean) +
-	                    " range=[" + std::to_string(lower_bound) + "," + std::to_string(upper_bound) +
-	                    "] scale=" + std::to_string(scale));
 	out = mean + LaplaceNoise(scale, seed ^ (entry.offset * PAC_MAGIC_HASH));
 	return true;
 }
 
-static void DpGuptMeanMNoiseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+static void DpGuptMeanMNoiseFunctionInternal(DataChunk &args, ExpressionState &state, Vector &result, bool emit_scale,
+                                             bool record_scale = false) {
 	auto &context = state.GetContext();
 	Value seed_val;
 	uint64_t seed = (context.TryGetCurrentSetting("privacy_seed", seed_val) && !seed_val.IsNull())
@@ -793,9 +921,10 @@ static void DpGuptMeanMNoiseFunction(DataChunk &args, ExpressionState &state, Ve
 	}
 
 	idx_t count = args.size();
-	bool has_empty_default = args.ColumnCount() == 6;
+	bool has_empty_default = record_scale ? args.ColumnCount() == 7 : args.ColumnCount() == 6;
 	auto &list_vec = args.data[0];
-	UnifiedVectorFormat list_data, epsilon_data, sample_lanes_data, lower_data, upper_data, empty_data;
+	UnifiedVectorFormat list_data, epsilon_data, sample_lanes_data, lower_data, upper_data, empty_data,
+	    aggregate_index_data;
 	list_vec.ToUnifiedFormat(count, list_data);
 	args.data[1].ToUnifiedFormat(count, epsilon_data);
 	args.data[2].ToUnifiedFormat(count, sample_lanes_data);
@@ -803,6 +932,9 @@ static void DpGuptMeanMNoiseFunction(DataChunk &args, ExpressionState &state, Ve
 	args.data[4].ToUnifiedFormat(count, upper_data);
 	if (has_empty_default) {
 		args.data[5].ToUnifiedFormat(count, empty_data);
+	}
+	if (record_scale) {
+		args.data[args.ColumnCount() - 1].ToUnifiedFormat(count, aggregate_index_data);
 	}
 
 	auto &child_vec = ListVector::GetEntry(list_vec);
@@ -815,6 +947,7 @@ static void DpGuptMeanMNoiseFunction(DataChunk &args, ExpressionState &state, Ve
 	auto lower_values = UnifiedVectorFormat::GetData<double>(lower_data);
 	auto upper_values = UnifiedVectorFormat::GetData<double>(upper_data);
 	auto empty_values = has_empty_default ? UnifiedVectorFormat::GetData<double>(empty_data) : nullptr;
+	auto aggregate_indexes = record_scale ? UnifiedVectorFormat::GetData<int32_t>(aggregate_index_data) : nullptr;
 	auto result_data = FlatVector::GetData<double>(result);
 	auto &result_validity = FlatVector::Validity(result);
 
@@ -824,9 +957,11 @@ static void DpGuptMeanMNoiseFunction(DataChunk &args, ExpressionState &state, Ve
 		auto sample_lanes_idx = sample_lanes_data.sel->get_index(i);
 		auto lower_idx = lower_data.sel->get_index(i);
 		auto upper_idx = upper_data.sel->get_index(i);
+		auto aggregate_index_idx = record_scale ? aggregate_index_data.sel->get_index(i) : 0;
 		if (!list_data.validity.RowIsValid(list_idx) || !epsilon_data.validity.RowIsValid(eps_idx) ||
 		    !sample_lanes_data.validity.RowIsValid(sample_lanes_idx) || !lower_data.validity.RowIsValid(lower_idx) ||
-		    !upper_data.validity.RowIsValid(upper_idx)) {
+		    !upper_data.validity.RowIsValid(upper_idx) ||
+		    (record_scale && !aggregate_index_data.validity.RowIsValid(aggregate_index_idx))) {
 			result_validity.SetInvalid(i);
 			continue;
 		}
@@ -834,15 +969,44 @@ static void DpGuptMeanMNoiseFunction(DataChunk &args, ExpressionState &state, Ve
 		double upper_bound = upper_values[upper_idx];
 		double empty_default =
 		    has_empty_default ? empty_values[empty_data.sel->get_index(i)] : (lower_bound + upper_bound) / 2.0;
-		double released = 0.0;
-		if (GuptMeanMNoiseRow(list_entries[list_idx], child_data, child_values, epsilons[eps_idx],
-		                      sample_lanes_values[sample_lanes_idx], lower_bound, upper_bound, empty_default,
-		                      noise_enabled, seed, released)) {
-			result_data[i] = released;
+		if (emit_scale || record_scale) {
+			double mean = 0.0;
+			double scale = 0.0;
+			if (GuptMeanMStatsRow(list_entries[list_idx], child_data, child_values, epsilons[eps_idx],
+			                      sample_lanes_values[sample_lanes_idx], lower_bound, upper_bound, empty_default, mean,
+			                      scale)) {
+				if (record_scale) {
+					DpSassNoiseScaleQueryRecords().push_back({aggregate_indexes[aggregate_index_idx], scale});
+					result_data[i] = mean;
+				} else {
+					result_data[i] = scale;
+				}
+			} else {
+				result_validity.SetInvalid(i);
+			}
 		} else {
-			result_validity.SetInvalid(i);
+			double released = 0.0;
+			if (GuptMeanMNoiseRow(list_entries[list_idx], child_data, child_values, epsilons[eps_idx],
+			                      sample_lanes_values[sample_lanes_idx], lower_bound, upper_bound, empty_default,
+			                      noise_enabled, seed, released)) {
+				result_data[i] = released;
+			} else {
+				result_validity.SetInvalid(i);
+			}
 		}
 	}
+}
+
+static void DpGuptMeanMNoiseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	DpGuptMeanMNoiseFunctionInternal(args, state, result, false);
+}
+
+static void DpGuptMeanMNoiseScaleFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	DpGuptMeanMNoiseFunctionInternal(args, state, result, true);
+}
+
+static void DpGuptMeanMRecordNoiseScaleFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	DpGuptMeanMNoiseFunctionInternal(args, state, result, false, true);
 }
 
 void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
@@ -905,6 +1069,35 @@ void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 
+	ScalarFunctionSet scale_set("dp_smooth_median_noise_scale");
+	scale_set.AddFunction(ScalarFunction("dp_smooth_median_noise_scale",
+	                                     {list_type, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::INTEGER},
+	                                     LogicalType::DOUBLE, DpSmoothMedianNoiseScaleFunction));
+	scale_set.AddFunction(ScalarFunction("dp_smooth_median_noise_scale",
+	                                     {list_type, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::INTEGER,
+	                                      LogicalType::DOUBLE, LogicalType::DOUBLE},
+	                                     LogicalType::DOUBLE, DpSmoothMedianNoiseScaleFunction));
+	scale_set.AddFunction(ScalarFunction("dp_smooth_median_noise_scale",
+	                                     {list_type, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::INTEGER,
+	                                      LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE},
+	                                     LogicalType::DOUBLE, DpSmoothMedianNoiseScaleFunction));
+	CreateScalarFunctionInfo scale_info(scale_set);
+	FunctionDescription scale_desc;
+	scale_desc.description = "[INTERNAL] Returns the smooth-median SASS Laplace noise scale.";
+	scale_info.descriptions.push_back(std::move(scale_desc));
+	loader.RegisterFunction(std::move(scale_info));
+
+	ScalarFunction record_scale("dp_smooth_median_record_noise_scale",
+	                            {list_type, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::INTEGER,
+	                             LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::INTEGER},
+	                            LogicalType::DOUBLE, DpSmoothMedianRecordNoiseScaleFunction);
+	CreateScalarFunctionInfo record_scale_info(record_scale);
+	FunctionDescription record_scale_desc;
+	record_scale_desc.description =
+	    "[INTERNAL] Records the smooth-median SASS Laplace scale and returns the non-private estimator.";
+	record_scale_info.descriptions.push_back(std::move(record_scale_desc));
+	loader.RegisterFunction(std::move(record_scale_info));
+
 	// GUPT-style mean release: mean of the 64 lane answers + pure-ε Laplace noise. No delta.
 	ScalarFunctionSet gupt_set("dp_gupt_mean_noise");
 	gupt_set.AddFunction(
@@ -922,6 +1115,32 @@ void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
 	gupt_info.descriptions.push_back(std::move(gupt_desc));
 	loader.RegisterFunction(std::move(gupt_info));
 
+	ScalarFunctionSet gupt_scale_set("dp_gupt_mean_noise_scale");
+	gupt_scale_set.AddFunction(
+	    ScalarFunction("dp_gupt_mean_noise_scale",
+	                   {list_type, LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::DOUBLE, LogicalType::DOUBLE},
+	                   LogicalType::DOUBLE, DpGuptMeanNoiseScaleFunction));
+	gupt_scale_set.AddFunction(ScalarFunction("dp_gupt_mean_noise_scale",
+	                                          {list_type, LogicalType::DOUBLE, LogicalType::INTEGER,
+	                                           LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE},
+	                                          LogicalType::DOUBLE, DpGuptMeanNoiseScaleFunction));
+	CreateScalarFunctionInfo gupt_scale_info(gupt_scale_set);
+	FunctionDescription gupt_scale_desc;
+	gupt_scale_desc.description = "[INTERNAL] Returns the GUPT-style SASS mean-release Laplace noise scale.";
+	gupt_scale_info.descriptions.push_back(std::move(gupt_scale_desc));
+	loader.RegisterFunction(std::move(gupt_scale_info));
+
+	ScalarFunction gupt_record_scale("dp_gupt_mean_record_noise_scale",
+	                                 {list_type, LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::DOUBLE,
+	                                  LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::INTEGER},
+	                                 LogicalType::DOUBLE, DpGuptMeanRecordNoiseScaleFunction);
+	CreateScalarFunctionInfo gupt_record_scale_info(gupt_record_scale);
+	FunctionDescription gupt_record_scale_desc;
+	gupt_record_scale_desc.description =
+	    "[INTERNAL] Records the GUPT-style SASS mean-release scale and returns the non-private estimator.";
+	gupt_record_scale_info.descriptions.push_back(std::move(gupt_record_scale_desc));
+	loader.RegisterFunction(std::move(gupt_record_scale_info));
+
 	ScalarFunctionSet gupt_m_set("dp_gupt_mean_m_noise");
 	gupt_m_set.AddFunction(
 	    ScalarFunction("dp_gupt_mean_m_noise",
@@ -936,6 +1155,32 @@ void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
 	gupt_m_desc.description = "Applies experimental variable-m GUPT-style mean release to sample lane answers.";
 	gupt_m_info.descriptions.push_back(std::move(gupt_m_desc));
 	loader.RegisterFunction(std::move(gupt_m_info));
+
+	ScalarFunctionSet gupt_m_scale_set("dp_gupt_mean_m_noise_scale");
+	gupt_m_scale_set.AddFunction(
+	    ScalarFunction("dp_gupt_mean_m_noise_scale",
+	                   {list_type, LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::DOUBLE, LogicalType::DOUBLE},
+	                   LogicalType::DOUBLE, DpGuptMeanMNoiseScaleFunction));
+	gupt_m_scale_set.AddFunction(ScalarFunction("dp_gupt_mean_m_noise_scale",
+	                                            {list_type, LogicalType::DOUBLE, LogicalType::INTEGER,
+	                                             LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE},
+	                                            LogicalType::DOUBLE, DpGuptMeanMNoiseScaleFunction));
+	CreateScalarFunctionInfo gupt_m_scale_info(gupt_m_scale_set);
+	FunctionDescription gupt_m_scale_desc;
+	gupt_m_scale_desc.description = "[INTERNAL] Returns the variable-m GUPT-style SASS Laplace noise scale.";
+	gupt_m_scale_info.descriptions.push_back(std::move(gupt_m_scale_desc));
+	loader.RegisterFunction(std::move(gupt_m_scale_info));
+
+	ScalarFunction gupt_m_record_scale("dp_gupt_mean_m_record_noise_scale",
+	                                   {list_type, LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::DOUBLE,
+	                                    LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::INTEGER},
+	                                   LogicalType::DOUBLE, DpGuptMeanMRecordNoiseScaleFunction);
+	CreateScalarFunctionInfo gupt_m_record_scale_info(gupt_m_record_scale);
+	FunctionDescription gupt_m_record_scale_desc;
+	gupt_m_record_scale_desc.description =
+	    "[INTERNAL] Records the variable-m GUPT-style SASS mean-release scale and returns the non-private estimator.";
+	gupt_m_record_scale_info.descriptions.push_back(std::move(gupt_m_record_scale_desc));
+	loader.RegisterFunction(std::move(gupt_m_record_scale_info));
 
 	// dp_aggregate: naive DP sample-and-aggregate terminal, mirroring pac_aggregate's shape
 	// (samples, counts, ...). `counts` is accepted for symmetry and ignored by the median path.

@@ -1,6 +1,7 @@
 #include <locale>
 #include "aggregates/as_count.hpp"
 #include "categorical/pac_categorical.hpp"
+#include "duckdb/common/types/value_map.hpp"
 #include "duckdb/parser/parsed_data/create_aggregate_function_info.hpp"
 
 namespace duckdb {
@@ -558,6 +559,74 @@ static void DpSampleMCountColumnScatterUpdate(Vector inputs[], AggregateInputDat
 	}
 }
 
+static bool DpSampleMPredicateLaneIsTrue(UnifiedVectorFormat &list_data, UnifiedVectorFormat &child_data,
+                                         const bool *child_values, idx_t list_idx, idx_t lane) {
+	if (!list_data.validity.RowIsValid(list_idx)) {
+		return false;
+	}
+	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+	auto &entry = list_entries[list_idx];
+	if (lane >= entry.length) {
+		return false;
+	}
+	auto child_idx = child_data.sel->get_index(entry.offset + lane);
+	return child_data.validity.RowIsValid(child_idx) && child_values[child_idx];
+}
+
+static void DpSampleMCountIfUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr,
+                                   idx_t count) {
+	auto &state = *reinterpret_cast<DpSampleMCountState *>(state_ptr);
+	int sample_count = GetPrivSampleCount(aggr);
+	UnifiedVectorFormat hash_data, predicate_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, predicate_data);
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto &predicate_child = ListVector::GetEntry(inputs[1]);
+	UnifiedVectorFormat predicate_child_data;
+	predicate_child.ToUnifiedFormat(ListVector::GetListSize(inputs[1]), predicate_child_data);
+	auto predicate_values = UnifiedVectorFormat::GetData<bool>(predicate_child_data);
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto p_idx = predicate_data.sel->get_index(i);
+		if (!hash_data.validity.RowIsValid(h_idx)) {
+			continue;
+		}
+		idx_t lane = DpSassLaneIndex(hashes[h_idx], sample_count);
+		if (DpSampleMPredicateLaneIsTrue(predicate_data, predicate_child_data, predicate_values, p_idx, lane)) {
+			auto counts = EnsureDpSampleMCountArray(state, aggr.allocator, sample_count);
+			counts[lane] += PAC_FLOAT(1.0);
+		}
+	}
+}
+
+static void DpSampleMCountIfScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
+                                          idx_t count) {
+	int sample_count = GetPrivSampleCount(aggr);
+	UnifiedVectorFormat hash_data, predicate_data, state_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, predicate_data);
+	states.ToUnifiedFormat(count, state_data);
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto state_ptrs = UnifiedVectorFormat::GetData<DpSampleMCountState *>(state_data);
+	auto &predicate_child = ListVector::GetEntry(inputs[1]);
+	UnifiedVectorFormat predicate_child_data;
+	predicate_child.ToUnifiedFormat(ListVector::GetListSize(inputs[1]), predicate_child_data);
+	auto predicate_values = UnifiedVectorFormat::GetData<bool>(predicate_child_data);
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto p_idx = predicate_data.sel->get_index(i);
+		if (!hash_data.validity.RowIsValid(h_idx)) {
+			continue;
+		}
+		idx_t lane = DpSassLaneIndex(hashes[h_idx], sample_count);
+		if (DpSampleMPredicateLaneIsTrue(predicate_data, predicate_child_data, predicate_values, p_idx, lane)) {
+			auto *state = state_ptrs[state_data.sel->get_index(i)];
+			auto counts = EnsureDpSampleMCountArray(*state, aggr.allocator, sample_count);
+			counts[lane] += PAC_FLOAT(1.0);
+		}
+	}
+}
+
 static void DpSampleMCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
 	int sample_count = GetPrivSampleCount(aggr);
 	auto src_states = FlatVector::GetData<DpSampleMCountState *>(src);
@@ -603,6 +672,33 @@ static void DpSampleMCountFinalize(Vector &states, AggregateInputData &input, Ve
 	}
 }
 
+static void DpSampleMCountDistinctFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                           idx_t offset) {
+	int sample_count = GetPrivSampleCount(input);
+	auto state_ptrs = FlatVector::GetData<DpSampleMCountState *>(states);
+	auto list_entries = FlatVector::GetData<list_entry_t>(result);
+	auto &child_vec = ListVector::GetEntry(result);
+
+	idx_t total_elements = (offset + count) * static_cast<idx_t>(sample_count);
+	ListVector::Reserve(result, total_elements);
+	ListVector::SetListSize(result, total_elements);
+
+	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
+	for (idx_t i = 0; i < count; i++) {
+		idx_t base = (offset + i) * static_cast<idx_t>(sample_count);
+		list_entries[offset + i].offset = base;
+		list_entries[offset + i].length = sample_count;
+		auto *state = state_ptrs[i];
+		if (!state->counts) {
+			memset(child_data + base, 0, sample_count * sizeof(PAC_FLOAT));
+			continue;
+		}
+		for (int j = 0; j < sample_count; j++) {
+			child_data[base + j] = state->counts[j];
+		}
+	}
+}
+
 static unique_ptr<FunctionData> DpSampleMCountBind(ClientContext &ctx, AggregateFunction &,
                                                    vector<unique_ptr<Expression>> &) {
 	int sample_lanes = GetDpSampleLanes(ctx);
@@ -626,6 +722,214 @@ void RegisterDpSampleMCountFunctions(ExtensionLoader &loader) {
 	CreateAggregateFunctionInfo info(set);
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Experimental variable-m SAA counters for COUNT-like values.";
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
+}
+
+void RegisterDpSampleMCountDistinctFunctions(ExtensionLoader &loader) {
+	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+	AggregateFunctionSet set("as_sample_m_count_distinct");
+	set.AddFunction(AggregateFunction(
+	    "as_sample_m_count_distinct", {LogicalType::UBIGINT}, list_type, DpSampleMCountStateSize,
+	    DpSampleMCountInitialize, DpSampleMCountScatterUpdate, DpSampleMCountCombine, DpSampleMCountDistinctFinalize,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, DpSampleMCountUpdate, DpSampleMCountBind));
+	CreateAggregateFunctionInfo info(set);
+	FunctionDescription desc;
+	desc.description =
+	    "[INTERNAL] Experimental variable-m SAA lane counters for pre-deduplicated COUNT(DISTINCT) values.";
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
+}
+
+struct DpSampleMCountDistinctValuesState {
+	value_set_t *sets;
+};
+
+static idx_t DpSampleMCountDistinctValuesStateSize(const AggregateFunction &) {
+	return sizeof(DpSampleMCountDistinctValuesState);
+}
+
+static void DpSampleMCountDistinctValuesInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
+	memset(state_ptr, 0, sizeof(DpSampleMCountDistinctValuesState));
+}
+
+static value_set_t *EnsureDpSampleMCountDistinctValueSets(DpSampleMCountDistinctValuesState &state,
+                                                          ArenaAllocator &allocator, int sample_count) {
+	if (!state.sets) {
+		state.sets = reinterpret_cast<value_set_t *>(allocator.Allocate(sample_count * sizeof(value_set_t)));
+		for (int lane = 0; lane < sample_count; lane++) {
+			new (&state.sets[lane]) value_set_t();
+		}
+	}
+	return state.sets;
+}
+
+static void DpSampleMCountDistinctValuesUpdateOne(DpSampleMCountDistinctValuesState &state, ArenaAllocator &allocator,
+                                                  uint64_t hash, Vector &list_input,
+                                                  const UnifiedVectorFormat &list_data,
+                                                  const UnifiedVectorFormat &child_data, idx_t list_idx,
+                                                  int sample_count) {
+	if (!list_data.validity.RowIsValid(list_idx)) {
+		return;
+	}
+	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+	auto &entry = list_entries[list_idx];
+	if (entry.length == 0) {
+		return;
+	}
+	auto sets = EnsureDpSampleMCountDistinctValueSets(state, allocator, sample_count);
+	auto &lane_set = sets[DpSassLaneIndex(hash, sample_count)];
+	auto &child_vec = ListVector::GetEntry(list_input);
+	for (idx_t offset = 0; offset < entry.length; offset++) {
+		auto child_idx = child_data.sel->get_index(entry.offset + offset);
+		if (child_data.validity.RowIsValid(child_idx)) {
+			lane_set.insert(child_vec.GetValue(child_idx));
+		}
+	}
+}
+
+static void DpSampleMCountDistinctValuesUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr,
+                                               idx_t count) {
+	auto &state = *reinterpret_cast<DpSampleMCountDistinctValuesState *>(state_ptr);
+	int sample_count = GetPrivSampleCount(aggr);
+	UnifiedVectorFormat hash_data, list_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, list_data);
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto &child_vec = ListVector::GetEntry(inputs[1]);
+	UnifiedVectorFormat child_data;
+	child_vec.ToUnifiedFormat(ListVector::GetListSize(inputs[1]), child_data);
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto list_idx = list_data.sel->get_index(i);
+		if (hash_data.validity.RowIsValid(h_idx)) {
+			DpSampleMCountDistinctValuesUpdateOne(state, aggr.allocator, hashes[h_idx], inputs[1], list_data,
+			                                      child_data, list_idx, sample_count);
+		}
+	}
+}
+
+static void DpSampleMCountDistinctValuesScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
+                                                      idx_t count) {
+	int sample_count = GetPrivSampleCount(aggr);
+	UnifiedVectorFormat hash_data, list_data, state_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, list_data);
+	states.ToUnifiedFormat(count, state_data);
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto state_ptrs = UnifiedVectorFormat::GetData<DpSampleMCountDistinctValuesState *>(state_data);
+	auto &child_vec = ListVector::GetEntry(inputs[1]);
+	UnifiedVectorFormat child_data;
+	child_vec.ToUnifiedFormat(ListVector::GetListSize(inputs[1]), child_data);
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto list_idx = list_data.sel->get_index(i);
+		if (hash_data.validity.RowIsValid(h_idx)) {
+			auto *state = state_ptrs[state_data.sel->get_index(i)];
+			DpSampleMCountDistinctValuesUpdateOne(*state, aggr.allocator, hashes[h_idx], inputs[1], list_data,
+			                                      child_data, list_idx, sample_count);
+		}
+	}
+}
+
+static void DpSampleMCountDistinctValuesCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
+	int sample_count = GetPrivSampleCount(aggr);
+	auto src_states = FlatVector::GetData<DpSampleMCountDistinctValuesState *>(src);
+	auto dst_states = FlatVector::GetData<DpSampleMCountDistinctValuesState *>(dst);
+	for (idx_t i = 0; i < count; i++) {
+		auto *s = src_states[i];
+		if (!s->sets) {
+			continue;
+		}
+		auto *d = dst_states[i];
+		auto dst_sets = EnsureDpSampleMCountDistinctValueSets(*d, aggr.allocator, sample_count);
+		for (int lane = 0; lane < sample_count; lane++) {
+			for (auto &value : s->sets[lane]) {
+				dst_sets[lane].insert(value);
+			}
+		}
+	}
+}
+
+static void DpSampleMCountDistinctValuesFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                                 idx_t offset) {
+	int sample_count = GetPrivSampleCount(input);
+	auto state_ptrs = FlatVector::GetData<DpSampleMCountDistinctValuesState *>(states);
+	auto list_entries = FlatVector::GetData<list_entry_t>(result);
+	auto &child_vec = ListVector::GetEntry(result);
+
+	idx_t total_elements = (offset + count) * static_cast<idx_t>(sample_count);
+	ListVector::Reserve(result, total_elements);
+	ListVector::SetListSize(result, total_elements);
+
+	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
+	auto &child_validity = FlatVector::Validity(child_vec);
+	child_validity.SetAllValid(total_elements);
+	for (idx_t i = 0; i < count; i++) {
+		idx_t base = (offset + i) * static_cast<idx_t>(sample_count);
+		list_entries[offset + i].offset = base;
+		list_entries[offset + i].length = sample_count;
+		auto *state = state_ptrs[i];
+		if (!state->sets) {
+			memset(child_data + base, 0, sample_count * sizeof(PAC_FLOAT));
+			continue;
+		}
+		for (int lane = 0; lane < sample_count; lane++) {
+			child_data[base + lane] = static_cast<PAC_FLOAT>(state->sets[lane].size());
+		}
+	}
+}
+
+static void DpSampleMCountDistinctValuesDestroy(Vector &states, AggregateInputData &input, idx_t count) {
+	int sample_count = GetPrivSampleCount(input);
+	auto state_ptrs = FlatVector::GetData<DpSampleMCountDistinctValuesState *>(states);
+	for (idx_t i = 0; i < count; i++) {
+		auto *state = state_ptrs[i];
+		if (!state || !state->sets) {
+			continue;
+		}
+		for (int lane = 0; lane < sample_count; lane++) {
+			state->sets[lane].~value_set_t();
+		}
+		state->sets = nullptr;
+	}
+}
+
+static unique_ptr<FunctionData> DpSampleMCountDistinctValuesBind(ClientContext &ctx, AggregateFunction &func,
+                                                                 vector<unique_ptr<Expression>> &args) {
+	if (args.size() != 2 || args[1]->return_type.id() != LogicalTypeId::LIST) {
+		throw InvalidInputException("as_sample_m_count_distinct_values expects a LIST of per-PU distinct values");
+	}
+	return DpSampleMCountBind(ctx, func, args);
+}
+
+void RegisterDpSampleMCountDistinctValuesFunctions(ExtensionLoader &loader) {
+	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+	AggregateFunctionSet set("as_sample_m_count_distinct_values");
+	set.AddFunction(AggregateFunction("as_sample_m_count_distinct_values", {LogicalType::UBIGINT, LogicalType::ANY},
+	                                  list_type, DpSampleMCountDistinctValuesStateSize,
+	                                  DpSampleMCountDistinctValuesInitialize, DpSampleMCountDistinctValuesScatterUpdate,
+	                                  DpSampleMCountDistinctValuesCombine, DpSampleMCountDistinctValuesFinalize,
+	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, DpSampleMCountDistinctValuesUpdate,
+	                                  DpSampleMCountDistinctValuesBind, DpSampleMCountDistinctValuesDestroy));
+	CreateAggregateFunctionInfo info(set);
+	FunctionDescription desc;
+	desc.description = "[INTERNAL] Experimental variable-m SAA lane counters for per-PU COUNT(DISTINCT) value lists.";
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
+}
+
+void RegisterDpSampleMCountIfFunctions(ExtensionLoader &loader) {
+	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+	auto bool_list_type = LogicalType::LIST(LogicalType::BOOLEAN);
+	AggregateFunctionSet set("as_sample_m_count_if");
+	set.AddFunction(AggregateFunction(
+	    "as_sample_m_count_if", {LogicalType::UBIGINT, bool_list_type}, list_type, DpSampleMCountStateSize,
+	    DpSampleMCountInitialize, DpSampleMCountIfScatterUpdate, DpSampleMCountCombine, DpSampleMCountFinalize,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, DpSampleMCountIfUpdate, DpSampleMCountBind));
+	CreateAggregateFunctionInfo info(set);
+	FunctionDescription desc;
+	desc.description = "[INTERNAL] Experimental variable-m SAA counters for lane-selected COUNT-like values.";
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 }

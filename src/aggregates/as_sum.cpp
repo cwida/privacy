@@ -1154,6 +1154,78 @@ static void DpSampleMSumScatterUpdate(Vector inputs[], AggregateInputData &aggr,
 	}
 }
 
+static bool DpSampleMPredicateLaneIsTrue(UnifiedVectorFormat &list_data, UnifiedVectorFormat &child_data,
+                                         const bool *child_values, idx_t list_idx, idx_t lane) {
+	if (!list_data.validity.RowIsValid(list_idx)) {
+		return false;
+	}
+	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+	auto &entry = list_entries[list_idx];
+	if (lane >= entry.length) {
+		return false;
+	}
+	auto child_idx = child_data.sel->get_index(entry.offset + lane);
+	return child_data.validity.RowIsValid(child_idx) && child_values[child_idx];
+}
+
+static void DpSampleMSumIfUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr, idx_t count) {
+	auto &state = *reinterpret_cast<DpSampleMSumState *>(state_ptr);
+	int sample_count = GetPrivSampleCount(aggr);
+	UnifiedVectorFormat hash_data, value_data, predicate_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, value_data);
+	inputs[2].ToUnifiedFormat(count, predicate_data);
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto values = UnifiedVectorFormat::GetData<double>(value_data);
+	auto &predicate_child = ListVector::GetEntry(inputs[2]);
+	UnifiedVectorFormat predicate_child_data;
+	predicate_child.ToUnifiedFormat(ListVector::GetListSize(inputs[2]), predicate_child_data);
+	auto predicate_values = UnifiedVectorFormat::GetData<bool>(predicate_child_data);
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto v_idx = value_data.sel->get_index(i);
+		auto p_idx = predicate_data.sel->get_index(i);
+		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
+			continue;
+		}
+		idx_t lane = DpSassLaneIndex(hashes[h_idx], sample_count);
+		if (DpSampleMPredicateLaneIsTrue(predicate_data, predicate_child_data, predicate_values, p_idx, lane)) {
+			auto values_ptr = EnsureDpSampleMArray(state.values, aggr.allocator, sample_count);
+			values_ptr[lane] += static_cast<PAC_FLOAT>(values[v_idx]);
+		}
+	}
+}
+
+static void DpSampleMSumIfScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
+	int sample_count = GetPrivSampleCount(aggr);
+	UnifiedVectorFormat hash_data, value_data, predicate_data, state_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, value_data);
+	inputs[2].ToUnifiedFormat(count, predicate_data);
+	states.ToUnifiedFormat(count, state_data);
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto values = UnifiedVectorFormat::GetData<double>(value_data);
+	auto state_ptrs = UnifiedVectorFormat::GetData<DpSampleMSumState *>(state_data);
+	auto &predicate_child = ListVector::GetEntry(inputs[2]);
+	UnifiedVectorFormat predicate_child_data;
+	predicate_child.ToUnifiedFormat(ListVector::GetListSize(inputs[2]), predicate_child_data);
+	auto predicate_values = UnifiedVectorFormat::GetData<bool>(predicate_child_data);
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto v_idx = value_data.sel->get_index(i);
+		auto p_idx = predicate_data.sel->get_index(i);
+		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
+			continue;
+		}
+		idx_t lane = DpSassLaneIndex(hashes[h_idx], sample_count);
+		if (DpSampleMPredicateLaneIsTrue(predicate_data, predicate_child_data, predicate_values, p_idx, lane)) {
+			auto *state = state_ptrs[state_data.sel->get_index(i)];
+			auto values_ptr = EnsureDpSampleMArray(state->values, aggr.allocator, sample_count);
+			values_ptr[lane] += static_cast<PAC_FLOAT>(values[v_idx]);
+		}
+	}
+}
+
 static void DpSampleMSumCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
 	int sample_count = GetPrivSampleCount(aggr);
 	auto src_states = FlatVector::GetData<DpSampleMSumState *>(src);
@@ -1217,6 +1289,21 @@ void RegisterDpSampleMSumFunctions(ExtensionLoader &loader) {
 	CreateAggregateFunctionInfo info(set);
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Experimental variable-m SAA counters for SUM-like values.";
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
+}
+
+void RegisterDpSampleMSumIfFunctions(ExtensionLoader &loader) {
+	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+	auto bool_list_type = LogicalType::LIST(LogicalType::BOOLEAN);
+	AggregateFunctionSet set("as_sample_m_sum_if");
+	set.AddFunction(AggregateFunction(
+	    "as_sample_m_sum_if", {LogicalType::UBIGINT, LogicalType::DOUBLE, bool_list_type}, list_type,
+	    DpSampleMSumStateSize, DpSampleMSumInitialize, DpSampleMSumIfScatterUpdate, DpSampleMSumCombine,
+	    DpSampleMSumFinalize, FunctionNullHandling::DEFAULT_NULL_HANDLING, DpSampleMSumIfUpdate, DpSampleMBind));
+	CreateAggregateFunctionInfo info(set);
+	FunctionDescription desc;
+	desc.description = "[INTERNAL] Experimental variable-m SAA counters for lane-selected SUM-like values.";
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 }

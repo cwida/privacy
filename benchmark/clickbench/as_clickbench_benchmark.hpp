@@ -7,6 +7,7 @@
 
 #include <set>
 #include <string>
+#include <vector>
 #include "duckdb.hpp"
 
 namespace duckdb {
@@ -14,7 +15,8 @@ namespace duckdb {
 int RunASClickBenchBenchmark(const string &db_path = "clickbench.db",
                              const string &queries_dir = "benchmark/clickbench/clickbench_queries",
                              const string &out_csv = "", bool micro = false, const std::set<int> &query_filter = {},
-                             int threads = 8, const string &memory_limit = "");
+                             int threads = 8, const string &memory_limit = "",
+                             const std::vector<int> &as_m_values = std::vector<int> {64});
 
 } // namespace duckdb
 

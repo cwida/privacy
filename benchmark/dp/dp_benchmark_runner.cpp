@@ -132,14 +132,29 @@ struct UtilityMetrics {
 	string recall;
 	string precision;
 	string median_error_pct;
+	string q1_sum_median_error_pct;
+	string q1_avg_median_error_pct;
+	string q1_count_median_error_pct;
 	string saa_estimator_utility;
 	string saa_estimator_recall;
 	string saa_estimator_precision;
 	string saa_estimator_median_error_pct;
+	string saa_estimator_q1_sum_median_error_pct;
+	string saa_estimator_q1_avg_median_error_pct;
+	string saa_estimator_q1_count_median_error_pct;
 	string saa_sampling_utility;
 	string saa_sampling_recall;
 	string saa_sampling_precision;
 	string saa_sampling_median_error_pct;
+	string saa_sampling_q1_sum_median_error_pct;
+	string saa_sampling_q1_avg_median_error_pct;
+	string saa_sampling_q1_count_median_error_pct;
+	string saa_noise_scale_median;
+	string saa_noise_scale_mean;
+	string saa_noise_scale_max;
+	string saa_noise_scale_q1_sum_median;
+	string saa_noise_scale_q1_avg_median;
+	string saa_noise_scale_q1_count_median;
 };
 
 struct RunPoint {
@@ -860,9 +875,9 @@ static void LoadTpch(Connection &con) {
 }
 
 static void GenerateJcchSkew(Connection &con, double scale_factor) {
-	int64_t n_whales = std::max<int64_t>(10, static_cast<int64_t>(150.0 * scale_factor));
-	Log("Applying JCC-H skew to " + std::to_string(n_whales) + " whale customers");
-	RunStatement(con, "UPDATE orders SET o_custkey = 1 + (o_orderkey % " + std::to_string(n_whales) +
+	int64_t n_hot_customers = std::max<int64_t>(10, static_cast<int64_t>(150.0 * scale_factor));
+	Log("Applying JCC-H skew to " + std::to_string(n_hot_customers) + " hot customers");
+	RunStatement(con, "UPDATE orders SET o_custkey = 1 + (o_orderkey % " + std::to_string(n_hot_customers) +
 	                      ") WHERE o_orderkey % 10 < 3");
 	RunStatement(con, "CHECKPOINT");
 }
@@ -929,6 +944,13 @@ static double DeriveSassOutputBound(double per_pu_bound, double pu_count, int sa
 	// domain. Therefore the terminal bound must be on the rescaled full-output scale,
 	// not the raw per-lane sample scale.
 	return std::max(1.0, per_pu_bound * std::ceil(pu_count));
+}
+
+static double ScaleConfiguredSassOutputBound(double output_bound, double multiplier) {
+	if (output_bound <= 0.0) {
+		return 0.0;
+	}
+	return output_bound * multiplier;
 }
 
 static bool ReadLastUtilityLine(const string &path, UtilityMetrics &metrics) {
@@ -1257,6 +1279,147 @@ static UtilityMetrics CompareResultTables(Connection &con, const string &release
 	return metrics;
 }
 
+struct Q1AggregateMetrics {
+	string sum_median_error_pct;
+	string avg_median_error_pct;
+	string count_median_error_pct;
+};
+
+struct NoiseScaleSummary {
+	string median;
+	string mean;
+	string max;
+};
+
+static string MedianErrorString(vector<double> values) {
+	if (values.empty()) {
+		return "";
+	}
+	std::sort(values.begin(), values.end());
+	idx_t mid = values.size() / 2;
+	double median = (values.size() % 2) ? values[mid] : (values[mid - 1] + values[mid]) / 2.0;
+	return FormatNumber(median);
+}
+
+static NoiseScaleSummary SummarizeNoiseScaleValues(vector<double> values) {
+	NoiseScaleSummary summary;
+	if (values.empty()) {
+		return summary;
+	}
+	double sum = 0.0;
+	double max_value = 0.0;
+	for (double value : values) {
+		sum += value;
+		max_value = std::max(max_value, value);
+	}
+	std::sort(values.begin(), values.end());
+	idx_t mid = values.size() / 2;
+	double median = (values.size() % 2) ? values[mid] : (values[mid - 1] + values[mid]) / 2.0;
+	summary.median = FormatNumber(median);
+	summary.mean = FormatNumber(sum / static_cast<double>(values.size()));
+	summary.max = FormatNumber(max_value);
+	return summary;
+}
+
+static NoiseScaleSummary SummarizeNoiseScaleRecordTable(Connection &con, const string &table_name) {
+	auto snapshot = ReadResultSnapshot(con, table_name);
+	vector<double> values;
+	for (auto &row : snapshot.rows) {
+		if (row.size() < 5) {
+			continue;
+		}
+		double value;
+		if (TryCastDouble(row[4], value)) {
+			values.push_back(std::fabs(value));
+		}
+	}
+	return SummarizeNoiseScaleValues(std::move(values));
+}
+
+static Q1AggregateMetrics SummarizeQ1NoiseScaleRecordFamilies(Connection &con, const string &table_name) {
+	auto snapshot = ReadResultSnapshot(con, table_name);
+	Q1AggregateMetrics metrics;
+	vector<double> sum_scales;
+	vector<double> avg_scales;
+	vector<double> count_scales;
+	for (auto &row : snapshot.rows) {
+		if (row.size() < 5) {
+			continue;
+		}
+		double aggregate_index_value;
+		double noise_scale;
+		if (!TryCastDouble(row[1], aggregate_index_value) || !TryCastDouble(row[4], noise_scale)) {
+			continue;
+		}
+		idx_t aggregate_index = static_cast<idx_t>(aggregate_index_value);
+		if (aggregate_index < 4) {
+			sum_scales.push_back(std::fabs(noise_scale));
+		} else if (aggregate_index < 7) {
+			avg_scales.push_back(std::fabs(noise_scale));
+		} else if (aggregate_index == 7) {
+			count_scales.push_back(std::fabs(noise_scale));
+		}
+	}
+	metrics.sum_median_error_pct = MedianErrorString(std::move(sum_scales));
+	metrics.avg_median_error_pct = MedianErrorString(std::move(avg_scales));
+	metrics.count_median_error_pct = MedianErrorString(std::move(count_scales));
+	return metrics;
+}
+
+static Q1AggregateMetrics CompareQ1AggregateFamilies(Connection &con, const string &released_table,
+                                                     const string &reference_table, idx_t key_cols,
+                                                     const string &label) {
+	auto released = ReadResultSnapshot(con, released_table);
+	auto reference = ReadResultSnapshot(con, reference_table);
+	if (released.column_count != reference.column_count) {
+		throw std::runtime_error(label + " Q1 comparison column-count mismatch");
+	}
+	if (reference.column_count < key_cols + 8) {
+		throw std::runtime_error(label + " Q1 comparison expected 8 measure columns");
+	}
+	auto released_by_key = RowsByKey(released, key_cols, label + " Q1 released");
+	auto reference_by_key = RowsByKey(reference, key_cols, label + " Q1 reference");
+
+	vector<double> sum_errors;
+	vector<double> avg_errors;
+	vector<double> count_errors;
+	for (auto &entry : reference_by_key) {
+		auto found = released_by_key.find(entry.first);
+		if (found == released_by_key.end()) {
+			continue;
+		}
+		auto &released_row = found->second;
+		auto &reference_row = entry.second;
+		for (idx_t col = key_cols; col < key_cols + 8; col++) {
+			if (released_row[col].IsNull()) {
+				continue;
+			}
+			double released_value;
+			double reference_value;
+			if (!TryCastDouble(released_row[col], released_value) ||
+			    !TryCastDouble(reference_row[col], reference_value)) {
+				continue;
+			}
+			double abs_ref = std::max(0.00001, std::fabs(reference_value));
+			double error_pct = 100.0 * std::fabs(released_value - reference_value) / abs_ref;
+			idx_t measure_idx = col - key_cols;
+			if (measure_idx < 4) {
+				sum_errors.push_back(error_pct);
+			} else if (measure_idx < 7) {
+				avg_errors.push_back(error_pct);
+			} else {
+				count_errors.push_back(error_pct);
+			}
+		}
+	}
+
+	Q1AggregateMetrics metrics;
+	metrics.sum_median_error_pct = MedianErrorString(std::move(sum_errors));
+	metrics.avg_median_error_pct = MedianErrorString(std::move(avg_errors));
+	metrics.count_median_error_pct = MedianErrorString(std::move(count_errors));
+	return metrics;
+}
+
 static string StripTrailingSemicolon(string sql) {
 	sql = Trim(sql);
 	while (!sql.empty() && sql.back() == ';') {
@@ -1287,6 +1450,7 @@ struct SaaEstimatorMetricCleanup {
 		TryRun("SET privacy_diffcols=NULL");
 		TryRun("SET priv_rewrite=true");
 		TryRun("SET privacy_noise=true");
+		TryRun("SET dp_sass_noise_scale_query_mode=false");
 		TryRun("SET privacy_seed=" + std::to_string(seed));
 	}
 
@@ -1299,7 +1463,40 @@ private:
 	}
 };
 
-static void FillSaaEstimatorMetrics(Connection &con, const QuerySpec &query, uint64_t seed, UtilityMetrics &metrics) {
+static bool IsBuiltInTpchQ1(const DatasetConfig &dataset, const QuerySpec &query) {
+	bool built_in_tpch = (dataset.name == "tpch" && dataset.workload == "tpch_stock_dp") ||
+	                     (dataset.name == "jcch" && dataset.workload == "jcch_stock_dp");
+	return built_in_tpch && query.name == "q01" && query.key_cols == 2;
+}
+
+static void FillQ1FullAnswerMetrics(Connection &con, const DatasetConfig &dataset, const QuerySpec &query,
+                                    uint64_t seed, UtilityMetrics &metrics) {
+	if (!IsBuiltInTpchQ1(dataset, query)) {
+		return;
+	}
+	string suffix = std::to_string(getpid());
+	string private_table = "__q1_private_" + suffix;
+	string full_table = "__q1_full_" + suffix;
+	SaaEstimatorMetricCleanup cleanup(con, {private_table, full_table}, seed);
+
+	RunStatement(con, "SET privacy_diffcols=NULL");
+	RunStatement(con, "SET privacy_seed=" + std::to_string(seed));
+	RunStatement(con, "SET priv_rewrite=true");
+	RunStatement(con, "SET privacy_noise=true");
+	CreateTempResultTable(con, private_table, query.sql);
+
+	RunStatement(con, "SET priv_rewrite=false");
+	RunStatement(con, "SET privacy_noise=false");
+	CreateTempResultTable(con, full_table, query.sql);
+
+	auto q1_metrics = CompareQ1AggregateFamilies(con, private_table, full_table, query.key_cols, "Q1 full-answer");
+	metrics.q1_sum_median_error_pct = q1_metrics.sum_median_error_pct;
+	metrics.q1_avg_median_error_pct = q1_metrics.avg_median_error_pct;
+	metrics.q1_count_median_error_pct = q1_metrics.count_median_error_pct;
+}
+
+static void FillSaaEstimatorMetrics(Connection &con, const DatasetConfig &dataset, const QuerySpec &query,
+                                    uint64_t seed, UtilityMetrics &metrics) {
 	string suffix = std::to_string(getpid());
 	string private_table = "__dp_sass_private_" + suffix;
 	string estimator_table = "__dp_sass_estimator_" + suffix;
@@ -1329,6 +1526,42 @@ static void FillSaaEstimatorMetrics(Connection &con, const QuerySpec &query, uin
 	metrics.saa_sampling_recall = sampling_metrics.recall;
 	metrics.saa_sampling_precision = sampling_metrics.precision;
 	metrics.saa_sampling_median_error_pct = sampling_metrics.median_error_pct;
+
+	if (IsBuiltInTpchQ1(dataset, query)) {
+		auto estimator_q1 =
+		    CompareQ1AggregateFamilies(con, private_table, estimator_table, query.key_cols, "SAA estimator Q1");
+		auto sampling_q1 =
+		    CompareQ1AggregateFamilies(con, estimator_table, full_table, query.key_cols, "SAA sampling Q1");
+		metrics.saa_estimator_q1_sum_median_error_pct = estimator_q1.sum_median_error_pct;
+		metrics.saa_estimator_q1_avg_median_error_pct = estimator_q1.avg_median_error_pct;
+		metrics.saa_estimator_q1_count_median_error_pct = estimator_q1.count_median_error_pct;
+		metrics.saa_sampling_q1_sum_median_error_pct = sampling_q1.sum_median_error_pct;
+		metrics.saa_sampling_q1_avg_median_error_pct = sampling_q1.avg_median_error_pct;
+		metrics.saa_sampling_q1_count_median_error_pct = sampling_q1.count_median_error_pct;
+	}
+}
+
+static void FillSaaNoiseScaleMetrics(Connection &con, const DatasetConfig &dataset, const QuerySpec &query,
+                                     uint64_t seed, UtilityMetrics &metrics) {
+	string suffix = std::to_string(getpid());
+	string scale_table = "__dp_sass_noise_scale_" + suffix;
+	SaaEstimatorMetricCleanup cleanup(con, {scale_table}, seed);
+
+	RunStatement(con, "SET privacy_diffcols=NULL");
+	RunStatement(con, "SET privacy_seed=" + std::to_string(seed));
+	CreateTempResultTable(con, scale_table, "SELECT * FROM dp_sass_noise_scale_query(" + SqlQuote(query.sql) + ")");
+
+	auto summary = SummarizeNoiseScaleRecordTable(con, scale_table);
+	metrics.saa_noise_scale_median = summary.median;
+	metrics.saa_noise_scale_mean = summary.mean;
+	metrics.saa_noise_scale_max = summary.max;
+
+	if (IsBuiltInTpchQ1(dataset, query)) {
+		auto q1_metrics = SummarizeQ1NoiseScaleRecordFamilies(con, scale_table);
+		metrics.saa_noise_scale_q1_sum_median = q1_metrics.sum_median_error_pct;
+		metrics.saa_noise_scale_q1_avg_median = q1_metrics.avg_median_error_pct;
+		metrics.saa_noise_scale_q1_count_median = q1_metrics.count_median_error_pct;
+	}
 }
 
 static vector<QuerySpec> FilterQueriesByName(vector<QuerySpec> queries, const vector<string> &names) {
@@ -1485,12 +1718,17 @@ static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta
 
 static void WriteHeader(std::ofstream &csv) {
 	csv << "dataset,workload,query,query_id,mode,release,profile,run,success,error,primary_metric,time_ms,"
-	       "utility,recall,precision,median_error_pct,saa_estimator_utility,saa_estimator_recall,"
-	       "saa_estimator_precision,saa_estimator_median_error_pct,saa_sampling_utility,saa_sampling_recall,"
-	       "saa_sampling_precision,saa_sampling_median_error_pct,epsilon,delta,sf,dp_sum_bound,dp_count_bound,"
-	       "dp_max_groups_contributed,c_u,dp_sass_count_output_bound,dp_sass_sum_output_bound,"
-	       "dp_avg_lower_bounds,dp_avg_upper_bounds,bound_multiplier,dp_sample_lanes,dp_sass_m,seed,db_path,"
-	       "query_path\n";
+	       "utility,recall,precision,median_error_pct,q1_sum_median_error_pct,q1_avg_median_error_pct,"
+	       "q1_count_median_error_pct,saa_estimator_utility,saa_estimator_recall,saa_estimator_precision,"
+	       "saa_estimator_median_error_pct,saa_estimator_q1_sum_median_error_pct,"
+	       "saa_estimator_q1_avg_median_error_pct,saa_estimator_q1_count_median_error_pct,saa_sampling_utility,"
+	       "saa_sampling_recall,saa_sampling_precision,saa_sampling_median_error_pct,"
+	       "saa_sampling_q1_sum_median_error_pct,saa_sampling_q1_avg_median_error_pct,"
+	       "saa_sampling_q1_count_median_error_pct,saa_noise_scale_median,saa_noise_scale_mean,"
+	       "saa_noise_scale_max,saa_noise_scale_q1_sum_median,saa_noise_scale_q1_avg_median,"
+	       "saa_noise_scale_q1_count_median,epsilon,delta,sf,dp_sum_bound,dp_count_bound,dp_max_groups_contributed,"
+	       "c_u,dp_sass_count_output_bound,dp_sass_sum_output_bound,dp_avg_lower_bounds,dp_avg_upper_bounds,"
+	       "bound_multiplier,dp_sample_lanes,dp_sass_m,seed,db_path,query_path\n";
 }
 
 static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const QuerySpec &query, idx_t query_id,
@@ -1501,14 +1739,22 @@ static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const Que
 	    << point.release << "," << (query.profile == PrivacyProfile::PART ? "part" : "customer") << "," << run << ","
 	    << (success ? "true" : "false") << "," << CsvQuote(error) << ",utility," << FormatNumber(time_ms) << ","
 	    << metrics.utility << "," << metrics.recall << "," << metrics.precision << "," << metrics.median_error_pct
-	    << "," << metrics.saa_estimator_utility << "," << metrics.saa_estimator_recall << ","
-	    << metrics.saa_estimator_precision << "," << metrics.saa_estimator_median_error_pct << ","
-	    << metrics.saa_sampling_utility << "," << metrics.saa_sampling_recall << "," << metrics.saa_sampling_precision
-	    << "," << metrics.saa_sampling_median_error_pct << "," << FormatNumber(point.epsilon) << ","
-	    << FormatNumber(delta) << "," << FormatNumber(dataset.scale_factor) << "," << FormatNumber(point.sum_bound)
-	    << "," << FormatNumber(point.count_bound) << "," << FormatNumber(point.group_bound) << ","
-	    << FormatNumber(point.c_u) << "," << FormatNumber(sass_count_output_bound) << ","
-	    << FormatNumber(sass_sum_output_bound) << "," << CsvQuote(FormatNumberList(point.avg_lower_bounds)) << ","
+	    << "," << metrics.q1_sum_median_error_pct << "," << metrics.q1_avg_median_error_pct << ","
+	    << metrics.q1_count_median_error_pct << "," << metrics.saa_estimator_utility << ","
+	    << metrics.saa_estimator_recall << "," << metrics.saa_estimator_precision << ","
+	    << metrics.saa_estimator_median_error_pct << "," << metrics.saa_estimator_q1_sum_median_error_pct << ","
+	    << metrics.saa_estimator_q1_avg_median_error_pct << "," << metrics.saa_estimator_q1_count_median_error_pct
+	    << "," << metrics.saa_sampling_utility << "," << metrics.saa_sampling_recall << ","
+	    << metrics.saa_sampling_precision << "," << metrics.saa_sampling_median_error_pct << ","
+	    << metrics.saa_sampling_q1_sum_median_error_pct << "," << metrics.saa_sampling_q1_avg_median_error_pct << ","
+	    << metrics.saa_sampling_q1_count_median_error_pct << "," << metrics.saa_noise_scale_median << ","
+	    << metrics.saa_noise_scale_mean << "," << metrics.saa_noise_scale_max << ","
+	    << metrics.saa_noise_scale_q1_sum_median << "," << metrics.saa_noise_scale_q1_avg_median << ","
+	    << metrics.saa_noise_scale_q1_count_median << "," << FormatNumber(point.epsilon) << "," << FormatNumber(delta)
+	    << "," << FormatNumber(dataset.scale_factor) << "," << FormatNumber(point.sum_bound) << ","
+	    << FormatNumber(point.count_bound) << "," << FormatNumber(point.group_bound) << "," << FormatNumber(point.c_u)
+	    << "," << FormatNumber(sass_count_output_bound) << "," << FormatNumber(sass_sum_output_bound) << ","
+	    << CsvQuote(FormatNumberList(point.avg_lower_bounds)) << ","
 	    << CsvQuote(FormatNumberList(point.avg_upper_bounds)) << "," << FormatNumber(point.bound_multiplier) << ","
 	    << point.sample_lanes << "," << point.sass_m << "," << seed << "," << CsvQuote(db_path) << ","
 	    << CsvQuote(query.path) << "\n";
@@ -1643,12 +1889,12 @@ static void RunDataset(const Config &config, const DatasetConfig &dataset, std::
 						}
 						sass_count_output_bound =
 						    point.sass_count_output_bound > 0.0
-						        ? point.sass_count_output_bound
+						        ? ScaleConfiguredSassOutputBound(point.sass_count_output_bound, point.bound_multiplier)
 						        : DeriveSassOutputBound(point.count_bound, pu_count, point.sample_lanes,
 						                                "dp_sass_count_output_bound");
 						sass_sum_output_bound =
 						    point.sass_sum_output_bound > 0.0
-						        ? point.sass_sum_output_bound
+						        ? ScaleConfiguredSassOutputBound(point.sass_sum_output_bound, point.bound_multiplier)
 						        : DeriveSassOutputBound(point.sum_bound, pu_count, point.sample_lanes,
 						                                "dp_sass_sum_output_bound");
 					} else if (point.mode != "duckdb") {
@@ -1681,13 +1927,22 @@ static void RunDataset(const Config &config, const DatasetConfig &dataset, std::
 						metrics.recall = "1";
 						metrics.precision = "1";
 						metrics.median_error_pct = "0";
+						if (IsBuiltInTpchQ1(dataset, query)) {
+							metrics.q1_sum_median_error_pct = "0";
+							metrics.q1_avg_median_error_pct = "0";
+							metrics.q1_count_median_error_pct = "0";
+						}
 					} else if (point.mode == "dp_sass_bounded_ratio") {
 						FillScalarUtility(released_scalar, reference_scalar, metrics);
 					} else if (!ReadLastUtilityLine(utility_path, metrics)) {
 						throw std::runtime_error("privacy_diffcols did not write utility output");
 					}
+					if (point.mode != "duckdb" && point.mode != "dp_sass_bounded_ratio") {
+						FillQ1FullAnswerMetrics(con, dataset, query, seed, metrics);
+					}
 					if (point.mode == "dp_sass") {
-						FillSaaEstimatorMetrics(con, query, seed, metrics);
+						FillSaaEstimatorMetrics(con, dataset, query, seed, metrics);
+						FillSaaNoiseScaleMetrics(con, dataset, query, seed, metrics);
 					}
 					success = true;
 					Log(dataset.name + " " + point.mode + " " + query.name + " run " + std::to_string(run) +

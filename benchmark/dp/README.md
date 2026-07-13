@@ -51,6 +51,14 @@ The JSON config accepts scalar or array sweeps for:
 - `sass_releases`: `median` or `average`
 - `query_names`: optional built-in query-name filter, e.g., `["q01", "q05"]`
 
+`bound_multiplier` scales each mechanism's configured base bounds. For
+`dp_standard` and `dp_elastic`, this means the contribution or value-clipping
+bounds. For `dp_sass`, configured `sass_count_output_bounds` and
+`sass_sum_output_bounds` are SAA output-domain base bounds and are scaled by the
+same multiplier. If a SASS output bound is omitted, the runner derives a
+conservative fallback from the scaled contribution bound and the privacy-unit
+count.
+
 CSV rows include the concrete values used for each run, including `epsilon`,
 `delta`, `sf`, `c_u`, bounds, sample lanes, utility metrics, and timing metadata.
 The main `utility`/`median_error_pct` columns compare the private output against

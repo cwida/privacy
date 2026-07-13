@@ -140,6 +140,25 @@ static inline uint64_t BoolListToMask(UnifiedVectorFormat &list_data, UnifiedVec
 // ============================================================================
 // Helper: Common filter logic for mask-based filtering
 // ============================================================================
+static inline bool FilterFromCount(idx_t true_count, idx_t lane_count, double mi, double correction,
+                                   std::mt19937_64 &gen) {
+	double effective_popcount = static_cast<double>(true_count) * correction;
+	double threshold = static_cast<double>(lane_count) / 2.0;
+
+	if (mi <= 0.0) {
+		// Deterministic mode: true when at least half of the lanes pass.
+		return effective_popcount >= threshold;
+	} else {
+		// Probabilistic mode: P(true) = effective_popcount / lane_count.
+		uint64_t range = static_cast<uint64_t>(static_cast<double>(lane_count) / correction);
+		if (range == 0) {
+			return true; // correction is very large, always return true
+		}
+		auto random_threshold = static_cast<idx_t>(gen() % range);
+		return true_count > random_threshold;
+	}
+}
+
 // Returns true with probability proportional to popcount(mask)/64
 // mi: controls probabilistic (mi>0) vs deterministic (mi<=0) mode
 // correction: considers correction times more non-nulls (increases true probability)
@@ -147,21 +166,7 @@ static inline uint64_t BoolListToMask(UnifiedVectorFormat &list_data, UnifiedVec
 // When mi > 0: probabilistic, P(true) = popcount(mask) * correction / 64
 static inline bool FilterFromMask(uint64_t mask, double mi, double correction, std::mt19937_64 &gen) {
 	int popcount = Popcount64(mask);
-	double effective_popcount = popcount * correction;
-
-	if (mi <= 0.0) {
-		// Deterministic mode: true when effective_popcount >= 32
-		return effective_popcount >= 32.0;
-	} else {
-		// Probabilistic mode: P(true) = effective_popcount / 64
-		// Equivalently: true if popcount > threshold, where threshold is in [0, 64/correction)
-		uint64_t range = static_cast<uint64_t>(64.0 / correction);
-		if (range == 0) {
-			return true; // correction is very large, always return true
-		}
-		int threshold = static_cast<int>(gen() % range);
-		return popcount > threshold;
-	}
+	return FilterFromCount(popcount, 64, mi, correction, gen);
 }
 
 // ============================================================================
@@ -265,8 +270,14 @@ static void PacFilterFromBoolListFunction(DataChunk &args, ExpressionState &stat
 			continue;
 		}
 
-		uint64_t mask = BoolListToMask(list_data, child_data, child_values, list_idx);
-		result_data[i] = FilterFromMask(mask, params.mi, params.correction, params.gen);
+		idx_t true_count = 0;
+		for (idx_t j = 0; j < entry.length; j++) {
+			auto child_idx = child_data.sel->get_index(entry.offset + j);
+			if (child_data.validity.RowIsValid(child_idx) && child_values[child_idx]) {
+				true_count++;
+			}
+		}
+		result_data[i] = FilterFromCount(true_count, entry.length, params.mi, params.correction, params.gen);
 	}
 }
 
@@ -350,13 +361,12 @@ static void PacFilterCmpFunction(DataChunk &args, ExpressionState &state, Vector
 			continue;
 		}
 
-		// Build mask: compare val against each counter element
-		uint64_t mask = 0;
-		idx_t len = entry.length > 64 ? 64 : entry.length;
+		idx_t true_count = 0;
+		idx_t len = entry.length;
 		for (idx_t j = 0; j < len; j++) {
 			auto child_idx = child_data.sel->get_index(entry.offset + j);
 			if (child_data.validity.RowIsValid(child_idx) && ComparePacFloat<CMP>(val, child_values[child_idx])) {
-				mask |= (1ULL << j);
+				true_count++;
 			}
 		}
 
@@ -366,7 +376,7 @@ static void PacFilterCmpFunction(DataChunk &args, ExpressionState &state, Vector
 			correction =
 			    correction_data.validity.RowIsValid(corr_idx) ? static_cast<double>(corrections[corr_idx]) : 1.0;
 		}
-		result_data[i] = FilterFromMask(mask, params.mi, correction, params.gen);
+		result_data[i] = FilterFromCount(true_count, len, params.mi, correction, params.gen);
 	}
 }
 
@@ -647,55 +657,61 @@ static void PacDivFunction(DataChunk &args, ExpressionState &state, Vector &resu
 	den_child.ToUnifiedFormat(ListVector::GetListSize(den_vec), den_child_data);
 	auto num_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(num_child_data);
 	auto den_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(den_child_data);
+	auto num_entries = UnifiedVectorFormat::GetData<list_entry_t>(num_data);
+	auto den_entries = UnifiedVectorFormat::GetData<list_entry_t>(den_data);
+
+	vector<idx_t> output_lengths(count, 0);
+	idx_t total_elements = 0;
+	for (idx_t i = 0; i < count; i++) {
+		auto n_idx = num_data.sel->get_index(i);
+		auto d_idx = den_data.sel->get_index(i);
+		if (!num_data.validity.RowIsValid(n_idx) || !den_data.validity.RowIsValid(d_idx)) {
+			continue;
+		}
+		output_lengths[i] = std::min(num_entries[n_idx].length, den_entries[d_idx].length);
+		total_elements += output_lengths[i];
+	}
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto list_entries = FlatVector::GetData<list_entry_t>(result);
 	auto &result_validity = FlatVector::Validity(result);
 	auto &result_child = ListVector::GetEntry(result);
 
-	idx_t total_elements = count * 64;
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
 	auto result_data = FlatVector::GetData<PAC_FLOAT>(result_child);
 	auto &result_child_validity = FlatVector::Validity(result_child);
+	result_child_validity.SetAllValid(total_elements);
 
+	idx_t base = 0;
 	for (idx_t i = 0; i < count; i++) {
 		auto n_idx = num_data.sel->get_index(i);
 		auto d_idx = den_data.sel->get_index(i);
 
-		list_entries[i].offset = i * 64;
-		list_entries[i].length = 64;
+		list_entries[i].offset = base;
+		list_entries[i].length = output_lengths[i];
 
 		if (!num_data.validity.RowIsValid(n_idx) || !den_data.validity.RowIsValid(d_idx)) {
 			result_validity.SetInvalid(i);
 			continue;
 		}
 
-		auto num_entries = UnifiedVectorFormat::GetData<list_entry_t>(num_data);
-		auto den_entries = UnifiedVectorFormat::GetData<list_entry_t>(den_data);
 		auto &num_entry = num_entries[n_idx];
 		auto &den_entry = den_entries[d_idx];
-		idx_t len = std::min(num_entry.length, den_entry.length);
-		if (len > 64) {
-			len = 64;
-		}
+		idx_t len = output_lengths[i];
 
-		idx_t base = i * 64;
 		for (idx_t j = 0; j < len; j++) {
 			auto nv_idx = num_child_data.sel->get_index(num_entry.offset + j);
 			auto dv_idx = den_child_data.sel->get_index(den_entry.offset + j);
 			bool n_valid = num_child_data.validity.RowIsValid(nv_idx);
 			bool d_valid = den_child_data.validity.RowIsValid(dv_idx);
-			if (n_valid && d_valid) {
+			if (n_valid && d_valid && den_values[dv_idx] != PAC_FLOAT(0.0)) {
 				result_data[base + j] = num_values[nv_idx] / den_values[dv_idx];
 			} else {
 				result_child_validity.SetInvalid(base + j);
 			}
 		}
-		// Zero-fill any remaining positions (if lists shorter than 64)
-		for (idx_t j = len; j < 64; j++) {
-			result_child_validity.SetInvalid(base + j);
-		}
+		base += len;
 	}
 }
 

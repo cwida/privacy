@@ -617,16 +617,6 @@ static idx_t CountAvgAggregates(const LogicalAggregate *agg) {
 	return count;
 }
 
-static bool AggregateContainsDistinct(const LogicalAggregate *agg) {
-	for (auto &expr : agg->expressions) {
-		auto &a = expr->Cast<BoundAggregateExpression>();
-		if (a.IsDistinct()) {
-			return true;
-		}
-	}
-	return false;
-}
-
 static const AvgInfo *FindAvgInfoForSumPos(const vector<AvgInfo> &avg_infos, idx_t aggregate_pos) {
 	for (auto &info : avg_infos) {
 		if (info.sum_pos == aggregate_pos) {
@@ -1053,6 +1043,90 @@ static unique_ptr<LogicalOperator> BuildRankCapFilter(OptimizerExtensionInput &i
 	return filter;
 }
 
+static unique_ptr<Expression> BuildIsNotNullPredicate(unique_ptr<Expression> expr) {
+	auto not_null = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NOT_NULL, LogicalType::BOOLEAN);
+	not_null->children.push_back(std::move(expr));
+	return not_null;
+}
+
+static unique_ptr<Expression> ConjoinPredicates(vector<unique_ptr<Expression>> predicates) {
+	vector<unique_ptr<Expression>> present;
+	for (auto &predicate : predicates) {
+		if (predicate) {
+			present.push_back(std::move(predicate));
+		}
+	}
+	if (present.empty()) {
+		return nullptr;
+	}
+	if (present.size() == 1) {
+		return std::move(present[0]);
+	}
+	auto conjunction = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND);
+	conjunction->children = std::move(present);
+	return std::move(conjunction);
+}
+
+static unique_ptr<LogicalOperator> BuildNotNullFilterOnSourceColumn(unique_ptr<LogicalOperator> child,
+                                                                    LogicalAggregate *src, idx_t src_group_index,
+                                                                    idx_t col) {
+	auto filter = make_uniq<LogicalFilter>(BuildIsNotNullPredicate(BuildLowerGroupRef(src, src_group_index, col)));
+	filter->children.push_back(std::move(child));
+	return filter;
+}
+
+static vector<unique_ptr<Expression>> PrepareVariableMDistinctListFilters(OptimizerExtensionInput &input,
+                                                                          LogicalAggregate *agg,
+                                                                          const Expression &pu_hash_expr,
+                                                                          int64_t count_bound) {
+	vector<unique_ptr<Expression>> filters(agg->expressions.size());
+	if (count_bound <= 0) {
+		return filters;
+	}
+
+	auto &binder = input.optimizer.binder;
+	idx_t window_index = binder.GenerateTableIndex();
+	auto window = make_uniq<LogicalWindow>(window_index);
+	vector<idx_t> distinct_filter_indices;
+
+	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
+		auto &aggr = agg->expressions[ai]->Cast<BoundAggregateExpression>();
+		string name = StringUtil::Lower(aggr.function.name);
+		if (name != "count" || !aggr.IsDistinct() || aggr.children.empty()) {
+			continue;
+		}
+
+		auto rank =
+		    make_uniq<BoundWindowExpression>(ExpressionType::WINDOW_RANK_DENSE, LogicalType::BIGINT, nullptr, nullptr);
+		for (auto &group : agg->groups) {
+			rank->partitions.push_back(group->Copy());
+		}
+		rank->partitions.push_back(pu_hash_expr.Copy());
+		rank->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST, aggr.children[0]->Copy());
+		rank->start = WindowBoundary::UNBOUNDED_PRECEDING;
+		rank->end = WindowBoundary::CURRENT_ROW_ROWS;
+		idx_t rank_pos = window->expressions.size();
+		window->expressions.push_back(std::move(rank));
+
+		auto rank_ref = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ColumnBinding(window_index, rank_pos));
+		auto cap_const = make_uniq<BoundConstantExpression>(Value::BIGINT(count_bound));
+		auto in_cap = make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_LESSTHANOREQUALTO,
+		                                                   std::move(rank_ref), std::move(cap_const));
+		vector<unique_ptr<Expression>> predicates;
+		predicates.push_back(BuildIsNotNullPredicate(aggr.children[0]->Copy()));
+		predicates.push_back(std::move(in_cap));
+		filters[ai] = ConjoinPredicates(std::move(predicates));
+		distinct_filter_indices.push_back(ai);
+	}
+
+	if (distinct_filter_indices.empty()) {
+		return filters;
+	}
+	window->children.push_back(std::move(agg->children[0]));
+	agg->children[0] = std::move(window);
+	return filters;
+}
+
 static void ApplyMaxGroupsContributed(OptimizerExtensionInput &input, LogicalAggregate *agg,
                                       const PuPreAggregationInfo &pre, int64_t max_groups) {
 	if (pre.num_original_groups == 0) {
@@ -1339,11 +1413,12 @@ static NoiseProjection InsertProjectionAndRemap(unique_ptr<LogicalOperator> &pla
 
 	ColumnBindingReplacer replacer;
 	for (idx_t gi = 0; gi < n_groups; gi++) {
-		replacer.replacement_bindings.emplace_back(ColumnBinding(source_group_idx, gi), ColumnBinding(proj_idx, gi));
+		replacer.replacement_bindings.emplace_back(ColumnBinding(source_group_idx, gi), ColumnBinding(proj_idx, gi),
+		                                           proj_types[gi]);
 	}
 	for (idx_t ai = 0; ai < n_aggs; ai++) {
 		replacer.replacement_bindings.emplace_back(ColumnBinding(source_agg_idx, source_agg_offset + ai),
-		                                           ColumnBinding(proj_idx, n_groups + ai));
+		                                           ColumnBinding(proj_idx, n_groups + ai), proj_types[n_groups + ai]);
 	}
 	replacer.stop_operator = proj_ptr;
 	replacer.VisitOperator(*plan);
@@ -1626,6 +1701,7 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 	D_ASSERT(empty_defaults.size() == n_aggs);
 	D_ASSERT(agg_positions.size() == n_aggs);
 	bool stability_query_mode = GetBooleanSetting(input.context, "dp_sass_stability_query_mode", false);
+	bool noise_scale_query_mode = GetBooleanSetting(input.context, "dp_sass_noise_scale_query_mode", false);
 	bool average_release = release_method == "average";
 	bool variable_m = GetDpSassM(input.context) > DP_SASS_DEFAULT_M;
 
@@ -1662,8 +1738,16 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 		// Per-kind public default used to fill empty lanes so the populated-lane count is
 		// data-independent (no NULL leak; fixed GUPT denominator).
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(empty_defaults[ai])));
-		const char *terminal =
-		    average_release ? (variable_m ? "dp_gupt_mean_m_noise" : "dp_gupt_mean_noise") : "dp_smooth_median_noise";
+		const char *terminal = nullptr;
+		if (noise_scale_query_mode) {
+			children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(static_cast<int32_t>(ai))));
+			terminal = average_release
+			               ? (variable_m ? "dp_gupt_mean_m_record_noise_scale" : "dp_gupt_mean_record_noise_scale")
+			               : "dp_smooth_median_record_noise_scale";
+		} else {
+			terminal = average_release ? (variable_m ? "dp_gupt_mean_m_noise" : "dp_gupt_mean_noise")
+			                           : "dp_smooth_median_noise";
+		}
 		unique_ptr<Expression> noised = BindScalarLocal(input, terminal, std::move(children));
 		if (output_types[ai] != LogicalType::DOUBLE) {
 			noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), output_types[ai]);
@@ -1787,21 +1871,22 @@ static DpSassContributionBounds GetDpSassContributionBounds(ClientContext &conte
 
 static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, LogicalAggregate *agg,
                                                unique_ptr<Expression> pu_hash_expr, int64_t count_bound,
-                                               int64_t group_bound, bool apply_support_filter) {
+                                               int64_t group_bound, bool apply_support_filter, bool variable_m) {
 	auto &binder = input.optimizer.binder;
 	auto &old_aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
 	auto distinct_value = old_aggr.children[0]->Copy();
 	auto distinct_type = distinct_value->return_type;
 
-	vector<unique_ptr<Expression>> mask_children;
-	mask_children.push_back(pu_hash_expr->Copy());
-	auto sample_mask = BindScalarLocal(input, "dp_sample_mask", std::move(mask_children));
-	auto bit_or_expr = BindBitOrAggregate(input, std::move(sample_mask), distinct_value->Copy());
-
 	idx_t inner_group_index = binder.GenerateTableIndex();
 	idx_t inner_agg_index = binder.GenerateTableIndex();
 	vector<unique_ptr<Expression>> inner_expressions;
-	inner_expressions.push_back(std::move(bit_or_expr));
+	if (!variable_m) {
+		vector<unique_ptr<Expression>> mask_children;
+		mask_children.push_back(pu_hash_expr->Copy());
+		auto sample_mask = BindScalarLocal(input, "dp_sample_mask", std::move(mask_children));
+		auto bit_or_expr = BindBitOrAggregate(input, std::move(sample_mask), distinct_value->Copy());
+		inner_expressions.push_back(std::move(bit_or_expr));
+	}
 	auto inner_agg = make_uniq<LogicalAggregate>(inner_group_index, inner_agg_index, std::move(inner_expressions));
 
 	idx_t num_original_groups = agg->groups.size();
@@ -1826,6 +1911,10 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 	// This mirrors dp_standard's factored clipping rather than a single count_bound*group_bound cap.
 	idx_t pu_group_col = num_original_groups;
 	idx_t distinct_col = num_original_groups + 1;
+	if (variable_m) {
+		distinct_rows =
+		    BuildNotNullFilterOnSourceColumn(std::move(distinct_rows), inner_agg_ptr, inner_gi, distinct_col);
+	}
 	vector<RankCapSpec> caps;
 	if (num_original_groups > 0 && group_bound > 0) {
 		// L0: at most `group_bound` distinct groups per PU (dense-rank over the group columns).
@@ -1874,6 +1963,64 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 		window->children.push_back(std::move(distinct_rows));
 		distinct_rows = std::move(window);
 		support_window_index = optional_idx(window_index);
+	}
+
+	if (variable_m) {
+		idx_t lane_group_index = binder.GenerateTableIndex();
+		idx_t lane_agg_index = binder.GenerateTableIndex();
+		vector<unique_ptr<Expression>> lane_expressions;
+		if (apply_support_filter) {
+			auto rn_ref = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT,
+			                                                  ColumnBinding(support_window_index.GetIndex(), 0));
+			auto is_first = make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_EQUAL, std::move(rn_ref),
+			                                                     make_uniq<BoundConstantExpression>(Value::BIGINT(1)));
+			auto marker = make_uniq<BoundCaseExpression>(LogicalType::BIGINT);
+			BoundCaseCheck check;
+			check.when_expr = std::move(is_first);
+			check.then_expr = make_uniq<BoundConstantExpression>(Value::BIGINT(1));
+			marker->case_checks.push_back(std::move(check));
+			marker->else_expr = make_uniq<BoundConstantExpression>(Value::BIGINT(0));
+			lane_expressions.push_back(BindPlainAggregate(input, "sum", std::move(marker)));
+		}
+
+		auto lane_agg = make_uniq<LogicalAggregate>(lane_group_index, lane_agg_index, std::move(lane_expressions));
+		for (idx_t gi = 0; gi < num_original_groups; gi++) {
+			lane_agg->groups.push_back(make_uniq<BoundColumnRefExpression>(agg->groups[gi]->return_type,
+			                                                               ColumnBinding(inner_group_index, gi)));
+		}
+		auto lane_source = BuildLowerGroupRef(inner_agg_ptr, inner_gi, pu_group_col);
+		auto lane_mask =
+		    make_uniq<BoundConstantExpression>(Value::UBIGINT(static_cast<uint64_t>(GetDpSassM(input.context) - 1)));
+		lane_agg->groups.push_back(
+		    input.optimizer.BindScalarFunction("&", std::move(lane_source), std::move(lane_mask)));
+		lane_agg->groups.push_back(
+		    make_uniq<BoundColumnRefExpression>(distinct_type, ColumnBinding(inner_group_index, distinct_col)));
+		lane_agg->children.push_back(std::move(distinct_rows));
+		lane_agg->ResolveOperatorTypes();
+
+		for (idx_t gi = 0; gi < num_original_groups; gi++) {
+			agg->groups[gi] =
+			    make_uniq<BoundColumnRefExpression>(lane_agg->types[gi], ColumnBinding(lane_group_index, gi));
+		}
+		auto lane_ref = make_uniq<BoundColumnRefExpression>(lane_agg->types[num_original_groups],
+		                                                    ColumnBinding(lane_group_index, num_original_groups));
+		LogicalType support_type;
+		if (apply_support_filter) {
+			support_type = lane_agg->types[lane_agg->groups.size()];
+		}
+		agg->children[0] = std::move(lane_agg);
+
+		vector<unique_ptr<Expression>> top_expressions;
+		vector<unique_ptr<Expression>> count_children;
+		count_children.push_back(std::move(lane_ref));
+		top_expressions.push_back(BindAggregateLocal(input, "as_sample_m_count_distinct", std::move(count_children)));
+		if (apply_support_filter) {
+			auto support_ref = make_uniq<BoundColumnRefExpression>(support_type, ColumnBinding(lane_agg_index, 0));
+			top_expressions.push_back(BindPlainAggregate(input, "sum", std::move(support_ref)));
+		}
+		agg->expressions = std::move(top_expressions);
+		agg->ResolveOperatorTypes();
+		return;
 	}
 
 	idx_t merge_group_index = binder.GenerateTableIndex();
@@ -1948,7 +2095,7 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 }
 
 static void RewritePuDistinctCountToSampleMedian(OptimizerExtensionInput &input, LogicalAggregate *agg,
-                                                 unique_ptr<Expression> pu_hash_expr) {
+                                                 unique_ptr<Expression> pu_hash_expr, bool variable_m) {
 	auto &binder = input.optimizer.binder;
 	auto &old_aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
 	auto distinct_value = old_aggr.children[0]->Copy();
@@ -1969,12 +2116,14 @@ static void RewritePuDistinctCountToSampleMedian(OptimizerExtensionInput &input,
 	vector<unique_ptr<Expression>> count_children;
 	count_children.push_back(std::move(hash_ref));
 	count_children.push_back(std::move(value_ref));
-	top_expressions.push_back(BindAggregateLocal(input, "as_sample_count", std::move(count_children)));
+	top_expressions.push_back(
+	    BindAggregateLocal(input, variable_m ? "as_sample_m_count" : "as_sample_count", std::move(count_children)));
 
 	agg->children[0] = std::move(inner_agg);
 	agg->expressions = std::move(top_expressions);
 	agg->ResolveOperatorTypes();
-	PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] specialized COUNT(DISTINCT PU key) -> distinct PU rows + as_sample_count");
+	PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] specialized COUNT(DISTINCT PU key) -> distinct PU rows + " +
+	                    string(variable_m ? "as_sample_m_count" : "as_sample_count"));
 }
 
 static void RemapExpressionBindingsLocal(Expression &e, const std::unordered_map<idx_t, idx_t> &map) {
@@ -2014,36 +2163,55 @@ struct SampleAggregateRewrite {
 	double value_upper;
 	bool clip_count;
 	double count_upper;
+	bool raw_lower_value;
 };
 
 static void BuildSampleMedianLowerExpression(OptimizerExtensionInput &input, const BoundAggregateExpression &aggr,
                                              const std::unordered_map<idx_t, idx_t> *index_map,
                                              const DpSassContributionBounds &bounds,
                                              vector<unique_ptr<Expression>> &lower_expressions,
-                                             vector<SampleAggregateRewrite> &rewrites, bool variable_m) {
+                                             vector<SampleAggregateRewrite> &rewrites, bool variable_m,
+                                             const Expression *extra_filter = nullptr) {
 	string name = StringUtil::Lower(aggr.function.name);
 	string sample_sum_name = variable_m ? "as_sample_m_sum" : "as_sample_sum";
 	string sample_avg_name = variable_m ? "as_sample_m_avg" : "as_sample_avg";
+	string sample_min_name = variable_m ? "as_sample_m_min" : "as_sample_min";
+	string sample_max_name = variable_m ? "as_sample_m_max" : "as_sample_max";
 	vector<unique_ptr<Expression>> children;
 	idx_t lower_value_pos = lower_expressions.size();
 	if (name == "count_star") {
 		lower_expressions.push_back(BindPlainAggregate(input, "count_star", std::move(children)));
 		rewrites.push_back(
-		    {sample_sum_name, lower_value_pos, optional_idx(), true, 0.0, bounds.count_bound, false, 0.0});
+		    {sample_sum_name, lower_value_pos, optional_idx(), true, 0.0, bounds.count_bound, false, 0.0, false});
 	} else if (name == "count") {
 		if (!aggr.children.empty()) {
 			children.push_back(CopyMaybeRemapped(*aggr.children[0], index_map));
 		}
-		lower_expressions.push_back(
-		    BindPlainAggregate(input, "count", std::move(children),
-		                       aggr.IsDistinct() ? AggregateType::DISTINCT : AggregateType::NON_DISTINCT));
-		rewrites.push_back(
-		    {sample_sum_name, lower_value_pos, optional_idx(), true, 0.0, bounds.count_bound, false, 0.0});
+		if (variable_m && aggr.IsDistinct()) {
+			lower_expressions.push_back(
+			    BindPlainAggregate(input, "list", std::move(children), AggregateType::DISTINCT));
+			vector<unique_ptr<Expression>> predicates;
+			predicates.push_back(CopyFilterMaybeRemapped(aggr, index_map));
+			if (extra_filter) {
+				predicates.push_back(extra_filter->Copy());
+			}
+			lower_expressions.back()->Cast<BoundAggregateExpression>().filter =
+			    ConjoinPredicates(std::move(predicates));
+			rewrites.push_back({"as_sample_m_count_distinct_values", lower_value_pos, optional_idx(), false, 0.0, 0.0,
+			                    false, 0.0, true});
+			return;
+		} else {
+			lower_expressions.push_back(
+			    BindPlainAggregate(input, "count", std::move(children),
+			                       aggr.IsDistinct() ? AggregateType::DISTINCT : AggregateType::NON_DISTINCT));
+			rewrites.push_back(
+			    {sample_sum_name, lower_value_pos, optional_idx(), true, 0.0, bounds.count_bound, false, 0.0, false});
+		}
 	} else if (name == "sum") {
 		children.push_back(CopyMaybeRemapped(*aggr.children[0], index_map));
 		lower_expressions.push_back(BindPlainAggregate(input, "sum", std::move(children)));
-		rewrites.push_back(
-		    {sample_sum_name, lower_value_pos, optional_idx(), true, -bounds.sum_bound, bounds.sum_bound, false, 0.0});
+		rewrites.push_back({sample_sum_name, lower_value_pos, optional_idx(), true, -bounds.sum_bound, bounds.sum_bound,
+		                    false, 0.0, false});
 	} else if (name == "avg") {
 		auto sum_arg = CopyMaybeRemapped(*aggr.children[0], index_map);
 		auto count_arg = CopyMaybeRemapped(*aggr.children[0], index_map);
@@ -2057,7 +2225,7 @@ static void BuildSampleMedianLowerExpression(OptimizerExtensionInput &input, con
 		lower_expressions.push_back(BindPlainAggregate(input, "count", std::move(count_arg)));
 		lower_expressions.back()->Cast<BoundAggregateExpression>().filter = std::move(filter_for_count);
 		rewrites.push_back({sample_avg_name, lower_value_pos, optional_idx(lower_count_pos), true, -bounds.sum_bound,
-		                    bounds.sum_bound, true, bounds.count_bound});
+		                    bounds.sum_bound, true, bounds.count_bound, false});
 		return;
 	} else if (name == "min" || name == "max") {
 		// Per-PU MIN/MAX of the value; per-lane sample MIN/MAX then median/mean release. No per-lane
@@ -2065,11 +2233,11 @@ static void BuildSampleMedianLowerExpression(OptimizerExtensionInput &input, con
 		// [dp_sass_minmax_lower_bound, dp_sass_minmax_upper_bound] output domain.
 		children.push_back(CopyMaybeRemapped(*aggr.children[0], index_map));
 		lower_expressions.push_back(BindPlainAggregate(input, name, std::move(children)));
-		rewrites.push_back({name == "min" ? "as_sample_min" : "as_sample_max", lower_value_pos, optional_idx(), false,
-		                    0.0, 0.0, false, 0.0});
+		rewrites.push_back({name == "min" ? sample_min_name : sample_max_name, lower_value_pos, optional_idx(), false,
+		                    0.0, 0.0, false, 0.0, false});
 	} else {
-		throw InvalidInputException("dp_sample_median: only COUNT, COUNT(DISTINCT), SUM, and AVG aggregates are "
-		                            "supported");
+		throw InvalidInputException("dp_sample_median: only COUNT, COUNT(DISTINCT), SUM, AVG, MIN, and MAX aggregates "
+		                            "are supported");
 	}
 	lower_expressions.back()->Cast<BoundAggregateExpression>().filter = CopyFilterMaybeRemapped(aggr, index_map);
 }
@@ -2080,10 +2248,12 @@ static unique_ptr<Expression> BuildSampleMedianAggregateRef(OptimizerExtensionIn
 	auto lower_type = pre_agg.lower_agg->types[pre_agg.num_original_groups + 1 + rewrite.lower_value_pos];
 	unique_ptr<Expression> lower_ref = make_uniq<BoundColumnRefExpression>(
 	    lower_type, ColumnBinding(pre_agg.lower_agg_index, rewrite.lower_value_pos));
-	lower_ref = BoundCastExpression::AddCastToType(input.context, std::move(lower_ref), LogicalType::DOUBLE);
-	if (rewrite.clip_value) {
-		lower_ref =
-		    ClipToBounds(input, std::move(lower_ref), rewrite.value_lower, rewrite.value_upper, LogicalType::DOUBLE);
+	if (!rewrite.raw_lower_value) {
+		lower_ref = BoundCastExpression::AddCastToType(input.context, std::move(lower_ref), LogicalType::DOUBLE);
+		if (rewrite.clip_value) {
+			lower_ref = ClipToBounds(input, std::move(lower_ref), rewrite.value_lower, rewrite.value_upper,
+			                         LogicalType::DOUBLE);
+		}
 	}
 
 	vector<unique_ptr<Expression>> children;
@@ -2110,7 +2280,7 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
                                            bool variable_m = false) {
 	if (IsDpSampleCountDistinct(agg)) {
 		if (distinct_count_is_pu_key) {
-			RewritePuDistinctCountToSampleMedian(input, agg, std::move(pu_hash_expr));
+			RewritePuDistinctCountToSampleMedian(input, agg, std::move(pu_hash_expr), variable_m);
 			return;
 		}
 		D_ASSERT(bounds.has_integer_count_bound);
@@ -2118,7 +2288,7 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 		int64_t group_bound =
 		    !agg->groups.empty() ? GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", "dp_sass") : 1;
 		RewriteDistinctCountToSampleMedian(input, agg, std::move(pu_hash_expr), count_bound, group_bound,
-		                                   apply_distinct_support_filter);
+		                                   apply_distinct_support_filter, variable_m);
 		return;
 	}
 
@@ -2126,9 +2296,28 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 	lower_expressions.reserve(agg->expressions.size());
 	vector<SampleAggregateRewrite> rewrites;
 	rewrites.reserve(agg->expressions.size());
+	vector<unique_ptr<Expression>> variable_m_distinct_filters;
+	bool has_variable_m_distinct = false;
 	for (auto &expr : agg->expressions) {
 		auto &aggr = expr->Cast<BoundAggregateExpression>();
-		BuildSampleMedianLowerExpression(input, aggr, nullptr, bounds, lower_expressions, rewrites, variable_m);
+		string name = StringUtil::Lower(aggr.function.name);
+		if (name == "count" && aggr.IsDistinct()) {
+			has_variable_m_distinct = true;
+			break;
+		}
+	}
+	if (variable_m && has_variable_m_distinct) {
+		D_ASSERT(bounds.has_integer_count_bound);
+		variable_m_distinct_filters =
+		    PrepareVariableMDistinctListFilters(input, agg, *pu_hash_expr, bounds.count_bound_integer);
+	}
+	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
+		auto &expr = agg->expressions[ai];
+		auto &aggr = expr->Cast<BoundAggregateExpression>();
+		const Expression *extra_filter =
+		    ai < variable_m_distinct_filters.size() ? variable_m_distinct_filters[ai].get() : nullptr;
+		BuildSampleMedianLowerExpression(input, aggr, nullptr, bounds, lower_expressions, rewrites, variable_m,
+		                                 extra_filter);
 	}
 
 	auto pre_agg = InsertPuPreAggregation(input, agg, std::move(lower_expressions), std::move(pu_hash_expr));
@@ -2427,12 +2616,6 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	if (variable_m) {
 		if (GetDpSampleLanes(input.context) != 1) {
 			throw InvalidInputException("dp_sass: dp_sass_m > 64 currently requires dp_sample_lanes = 1");
-		}
-		if (AggregateContainsMinMax(single_agg)) {
-			throw InvalidInputException("dp_sass: dp_sass_m > 64 currently supports only COUNT, SUM, and AVG");
-		}
-		if (AggregateContainsDistinct(single_agg)) {
-			throw InvalidInputException("dp_sass: dp_sass_m > 64 does not yet support DISTINCT aggregates");
 		}
 		PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] using experimental variable-m SAA path m=" + std::to_string(sass_m));
 	}

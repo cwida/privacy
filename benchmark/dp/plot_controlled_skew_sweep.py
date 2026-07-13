@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 
 ROOT = Path(__file__).resolve().parents[2]
 QUERY_ORDER = ["q01", "q05", "q06", "q14", "q19"]
-WHALE_COLORS = {
+HOT_CUSTOMER_COLORS = {
     "50": "#0072b2",
     "150": "#d55e00",
     "450": "#009e73",
@@ -59,9 +59,13 @@ def read_metadata(path):
     variants = {}
     with path.open(newline="") as handle:
         for row in csv.DictReader(handle):
+            hot_customers_per_sf = row.get("hot_customers_per_sf", row.get("whales_per_sf", ""))
+            n_hot_customers = row.get("n_hot_customers", row.get("n_whales", ""))
+            row["hot_customers_per_sf"] = hot_customers_per_sf
+            row["n_hot_customers"] = n_hot_customers
             row["db_norm"] = norm_path(row["db"])
             row["remap_percent_num"] = to_float(row["remap_percent"]) or 0.0
-            row["whales_per_sf_num"] = to_float(row["whales_per_sf"])
+            row["hot_customers_per_sf_num"] = to_float(hot_customers_per_sf)
             variants[row["db_norm"]] = row
     return variants
 
@@ -145,8 +149,8 @@ def write_merged(path, stability_rows, utility_rows):
         "query",
         "mechanism",
         "remap_percent",
-        "whales_per_sf",
-        "n_whales",
+        "hot_customers_per_sf",
+        "n_hot_customers",
         "median_cv",
         "max_cv",
         "median_error_pct",
@@ -166,8 +170,8 @@ def write_merged(path, stability_rows, utility_rows):
                     "query": utility["query"],
                     "mechanism": utility["mechanism"],
                     "remap_percent": utility["remap_percent"],
-                    "whales_per_sf": utility["whales_per_sf"],
-                    "n_whales": utility["n_whales"],
+                    "hot_customers_per_sf": utility["hot_customers_per_sf"],
+                    "n_hot_customers": utility["n_hot_customers"],
                     "median_cv": stability["median_cv"],
                     "max_cv": stability["max_cv"],
                     "median_error_pct": utility["median_error_pct"],
@@ -198,7 +202,7 @@ def plot_stability(rows, output):
     for ax, query in zip(axes, QUERY_ORDER):
         q_rows = [row for row in rows if row["query"] == query]
         baseline = next((row for row in q_rows if row["variant"] == "baseline"), None)
-        for whales in ["50", "150", "450"]:
+        for hot_customers_per_sf in ["50", "150", "450"]:
             series = []
             if baseline:
                 series.append((0.0, 100.0 * baseline["median_cv"]))
@@ -207,7 +211,7 @@ def plot_stability(rows, output):
                     [
                         (row["remap_percent_num"], 100.0 * row["median_cv"])
                         for row in q_rows
-                        if row["whales_per_sf"] == whales
+                        if row["hot_customers_per_sf"] == hot_customers_per_sf
                     ]
                 )
             )
@@ -219,8 +223,8 @@ def plot_stability(rows, output):
                 marker="o",
                 linewidth=2,
                 markersize=4,
-                color=WHALE_COLORS[whales],
-                label=f"{whales} whales/SF",
+                color=HOT_CUSTOMER_COLORS[hot_customers_per_sf],
+                label=f"{hot_customers_per_sf} hot customers/SF",
             )
         ax.set_title(query.upper(), fontweight="bold")
         ax.set_yscale("log")

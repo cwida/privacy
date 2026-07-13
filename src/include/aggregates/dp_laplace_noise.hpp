@@ -11,8 +11,15 @@ struct DpSassStabilityQueryRecord {
 	vector<Value> stats;
 };
 
+struct DpSassNoiseScaleQueryRecord {
+	int32_t aggregate_index;
+	double noise_scale;
+};
+
 void ClearDpSassStabilityQueryRecords();
 vector<DpSassStabilityQueryRecord> TakeDpSassStabilityQueryRecords();
+void ClearDpSassNoiseScaleQueryRecords();
+vector<DpSassNoiseScaleQueryRecord> TakeDpSassNoiseScaleQueryRecords();
 
 // Registers `dp_noise(value DOUBLE, scale DOUBLE) -> DOUBLE`.
 // Returns value + Lap(scale) (location 0, scale = scale). Deterministic when `privacy_seed` is set.

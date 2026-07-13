@@ -9,6 +9,7 @@
 #include "duckdb/main/connection.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -123,6 +124,219 @@ static std::set<int> ParseIntSetCSV(const string &list) {
 		}
 	}
 	return values;
+}
+
+static vector<int> ParseIntListCSV(const string &list) {
+	vector<int> values;
+	std::stringstream ss(list);
+	string tok;
+	while (std::getline(ss, tok, ',')) {
+		tok = Trim(tok);
+		if (!tok.empty()) {
+			values.push_back(std::stoi(tok));
+		}
+	}
+	return values;
+}
+
+static bool IsIdentifierChar(char c) {
+	return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+static bool IsValidSampleCount(int m) {
+	return m >= 64 && m <= 512 && (m & (m - 1)) == 0;
+}
+
+static idx_t FindMatchingParen(const string &sql, idx_t open_pos) {
+	int depth = 0;
+	bool in_single_quote = false;
+	bool in_double_quote = false;
+	for (idx_t i = open_pos; i < sql.size(); i++) {
+		char c = sql[i];
+		if (in_single_quote) {
+			if (c == '\'' && i + 1 < sql.size() && sql[i + 1] == '\'') {
+				i++;
+			} else if (c == '\'') {
+				in_single_quote = false;
+			}
+			continue;
+		}
+		if (in_double_quote) {
+			if (c == '"' && i + 1 < sql.size() && sql[i + 1] == '"') {
+				i++;
+			} else if (c == '"') {
+				in_double_quote = false;
+			}
+			continue;
+		}
+		if (c == '\'') {
+			in_single_quote = true;
+		} else if (c == '"') {
+			in_double_quote = true;
+		} else if (c == '(') {
+			depth++;
+		} else if (c == ')') {
+			depth--;
+			if (depth == 0) {
+				return i;
+			}
+		}
+	}
+	return string::npos;
+}
+
+static vector<string> SplitTopLevelArgs(const string &args) {
+	vector<string> result;
+	idx_t start = 0;
+	int depth = 0;
+	bool in_single_quote = false;
+	bool in_double_quote = false;
+	for (idx_t i = 0; i < args.size(); i++) {
+		char c = args[i];
+		if (in_single_quote) {
+			if (c == '\'' && i + 1 < args.size() && args[i + 1] == '\'') {
+				i++;
+			} else if (c == '\'') {
+				in_single_quote = false;
+			}
+			continue;
+		}
+		if (in_double_quote) {
+			if (c == '"' && i + 1 < args.size() && args[i + 1] == '"') {
+				i++;
+			} else if (c == '"') {
+				in_double_quote = false;
+			}
+			continue;
+		}
+		if (c == '\'') {
+			in_single_quote = true;
+		} else if (c == '"') {
+			in_double_quote = true;
+		} else if (c == '(') {
+			depth++;
+		} else if (c == ')') {
+			depth--;
+		} else if (c == ',' && depth == 0) {
+			result.push_back(Trim(args.substr(start, i - start)));
+			start = i + 1;
+		}
+	}
+	result.push_back(Trim(args.substr(start)));
+	return result;
+}
+
+static bool StartsWithFunctionCall(const string &sql, idx_t pos, const string &name, idx_t &open_pos) {
+	if (pos > 0 && IsIdentifierChar(sql[pos - 1])) {
+		return false;
+	}
+	if (sql.compare(pos, name.size(), name) != 0) {
+		return false;
+	}
+	idx_t next = pos + name.size();
+	if (next < sql.size() && IsIdentifierChar(sql[next])) {
+		return false;
+	}
+	while (next < sql.size() && std::isspace(static_cast<unsigned char>(sql[next]))) {
+		next++;
+	}
+	if (next >= sql.size() || sql[next] != '(') {
+		return false;
+	}
+	open_pos = next;
+	return true;
+}
+
+static string StripFunctionCalls(const string &sql, const string &name) {
+	string result;
+	idx_t pos = 0;
+	while (pos < sql.size()) {
+		idx_t open_pos;
+		if (StartsWithFunctionCall(sql, pos, name, open_pos)) {
+			idx_t close_pos = FindMatchingParen(sql, open_pos);
+			if (close_pos == string::npos) {
+				throw std::runtime_error("could not find closing parenthesis for " + name);
+			}
+			result += StripFunctionCalls(sql.substr(open_pos + 1, close_pos - open_pos - 1), name);
+			pos = close_pos + 1;
+			continue;
+		}
+		result.push_back(sql[pos++]);
+	}
+	return result;
+}
+
+static string RewriteAsFunctionCall(const string &name, const vector<string> &args, int sample_count) {
+	string sample_suffix = sample_count == 64 ? "" : "_m";
+	if (name == "as_noised_count") {
+		if (args.empty()) {
+			throw std::runtime_error("as_noised_count rewrite expected at least one argument");
+		}
+		std::ostringstream out;
+		out << "list_avg(as_sample" << sample_suffix << "_count(";
+		for (idx_t i = 0; i < args.size(); i++) {
+			if (i > 0) {
+				out << ", ";
+			}
+			out << args[i];
+		}
+		out << "))";
+		return out.str();
+	}
+	if (name == "as_noised_sum") {
+		if (args.size() != 2) {
+			throw std::runtime_error("as_noised_sum rewrite expected two arguments");
+		}
+		return "list_avg(as_sample" + sample_suffix + "_sum(" + args[0] + ", CAST(" + args[1] + " AS DOUBLE)))";
+	}
+	if (name == "as_noised_avg") {
+		if (args.size() != 2) {
+			throw std::runtime_error("as_noised_avg rewrite expected two arguments");
+		}
+		return "list_avg(as_sample" + sample_suffix + "_avg(" + args[0] + ", CAST(" + args[1] + " AS DOUBLE), 1.0))";
+	}
+	if (name == "as_noised_min" || name == "as_noised_max") {
+		if (args.size() != 2) {
+			throw std::runtime_error(name + " rewrite expected two arguments");
+		}
+		string sample_name = name == "as_noised_min" ? "min" : "max";
+		return "list_avg(as_sample" + sample_suffix + "_" + sample_name + "(" + args[0] + ", " + args[1] + "))";
+	}
+	throw std::runtime_error("unsupported AS aggregate rewrite: " + name);
+}
+
+static bool ContainsVariableMUnsupportedAggregate(const string &sql) {
+	return sql.find("as_min") != string::npos || sql.find("as_max") != string::npos;
+}
+
+static string RewriteAsQueryForSampleAggregation(const string &sql, int sample_count) {
+	static const vector<string> names = {"as_noised_count", "as_noised_sum", "as_noised_avg", "as_noised_min",
+	                                     "as_noised_max"};
+	string raw_hash_sql = StripFunctionCalls(sql, "priv_hash");
+	string result;
+	idx_t pos = 0;
+	while (pos < raw_hash_sql.size()) {
+		bool rewritten = false;
+		for (auto &name : names) {
+			idx_t open_pos;
+			if (!StartsWithFunctionCall(raw_hash_sql, pos, name, open_pos)) {
+				continue;
+			}
+			idx_t close_pos = FindMatchingParen(raw_hash_sql, open_pos);
+			if (close_pos == string::npos) {
+				throw std::runtime_error("could not find closing parenthesis for " + name);
+			}
+			auto args = SplitTopLevelArgs(raw_hash_sql.substr(open_pos + 1, close_pos - open_pos - 1));
+			result += RewriteAsFunctionCall(name, args, sample_count);
+			pos = close_pos + 1;
+			rewritten = true;
+			break;
+		}
+		if (!rewritten) {
+			result.push_back(raw_hash_sql[pos++]);
+		}
+	}
+	return result;
 }
 
 static int ExecuteCommand(const string &cmd) {
@@ -263,8 +477,18 @@ static double RunMedian(Connection &con, const string &sql, int hot_runs, const 
 }
 
 int RunASClickBenchBenchmark(const string &db_path, const string &queries_dir, const string &out_csv, bool micro,
-                             const std::set<int> &query_filter, int threads, const string &memory_limit) {
+                             const std::set<int> &query_filter, int threads, const string &memory_limit,
+                             const std::vector<int> &as_m_values) {
 	try {
+		if (as_m_values.empty()) {
+			throw std::runtime_error("at least one AS m value is required");
+		}
+		for (auto m : as_m_values) {
+			if (!IsValidSampleCount(m)) {
+				throw std::runtime_error("AS m values must be powers of two between 64 and 512");
+			}
+		}
+
 		char cwd[PATH_MAX];
 		if (!getcwd(cwd, sizeof(cwd))) {
 			throw std::runtime_error("Failed to get current working directory");
@@ -360,6 +584,7 @@ int RunASClickBenchBenchmark(const string &db_path, const string &queries_dir, c
 			throw std::runtime_error("query filter selected no AS ClickBench queries");
 		}
 		Log("Selected " + std::to_string(selected_entries.size()) + " AS ClickBench queries.");
+		bool sample_aggregation_sweep = as_m_values.size() > 1 || as_m_values[0] != 64;
 
 		string actual_out = out_csv;
 		if (actual_out.empty()) {
@@ -370,7 +595,7 @@ int RunASClickBenchBenchmark(const string &db_path, const string &queries_dir, c
 		if (!csv.is_open()) {
 			throw std::runtime_error("Failed to open output CSV: " + actual_out);
 		}
-		csv << "query,mode,median_ms\n";
+		csv << "query,mode,m,median_ms\n";
 
 		std::map<int, double> baseline_cache;
 		for (auto &entry : selected_entries) {
@@ -387,17 +612,34 @@ int RunASClickBenchBenchmark(const string &db_path, const string &queries_dir, c
 				baseline_cache[entry.query_number] =
 				    RunMedian(con, baseline_sql, 5, "DuckDB Q" + std::to_string(entry.query_number));
 			}
-			csv << entry.label << ",baseline," << FormatNumber(baseline_cache[entry.query_number]) << "\n";
+			csv << entry.label << ",baseline,0," << FormatNumber(baseline_cache[entry.query_number]) << "\n";
 
 			string as_sql = ReadFileToString(as_dir + "/" + entry.filename);
 			if (as_sql.empty()) {
-				csv << entry.label << ",SIMD-AS,-1\n";
+				for (auto as_m : as_m_values) {
+					csv << entry.label << ",SIMD-AS," << as_m << ",-1\n";
+				}
 			} else {
 				con.Query("SET priv_rewrite=false;");
-				double as_median = RunMedian(con, as_sql, 5, "SIMD-AS " + entry.label);
+				for (auto as_m : as_m_values) {
+					con.Query("SET dp_sass_m=" + std::to_string(as_m) + ";");
+					string query_sql = as_sql;
+					if (sample_aggregation_sweep) {
+						if (ContainsVariableMUnsupportedAggregate(as_sql)) {
+							Log("SIMD-AS " + entry.label + " m=" + std::to_string(as_m) +
+							    " skipped: sample-aggregation sweep supports COUNT/SUM/AVG only");
+							csv << entry.label << ",SIMD-AS," << as_m << ",-1\n";
+							continue;
+						}
+						query_sql = RewriteAsQueryForSampleAggregation(as_sql, as_m);
+					}
+					double as_median =
+					    RunMedian(con, query_sql, 5, "SIMD-AS " + entry.label + " m=" + std::to_string(as_m));
+					csv << entry.label << ",SIMD-AS," << as_m << "," << FormatNumber(as_median) << "\n";
+				}
 				con.Query("SET priv_rewrite=true;");
-				csv << entry.label << ",SIMD-AS," << FormatNumber(as_median) << "\n";
 			}
+			csv.flush();
 		}
 
 		csv.close();
@@ -419,6 +661,7 @@ static void PrintUsageMain() {
 	          << "  --queries <dir>   Directory containing create.sql, load.sql, queries.sql\n"
 	          << "  --out <csv>       Output CSV path\n"
 	          << "  --query-list <csv>  1-based ClickBench query ids to run\n"
+	          << "  --as-ms <csv>     AS sample counts to run, e.g. 64,512 (default 64)\n"
 	          << "  --threads=N       DuckDB thread count (default 8)\n"
 	          << "  --memory-limit <limit>  DuckDB memory limit, e.g. 16GB\n";
 }
@@ -430,6 +673,7 @@ int main(int argc, char **argv) {
 	std::string out_csv;
 	std::string memory_limit;
 	std::set<int> query_filter;
+	std::vector<int> as_m_values = {64};
 	int threads = 8;
 
 	for (int i = 1; i < argc; i++) {
@@ -447,6 +691,10 @@ int main(int argc, char **argv) {
 			out_csv = argv[++i];
 		} else if (arg == "--query-list" && i + 1 < argc) {
 			query_filter = duckdb::ParseIntSetCSV(argv[++i]);
+		} else if (arg == "--as-ms" && i + 1 < argc) {
+			as_m_values = duckdb::ParseIntListCSV(argv[++i]);
+		} else if (arg.rfind("--as-ms=", 0) == 0) {
+			as_m_values = duckdb::ParseIntListCSV(arg.substr(8));
 		} else if (arg == "--memory-limit" && i + 1 < argc) {
 			memory_limit = argv[++i];
 		} else if (arg.rfind("--threads=", 0) == 0) {
@@ -458,5 +706,6 @@ int main(int argc, char **argv) {
 		}
 	}
 
-	return duckdb::RunASClickBenchBenchmark(db_path, queries_dir, out_csv, micro, query_filter, threads, memory_limit);
+	return duckdb::RunASClickBenchBenchmark(db_path, queries_dir, out_csv, micro, query_filter, threads, memory_limit,
+	                                        as_m_values);
 }

@@ -108,4 +108,40 @@ FROM dp_sass_stability_query($$SELECT COUNT(*) AS c FROM users$$);
 1
 
 statement ok
+SET dp_sass_m = 128;
+
+query II
+SELECT lane_count, valid_count
+FROM dp_sass_stability_query($$SELECT COUNT(*) AS c FROM users$$);
+----
+128	128
+
+statement ok
+SET dp_sass_m = 64;
+
+statement ok
+SET dp_sass_avg_lower_bound = NULL;
+
+statement ok
+SET dp_sass_avg_upper_bound = NULL;
+
+statement ok
+SET dp_avg_lower_bounds = '0';
+
+statement ok
+SET dp_avg_upper_bounds = '200';
+
+query TI
+SELECT aggregate_name, lane_count
+FROM dp_sass_stability_query($$SELECT AVG(amount) AS a FROM events$$);
+----
+a	64
+
+statement ok
+SET dp_avg_lower_bounds = NULL;
+
+statement ok
+SET dp_avg_upper_bounds = NULL;
+
+statement ok
 PRAGMA clear_privacy_metadata;

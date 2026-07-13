@@ -34,6 +34,8 @@ void RegisterPacMinCountersFunctions(ExtensionLoader &loader);
 void RegisterPacMaxCountersFunctions(ExtensionLoader &loader);
 void RegisterDpSampleMinFunctions(ExtensionLoader &loader);
 void RegisterDpSampleMaxFunctions(ExtensionLoader &loader);
+void RegisterDpSampleMMinFunctions(ExtensionLoader &loader);
+void RegisterDpSampleMMaxFunctions(ExtensionLoader &loader);
 void RegisterPacNoisedClipMinFunctions(ExtensionLoader &loader);
 void RegisterPacNoisedClipMaxFunctions(ExtensionLoader &loader);
 void RegisterPacClipMinFunctions(ExtensionLoader &loader);

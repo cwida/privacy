@@ -400,6 +400,188 @@ static unique_ptr<FunctionData> DpSampleMinMaxBind(ClientContext &ctx, Aggregate
 }
 
 // ============================================================================
+// Variable-m SASS MIN/MAX counters: Returns m sample values as LIST<DOUBLE>
+// ============================================================================
+template <typename T, bool IS_MAX>
+struct DpSampleMMinMaxState {
+	T *values;
+	bool *valid;
+};
+
+template <typename T, bool IS_MAX>
+static idx_t DpSampleMMinMaxStateSize(const AggregateFunction &) {
+	return sizeof(DpSampleMMinMaxState<T, IS_MAX>);
+}
+
+template <typename T, bool IS_MAX>
+static void DpSampleMMinMaxInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
+	memset(state_ptr, 0, sizeof(DpSampleMMinMaxState<T, IS_MAX>));
+}
+
+template <typename T, bool IS_MAX>
+static void EnsureDpSampleMMinMaxArrays(DpSampleMMinMaxState<T, IS_MAX> &state, ArenaAllocator &allocator,
+                                        int sample_count) {
+	if (!state.values) {
+		state.values = reinterpret_cast<T *>(allocator.AllocateAligned(sample_count * sizeof(T)));
+		state.valid = reinterpret_cast<bool *>(allocator.AllocateAligned(sample_count * sizeof(bool)));
+		memset(state.valid, 0, sample_count * sizeof(bool));
+	}
+}
+
+template <typename T, bool IS_MAX>
+static void DpSampleMMinMaxUpdateOne(DpSampleMMinMaxState<T, IS_MAX> &state, ArenaAllocator &allocator, uint64_t hash,
+                                     T value, int sample_count) {
+	EnsureDpSampleMMinMaxArrays(state, allocator, sample_count);
+	idx_t lane = DpSassLaneIndex(hash, sample_count);
+	if (!state.valid[lane] || PAC_IS_BETTER(value, state.values[lane])) {
+		state.values[lane] = value;
+		state.valid[lane] = true;
+	}
+}
+
+template <typename T, bool IS_MAX>
+static void DpSampleMMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr, idx_t count) {
+	auto &state = *reinterpret_cast<DpSampleMMinMaxState<T, IS_MAX> *>(state_ptr);
+	int sample_count = GetPrivSampleCount(aggr);
+	UnifiedVectorFormat hash_data, value_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, value_data);
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto values = UnifiedVectorFormat::GetData<T>(value_data);
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto v_idx = value_data.sel->get_index(i);
+		if (hash_data.validity.RowIsValid(h_idx) && value_data.validity.RowIsValid(v_idx)) {
+			DpSampleMMinMaxUpdateOne(state, aggr.allocator, hashes[h_idx], values[v_idx], sample_count);
+		}
+	}
+}
+
+template <typename T, bool IS_MAX>
+static void DpSampleMMinMaxScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
+                                         idx_t count) {
+	int sample_count = GetPrivSampleCount(aggr);
+	UnifiedVectorFormat hash_data, value_data, state_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, value_data);
+	states.ToUnifiedFormat(count, state_data);
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto values = UnifiedVectorFormat::GetData<T>(value_data);
+	auto state_ptrs = UnifiedVectorFormat::GetData<DpSampleMMinMaxState<T, IS_MAX> *>(state_data);
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto v_idx = value_data.sel->get_index(i);
+		if (hash_data.validity.RowIsValid(h_idx) && value_data.validity.RowIsValid(v_idx)) {
+			auto *state = state_ptrs[state_data.sel->get_index(i)];
+			DpSampleMMinMaxUpdateOne(*state, aggr.allocator, hashes[h_idx], values[v_idx], sample_count);
+		}
+	}
+}
+
+template <typename T, bool IS_MAX>
+static void DpSampleMMinMaxCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
+	int sample_count = GetPrivSampleCount(aggr);
+	auto src_states = FlatVector::GetData<DpSampleMMinMaxState<T, IS_MAX> *>(src);
+	auto dst_states = FlatVector::GetData<DpSampleMMinMaxState<T, IS_MAX> *>(dst);
+	for (idx_t i = 0; i < count; i++) {
+		auto *s = src_states[i];
+		if (!s->values) {
+			continue;
+		}
+		auto *d = dst_states[i];
+		EnsureDpSampleMMinMaxArrays(*d, aggr.allocator, sample_count);
+		for (int j = 0; j < sample_count; j++) {
+			if (s->valid[j] && (!d->valid[j] || PAC_IS_BETTER(s->values[j], d->values[j]))) {
+				d->values[j] = s->values[j];
+				d->valid[j] = true;
+			}
+		}
+	}
+}
+
+template <typename T, bool IS_MAX>
+static void DpSampleMMinMaxFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                    idx_t offset) {
+	int sample_count = GetPrivSampleCount(input);
+	auto state_ptrs = FlatVector::GetData<DpSampleMMinMaxState<T, IS_MAX> *>(states);
+	auto list_entries = FlatVector::GetData<list_entry_t>(result);
+	auto &child_vec = ListVector::GetEntry(result);
+
+	idx_t total_elements = (offset + count) * static_cast<idx_t>(sample_count);
+	ListVector::Reserve(result, total_elements);
+	ListVector::SetListSize(result, total_elements);
+
+	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
+	auto &child_validity = FlatVector::Validity(child_vec);
+	child_validity.SetAllValid(total_elements);
+	double scale_divisor = input.bind_data ? input.bind_data->Cast<PrivBindData>().scale_divisor : 1.0;
+
+	for (idx_t i = 0; i < count; i++) {
+		auto *state = state_ptrs[i];
+		idx_t base = (offset + i) * static_cast<idx_t>(sample_count);
+		list_entries[offset + i].offset = base;
+		list_entries[offset + i].length = sample_count;
+		for (int j = 0; j < sample_count; j++) {
+			if (state->values && state->valid[j]) {
+				child_data[base + j] = static_cast<PAC_FLOAT>(ToDouble(state->values[j]) / scale_divisor);
+			} else {
+				child_data[base + j] = 0.0;
+				child_validity.SetInvalid(base + j);
+			}
+		}
+	}
+}
+
+template <bool IS_MAX>
+static unique_ptr<FunctionData> DpSampleMMinMaxBind(ClientContext &ctx, AggregateFunction &function,
+                                                    vector<unique_ptr<Expression>> &args) {
+	int sample_lanes = GetDpSampleLanes(ctx);
+	if (sample_lanes != 1) {
+		throw InvalidInputException("as_sample_m_%s: dp_sample_lanes must be 1 when dp_sass_m > 64",
+		                            IS_MAX ? "max" : "min");
+	}
+	auto &value_type = args[1]->return_type;
+	auto physical_type = value_type.InternalType();
+	double scale_divisor = value_type.id() == LogicalTypeId::DECIMAL
+	                           ? std::pow(10.0, static_cast<double>(DecimalType::GetScale(value_type)))
+	                           : 1.0;
+
+	function.return_type = LogicalType::LIST(PacFloatLogicalType());
+	function.arguments[1] = value_type;
+
+#define BIND_DP_SAMPLE_M_TYPE(PHYS_TYPE, CPP_TYPE)                                                                     \
+	case PhysicalType::PHYS_TYPE:                                                                                      \
+		function.state_size = DpSampleMMinMaxStateSize<CPP_TYPE, IS_MAX>;                                              \
+		function.initialize = DpSampleMMinMaxInitialize<CPP_TYPE, IS_MAX>;                                             \
+		function.update = DpSampleMMinMaxScatterUpdate<CPP_TYPE, IS_MAX>;                                              \
+		function.simple_update = DpSampleMMinMaxUpdate<CPP_TYPE, IS_MAX>;                                              \
+		function.combine = DpSampleMMinMaxCombine<CPP_TYPE, IS_MAX>;                                                   \
+		function.finalize = DpSampleMMinMaxFinalize<CPP_TYPE, IS_MAX>;                                                 \
+		break
+
+	switch (physical_type) {
+		BIND_DP_SAMPLE_M_TYPE(INT8, int8_t);
+		BIND_DP_SAMPLE_M_TYPE(INT16, int16_t);
+		BIND_DP_SAMPLE_M_TYPE(INT32, int32_t);
+		BIND_DP_SAMPLE_M_TYPE(INT64, int64_t);
+		BIND_DP_SAMPLE_M_TYPE(UINT8, uint8_t);
+		BIND_DP_SAMPLE_M_TYPE(UINT16, uint16_t);
+		BIND_DP_SAMPLE_M_TYPE(UINT32, uint32_t);
+		BIND_DP_SAMPLE_M_TYPE(UINT64, uint64_t);
+		BIND_DP_SAMPLE_M_TYPE(FLOAT, float);
+		BIND_DP_SAMPLE_M_TYPE(DOUBLE, double);
+		BIND_DP_SAMPLE_M_TYPE(INT128, hugeint_t);
+		BIND_DP_SAMPLE_M_TYPE(UINT128, uhugeint_t);
+	default:
+		throw NotImplementedException("as_sample_m_%s not implemented for type %s", IS_MAX ? "max" : "min",
+		                              value_type.ToString());
+	}
+#undef BIND_DP_SAMPLE_M_TYPE
+
+	return make_uniq<PrivBindData>(ctx, 0.0, 1.0, scale_divisor, false, GetDpSampleLanes(ctx), GetDpSassM(ctx));
+}
+
+// ============================================================================
 // Registration
 // ============================================================================
 
@@ -502,6 +684,32 @@ void RegisterDpSampleMaxFunctions(ExtensionLoader &loader) {
 	CreateAggregateFunctionInfo info(set);
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Returns 64 sample-median DP counters for MAX-like values.";
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
+}
+
+void RegisterDpSampleMMinFunctions(ExtensionLoader &loader) {
+	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+	AggregateFunctionSet set("as_sample_m_min");
+	set.AddFunction(AggregateFunction("as_sample_m_min", {LogicalType::UBIGINT, LogicalType::ANY}, list_type, nullptr,
+	                                  nullptr, nullptr, nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	                                  nullptr, DpSampleMMinMaxBind<false>));
+	CreateAggregateFunctionInfo info(set);
+	FunctionDescription desc;
+	desc.description = "[INTERNAL] Returns variable-m sample-median DP counters for MIN-like values.";
+	info.descriptions.push_back(std::move(desc));
+	loader.RegisterFunction(std::move(info));
+}
+
+void RegisterDpSampleMMaxFunctions(ExtensionLoader &loader) {
+	auto list_type = LogicalType::LIST(PacFloatLogicalType());
+	AggregateFunctionSet set("as_sample_m_max");
+	set.AddFunction(AggregateFunction("as_sample_m_max", {LogicalType::UBIGINT, LogicalType::ANY}, list_type, nullptr,
+	                                  nullptr, nullptr, nullptr, nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING,
+	                                  nullptr, DpSampleMMinMaxBind<true>));
+	CreateAggregateFunctionInfo info(set);
+	FunctionDescription desc;
+	desc.description = "[INTERNAL] Returns variable-m sample-median DP counters for MAX-like values.";
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
 }

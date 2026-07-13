@@ -37,7 +37,9 @@ ALTER TABLE lineitem ADD PRIVACY_LINK (l_orderkey) REFERENCES orders(o_orderkey)
 
 ## Dataset variants
 
-The unskewed baseline is TPC-H SF30.
+The unskewed baseline is the original TPC-H SF30 database. It is not TPC-C.
+The JCC-H-style variants below are created by changing only customer ownership
+of orders in a copy of that baseline.
 
 The skewed datasets are controlled JCC-H-style variants generated from the same
 SF30 base database. The skew script copies the base database, remaps a fraction
@@ -46,7 +48,7 @@ references are valid, and then runs the benchmark.
 
 ```sql
 UPDATE orders
-SET o_custkey = 1 + (o_orderkey % <n_whales>)
+SET o_custkey = 1 + (o_orderkey % <n_hot_customers>)
 WHERE o_orderkey % 100 < <remap_percent>;
 ```
 
@@ -55,14 +57,14 @@ The controlled sweep uses this grid:
 | Parameter | Values |
 |---|---|
 | `remap_percent` | `10`, `30`, `60` |
-| `whales_per_sf` | `50`, `150`, `450` |
-| `n_whales` at SF30 | `1500`, `4500`, `13500` |
+| `hot_customers_per_sf` | `50`, `150`, `450` |
+| `n_hot_customers` at SF30 | `1500`, `4500`, `13500` |
 
-Whales are the high-contribution customers that receive the remapped orders.
-`whales_per_sf` controls how many such customers exist per scale-factor unit,
-and `n_whales = whales_per_sf * 30` at SF30. Higher `remap_percent` moves more
-orders to whales; lower `n_whales` concentrates those orders onto fewer
-customers.
+Hot customers are the high-contribution customers that receive the remapped
+orders. `hot_customers_per_sf` controls how many such customers exist per
+scale-factor unit, and `n_hot_customers = hot_customers_per_sf * 30` at SF30.
+Higher `remap_percent` moves more orders to hot customers; lower
+`n_hot_customers` concentrates those orders onto fewer customers.
 
 This changes which customers own orders. It does not change the public TPC-H
 value domains for `lineitem` columns such as `l_quantity`, `l_extendedprice`, or
@@ -85,11 +87,12 @@ The active parameter grid is:
 | `dp_sass_release` | `median`, `average` |
 | `seed_base` | `1000003` |
 
-`bound_multipliers` scale the public contribution bounds used by
-`dp_standard`, `dp_elastic`, and `dp_sass`. The `1` setting is the baseline
-bound, `0.01` and `0.1` intentionally make the bound tighter, and `10` and `100`
-make it looser. This sweep measures how sensitive each mechanism is to bound
-quality.
+`bound_multipliers` scale each mechanism's own public base bounds. For
+`dp_standard` and `dp_elastic`, these are contribution or value-clipping bounds.
+For `dp_sass`, these include its SAA output-domain bounds. The `1` setting is
+the baseline bound, `0.01` and `0.1` intentionally make the bound tighter, and
+`10` and `100` make it looser. This sweep measures how sensitive each mechanism
+is to bound quality.
 
 `dp_sass_m` is the number of SAA subsamples. `m = 64` is the default SIMD-SAA
 path. Values above 64 use the experimental variable-m path to test whether more
@@ -124,8 +127,16 @@ privately estimated from the benchmark database.
 
 `dp_count_bound` and `dp_sum_bound` are contribution bounds. The benchmark
 multiplies them by each `bound_multiplier`. The multipliers test tight and loose
-public clipping settings. They do not scale `dp_sass_*_output_bound`, and they
-do not scale the public AVG value domains.
+public clipping settings.
+
+`dp_sass_count_output_bound` and `dp_sass_sum_output_bound` are SAA
+output-domain bounds, not per-PU contribution bounds. When the config supplies
+them, the benchmark treats them as SAA's own base bounds and multiplies them by
+the same `bound_multiplier`. This keeps the comparison fair: DP-bounded is not
+forced to use an SAA output-domain bound, and SAA is not forced to derive its
+output domain from DP-bounded's contribution bound.
+
+The public AVG value domains are not scaled by `bound_multiplier`.
 
 `c_u` is the group cap: the maximum number of output groups one privacy unit may
 contribute to.
@@ -185,18 +196,31 @@ for `l_quantity`, `[0, 105000]` for `l_extendedprice`, and `[0, 0.1]` for
 `l_discount`. The lower bounds use `0` to keep the public domains simple and
 valid.
 
-SASS output bounds are also public. When a config entry supplies
-`sass_count_output_bounds` or `sass_sum_output_bounds`, the runner uses that
-value directly. If one is omitted, the runner derives a fallback from the public
-contribution bound and the public privacy-unit count:
+SASS output bounds are also public. For paper-style utility sweeps, they should
+be chosen independently from `dp_count_bound` and `dp_sum_bound`, because SAA
+needs a domain for the no-noise subsample estimator output rather than a
+per-PU contribution cap. The intended evaluation setup is:
+
+```text
+dp_count_bound             = DP/SAA contribution base bound * bound_multiplier
+dp_sum_bound               = DP/SAA contribution base bound * bound_multiplier
+dp_sass_count_output_bound = SAA count-output base bound * bound_multiplier
+dp_sass_sum_output_bound   = SAA sum-output base bound * bound_multiplier
+```
+
+When a config entry supplies `sass_count_output_bounds` or
+`sass_sum_output_bounds`, the runner applies the multiplier as shown above. If
+one is omitted, the runner derives a conservative fallback from the already
+multiplied contribution bound and the public privacy-unit count:
 
 ```text
 derived_output_bound = max(1, per_pu_bound * ceil(number_of_privacy_units))
 ```
 
-This bound is on the rescaled full-output scale. It is not the raw per-lane
-sample scale, because SASS finalizers rescale lane outputs before clamping and
-adding noise.
+This fallback bound is on the rescaled full-output scale. It is not the raw
+per-lane sample scale, because SASS finalizers rescale lane outputs before
+clamping and adding noise. The fallback is a convenience for smoke tests; for
+reported utility results, prefer explicit SAA output-domain base bounds.
 
 `dp_elastic` is the exception. It computes FLEX max-frequency statistics from
 the database during query rewriting. Those statistics are part of the elastic

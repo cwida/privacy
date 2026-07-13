@@ -451,6 +451,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "[INTERNAL] Record dp_sass aggregate-list stability for "
 	                             "dp_sass_stability_query",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	db.config.AddExtensionOption("dp_sass_noise_scale_query_mode",
+	                             "[INTERNAL] Record dp_sass aggregate noise scales for dp_sass_noise_scale_query",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	// When false, unsupported operators skip privacy compilation instead of throwing
 	db.config.AddExtensionOption(
 	    "pac_conservative_mode",
@@ -503,6 +506,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterDpSampleAvgFunctions(loader);
 	RegisterDpSampleMSumFunctions(loader);
 	RegisterDpSampleMAvgFunctions(loader);
+	RegisterDpSampleMSumIfFunctions(loader);
 	RegisterPacClipSumFunctions(loader);
 	RegisterPacNoisedClipSumFunctions(loader);
 	RegisterPacNoisedClipSumCountFunctions(loader);
@@ -511,6 +515,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacCountCountersFunctions(loader);
 	RegisterDpSampleCountFunctions(loader);
 	RegisterDpSampleMCountFunctions(loader);
+	RegisterDpSampleMCountDistinctFunctions(loader);
+	RegisterDpSampleMCountDistinctValuesFunctions(loader);
+	RegisterDpSampleMCountIfFunctions(loader);
 	RegisterPacClipCountFunctions(loader);
 	RegisterPacNoisedClipCountFunctions(loader);
 	// Register as_min/as_max aggregate functions
@@ -521,6 +528,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacMaxCountersFunctions(loader);
 	RegisterDpSampleMinFunctions(loader);
 	RegisterDpSampleMaxFunctions(loader);
+	RegisterDpSampleMMinFunctions(loader);
+	RegisterDpSampleMMaxFunctions(loader);
 	// Register clip synonyms for min/max
 	RegisterPacClipMinFunctions(loader);
 	RegisterPacClipMaxFunctions(loader);

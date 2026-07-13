@@ -18,7 +18,9 @@ namespace duckdb {
 // - out_csv: output CSV path (if empty, a default name benchmark/tpch_bench_results_sf{sf}.csv will be used)
 // Returns 0 on success, non-zero on error.
 int RunASTPCHBenchmark(const string &db_path = "tpch.db", const string &queries_dir = "benchmark", double sf = 10.0,
-                       const string &out_csv = "", bool run_simple_hash = false, int threads = 8);
+                       const string &out_csv = "", bool run_simple_hash = false, int threads = 8,
+                       const vector<int> &as_m_values = vector<int> {64}, bool skip_naive = false,
+                       bool skip_plot = false);
 
 } // namespace duckdb
 

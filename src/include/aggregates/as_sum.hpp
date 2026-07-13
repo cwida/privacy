@@ -49,6 +49,7 @@ void RegisterDpSampleSumFunctions(ExtensionLoader &loader);
 void RegisterDpSampleAvgFunctions(ExtensionLoader &loader);
 void RegisterDpSampleMSumFunctions(ExtensionLoader &loader);
 void RegisterDpSampleMAvgFunctions(ExtensionLoader &loader);
+void RegisterDpSampleMSumIfFunctions(ExtensionLoader &loader);
 
 // ============================================================================
 // PAC_SUM(hash_key, value)  aggregate function

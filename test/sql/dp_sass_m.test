@@ -51,6 +51,20 @@ SELECT len(as_sample_m_count(0::UBIGINT)),
 128	128	0
 
 query III
+SELECT len(as_sample_m_count_distinct(0::UBIGINT)),
+       as_sample_m_count_distinct(0::UBIGINT)[1]::INTEGER,
+       as_sample_m_count_distinct(0::UBIGINT)[2]::INTEGER;
+----
+128	1	0
+
+query III
+SELECT len(as_sample_m_count_distinct_values(0::UBIGINT, [1, 1, 2])),
+       as_sample_m_count_distinct_values(0::UBIGINT, [1, 1, 2])[1]::INTEGER,
+       as_sample_m_count_distinct_values(0::UBIGINT, [1, 1, 2])[2]::INTEGER;
+----
+128	2	0
+
+query III
 SELECT len(as_sample_m_sum(0::UBIGINT, 2.0)),
        as_sample_m_sum(0::UBIGINT, 2.0)[1]::INTEGER,
        as_sample_m_sum(0::UBIGINT, 2.0)[2]::INTEGER;
@@ -64,16 +78,65 @@ SELECT len(as_sample_m_avg(0::UBIGINT, 10.0, 2.0)),
 ----
 128	5	true
 
+query III
+SELECT len(as_sample_m_min(0::UBIGINT, 7.0::DOUBLE)),
+       as_sample_m_min(0::UBIGINT, 7.0::DOUBLE)[1]::INTEGER,
+       as_sample_m_min(0::UBIGINT, 7.0::DOUBLE)[2] IS NULL;
+----
+128	7	true
+
+query III
+SELECT len(as_sample_m_max(0::UBIGINT, 7.0::DOUBLE)),
+       as_sample_m_max(0::UBIGINT, 7.0::DOUBLE)[1]::INTEGER,
+       as_sample_m_max(0::UBIGINT, 7.0::DOUBLE)[2] IS NULL;
+----
+128	7	true
+
 query I
 SELECT dp_gupt_mean_m_noise(as_sample_m_count(0::UBIGINT), 1.0, 1, 0.0, 128.0, 0.0)::INTEGER;
 ----
 1
 
 query I
+SELECT dp_gupt_mean_noise_scale(as_sample_count(0::UBIGINT), 2.0, 1, 0.0, 128.0, 0.0)::INTEGER;
+----
+1
+
+query R
+SELECT dp_gupt_mean_m_noise_scale(as_sample_m_count(0::UBIGINT), 1.0, 1, 0.0, 128.0, 0.0);
+----
+1.0
+
+query I
 SELECT dp_smooth_median_noise(as_sample_m_sum(i::UBIGINT, 1.0), 1.0, 1e-6, 1, 0.0, 1000.0, 0.0)::INTEGER
 FROM range(128) t(i);
 ----
 128
+
+query I
+SELECT isfinite(dp_smooth_median_noise_scale(as_sample_m_sum(i::UBIGINT, 1.0), 1.0, 1e-6, 1, 0.0, 1000.0, 0.0))::INTEGER
+FROM range(128) t(i);
+----
+1
+
+query III
+SELECT len(priv_div(as_sample_m_sum(0::UBIGINT, 2.0), as_sample_m_count(0::UBIGINT))),
+       priv_div(as_sample_m_sum(0::UBIGINT, 2.0), as_sample_m_count(0::UBIGINT))[1]::INTEGER,
+       priv_div(as_sample_m_sum(0::UBIGINT, 2.0), as_sample_m_count(0::UBIGINT))[2] IS NULL;
+----
+128	2	true
+
+query II
+SELECT as_sample_m_count_if(0::UBIGINT, [true])[1]::INTEGER,
+       as_sample_m_count_if(0::UBIGINT, [false])[1]::INTEGER;
+----
+128	0
+
+query II
+SELECT as_sample_m_sum_if(0::UBIGINT, 2.0, [true])[1]::INTEGER,
+       as_sample_m_sum_if(0::UBIGINT, 2.0, [false])[1]::INTEGER;
+----
+256	0
 
 statement ok
 SET dp_sample_lanes = 2;
@@ -128,6 +191,12 @@ SET dp_sass_avg_lower_bound = 0;
 statement ok
 SET dp_sass_avg_upper_bound = 2;
 
+statement ok
+SET dp_sass_minmax_lower_bound = 0;
+
+statement ok
+SET dp_sass_minmax_upper_bound = 2;
+
 query I nosort explain_sass_m_sum
 EXPLAIN SELECT SUM(v) FROM sass_m_users;
 ----
@@ -178,6 +247,277 @@ even	64	64
 odd	64	64
 
 statement ok
+SET dp_count_bound = 2;
+
+statement ok
+SET dp_sum_bound = 3;
+
+statement ok
+CREATE TABLE sass_m_complex_events AS
+SELECT uid,
+       CASE WHEN uid % 2 = 0 THEN 'even' ELSE 'odd' END AS category,
+       marker::INTEGER AS marker,
+       (marker + 1)::DOUBLE AS amount
+FROM range(128) u(uid), range(2) m(marker);
+
+statement ok
+ALTER TABLE sass_m_complex_events ADD PRIVACY_LINK (uid) REFERENCES sass_m_users (uid);
+
+query TII
+SELECT category,
+       COUNT(*) FILTER (WHERE marker = 1)::INTEGER AS selected_count,
+       SUM(amount)::INTEGER AS sum_amount
+FROM sass_m_complex_events JOIN sass_m_users USING (uid)
+GROUP BY category
+ORDER BY category;
+----
+even	64	192
+odd	64	192
+
+statement ok
+SET dp_count_bound = 1;
+
+statement ok
+SET dp_sum_bound = 1;
+
+query I nosort explain_sass_m_pu_distinct
+EXPLAIN SELECT COUNT(DISTINCT uid) FROM sass_m_users;
+----
+as_sample_m_count
+
+query I
+SELECT COUNT(DISTINCT uid)::INTEGER FROM sass_m_users;
+----
+128
+
+statement ok
+CREATE TABLE sass_m_same_lane_users AS
+SELECT i::INTEGER AS uid, 1::INTEGER AS marker
+FROM range(20000) t(i)
+WHERE (hash(i::INTEGER) & 127) = 0
+LIMIT 2;
+
+statement ok
+ALTER TABLE sass_m_same_lane_users ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE sass_m_same_lane_users SET PU;
+
+query I nosort explain_sass_m_general_distinct
+EXPLAIN SELECT COUNT(DISTINCT marker) FROM sass_m_same_lane_users;
+----
+as_sample_m_count_distinct
+
+query I
+SELECT COUNT(DISTINCT marker)::INTEGER FROM sass_m_same_lane_users;
+----
+0
+
+statement ok
+CREATE TABLE sass_m_null_distinct AS
+SELECT i::INTEGER AS uid, NULL::INTEGER AS marker
+FROM range(128) t(i);
+
+statement ok
+ALTER TABLE sass_m_null_distinct ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE sass_m_null_distinct SET PU;
+
+query I
+SELECT COUNT(DISTINCT marker)::INTEGER FROM sass_m_null_distinct;
+----
+0
+
+statement ok
+CREATE TABLE sass_m_repeated_distinct AS
+WITH candidates AS (
+    SELECT i::INTEGER AS uid,
+           (i % 5)::INTEGER AS marker,
+           row_number() OVER (
+               PARTITION BY (hash(i::INTEGER) & 127), (i % 5)
+               ORDER BY i
+           ) AS rn
+    FROM range(200000) t(i)
+)
+SELECT uid, marker
+FROM candidates
+WHERE rn = 1;
+
+statement ok
+ALTER TABLE sass_m_repeated_distinct ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE sass_m_repeated_distinct SET PU;
+
+query I
+SELECT COUNT(DISTINCT marker)::INTEGER FROM sass_m_repeated_distinct;
+----
+5
+
+query I nosort explain_sass_m_mixed_distinct
+EXPLAIN SELECT COUNT(DISTINCT marker), COUNT(*) FROM sass_m_repeated_distinct;
+----
+as_sample_m_count_distinct_values
+
+query II
+SELECT COUNT(DISTINCT marker)::INTEGER, COUNT(*)::INTEGER FROM sass_m_repeated_distinct;
+----
+5	640
+
+query I nosort explain_sass_m_grouped_distinct
+EXPLAIN SELECT g, COUNT(DISTINCT marker)
+FROM (SELECT 'all' AS g, marker FROM sass_m_repeated_distinct) q
+GROUP BY g;
+----
+as_sample_m_count_distinct
+
+query II
+SELECT g, COUNT(DISTINCT marker)::INTEGER
+FROM (SELECT 'all' AS g, marker FROM sass_m_repeated_distinct) q
+GROUP BY g
+ORDER BY g;
+----
+all	5
+
+query I nosort explain_sass_m_grouped_mixed_distinct
+EXPLAIN SELECT g, COUNT(DISTINCT marker), COUNT(*)
+FROM (SELECT 'all' AS g, marker FROM sass_m_repeated_distinct) q
+GROUP BY g;
+----
+as_sample_m_count_distinct_values
+
+query TII
+SELECT g, COUNT(DISTINCT marker)::INTEGER, COUNT(*)::INTEGER
+FROM (SELECT 'all' AS g, marker FROM sass_m_repeated_distinct) q
+GROUP BY g
+ORDER BY g;
+----
+all	5	640
+
+statement ok
+SET dp_count_bound = 2;
+
+statement ok
+CREATE TABLE sass_m_capped_distinct AS
+WITH lane_users AS (
+    SELECT uid, lane
+    FROM (
+        SELECT i::INTEGER AS uid,
+               (hash(i::INTEGER) & 127) AS lane,
+               row_number() OVER (PARTITION BY (hash(i::INTEGER) & 127) ORDER BY i) AS rn
+        FROM range(200000) t(i)
+    ) q
+    WHERE rn = 1
+)
+SELECT uid, marker::INTEGER AS marker
+FROM lane_users, range(5) t(marker);
+
+statement ok
+ALTER TABLE sass_m_capped_distinct ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE sass_m_capped_distinct SET PU;
+
+query II
+SELECT COUNT(DISTINCT marker)::INTEGER, COUNT(*)::INTEGER FROM sass_m_capped_distinct;
+----
+2	256
+
+statement ok
+CREATE TABLE sass_m_complex_pu AS
+WITH candidates AS (
+    SELECT i::INTEGER AS uid,
+           (hash(i::INTEGER) & 127) AS lane,
+           row_number() OVER (PARTITION BY (hash(i::INTEGER) & 127) ORDER BY i) AS rn
+    FROM range(200000) t(i)
+)
+SELECT uid,
+       CASE WHEN rn = 1 THEN 'a' ELSE 'b' END AS cohort
+FROM candidates
+WHERE rn <= 2;
+
+statement ok
+ALTER TABLE sass_m_complex_pu ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE sass_m_complex_pu SET PU;
+
+statement ok
+CREATE TABLE sass_m_complex_facts AS
+SELECT uid, cohort, marker::INTEGER AS marker
+FROM sass_m_complex_pu, range(5) t(marker)
+UNION ALL
+SELECT uid, cohort, NULL::INTEGER AS marker
+FROM sass_m_complex_pu;
+
+statement ok
+ALTER TABLE sass_m_complex_facts ADD PRIVACY_LINK (uid) REFERENCES sass_m_complex_pu (uid);
+
+query TII
+SELECT cohort, COUNT(DISTINCT marker)::INTEGER, COUNT(*)::INTEGER
+FROM sass_m_complex_facts
+GROUP BY cohort
+ORDER BY cohort;
+----
+a	2	256
+b	2	256
+
+statement ok
+SET dp_count_bound = 1;
+
+statement ok
+SET dp_sum_bound = 6;
+
+statement ok
+SET dp_sass_m = 256;
+
+statement ok
+CREATE TABLE sass_m_256_users AS
+SELECT i::INTEGER AS uid
+FROM range(256) t(i);
+
+statement ok
+ALTER TABLE sass_m_256_users ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE sass_m_256_users SET PU;
+
+statement ok
+CREATE TABLE sass_m_256_events AS
+SELECT uid,
+       (uid % 4)::INTEGER AS bucket,
+       marker::INTEGER AS marker,
+       (marker + 1)::DOUBLE AS amount
+FROM range(256) u(uid), range(3) m(marker);
+
+statement ok
+ALTER TABLE sass_m_256_events ADD PRIVACY_LINK (uid) REFERENCES sass_m_256_users (uid);
+
+statement ok
+SET dp_count_bound = 3;
+
+query III
+SELECT bucket, COUNT(*)::INTEGER, SUM(amount)::INTEGER
+FROM sass_m_256_events JOIN sass_m_256_users USING (uid)
+GROUP BY bucket
+ORDER BY bucket;
+----
+0	192	384
+1	192	384
+2	192	384
+3	192	384
+
+statement ok
+SET dp_count_bound = 1;
+
+statement ok
+SET dp_sum_bound = 1;
+
+statement ok
+SET dp_sass_m = 128;
+
+statement ok
 SET dp_epsilon = 1.0;
 
 statement ok
@@ -213,10 +553,56 @@ true
 statement ok
 SET dp_sass_release = 'average';
 
+query I nosort explain_sass_m_min
+EXPLAIN SELECT MIN(v) FROM sass_m_users;
+----
+as_sample_m_min
+
+query I nosort explain_sass_m_max
+EXPLAIN SELECT MAX(v) FROM sass_m_users;
+----
+as_sample_m_max
+
+query II
+SELECT MIN(v)::INTEGER, MAX(v)::INTEGER FROM sass_m_users;
+----
+1	1
+
+query R
+SELECT round(noise_scale, 3)
+FROM dp_sass_noise_scale_query($$SELECT COUNT(*) FROM sass_m_users$$);
+----
+78.125
+
+statement ok
+SET dp_sass_noise_scale_query_mode = true;
+
+query I nosort explain_sass_noise_scale_terminal
+EXPLAIN SELECT COUNT(*) FROM sass_m_users;
+----
+dp_gupt_mean_m_record_noise_scale
+
+statement ok
+SET dp_sass_noise_scale_query_mode = false;
+
+statement ok
+SET dp_sass_m = 64;
+
+query I nosort explain_sass_default_m_min
+EXPLAIN SELECT MIN(v) FROM sass_m_users;
+----
+as_sample_min
+
+statement ok
+SET dp_sass_m = 128;
+
+statement ok
+SET dp_sass_minmax_lower_bound = NULL;
+
 statement error
 SELECT MIN(v) FROM sass_m_users;
 ----
-COUNT, SUM, and AVG
+dp_sass_minmax_lower_bound
 
 statement ok
 SET dp_sample_lanes = 2;

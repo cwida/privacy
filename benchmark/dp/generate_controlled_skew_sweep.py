@@ -20,7 +20,11 @@ def parse_int_list(text):
 
 
 def relpath(path):
-    return str(Path(path).resolve().relative_to(ROOT))
+    resolved = Path(path).resolve()
+    try:
+        return str(resolved.relative_to(ROOT))
+    except ValueError:
+        return str(resolved)
 
 
 def run(cmd, cwd=ROOT, timeout=None):
@@ -116,7 +120,7 @@ CHECKPOINT;
     run_duckdb(duckdb, db_path, sql)
 
 
-def skew_db(duckdb, base_db, dst_db, remap_percent, n_whales, threads, force):
+def skew_db(duckdb, base_db, dst_db, remap_percent, n_hot_customers, threads, force):
     if dst_db.exists() and not force:
         print(f"[skew] reusing {dst_db}", flush=True)
     else:
@@ -126,7 +130,7 @@ def skew_db(duckdb, base_db, dst_db, remap_percent, n_whales, threads, force):
         sql = f"""
 SET threads = {threads};
 UPDATE orders
-SET o_custkey = 1 + (o_orderkey % {n_whales})
+SET o_custkey = 1 + (o_orderkey % {n_hot_customers})
 WHERE o_orderkey % 100 < {remap_percent};
 CHECKPOINT;
 """
@@ -175,12 +179,12 @@ def make_config(template_config, by_query, variants, config_path, results_path, 
         "modes": ["duckdb", "dp_standard", "dp_elastic", "dp_sass"],
         "epsilons": template_config.get("epsilons", [1.0]),
         "deltas": template_config.get("deltas", [2.2222222222222222e-7]),
-		"bound_multipliers": template_config.get("bound_multipliers", [1.0]),
-		"sample_lanes": template_config.get("sample_lanes", [1]),
-		"sass_ms": template_config.get("sass_ms", [64]),
-		"sass_releases": ["median", "average"],
-		"datasets": datasets,
-	}
+        "bound_multipliers": template_config.get("bound_multipliers", [1.0]),
+        "sample_lanes": template_config.get("sample_lanes", [1]),
+        "sass_ms": template_config.get("sass_ms", [64]),
+        "sass_releases": ["median", "average"],
+        "datasets": datasets,
+    }
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(config, indent=2) + "\n")
 
@@ -191,8 +195,8 @@ def write_metadata(path, rows):
         "db",
         "sf",
         "remap_percent",
-        "whales_per_sf",
-        "n_whales",
+        "hot_customers_per_sf",
+        "n_hot_customers",
         "order_rows",
         "distinct_order_customers",
         "max_orders_per_customer",
@@ -238,7 +242,7 @@ def sequential_config_paths(out_dir, sf, variant, runs):
     return prefix.with_suffix(".json"), Path(str(prefix) + "_results.csv")
 
 
-def run_sequential(args, duckdb, runner, base_db, template_config, by_query, remap_percents, whales_per_sf_values):
+def run_sequential(args, duckdb, runner, base_db, template_config, by_query, remap_percents, hot_customers_per_sf_values):
     out_dir = Path(args.out_dir)
     rows = []
     metadata_path = out_dir / f"controlled_skew_sf{args.sf}_metadata.csv"
@@ -251,8 +255,8 @@ def run_sequential(args, duckdb, runner, base_db, template_config, by_query, rem
         "db": relpath(base_db),
         "sf": args.sf,
         "remap_percent": 0,
-        "whales_per_sf": "",
-        "n_whales": "",
+        "hot_customers_per_sf": "",
+        "n_hot_customers": "",
     }
     baseline.update(collect_db_stats(duckdb, base_db))
     rows.append(baseline)
@@ -263,20 +267,20 @@ def run_sequential(args, duckdb, runner, base_db, template_config, by_query, rem
     append_csv(results_path, combined_results)
 
     for remap_percent in remap_percents:
-        for whales_per_sf in whales_per_sf_values:
-            n_whales = whales_per_sf * args.sf
-            variant = f"r{remap_percent}_w{whales_per_sf}"
+        for hot_customers_per_sf in hot_customers_per_sf_values:
+            n_hot_customers = hot_customers_per_sf * args.sf
+            variant = f"r{remap_percent}_h{hot_customers_per_sf}"
             db_path = out_dir / f"controlled_skew_sf{args.sf}_{variant}.db"
             row = {
                 "variant": variant,
                 "db": relpath(db_path),
                 "sf": args.sf,
                 "remap_percent": remap_percent,
-                "whales_per_sf": whales_per_sf,
-                "n_whales": n_whales,
+                "hot_customers_per_sf": hot_customers_per_sf,
+                "n_hot_customers": n_hot_customers,
             }
             try:
-                skew_db(duckdb, base_db, db_path, remap_percent, n_whales, args.generate_threads, args.force)
+                skew_db(duckdb, base_db, db_path, remap_percent, n_hot_customers, args.generate_threads, args.force)
                 row.update(collect_db_stats(duckdb, db_path))
                 rows.append(row)
                 write_metadata(metadata_path, rows)
@@ -302,7 +306,7 @@ def main():
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR))
     parser.add_argument("--sf", type=int, default=30)
     parser.add_argument("--remap-percents", default="10,30,60")
-    parser.add_argument("--whales-per-sf", default="50,150,450")
+    parser.add_argument("--hot-customers-per-sf", default="50,150,450")
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--smoke-runs", type=int, default=1)
     parser.add_argument("--threads", type=int, default=4)
@@ -324,10 +328,11 @@ def main():
         raise FileNotFoundError(runner)
 
     remap_percents = parse_int_list(args.remap_percents)
-    whales_per_sf_values = parse_int_list(args.whales_per_sf)
+    hot_customers_per_sf_values = parse_int_list(args.hot_customers_per_sf)
     template_config, by_query = load_template_entries(template)
     if args.run_sequential:
-        run_sequential(args, duckdb, runner, base_db, template_config, by_query, remap_percents, whales_per_sf_values)
+        run_sequential(args, duckdb, runner, base_db, template_config, by_query, remap_percents,
+                       hot_customers_per_sf_values)
         return 0
 
     rows = []
@@ -336,26 +341,26 @@ def main():
         "db": relpath(base_db),
         "sf": args.sf,
         "remap_percent": 0,
-        "whales_per_sf": "",
-        "n_whales": "",
+        "hot_customers_per_sf": "",
+        "n_hot_customers": "",
     }
     baseline.update(collect_db_stats(duckdb, base_db))
     rows.append(baseline)
 
     skew_variants = []
     for remap_percent in remap_percents:
-        for whales_per_sf in whales_per_sf_values:
-            n_whales = whales_per_sf * args.sf
-            variant = f"r{remap_percent}_w{whales_per_sf}"
+        for hot_customers_per_sf in hot_customers_per_sf_values:
+            n_hot_customers = hot_customers_per_sf * args.sf
+            variant = f"r{remap_percent}_h{hot_customers_per_sf}"
             db_path = out_dir / f"controlled_skew_sf{args.sf}_{variant}.db"
-            skew_db(duckdb, base_db, db_path, remap_percent, n_whales, args.generate_threads, args.force)
+            skew_db(duckdb, base_db, db_path, remap_percent, n_hot_customers, args.generate_threads, args.force)
             row = {
                 "variant": variant,
                 "db": relpath(db_path),
                 "sf": args.sf,
                 "remap_percent": remap_percent,
-                "whales_per_sf": whales_per_sf,
-                "n_whales": n_whales,
+                "hot_customers_per_sf": hot_customers_per_sf,
+                "n_hot_customers": n_hot_customers,
             }
             row.update(collect_db_stats(duckdb, db_path))
             rows.append(row)
@@ -368,7 +373,7 @@ def main():
     full_results = out_dir / f"controlled_skew_sf{args.sf}_allmodes_{args.runs}run_results.csv"
     make_config(template_config, by_query, rows, full_config, full_results, args.runs, args.threads, QUERY_ORDER)
 
-    current_variant = next((row for row in rows if row["variant"] == "r30_w150"), skew_variants[0] if skew_variants else rows[0])
+    current_variant = next((row for row in rows if row["variant"] == "r30_h150"), skew_variants[0] if skew_variants else rows[0])
     smoke_config = out_dir / f"controlled_skew_sf{args.sf}_smoke_{args.smoke_query}.json"
     smoke_results = out_dir / f"controlled_skew_sf{args.sf}_smoke_{args.smoke_query}_results.csv"
     make_config(template_config, by_query, [current_variant], smoke_config, smoke_results, args.smoke_runs, args.threads,
