@@ -581,52 +581,120 @@ static string NormalizeSassOutputBounds(string mode) {
 	return mode;
 }
 
-static vector<idx_t> ExtractAggregateResultIndexes(const string &query) {
-	vector<idx_t> indexes;
+struct SassOracleOutputBounds {
+	double count_abs = 0.0;
+	double sum_abs = 0.0;
+	double avg_lower = 0.0;
+	double avg_upper = 0.0;
+	double minmax_lower = 0.0;
+	double minmax_upper = 0.0;
+	bool has_count = false;
+	bool has_sum = false;
+	bool has_avg = false;
+	bool has_minmax = false;
+};
+
+struct AggregateResultIndex {
+	idx_t index;
+	string kind;
+};
+
+static vector<AggregateResultIndex> ExtractAggregateResultIndexes(const string &query) {
+	vector<AggregateResultIndex> indexes;
 	vector<string> select_items = SplitTopLevelComma(ExtractSelectClause(query));
 	for (idx_t i = 0; i < select_items.size(); i++) {
 		string alias;
 		string expr = ToLowerAscii(StripSelectAlias(select_items[i], alias));
-		if (expr.find("count(") != string::npos || expr.find("sum(") != string::npos ||
-		    expr.find("avg(") != string::npos || expr.find("min(") != string::npos ||
-		    expr.find("max(") != string::npos) {
-			indexes.push_back(i);
+		if (expr.find("count(") != string::npos) {
+			indexes.push_back({i, "count"});
+		} else if (expr.find("sum(") != string::npos) {
+			indexes.push_back({i, "sum"});
+		} else if (expr.find("avg(") != string::npos) {
+			indexes.push_back({i, "avg"});
+		} else if (expr.find("min(") != string::npos || expr.find("max(") != string::npos) {
+			indexes.push_back({i, "minmax"});
 		}
 	}
 	return indexes;
 }
 
-static double InferOracleOutputBound(Connection &con, const string &query) {
-	vector<idx_t> aggregate_indexes = ExtractAggregateResultIndexes(query);
+static void WidenDegenerateDomain(double &lower, double &upper) {
+	if (!std::isfinite(lower) || !std::isfinite(upper)) {
+		lower = -1.0;
+		upper = 1.0;
+		return;
+	}
+	if (lower < upper) {
+		return;
+	}
+	double center = lower;
+	double pad = std::max(1.0, std::abs(center) * 0.01);
+	lower = center - pad;
+	upper = center + pad;
+}
+
+static SassOracleOutputBounds InferOracleOutputBounds(Connection &con, const string &query) {
+	SassOracleOutputBounds bounds;
+	vector<AggregateResultIndex> aggregate_indexes = ExtractAggregateResultIndexes(query);
 	if (aggregate_indexes.empty()) {
-		return 0.0;
+		return bounds;
 	}
 	auto result = con.Query(query);
 	if (!result || result->HasError()) {
-		return 0.0;
+		return bounds;
 	}
-	double max_abs_value = 0.0;
 	while (auto chunk = result->Fetch()) {
 		for (idx_t row = 0; row < chunk->size(); row++) {
-			for (auto col : aggregate_indexes) {
-				if (col >= result->ColumnCount()) {
+			for (auto &aggregate : aggregate_indexes) {
+				if (aggregate.index >= result->ColumnCount()) {
 					continue;
 				}
-				auto value = chunk->GetValue(col, row);
+				auto value = chunk->GetValue(aggregate.index, row);
 				if (value.IsNull()) {
 					continue;
 				}
 				try {
 					double numeric = value.DefaultCastAs(LogicalType::DOUBLE).GetValue<double>();
-					if (std::isfinite(numeric)) {
-						max_abs_value = std::max(max_abs_value, std::abs(numeric));
+					if (!std::isfinite(numeric)) {
+						continue;
+					}
+					if (aggregate.kind == "count") {
+						bounds.count_abs = std::max(bounds.count_abs, std::abs(numeric));
+						bounds.has_count = true;
+					} else if (aggregate.kind == "sum") {
+						bounds.sum_abs = std::max(bounds.sum_abs, std::abs(numeric));
+						bounds.has_sum = true;
+					} else if (aggregate.kind == "avg") {
+						if (!bounds.has_avg) {
+							bounds.avg_lower = numeric;
+							bounds.avg_upper = numeric;
+							bounds.has_avg = true;
+						} else {
+							bounds.avg_lower = std::min(bounds.avg_lower, numeric);
+							bounds.avg_upper = std::max(bounds.avg_upper, numeric);
+						}
+					} else if (aggregate.kind == "minmax") {
+						if (!bounds.has_minmax) {
+							bounds.minmax_lower = numeric;
+							bounds.minmax_upper = numeric;
+							bounds.has_minmax = true;
+						} else {
+							bounds.minmax_lower = std::min(bounds.minmax_lower, numeric);
+							bounds.minmax_upper = std::max(bounds.minmax_upper, numeric);
+						}
 					}
 				} catch (...) {
 				}
 			}
 		}
 	}
-	return max_abs_value;
+	if (bounds.has_avg) {
+		WidenDegenerateDomain(bounds.avg_lower, bounds.avg_upper);
+	}
+	if (bounds.has_minmax) {
+		WidenDegenerateDomain(bounds.minmax_lower, bounds.minmax_upper);
+	}
+	return bounds;
 }
 
 static std::set<int> ParseIntSetCSV(const string &list) {
@@ -1311,7 +1379,7 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 		vector<double> perfect_bounds(queries.size(), 0.0);
 		vector<double> perfect_count_bounds(queries.size(), 0.0);
 		vector<double> perfect_group_bounds(queries.size(), 1.0);
-		vector<double> oracle_output_bounds(queries.size(), 0.0);
+		vector<SassOracleOutputBounds> oracle_output_bounds(queries.size());
 		vector<double> sum_bound_times_ms(queries.size(), 0.0);
 		vector<double> count_bound_times_ms(queries.size(), 0.0);
 		vector<double> group_bound_times_ms(queries.size(), 0.0);
@@ -1555,11 +1623,14 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 						continue;
 					}
 					auto output_start = std::chrono::steady_clock::now();
-					oracle_output_bounds[q] = InferOracleOutputBound(con, queries[q]);
+					oracle_output_bounds[q] = InferOracleOutputBounds(con, queries[q]);
 					output_bound_times_ms[q] = MillisecondsSince(output_start);
-					if (oracle_output_bounds[q] > 0) {
-						Log(string("Q") + std::to_string(q + 1) +
-						    " oracle dp_sass output_bound=" + FormatNumber(oracle_output_bounds[q]));
+					auto &bounds = oracle_output_bounds[q];
+					if (bounds.has_count || bounds.has_sum || bounds.has_avg || bounds.has_minmax) {
+						Log(string("Q") + std::to_string(q + 1) + " oracle dp_sass output domains: count_abs=" +
+						    FormatNumber(bounds.count_abs) + " sum_abs=" + FormatNumber(bounds.sum_abs) + " avg=[" +
+						    FormatNumber(bounds.avg_lower) + "," + FormatNumber(bounds.avg_upper) + "] minmax=[" +
+						    FormatNumber(bounds.minmax_lower) + "," + FormatNumber(bounds.minmax_upper) + "]");
 					}
 				}
 			}
@@ -1827,20 +1898,39 @@ int RunClickHouseBenchmark(const string &db_path, const string &queries_dir, con
 							double public_count_bound =
 							    query_has_count_distinct[q] ? pu_bound : std::ceil(table_row_count);
 							sass_count_output_bound = std::min(sass_count_output_bound, public_count_bound);
-						} else if (sass_output_bounds == "oracle-output" && oracle_output_bounds[q] > 0.0) {
-							sass_count_output_bound = std::min(sass_count_output_bound, oracle_output_bounds[q]);
+						} else if (sass_output_bounds == "oracle-output" && oracle_output_bounds[q].has_count &&
+						           oracle_output_bounds[q].count_abs > 0.0) {
+							sass_count_output_bound =
+							    std::min(sass_count_output_bound, oracle_output_bounds[q].count_abs);
 						}
 						dp_setup.push_back("SET dp_sass_count_output_bound=" + FormatNumber(sass_count_output_bound) +
 						                   ";");
 						if (query_has_sum_avg[q]) {
 							double sass_sum_output_bound = dp_bound * pu_bound;
+							if (sass_output_bounds == "oracle-output" && oracle_output_bounds[q].has_sum &&
+							    oracle_output_bounds[q].sum_abs > 0.0) {
+								sass_sum_output_bound =
+								    std::min(sass_sum_output_bound, oracle_output_bounds[q].sum_abs);
+							}
 							dp_setup.push_back("SET dp_sass_sum_output_bound=" + FormatNumber(sass_sum_output_bound) +
 							                   ";");
-							dp_setup.push_back("SET dp_sass_avg_lower_bound=" + FormatNumber(-dp_bound) + ";");
-							dp_setup.push_back("SET dp_sass_avg_upper_bound=" + FormatNumber(dp_bound) + ";");
+							double avg_lower_bound = -dp_bound;
+							double avg_upper_bound = dp_bound;
+							if (sass_output_bounds == "oracle-output" && oracle_output_bounds[q].has_avg) {
+								avg_lower_bound = oracle_output_bounds[q].avg_lower;
+								avg_upper_bound = oracle_output_bounds[q].avg_upper;
+							}
+							dp_setup.push_back("SET dp_sass_avg_lower_bound=" + FormatNumber(avg_lower_bound) + ";");
+							dp_setup.push_back("SET dp_sass_avg_upper_bound=" + FormatNumber(avg_upper_bound) + ";");
 						}
-						dp_setup.push_back("SET dp_sass_minmax_lower_bound=-1e18;");
-						dp_setup.push_back("SET dp_sass_minmax_upper_bound=1e18;");
+						double minmax_lower_bound = -1e18;
+						double minmax_upper_bound = 1e18;
+						if (sass_output_bounds == "oracle-output" && oracle_output_bounds[q].has_minmax) {
+							minmax_lower_bound = oracle_output_bounds[q].minmax_lower;
+							minmax_upper_bound = oracle_output_bounds[q].minmax_upper;
+						}
+						dp_setup.push_back("SET dp_sass_minmax_lower_bound=" + FormatNumber(minmax_lower_bound) + ";");
+						dp_setup.push_back("SET dp_sass_minmax_upper_bound=" + FormatNumber(minmax_upper_bound) + ";");
 					}
 					if (query_has_group_by[q] && (mode_name == "dp_standard" || mode_name == "dp_sass")) {
 						dp_group_bound = std::max(

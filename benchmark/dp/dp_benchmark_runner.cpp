@@ -90,6 +90,8 @@ struct DatasetConfig {
 	vector<double> deltas;
 	vector<double> count_bounds;
 	vector<double> sum_bounds;
+	vector<double> avg_lower_bounds;
+	vector<double> avg_upper_bounds;
 	vector<double> sass_count_output_bounds;
 	vector<double> sass_sum_output_bounds;
 	vector<double> group_bounds;
@@ -111,6 +113,8 @@ struct Config {
 	vector<double> deltas;
 	vector<double> count_bounds = {1000.0};
 	vector<double> sum_bounds = {1000.0};
+	vector<double> avg_lower_bounds;
+	vector<double> avg_upper_bounds;
 	vector<double> sass_count_output_bounds;
 	vector<double> sass_sum_output_bounds;
 	vector<double> group_bounds = {1.0};
@@ -145,6 +149,8 @@ struct RunPoint {
 	double delta = 0.0;
 	double count_bound = 1000.0;
 	double sum_bound = 1000.0;
+	vector<double> avg_lower_bounds;
+	vector<double> avg_upper_bounds;
 	double sass_count_output_bound = 0.0;
 	double sass_sum_output_bound = 0.0;
 	double group_bound = 1.0;
@@ -191,6 +197,17 @@ static string FormatNumber(double v) {
 		}
 	}
 	return s;
+}
+
+static string FormatNumberList(const vector<double> &values) {
+	string out;
+	for (idx_t i = 0; i < values.size(); i++) {
+		if (i > 0) {
+			out += ",";
+		}
+		out += FormatNumber(values[i]);
+	}
+	return out;
 }
 
 static string CsvQuote(const string &s) {
@@ -630,6 +647,8 @@ static Config LoadConfig(const string &path) {
 	config.deltas = JsonNumberList(root, "deltas", "delta", config.deltas);
 	config.count_bounds = JsonNumberList(root, "count_bounds", "count_bound", config.count_bounds);
 	config.sum_bounds = JsonNumberList(root, "sum_bounds", "sum_bound", config.sum_bounds);
+	config.avg_lower_bounds = JsonNumberList(root, "avg_lower_bounds", "avg_lower_bound", config.avg_lower_bounds);
+	config.avg_upper_bounds = JsonNumberList(root, "avg_upper_bounds", "avg_upper_bound", config.avg_upper_bounds);
 	config.sass_count_output_bounds =
 	    JsonNumberList(root, "sass_count_output_bounds", "sass_count_output_bound", config.sass_count_output_bounds);
 	config.sass_sum_output_bounds =
@@ -669,6 +688,8 @@ static Config LoadConfig(const string &path) {
 		ds.deltas = JsonNumberList(entry, "deltas", "delta", config.deltas);
 		ds.count_bounds = JsonNumberList(entry, "count_bounds", "count_bound", config.count_bounds);
 		ds.sum_bounds = JsonNumberList(entry, "sum_bounds", "sum_bound", config.sum_bounds);
+		ds.avg_lower_bounds = JsonNumberList(entry, "avg_lower_bounds", "avg_lower_bound", config.avg_lower_bounds);
+		ds.avg_upper_bounds = JsonNumberList(entry, "avg_upper_bounds", "avg_upper_bound", config.avg_upper_bounds);
 		ds.sass_count_output_bounds = JsonNumberList(entry, "sass_count_output_bounds", "sass_count_output_bound",
 		                                             config.sass_count_output_bounds);
 		ds.sass_sum_output_bounds =
@@ -1378,6 +1399,8 @@ static vector<RunPoint> BuildRunPoints(const DatasetConfig &dataset) {
 													point.delta = delta;
 													point.count_bound = count_bound * multiplier;
 													point.sum_bound = sum_bound * multiplier;
+													point.avg_lower_bounds = dataset.avg_lower_bounds;
+													point.avg_upper_bounds = dataset.avg_upper_bounds;
 													point.sass_count_output_bound = sass_count_output_bound;
 													point.sass_sum_output_bound = sass_sum_output_bound;
 													point.group_bound = c_u;
@@ -1399,6 +1422,24 @@ static vector<RunPoint> BuildRunPoints(const DatasetConfig &dataset) {
 		}
 	}
 	return points;
+}
+
+static void ApplyAvgBoundSettings(Connection &con, const RunPoint &point) {
+	RunStatement(con, "SET dp_avg_lower_bounds=NULL");
+	RunStatement(con, "SET dp_avg_upper_bounds=NULL");
+	if (!point.avg_lower_bounds.empty() || !point.avg_upper_bounds.empty()) {
+		if (point.avg_lower_bounds.empty() || point.avg_upper_bounds.empty() ||
+		    point.avg_lower_bounds.size() != point.avg_upper_bounds.size()) {
+			throw std::runtime_error("avg_lower_bounds and avg_upper_bounds must have the same non-zero length");
+		}
+		RunStatement(con, "SET dp_avg_lower_bound=NULL");
+		RunStatement(con, "SET dp_avg_upper_bound=NULL");
+		RunStatement(con, "SET dp_avg_lower_bounds=" + SqlQuote(FormatNumberList(point.avg_lower_bounds)));
+		RunStatement(con, "SET dp_avg_upper_bounds=" + SqlQuote(FormatNumberList(point.avg_upper_bounds)));
+		return;
+	}
+	RunStatement(con, "SET dp_avg_lower_bound=0");
+	RunStatement(con, "SET dp_avg_upper_bound=" + FormatNumber(point.sum_bound));
 }
 
 static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta, double sass_count_output_bound,
@@ -1425,14 +1466,18 @@ static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta
 	RunStatement(con, "SET dp_sum_bound=" + FormatNumber(point.sum_bound));
 	RunStatement(con, "SET dp_count_bound=" + FormatNumber(point.count_bound));
 	RunStatement(con, "SET dp_max_groups_contributed=" + FormatNumber(point.group_bound));
+	ApplyAvgBoundSettings(con, point);
 	if (point.mode == "dp_sass") {
 		RunStatement(con, "SET dp_sample_lanes=" + std::to_string(point.sample_lanes));
 		RunStatement(con, "SET dp_sass_m=" + std::to_string(point.sass_m));
 		RunStatement(con, "SET dp_sass_release='" + point.release + "'");
 		RunStatement(con, "SET dp_sass_count_output_bound=" + FormatNumber(sass_count_output_bound));
 		RunStatement(con, "SET dp_sass_sum_output_bound=" + FormatNumber(sass_sum_output_bound));
-		RunStatement(con, "SET dp_sass_avg_lower_bound=0");
-		RunStatement(con, "SET dp_sass_avg_upper_bound=" + FormatNumber(point.sum_bound));
+		RunStatement(con, "SET dp_sass_avg_lower_bound=" +
+		                      FormatNumber(point.avg_lower_bounds.empty() ? 0.0 : point.avg_lower_bounds[0]));
+		RunStatement(con,
+		             "SET dp_sass_avg_upper_bound=" +
+		                 FormatNumber(point.avg_upper_bounds.empty() ? point.sum_bound : point.avg_upper_bounds[0]));
 		RunStatement(con, "SET dp_sass_minmax_lower_bound=0");
 		RunStatement(con, "SET dp_sass_minmax_upper_bound=" + FormatNumber(point.sum_bound));
 	}
@@ -1443,8 +1488,9 @@ static void WriteHeader(std::ofstream &csv) {
 	       "utility,recall,precision,median_error_pct,saa_estimator_utility,saa_estimator_recall,"
 	       "saa_estimator_precision,saa_estimator_median_error_pct,saa_sampling_utility,saa_sampling_recall,"
 	       "saa_sampling_precision,saa_sampling_median_error_pct,epsilon,delta,sf,dp_sum_bound,dp_count_bound,"
-	       "dp_max_groups_contributed,c_u,dp_sass_count_output_bound,dp_sass_sum_output_bound,bound_multiplier,"
-	       "dp_sample_lanes,dp_sass_m,seed,db_path,query_path\n";
+	       "dp_max_groups_contributed,c_u,dp_sass_count_output_bound,dp_sass_sum_output_bound,"
+	       "dp_avg_lower_bounds,dp_avg_upper_bounds,bound_multiplier,dp_sample_lanes,dp_sass_m,seed,db_path,"
+	       "query_path\n";
 }
 
 static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const QuerySpec &query, idx_t query_id,
@@ -1462,7 +1508,8 @@ static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const Que
 	    << FormatNumber(delta) << "," << FormatNumber(dataset.scale_factor) << "," << FormatNumber(point.sum_bound)
 	    << "," << FormatNumber(point.count_bound) << "," << FormatNumber(point.group_bound) << ","
 	    << FormatNumber(point.c_u) << "," << FormatNumber(sass_count_output_bound) << ","
-	    << FormatNumber(sass_sum_output_bound) << "," << FormatNumber(point.bound_multiplier) << ","
+	    << FormatNumber(sass_sum_output_bound) << "," << CsvQuote(FormatNumberList(point.avg_lower_bounds)) << ","
+	    << CsvQuote(FormatNumberList(point.avg_upper_bounds)) << "," << FormatNumber(point.bound_multiplier) << ","
 	    << point.sample_lanes << "," << point.sass_m << "," << seed << "," << CsvQuote(db_path) << ","
 	    << CsvQuote(query.path) << "\n";
 	csv.flush();

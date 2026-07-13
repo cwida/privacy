@@ -61,6 +61,17 @@ struct AvgInfo {
 	idx_t count_pos;         // position of the appended COUNT(*) in the rewritten aggregate
 	double midpoint;         // added back after releasing the centered SUM / COUNT ratio
 	double normalized_bound; // per-row bound after midpoint centering: (upper - lower) / 2
+	double output_lower_bound = 0.0;
+	double output_upper_bound = 0.0;
+};
+
+struct AvgDomain {
+	double lower;
+	double upper;
+};
+
+struct AvgBounds {
+	vector<AvgDomain> domains;
 };
 
 static unique_ptr<Expression> BindScalarLocal(OptimizerExtensionInput &input, const string &func_name,
@@ -100,9 +111,10 @@ static unique_ptr<Expression> ClipToBounds(OptimizerExtensionInput &input, uniqu
 // Replace each AVG(x) with SUM(x) in-place and append a COUNT(*) at the end.
 // Returns info pairing each (sum_pos, count_pos) for post-processing.
 static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, LogicalAggregate *agg,
-                                            bool use_bounded_mean, double avg_upper_bound) {
+                                            bool use_bounded_mean, const AvgBounds *avg_bounds = nullptr) {
 	vector<AvgInfo> avg_infos;
 	idx_t n_original = agg->expressions.size();
+	idx_t avg_idx = 0;
 	for (idx_t i = 0; i < n_original; i++) {
 		auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
 		if (aggr.function.name != "avg") {
@@ -114,16 +126,20 @@ static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, Logi
 		auto arg = std::move(aggr.children[0]);
 		auto filter_for_sum = std::move(aggr.filter);
 		auto filter_for_count = filter_for_sum ? filter_for_sum->Copy() : nullptr;
+		AvgDomain domain {0.0, 0.0};
+		if (avg_bounds) {
+			D_ASSERT(avg_idx < avg_bounds->domains.size());
+			domain = avg_bounds->domains[avg_idx];
+		}
 		double midpoint = 0.0;
 		double normalized_bound = 0.0;
 		if (use_bounded_mean) {
 			// Google DP's bounded mean centers bounded values around the midpoint before
-			// adding SUM noise, then shifts the noised ratio back. Until dp_standard has
-			// explicit AVG lower/upper settings, use the benchmark convention [0, dp_sum_bound].
-			double avg_lower_bound = 0.0;
-			midpoint = (avg_lower_bound + avg_upper_bound) / 2.0;
-			normalized_bound = (avg_upper_bound - avg_lower_bound) / 2.0;
-			arg = ClipToBounds(input, std::move(arg), avg_lower_bound, avg_upper_bound, LogicalType::DOUBLE);
+			// adding SUM noise, then shifts the noised ratio back.
+			D_ASSERT(avg_bounds);
+			midpoint = (domain.lower + domain.upper) / 2.0;
+			normalized_bound = (domain.upper - domain.lower) / 2.0;
+			arg = ClipToBounds(input, std::move(arg), domain.lower, domain.upper, LogicalType::DOUBLE);
 			auto midpoint_const = make_uniq<BoundConstantExpression>(Value::DOUBLE(midpoint));
 			arg = input.optimizer.BindScalarFunction("-", std::move(arg), std::move(midpoint_const));
 		}
@@ -135,7 +151,15 @@ static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, Logi
 		agg->expressions.push_back(BindPlainAggregate(input, "count_star", nullptr));
 		agg->expressions.back()->Cast<BoundAggregateExpression>().filter = std::move(filter_for_count);
 
-		avg_infos.push_back({i, count_pos, midpoint, normalized_bound});
+		AvgInfo info;
+		info.sum_pos = i;
+		info.count_pos = count_pos;
+		info.midpoint = midpoint;
+		info.normalized_bound = normalized_bound;
+		info.output_lower_bound = domain.lower;
+		info.output_upper_bound = domain.upper;
+		avg_infos.push_back(info);
+		avg_idx++;
 	}
 	if (!avg_infos.empty()) {
 		agg->ResolveOperatorTypes();
@@ -582,6 +606,27 @@ static bool AggregateContainsAvg(const LogicalAggregate *agg) {
 	return false;
 }
 
+static idx_t CountAvgAggregates(const LogicalAggregate *agg) {
+	idx_t count = 0;
+	for (auto &expr : agg->expressions) {
+		auto &a = expr->Cast<BoundAggregateExpression>();
+		if (a.function.name == "avg") {
+			count++;
+		}
+	}
+	return count;
+}
+
+static bool AggregateContainsDistinct(const LogicalAggregate *agg) {
+	for (auto &expr : agg->expressions) {
+		auto &a = expr->Cast<BoundAggregateExpression>();
+		if (a.IsDistinct()) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static const AvgInfo *FindAvgInfoForSumPos(const vector<AvgInfo> &avg_infos, idx_t aggregate_pos) {
 	for (auto &info : avg_infos) {
 		if (info.sum_pos == aggregate_pos) {
@@ -682,6 +727,110 @@ static double GetRequiredFiniteSetting(ClientContext &context, const string &set
 	return bound;
 }
 
+static bool TryGetFiniteSetting(ClientContext &context, const string &setting_name, double &bound) {
+	Value val;
+	if (!context.TryGetCurrentSetting(setting_name, val) || val.IsNull()) {
+		return false;
+	}
+	bound = val.GetValue<double>();
+	if (!std::isfinite(bound)) {
+		throw InvalidInputException("dp: " + setting_name + " must be finite (got " + std::to_string(bound) + ")");
+	}
+	return true;
+}
+
+static vector<double> ParseFiniteSettingList(ClientContext &context, const string &setting_name, bool &found) {
+	found = false;
+	Value val;
+	if (!context.TryGetCurrentSetting(setting_name, val) || val.IsNull()) {
+		return {};
+	}
+	string text = val.ToString();
+	StringUtil::Trim(text);
+	if (text.empty()) {
+		return {};
+	}
+	found = true;
+	vector<double> result;
+	auto parts = StringUtil::Split(text, ',');
+	for (auto &part : parts) {
+		StringUtil::Trim(part);
+		if (part.empty()) {
+			throw InvalidInputException("dp: " + setting_name + " contains an empty entry");
+		}
+		size_t parsed = 0;
+		double value = 0.0;
+		try {
+			value = std::stod(part, &parsed);
+		} catch (std::exception &) {
+			throw InvalidInputException("dp: could not parse " + setting_name + " entry '" + part + "' as DOUBLE");
+		}
+		if (parsed != part.size() || !std::isfinite(value)) {
+			throw InvalidInputException("dp: could not parse " + setting_name + " entry '" + part + "' as DOUBLE");
+		}
+		result.push_back(value);
+	}
+	return result;
+}
+
+static AvgBounds GetAvgBounds(ClientContext &context, const string &mechanism_name, idx_t avg_count,
+                              bool allow_sass_legacy) {
+	bool has_lower_list = false;
+	bool has_upper_list = false;
+	auto lower_list = ParseFiniteSettingList(context, "dp_avg_lower_bounds", has_lower_list);
+	auto upper_list = ParseFiniteSettingList(context, "dp_avg_upper_bounds", has_upper_list);
+	if (has_lower_list || has_upper_list) {
+		if (!has_lower_list || !has_upper_list || lower_list.size() != upper_list.size()) {
+			throw InvalidInputException("dp: dp_avg_lower_bounds and dp_avg_upper_bounds must have the same length");
+		}
+		if (lower_list.size() != avg_count) {
+			throw InvalidInputException("dp: expected " + std::to_string(avg_count) +
+			                            " AVG bounds, but dp_avg_lower_bounds has " +
+			                            std::to_string(lower_list.size()) + " entries");
+		}
+		AvgBounds bounds;
+		bounds.domains.reserve(avg_count);
+		for (idx_t i = 0; i < avg_count; i++) {
+			if (lower_list[i] >= upper_list[i]) {
+				throw InvalidInputException("dp: every AVG lower bound must be smaller than its upper bound");
+			}
+			bounds.domains.push_back({lower_list[i], upper_list[i]});
+		}
+		return bounds;
+	}
+
+	double lower = 0.0;
+	double upper = 0.0;
+	bool used_sass_legacy = false;
+	bool has_lower = TryGetFiniteSetting(context, "dp_avg_lower_bound", lower);
+	bool has_upper = TryGetFiniteSetting(context, "dp_avg_upper_bound", upper);
+	if (has_lower || has_upper) {
+		if (!has_lower || !has_upper) {
+			throw InvalidInputException("dp: dp_avg_lower_bound and dp_avg_upper_bound must be set together");
+		}
+	} else if (allow_sass_legacy) {
+		lower = GetRequiredFiniteSetting(context, "dp_sass_avg_lower_bound", mechanism_name);
+		upper = GetRequiredFiniteSetting(context, "dp_sass_avg_upper_bound", mechanism_name);
+		used_sass_legacy = true;
+	} else {
+		lower = 0.0;
+		upper = GetRequiredDpBound(context, "dp_sum_bound", mechanism_name);
+	}
+	if (lower >= upper) {
+		if (used_sass_legacy) {
+			throw InvalidInputException("dp_sass: dp_sass_avg_lower_bound must be smaller than "
+			                            "dp_sass_avg_upper_bound");
+		}
+		throw InvalidInputException(mechanism_name + ": AVG lower bound must be smaller than AVG upper bound");
+	}
+	AvgBounds bounds;
+	bounds.domains.reserve(avg_count);
+	for (idx_t i = 0; i < avg_count; i++) {
+		bounds.domains.push_back({lower, upper});
+	}
+	return bounds;
+}
+
 // Public domain [L, U] for MIN/MAX under dp_standard. Values are clipped to this range, so the
 // global sensitivity of MIN/MAX (change from removing/adding one PU) is exactly U - L.
 static std::pair<double, double> GetDpMinMaxBounds(ClientContext &context, const string &mechanism_name) {
@@ -694,14 +843,15 @@ static std::pair<double, double> GetDpMinMaxBounds(ClientContext &context, const
 	return {lower, upper};
 }
 
-// Elastic Laplace scale = sensitivity / epsilon; sensitivity = es for COUNT, es * sum_bound for SUM
-static double ElasticSensitivity(const BoundAggregateExpression &aggr, double sum_bound, double es) {
+// Elastic Laplace scale = sensitivity / epsilon; sensitivity = es for COUNT, es * value_bound for SUM.
+static double ElasticSensitivity(idx_t aggregate_pos, const BoundAggregateExpression &aggr,
+                                 const vector<AvgInfo> &avg_infos, double sum_bound, double es) {
 	const string &name = aggr.function.name;
 	if (name == "count" || name == "count_star") {
 		return es;
 	}
 	if (name == "sum") {
-		return es * sum_bound;
+		return es * StandardSumContributionBound(aggregate_pos, avg_infos, false, sum_bound, 0.0);
 	}
 	throw InternalException("dp: ElasticSensitivity received unsupported '" + name + "'");
 }
@@ -1348,11 +1498,13 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 
 	// dp_sass 'ratio' clamps the released mean back into its public output domain [clamp_lo, clamp_hi]
 	// (free DP post-processing), matching the lane_average estimator's domain. Off for the Laplace modes.
-	auto maybe_clamp = [&](unique_ptr<Expression> v) -> unique_ptr<Expression> {
+	auto maybe_clamp = [&](unique_ptr<Expression> v, const AvgInfo &info) -> unique_ptr<Expression> {
 		if (!clamp_output) {
 			return v;
 		}
-		return ClipToBounds(input, std::move(v), clamp_lo, clamp_hi, LogicalType::DOUBLE);
+		double lo = info.output_lower_bound < info.output_upper_bound ? info.output_lower_bound : clamp_lo;
+		double hi = info.output_lower_bound < info.output_upper_bound ? info.output_upper_bound : clamp_hi;
+		return ClipToBounds(input, std::move(v), lo, hi, LogicalType::DOUBLE);
 	};
 
 	// Build lookup: original-agg-position → AvgInfo
@@ -1409,7 +1561,7 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 				auto one = make_uniq<BoundConstantExpression>(Value::DOUBLE(1.0));
 				denominator = input.optimizer.BindScalarFunction("greatest", std::move(denominator), std::move(one));
 				auto ratio = input.optimizer.BindScalarFunction("/", make_sum_dbl(), std::move(denominator));
-				proj_exprs.push_back(maybe_clamp(add_midpoint(std::move(ratio))));
+				proj_exprs.push_back(maybe_clamp(add_midpoint(std::move(ratio)), info));
 			} else {
 				auto ratio = input.optimizer.BindScalarFunction("/", make_sum_dbl(), std::move(denominator));
 				auto case_expr = make_uniq<BoundCaseExpression>(LogicalType::DOUBLE);
@@ -1419,7 +1571,7 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 				                                         make_uniq<BoundConstantExpression>(Value::DOUBLE(0.0)));
 				check.then_expr = make_uniq<BoundConstantExpression>(Value(LogicalType::DOUBLE));
 				case_expr->case_checks.push_back(std::move(check));
-				case_expr->else_expr = maybe_clamp(add_midpoint(std::move(ratio)));
+				case_expr->else_expr = maybe_clamp(add_midpoint(std::move(ratio)), info);
 				proj_exprs.push_back(std::move(case_expr));
 			}
 		}
@@ -1475,6 +1627,7 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 	D_ASSERT(agg_positions.size() == n_aggs);
 	bool stability_query_mode = GetBooleanSetting(input.context, "dp_sass_stability_query_mode", false);
 	bool average_release = release_method == "average";
+	bool variable_m = GetDpSassM(input.context) > DP_SASS_DEFAULT_M;
 
 	vector<unique_ptr<Expression>> proj_exprs;
 	proj_exprs.reserve(n_groups + n_aggs);
@@ -1509,7 +1662,8 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 		// Per-kind public default used to fill empty lanes so the populated-lane count is
 		// data-independent (no NULL leak; fixed GUPT denominator).
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(empty_defaults[ai])));
-		const char *terminal = average_release ? "dp_gupt_mean_noise" : "dp_smooth_median_noise";
+		const char *terminal =
+		    average_release ? (variable_m ? "dp_gupt_mean_m_noise" : "dp_gupt_mean_noise") : "dp_smooth_median_noise";
 		unique_ptr<Expression> noised = BindScalarLocal(input, terminal, std::move(children));
 		if (output_types[ai] != LogicalType::DOUBLE) {
 			noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), output_types[ai]);
@@ -1866,14 +2020,16 @@ static void BuildSampleMedianLowerExpression(OptimizerExtensionInput &input, con
                                              const std::unordered_map<idx_t, idx_t> *index_map,
                                              const DpSassContributionBounds &bounds,
                                              vector<unique_ptr<Expression>> &lower_expressions,
-                                             vector<SampleAggregateRewrite> &rewrites) {
+                                             vector<SampleAggregateRewrite> &rewrites, bool variable_m) {
 	string name = StringUtil::Lower(aggr.function.name);
+	string sample_sum_name = variable_m ? "as_sample_m_sum" : "as_sample_sum";
+	string sample_avg_name = variable_m ? "as_sample_m_avg" : "as_sample_avg";
 	vector<unique_ptr<Expression>> children;
 	idx_t lower_value_pos = lower_expressions.size();
 	if (name == "count_star") {
 		lower_expressions.push_back(BindPlainAggregate(input, "count_star", std::move(children)));
 		rewrites.push_back(
-		    {"as_sample_sum", lower_value_pos, optional_idx(), true, 0.0, bounds.count_bound, false, 0.0});
+		    {sample_sum_name, lower_value_pos, optional_idx(), true, 0.0, bounds.count_bound, false, 0.0});
 	} else if (name == "count") {
 		if (!aggr.children.empty()) {
 			children.push_back(CopyMaybeRemapped(*aggr.children[0], index_map));
@@ -1882,12 +2038,12 @@ static void BuildSampleMedianLowerExpression(OptimizerExtensionInput &input, con
 		    BindPlainAggregate(input, "count", std::move(children),
 		                       aggr.IsDistinct() ? AggregateType::DISTINCT : AggregateType::NON_DISTINCT));
 		rewrites.push_back(
-		    {"as_sample_sum", lower_value_pos, optional_idx(), true, 0.0, bounds.count_bound, false, 0.0});
+		    {sample_sum_name, lower_value_pos, optional_idx(), true, 0.0, bounds.count_bound, false, 0.0});
 	} else if (name == "sum") {
 		children.push_back(CopyMaybeRemapped(*aggr.children[0], index_map));
 		lower_expressions.push_back(BindPlainAggregate(input, "sum", std::move(children)));
 		rewrites.push_back(
-		    {"as_sample_sum", lower_value_pos, optional_idx(), true, -bounds.sum_bound, bounds.sum_bound, false, 0.0});
+		    {sample_sum_name, lower_value_pos, optional_idx(), true, -bounds.sum_bound, bounds.sum_bound, false, 0.0});
 	} else if (name == "avg") {
 		auto sum_arg = CopyMaybeRemapped(*aggr.children[0], index_map);
 		auto count_arg = CopyMaybeRemapped(*aggr.children[0], index_map);
@@ -1900,7 +2056,7 @@ static void BuildSampleMedianLowerExpression(OptimizerExtensionInput &input, con
 		idx_t lower_count_pos = lower_expressions.size();
 		lower_expressions.push_back(BindPlainAggregate(input, "count", std::move(count_arg)));
 		lower_expressions.back()->Cast<BoundAggregateExpression>().filter = std::move(filter_for_count);
-		rewrites.push_back({"as_sample_avg", lower_value_pos, optional_idx(lower_count_pos), true, -bounds.sum_bound,
+		rewrites.push_back({sample_avg_name, lower_value_pos, optional_idx(lower_count_pos), true, -bounds.sum_bound,
 		                    bounds.sum_bound, true, bounds.count_bound});
 		return;
 	} else if (name == "min" || name == "max") {
@@ -1950,7 +2106,8 @@ static unique_ptr<Expression> BuildSampleMedianAggregateRef(OptimizerExtensionIn
 
 static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, LogicalAggregate *agg,
                                            unique_ptr<Expression> pu_hash_expr, const DpSassContributionBounds &bounds,
-                                           bool apply_distinct_support_filter, bool distinct_count_is_pu_key = false) {
+                                           bool apply_distinct_support_filter, bool distinct_count_is_pu_key = false,
+                                           bool variable_m = false) {
 	if (IsDpSampleCountDistinct(agg)) {
 		if (distinct_count_is_pu_key) {
 			RewritePuDistinctCountToSampleMedian(input, agg, std::move(pu_hash_expr));
@@ -1971,7 +2128,7 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 	rewrites.reserve(agg->expressions.size());
 	for (auto &expr : agg->expressions) {
 		auto &aggr = expr->Cast<BoundAggregateExpression>();
-		BuildSampleMedianLowerExpression(input, aggr, nullptr, bounds, lower_expressions, rewrites);
+		BuildSampleMedianLowerExpression(input, aggr, nullptr, bounds, lower_expressions, rewrites, variable_m);
 	}
 
 	auto pre_agg = InsertPuPreAggregation(input, agg, std::move(lower_expressions), std::move(pu_hash_expr));
@@ -2064,14 +2221,15 @@ static vector<double> ClipAndComputeSensitivities(OptimizerExtensionInput &input
 	double sum_bound = 0.0;
 	if (AggregateContainsSum(agg)) {
 		sum_bound = GetRequiredDpBound(input.context, "dp_sum_bound", mech);
-		ClipSumInputs(input, agg, sum_bound);
+		ClipSumInputs(input, agg, sum_bound, &avg_infos, false, 0.0);
 	}
 	double es = ComputeElasticSensitivity(input.context, chain, epsilon);
 	es *= self_join_factor;
 	vector<double> sens;
 	sens.reserve(agg->expressions.size());
-	for (auto &expr : agg->expressions) {
-		sens.push_back(ElasticSensitivity(expr->Cast<BoundAggregateExpression>(), sum_bound, es));
+	for (idx_t i = 0; i < agg->expressions.size(); i++) {
+		sens.push_back(
+		    ElasticSensitivity(i, agg->expressions[i]->Cast<BoundAggregateExpression>(), avg_infos, sum_bound, es));
 	}
 	return sens;
 }
@@ -2202,9 +2360,15 @@ static void CompileDPLaplaceQuery(const PrivacyCompatibilityResult &check, Optim
 
 	// Rewrite AVG(x) → SUM(x) + COUNT(*) before bound/clipping checks.
 	// Each AVG uses ε/2 per component so the combined cost is still ε-DP.
-	bool use_bounded_mean = mech == "dp_standard" && AggregateContainsAvg(agg);
-	double avg_upper_bound = use_bounded_mean ? GetRequiredDpBound(input.context, "dp_sum_bound", mech) : 0.0;
-	auto avg_infos = RewriteAvgAggregates(input, agg, use_bounded_mean, avg_upper_bound);
+	idx_t avg_count = CountAvgAggregates(agg);
+	AvgBounds avg_bounds;
+	const AvgBounds *avg_bounds_ptr = nullptr;
+	if (avg_count > 0) {
+		avg_bounds = GetAvgBounds(input.context, mech, avg_count, /*allow_sass_legacy=*/false);
+		avg_bounds_ptr = &avg_bounds;
+	}
+	bool use_bounded_mean = avg_count > 0;
+	auto avg_infos = RewriteAvgAggregates(input, agg, use_bounded_mean, avg_bounds_ptr);
 	idx_t n_original_aggs = agg->expressions.size() - avg_infos.size();
 	idx_t n_groups = agg->groups.size();
 
@@ -2252,11 +2416,25 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 
 	double epsilon = GetValidatedDpEpsilon(input.context, "dp_sample_median");
 	string release_method = GetDpSassReleaseMethod(input.context);
+	int sass_m = GetDpSassM(input.context);
+	bool variable_m = sass_m > DP_SASS_DEFAULT_M;
 	bool allow_self_joins = ValidateDPSelfJoins(plan, "dp_sample_median") > 1.0;
 	auto fk_chain = ExtractDPFKChain(plan, privacy_units, check, allow_self_joins);
 	auto *single_agg = CheckDPAggregates(plan, "dp_sass");
-	if (TryCompileDPSassFastCountStar(input, plan, single_agg, fk_chain, epsilon)) {
+	if (!variable_m && TryCompileDPSassFastCountStar(input, plan, single_agg, fk_chain, epsilon)) {
 		return;
+	}
+	if (variable_m) {
+		if (GetDpSampleLanes(input.context) != 1) {
+			throw InvalidInputException("dp_sass: dp_sass_m > 64 currently requires dp_sample_lanes = 1");
+		}
+		if (AggregateContainsMinMax(single_agg)) {
+			throw InvalidInputException("dp_sass: dp_sass_m > 64 currently supports only COUNT, SUM, and AVG");
+		}
+		if (AggregateContainsDistinct(single_agg)) {
+			throw InvalidInputException("dp_sass: dp_sass_m > 64 does not yet support DISTINCT aggregates");
+		}
+		PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] using experimental variable-m SAA path m=" + std::to_string(sass_m));
 	}
 
 	double delta = 0.0;
@@ -2277,6 +2455,13 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	// each with its own SAA mechanism, then release the ratio (Google-DP-style). We reuse the Laplace
 	// modes' RewriteAvgAggregates + WrapAvgRatioProjection; use_bounded_mean=false gives a plain
 	// (non-centered) sum/count ratio, so midpoint = 0 and no add-back is applied.
+	idx_t avg_count = CountAvgAggregates(agg);
+	AvgBounds avg_bounds;
+	const AvgBounds *avg_bounds_ptr = nullptr;
+	if (avg_count > 0) {
+		avg_bounds = GetAvgBounds(input.context, "dp_sass", avg_count, /*allow_sass_legacy=*/true);
+		avg_bounds_ptr = &avg_bounds;
+	}
 	vector<AvgInfo> avg_infos;
 	double ratio_avg_lower = 0.0;
 	double ratio_avg_upper = 0.0;
@@ -2284,15 +2469,11 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		// Read + validate the public AVG output domain even in ratio mode (so an inverted range is
 		// still caught), and clamp the released ratio into it below — matching the lane_average
 		// estimator's output domain (free DP post-processing).
-		ratio_avg_lower = GetRequiredFiniteSetting(input.context, "dp_sass_avg_lower_bound", "dp_sass");
-		ratio_avg_upper = GetRequiredFiniteSetting(input.context, "dp_sass_avg_upper_bound", "dp_sass");
-		if (ratio_avg_lower >= ratio_avg_upper) {
-			throw InvalidInputException("dp_sass: dp_sass_avg_lower_bound must be smaller than "
-			                            "dp_sass_avg_upper_bound");
-		}
+		ratio_avg_lower = avg_bounds.domains[0].lower;
+		ratio_avg_upper = avg_bounds.domains[0].upper;
 		PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] AVG ratio mode: decomposing AVG -> SUM + COUNT "
 		                    "(two independent SAA mechanisms), ratio clamped to the public avg domain");
-		avg_infos = RewriteAvgAggregates(input, agg, /*use_bounded_mean=*/false, 0.0);
+		avg_infos = RewriteAvgAggregates(input, agg, /*use_bounded_mean=*/false, avg_bounds_ptr);
 	}
 	std::unordered_set<idx_t> avg_components = BuildAvgComponentSet(avg_infos);
 
@@ -2367,6 +2548,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	deltas.reserve(agg->expressions.size());
 	vector<idx_t> sample_output_positions;
 	sample_output_positions.reserve(agg->expressions.size());
+	idx_t avg_output_idx = 0;
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
 		auto &aggr = agg->expressions[ai]->Cast<BoundAggregateExpression>();
 		string name = StringUtil::Lower(aggr.function.name);
@@ -2377,15 +2559,13 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 			upper_bounds.push_back(output_bound);
 			empty_defaults.push_back(0.0); // an empty subsample counts 0
 		} else if (name == "avg") {
-			double avg_lower = GetRequiredFiniteSetting(input.context, "dp_sass_avg_lower_bound", "dp_sass");
-			double avg_upper = GetRequiredFiniteSetting(input.context, "dp_sass_avg_upper_bound", "dp_sass");
-			if (avg_lower >= avg_upper) {
-				throw InvalidInputException("dp_sass: dp_sass_avg_lower_bound must be smaller than "
-				                            "dp_sass_avg_upper_bound");
-			}
+			D_ASSERT(avg_output_idx < avg_bounds.domains.size());
+			double avg_lower = avg_bounds.domains[avg_output_idx].lower;
+			double avg_upper = avg_bounds.domains[avg_output_idx].upper;
 			lower_bounds.push_back(avg_lower);
 			upper_bounds.push_back(avg_upper);
 			empty_defaults.push_back((avg_lower + avg_upper) / 2.0); // no identity for mean → neutral midpoint
+			avg_output_idx++;
 		} else if (name == "min" || name == "max") {
 			double mm_lower = GetRequiredFiniteSetting(input.context, "dp_sass_minmax_lower_bound", "dp_sass");
 			double mm_upper = GetRequiredFiniteSetting(input.context, "dp_sass_minmax_upper_bound", "dp_sass");
@@ -2412,7 +2592,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 
 	bool distinct_support_filter = apply_support_filter && IsDpSampleCountDistinct(agg);
 	RewriteAggregateToSampleMedian(input, agg, std::move(pu_hash_expr), contribution_bounds, distinct_support_filter,
-	                               distinct_count_is_pu_key);
+	                               distinct_count_is_pu_key, variable_m);
 
 	LogicalOperator *projection_anchor = agg;
 	if (distinct_support_filter) {

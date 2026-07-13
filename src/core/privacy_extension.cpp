@@ -352,6 +352,22 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "dp_minmax_upper_bound",
 	    "Public domain upper bound U for MIN/MAX under dp_standard (see dp_minmax_lower_bound).", LogicalType::DOUBLE,
 	    Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_avg_lower_bound",
+	                             "Public value-domain lower bound for AVG under DP modes. Used for bounded AVG "
+	                             "releases and as the dp_sass sample-mean output domain when set.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_avg_upper_bound",
+	                             "Public value-domain upper bound for AVG under DP modes. Used with "
+	                             "dp_avg_lower_bound.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_avg_lower_bounds",
+	                             "Comma-separated public lower bounds for AVG aggregates in query order. Overrides "
+	                             "dp_avg_lower_bound when set.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
+	db.config.AddExtensionOption("dp_avg_upper_bounds",
+	                             "Comma-separated public upper bounds for AVG aggregates in query order. Overrides "
+	                             "dp_avg_upper_bound when set.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 	db.config.AddExtensionOption("dp_sass_count_output_bound",
 	                             "Public output-domain upper bound for dp_sass COUNT/COUNT(DISTINCT) sample answers.",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
