@@ -1,9 +1,7 @@
 # DP benchmark setup
 
 This page records the benchmark setup used for the SF30 TPC-H/JCC-H DP utility
-experiments. It is an experiment audit document: use it to check whether the
-datasets, bounds, skew generation, and metrics match the setup we want to
-describe in the paper.
+experiments.
 
 The mechanism details live in [dp_mechanisms.md](dp_mechanisms.md). This page
 only describes how the experiments are configured.
@@ -12,15 +10,19 @@ only describes how the experiments are configured.
 
 The benchmark uses the built-in `tpch_stock_dp` and `jcch_stock_dp` query set in
 `benchmark/dp/dp_benchmark_runner.cpp`. It includes five customer-linked TPC-H
-queries that all DP modes can run:
+queries that all DP modes can run.
 
-| Query | Shape | Result keys |
-|---|---|---:|
-| `q01` | pricing summary with `SUM`, `AVG`, and `COUNT` | 2 |
-| `q05` | grouped revenue by nation | 1 |
-| `q06` | scalar revenue | 0 |
-| `q14` | scalar promotion revenue ratio | 0 |
-| `q19` | scalar discount revenue | 0 |
+Result keys are the leading output columns used only to match private result
+rows with the exact reference rows when computing utility. They are not privacy
+keys. All remaining output columns are treated as measured values.
+
+| Query | Shape | Result keys used for utility matching |
+|---|---|---|
+| `q01` | pricing summary with `SUM`, `AVG`, and `COUNT` | `l_returnflag`, `l_linestatus` |
+| `q05` | grouped revenue by nation | `n_name` |
+| `q06` | scalar revenue | none |
+| `q14` | scalar promotion revenue ratio | none |
+| `q19` | scalar discount revenue | none |
 
 The privacy unit is `customer`. The benchmark installs this metadata before
 running private modes:
@@ -35,8 +37,7 @@ ALTER TABLE lineitem ADD PRIVACY_LINK (l_orderkey) REFERENCES orders(o_orderkey)
 
 ## Dataset variants
 
-The unskewed baseline is TPC-H SF30. The current Graviton runs use
-`tpch_sf30_graviton.db`.
+The unskewed baseline is TPC-H SF30.
 
 The skewed datasets are controlled JCC-H-style variants generated from the same
 SF30 base database. The skew script copies the base database, remaps a fraction
@@ -57,28 +58,17 @@ The controlled sweep uses this grid:
 | `whales_per_sf` | `50`, `150`, `450` |
 | `n_whales` at SF30 | `1500`, `4500`, `13500` |
 
+Whales are the high-contribution customers that receive the remapped orders.
+`whales_per_sf` controls how many such customers exist per scale-factor unit,
+and `n_whales = whales_per_sf * 30` at SF30. Higher `remap_percent` moves more
+orders to whales; lower `n_whales` concentrates those orders onto fewer
+customers.
+
 This changes which customers own orders. It does not change the public TPC-H
 value domains for `lineitem` columns such as `l_quantity`, `l_extendedprice`, or
 `l_discount`.
 
-The skew script writes metadata to
-`benchmark/dp/skew_sweep/controlled_skew_sf30_metadata.csv`. It records the
-variant name, database path, remap percentage, whale count, total order rows,
-distinct order customers, max orders per customer, and p99 orders per customer.
-
 ## Benchmark parameters
-
-The canonical config for this sweep is:
-
-```text
-benchmark/dp/configs/tpch_jcch_sf30_all5_full_sass_m64_m128_m256_m512_3run.json
-```
-
-The controlled skew wrapper is:
-
-```text
-benchmark/dp/generate_controlled_skew_sweep.py
-```
 
 The active parameter grid is:
 
@@ -94,6 +84,12 @@ The active parameter grid is:
 | `dp_sass_m` | `64`, `128`, `256`, `512` |
 | `dp_sass_release` | `median`, `average` |
 | `seed_base` | `1000003` |
+
+`bound_multipliers` scale the public contribution bounds used by
+`dp_standard`, `dp_elastic`, and `dp_sass`. The `1` setting is the baseline
+bound, `0.01` and `0.1` intentionally make the bound tighter, and `10` and `100`
+make it looser. This sweep measures how sensitive each mechanism is to bound
+quality.
 
 `delta = 2.2222222222222222e-7` is `1 / 4,500,000`, using the public TPC-H SF30
 customer scale.
@@ -125,6 +121,9 @@ multiplies them by each `bound_multiplier`. The multipliers test tight and loose
 public clipping settings. They do not scale `dp_sass_*_output_bound`, and they
 do not scale the public AVG value domains.
 
+`c_u` is the group cap: the maximum number of output groups one privacy unit may
+contribute to.
+
 | Query | Dataset config | `dp_count_bound` | `dp_sum_bound` | `c_u` | `dp_sass_count_output_bound` | `dp_sass_sum_output_bound` |
 |---|---|---:|---:|---:|---:|---:|
 | `q01` | TPC-H/JCC-H | `1000` | `1000000` | `5` | `100000000` | `10000000000000` |
@@ -134,6 +133,22 @@ do not scale the public AVG value domains.
 | `q14` | TPC-H/JCC-H | `1` | `1000000` | `1` | unset | `100000000000` |
 | `q19` | TPC-H | `1` | `100000` | `1` | unset | `100000000` |
 | `q19` | JCC-H/skew | `1` | `1000000` | `1` | unset | `100000000` |
+
+`dp_sass_count_output_bound` is only needed when the query releases a
+COUNT-like aggregate. It is unset for SUM-only queries; the private
+partition-selection support count uses a separate Laplace mechanism and does not
+use this output-domain bound.
+
+The modes use the configured bounds differently:
+
+| Bound | `dp_standard` | `dp_elastic` | `dp_sass` |
+|---|---|---|---|
+| `dp_count_bound` | per-PU bound for COUNT and AVG count components | not used for FLEX sensitivity | per-PU bound for COUNT and AVG sample components |
+| `dp_sum_bound` | per-PU bound for SUM and AVG sum components | per-row value clip for SUM and AVG inputs | per-PU bound for SUM and AVG sample components |
+| `c_u` / `dp_max_groups_contributed` | group cap for grouped user-level sensitivity and partition selection | not used | group cap for grouped user-level sensitivity and partition selection |
+| `dp_sass_count_output_bound` | not used | not used | public output domain for released COUNT sample answers |
+| `dp_sass_sum_output_bound` | not used | not used | public output domain for released SUM sample answers |
+| `dp_avg_lower_bounds` / `dp_avg_upper_bounds` | public AVG value domains | public AVG value domains | public AVG output domains |
 
 For `q01`, the AVG aggregates use public TPC-H value-domain bounds:
 
@@ -198,6 +213,17 @@ The reported `time_ms` does include the benchmarked `con.Query(...)` call and
 fetching all result chunks. It also includes rewrite-time work triggered by that
 query. For `dp_elastic`, this means `time_ms` includes the auxiliary
 max-frequency queries used to compute FLEX sensitivity.
+
+For example, on a `lineitem -> orders -> customer` chain, `dp_elastic` computes
+one max-frequency value per FK hop during rewrite:
+
+```sql
+SELECT COALESCE(CAST(MAX(cnt) AS DOUBLE), 0.0)
+FROM (SELECT COUNT(*) AS cnt FROM lineitem GROUP BY l_orderkey);
+
+SELECT COALESCE(CAST(MAX(cnt) AS DOUBLE), 0.0)
+FROM (SELECT COUNT(*) AS cnt FROM orders GROUP BY o_custkey);
+```
 
 The `saa_estimator_*` and `saa_sampling_*` diagnostic queries run after the main
 timed query. They are not included in `time_ms`, but they do increase total
