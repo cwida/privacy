@@ -91,6 +91,12 @@ bound, `0.01` and `0.1` intentionally make the bound tighter, and `10` and `100`
 make it looser. This sweep measures how sensitive each mechanism is to bound
 quality.
 
+`dp_sass_m` is the number of SAA subsamples. `m = 64` is the default SIMD-SAA
+path. Values above 64 use the experimental variable-m path to test whether more
+subsamples improve utility. The current variable-m path requires
+`sample_lanes = 1`, supports `COUNT`, `SUM`, and `AVG`, and does not support
+`DISTINCT`, `MIN`, or `MAX`.
+
 `delta = 2.2222222222222222e-7` is `1 / 4,500,000`, using the public TPC-H SF30
 customer scale.
 
@@ -284,29 +290,6 @@ delta for smooth sensitivity. Ungrouped pure-epsilon cases do not conceptually
 need delta, but this benchmark still records the configured delta value for
 consistency across modes.
 
-## Result matrix
-
-Each result row is one `(dataset, query, mode, release, run, bound setting, m)`
-point. With the current config:
-
-| Dataset group | Rows per run | Runs | Total rows |
-|---|---:|---:|---:|
-| unskewed baseline | `255` | `3` | `765` |
-| one skew variant | `250` | `3` | `750` |
-| nine skew variants | `250 * 9` | `3` | `6750` |
-
-The expected combined result file has `7515` data rows plus one header row.
-
-The row counts come from this per-query matrix:
-
-| Dataset group | `duckdb` | `dp_standard` | `dp_elastic` | `dp_sass` |
-|---|---:|---:|---:|---:|
-| unskewed baseline | `1` | `5` | `5` | `5 * 4 * 2 = 40` |
-| skew variant | `0` | `5` | `5` | `5 * 4 * 2 = 40` |
-
-For `dp_sass`, the factors are five bound multipliers, four `m` values, and two
-release rules.
-
 ## Metrics
 
 The main utility columns compare the private output with the exact DuckDB answer
@@ -425,9 +408,9 @@ benchmark/dp/skew_sweep/controlled_skew_sf30_metadata.csv
 - The main utility columns measure error against the full-data answer. This
   includes both SAA sampling error and DP release error for `dp_sass`.
 
-## Review checklist
+## Open Questions
 
-Ask reviewers to check these points before using the results in the paper:
+Open questions are:
 
 - The customer-level privacy-unit choice matches the stated experiment.
 - The controlled skew update matches the intended synthetic skew model.
