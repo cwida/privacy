@@ -980,6 +980,12 @@ static unique_ptr<Expression> BuildLowerGroupRef(LogicalAggregate *lower_agg, id
 	return make_uniq<BoundColumnRefExpression>(lower_agg->types[column], ColumnBinding(lower_group_index, column));
 }
 
+static unique_ptr<Expression> BuildIsNullPredicate(unique_ptr<Expression> expr) {
+	auto is_null = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NULL, LogicalType::BOOLEAN);
+	is_null->children.push_back(std::move(expr));
+	return is_null;
+}
+
 // One ranking cap: `rank_type` OVER (PARTITION BY partition_cols ORDER BY hash(order_cols)) <= cap.
 // WINDOW_ROW_NUMBER caps rows per partition (compiles to a per-partition top-K of capacity `cap`,
 // so keep `cap` small); WINDOW_RANK_DENSE caps distinct order-key groups per partition. Column
@@ -988,6 +994,7 @@ struct RankCapSpec {
 	ExpressionType rank_type;
 	vector<idx_t> partition_cols;
 	vector<idx_t> order_cols;
+	vector<idx_t> keep_null_cols;
 	int64_t cap;
 };
 
@@ -1010,6 +1017,10 @@ static unique_ptr<LogicalOperator> BuildRankCapFilter(OptimizerExtensionInput &i
 		for (auto col : spec.partition_cols) {
 			rank->partitions.push_back(BuildLowerGroupRef(src, src_group_index, col));
 		}
+		for (auto col : spec.keep_null_cols) {
+			rank->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST,
+			                          BuildIsNullPredicate(BuildLowerGroupRef(src, src_group_index, col)));
+		}
 		vector<unique_ptr<Expression>> hash_children;
 		hash_children.reserve(spec.order_cols.size());
 		for (auto col : spec.order_cols) {
@@ -1027,8 +1038,14 @@ static unique_ptr<LogicalOperator> BuildRankCapFilter(OptimizerExtensionInput &i
 	for (idx_t i = 0; i < specs.size(); i++) {
 		auto rank_ref = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ColumnBinding(window_index, i));
 		auto cap_const = make_uniq<BoundConstantExpression>(Value::BIGINT(specs[i].cap));
-		keep_conditions.push_back(make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_LESSTHANOREQUALTO,
-		                                                               std::move(rank_ref), std::move(cap_const)));
+		unique_ptr<Expression> keep_condition = make_uniq<BoundComparisonExpression>(
+		    ExpressionType::COMPARE_LESSTHANOREQUALTO, std::move(rank_ref), std::move(cap_const));
+		for (auto col : specs[i].keep_null_cols) {
+			keep_condition = make_uniq<BoundConjunctionExpression>(
+			    ExpressionType::CONJUNCTION_OR, std::move(keep_condition),
+			    BuildIsNullPredicate(BuildLowerGroupRef(src, src_group_index, col)));
+		}
+		keep_conditions.push_back(std::move(keep_condition));
 	}
 	unique_ptr<Expression> keep_expr;
 	if (keep_conditions.size() == 1) {
@@ -1065,14 +1082,6 @@ static unique_ptr<Expression> ConjoinPredicates(vector<unique_ptr<Expression>> p
 	auto conjunction = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND);
 	conjunction->children = std::move(present);
 	return std::move(conjunction);
-}
-
-static unique_ptr<LogicalOperator> BuildNotNullFilterOnSourceColumn(unique_ptr<LogicalOperator> child,
-                                                                    LogicalAggregate *src, idx_t src_group_index,
-                                                                    idx_t col) {
-	auto filter = make_uniq<LogicalFilter>(BuildIsNotNullPredicate(BuildLowerGroupRef(src, src_group_index, col)));
-	filter->children.push_back(std::move(child));
-	return filter;
 }
 
 static vector<unique_ptr<Expression>> PrepareVariableMDistinctListFilters(OptimizerExtensionInput &input,
@@ -1911,10 +1920,6 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 	// This mirrors dp_standard's factored clipping rather than a single count_bound*group_bound cap.
 	idx_t pu_group_col = num_original_groups;
 	idx_t distinct_col = num_original_groups + 1;
-	if (variable_m) {
-		distinct_rows =
-		    BuildNotNullFilterOnSourceColumn(std::move(distinct_rows), inner_agg_ptr, inner_gi, distinct_col);
-	}
 	vector<RankCapSpec> caps;
 	if (num_original_groups > 0 && group_bound > 0) {
 		// L0: at most `group_bound` distinct groups per PU (dense-rank over the group columns).
@@ -1938,6 +1943,7 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 			value_cap.partition_cols.push_back(gi);
 		}
 		value_cap.order_cols = {distinct_col};
+		value_cap.keep_null_cols = {distinct_col};
 		value_cap.cap = count_bound;
 		caps.push_back(std::move(value_cap));
 	}
@@ -2004,6 +2010,8 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 		}
 		auto lane_ref = make_uniq<BoundColumnRefExpression>(lane_agg->types[num_original_groups],
 		                                                    ColumnBinding(lane_group_index, num_original_groups));
+		auto distinct_ref = make_uniq<BoundColumnRefExpression>(
+		    lane_agg->types[num_original_groups + 1], ColumnBinding(lane_group_index, num_original_groups + 1));
 		LogicalType support_type;
 		if (apply_support_filter) {
 			support_type = lane_agg->types[lane_agg->groups.size()];
@@ -2013,7 +2021,9 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 		vector<unique_ptr<Expression>> top_expressions;
 		vector<unique_ptr<Expression>> count_children;
 		count_children.push_back(std::move(lane_ref));
-		top_expressions.push_back(BindAggregateLocal(input, "as_sample_m_count_distinct", std::move(count_children)));
+		count_children.push_back(BuildIsNotNullPredicate(std::move(distinct_ref)));
+		top_expressions.push_back(
+		    BindAggregateLocal(input, "as_sample_m_count_distinct_if", std::move(count_children)));
 		if (apply_support_filter) {
 			auto support_ref = make_uniq<BoundColumnRefExpression>(support_type, ColumnBinding(lane_agg_index, 0));
 			top_expressions.push_back(BindPlainAggregate(input, "sum", std::move(support_ref)));

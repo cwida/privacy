@@ -699,6 +699,46 @@ static void DpSampleMCountDistinctFinalize(Vector &states, AggregateInputData &i
 	}
 }
 
+static void DpSampleMCountDistinctIfUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr,
+                                           idx_t count) {
+	auto &state = *reinterpret_cast<DpSampleMCountState *>(state_ptr);
+	int sample_count = GetPrivSampleCount(aggr);
+	UnifiedVectorFormat hash_data, include_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, include_data);
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto include_values = UnifiedVectorFormat::GetData<bool>(include_data);
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto include_idx = include_data.sel->get_index(i);
+		if (hash_data.validity.RowIsValid(h_idx) && include_data.validity.RowIsValid(include_idx) &&
+		    include_values[include_idx]) {
+			DpSampleMCountUpdateOne(state, aggr.allocator, hashes[h_idx], sample_count);
+		}
+	}
+}
+
+static void DpSampleMCountDistinctIfScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
+                                                  idx_t count) {
+	int sample_count = GetPrivSampleCount(aggr);
+	UnifiedVectorFormat hash_data, include_data, state_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, include_data);
+	states.ToUnifiedFormat(count, state_data);
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto include_values = UnifiedVectorFormat::GetData<bool>(include_data);
+	auto state_ptrs = UnifiedVectorFormat::GetData<DpSampleMCountState *>(state_data);
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto include_idx = include_data.sel->get_index(i);
+		if (hash_data.validity.RowIsValid(h_idx) && include_data.validity.RowIsValid(include_idx) &&
+		    include_values[include_idx]) {
+			auto *state = state_ptrs[state_data.sel->get_index(i)];
+			DpSampleMCountUpdateOne(*state, aggr.allocator, hashes[h_idx], sample_count);
+		}
+	}
+}
+
 static unique_ptr<FunctionData> DpSampleMCountBind(ClientContext &ctx, AggregateFunction &,
                                                    vector<unique_ptr<Expression>> &) {
 	int sample_lanes = GetDpSampleLanes(ctx);
@@ -739,6 +779,20 @@ void RegisterDpSampleMCountDistinctFunctions(ExtensionLoader &loader) {
 	    "[INTERNAL] Experimental variable-m SAA lane counters for pre-deduplicated COUNT(DISTINCT) values.";
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
+
+	AggregateFunctionSet if_set("as_sample_m_count_distinct_if");
+	if_set.AddFunction(AggregateFunction("as_sample_m_count_distinct_if", {LogicalType::UBIGINT, LogicalType::BOOLEAN},
+	                                     list_type, DpSampleMCountStateSize, DpSampleMCountInitialize,
+	                                     DpSampleMCountDistinctIfScatterUpdate, DpSampleMCountCombine,
+	                                     DpSampleMCountDistinctFinalize, FunctionNullHandling::SPECIAL_HANDLING,
+	                                     DpSampleMCountDistinctIfUpdate, DpSampleMCountBind));
+	CreateAggregateFunctionInfo if_info(if_set);
+	FunctionDescription if_desc;
+	if_desc.description =
+	    "[INTERNAL] Experimental variable-m SAA lane counters for conditionally pre-deduplicated COUNT(DISTINCT) "
+	    "values.";
+	if_info.descriptions.push_back(std::move(if_desc));
+	loader.RegisterFunction(std::move(if_info));
 }
 
 struct DpSampleMCountDistinctValuesState {

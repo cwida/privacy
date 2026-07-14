@@ -57,6 +57,12 @@ SELECT len(as_sample_m_count_distinct(0::UBIGINT)),
 ----
 128	1	0
 
+query II
+SELECT as_sample_m_count_distinct_if(0::UBIGINT, true)[1]::INTEGER,
+       as_sample_m_count_distinct_if(0::UBIGINT, false)[1]::INTEGER;
+----
+1	0
+
 query III
 SELECT len(as_sample_m_count_distinct_values(0::UBIGINT, [1, 1, 2])),
        as_sample_m_count_distinct_values(0::UBIGINT, [1, 1, 2])[1]::INTEGER,
@@ -306,7 +312,7 @@ ALTER TABLE sass_m_same_lane_users SET PU;
 query I nosort explain_sass_m_general_distinct
 EXPLAIN SELECT COUNT(DISTINCT marker) FROM sass_m_same_lane_users;
 ----
-as_sample_m_count_distinct
+as_sample_m_count_distinct_if
 
 query I
 SELECT COUNT(DISTINCT marker)::INTEGER FROM sass_m_same_lane_users;
@@ -328,6 +334,50 @@ query I
 SELECT COUNT(DISTINCT marker)::INTEGER FROM sass_m_null_distinct;
 ----
 0
+
+statement ok
+CREATE TABLE sass_m_null_distinct_events AS
+SELECT i::INTEGER AS uid,
+       CASE WHEN i % 2 = 0 THEN 'even' ELSE 'odd' END AS category,
+       NULL::INTEGER AS marker
+FROM range(128) t(i);
+
+statement ok
+ALTER TABLE sass_m_null_distinct_events ADD PRIVACY_LINK (uid) REFERENCES sass_m_users (uid);
+
+query TI
+SELECT category, COUNT(DISTINCT marker)::INTEGER
+FROM sass_m_null_distinct_events
+GROUP BY category
+ORDER BY category;
+----
+even	0
+odd	0
+
+statement ok
+CREATE TABLE sass_m_null_cap_distinct AS
+WITH lane_users AS (
+    SELECT uid
+    FROM (
+        SELECT i::INTEGER AS uid,
+               row_number() OVER (PARTITION BY (hash(i::INTEGER) & 127) ORDER BY i) AS rn
+        FROM range(200000) t(i)
+    ) q
+    WHERE rn = 1
+)
+SELECT uid, marker
+FROM lane_users, (VALUES (NULL::INTEGER), (892109::INTEGER)) markers(marker);
+
+statement ok
+ALTER TABLE sass_m_null_cap_distinct ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE sass_m_null_cap_distinct SET PU;
+
+query I
+SELECT COUNT(DISTINCT marker)::INTEGER FROM sass_m_null_cap_distinct;
+----
+1
 
 statement ok
 CREATE TABLE sass_m_repeated_distinct AS
@@ -370,7 +420,7 @@ EXPLAIN SELECT g, COUNT(DISTINCT marker)
 FROM (SELECT 'all' AS g, marker FROM sass_m_repeated_distinct) q
 GROUP BY g;
 ----
-as_sample_m_count_distinct
+as_sample_m_count_distinct_if
 
 query II
 SELECT g, COUNT(DISTINCT marker)::INTEGER
