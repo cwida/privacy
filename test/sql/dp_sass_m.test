@@ -77,6 +77,39 @@ SELECT len(as_sample_m_sum(0::UBIGINT, 2.0)),
 ----
 128	256	0
 
+statement ok
+SET dp_sass_rescale = false;
+
+query II
+SELECT as_sample_m_count(0::UBIGINT)[1]::INTEGER,
+       as_sample_m_sum(0::UBIGINT, 2.0)[1]::INTEGER;
+----
+1	2
+
+statement ok
+SET dp_sass_m = 64;
+
+query II
+SELECT as_sample_count(0::UBIGINT)[1]::INTEGER,
+       as_sample_sum(0::UBIGINT, 2.0)[1]::INTEGER;
+----
+1	2
+
+statement ok
+SET priv_clip_support = 1;
+
+query I
+SELECT list_sum(as_sample_clip_sum(i::UBIGINT, 2.0))::INTEGER
+FROM range(64) t(i);
+----
+126
+
+statement ok
+SET dp_sass_rescale = true;
+
+statement ok
+SET dp_sass_m = 128;
+
 query III
 SELECT len(as_sample_m_avg(0::UBIGINT, 10.0, 2.0)),
        as_sample_m_avg(0::UBIGINT, 10.0, 2.0)[1]::INTEGER,
@@ -218,10 +251,90 @@ SELECT COUNT(*)::INTEGER, SUM(v)::INTEGER FROM sass_m_users;
 ----
 128	128
 
+statement ok
+SET dp_sass_count_output_bounds = '1';
+
+statement error
+SELECT COUNT(*), COUNT(v) FROM sass_m_users;
+----
+dp_sass_count_output_bounds
+
+statement ok
+SET dp_sass_count_output_bounds = '10000,10000';
+
+query II
+SELECT COUNT(*)::INTEGER, COUNT(v)::INTEGER FROM sass_m_users;
+----
+128	128
+
+statement ok
+SET dp_sass_count_output_bounds = NULL;
+
+statement ok
+SET dp_sass_rescale = false;
+
+query II
+SELECT COUNT(*)::INTEGER, SUM(v)::INTEGER FROM sass_m_users;
+----
+1	1
+
+statement ok
+SET dp_sass_rescale = true;
+
+statement ok
+SET dp_sass_sum_output_bounds = '1';
+
+statement error
+SELECT SUM(v), SUM(v * 1000.0) FROM sass_m_users;
+----
+dp_sass_sum_output_bounds
+
+statement ok
+SET dp_sass_sum_output_bounds = '10000,10000000';
+
+statement ok
+SET dp_sum_bounds = '1';
+
+statement error
+SELECT SUM(v), SUM(v * 1000.0) FROM sass_m_users;
+----
+dp_sum_bounds
+
+statement ok
+SET dp_sum_bounds = '1,1000';
+
+query II
+SELECT SUM(v)::INTEGER, SUM(v * 1000.0)::INTEGER FROM sass_m_users;
+----
+128	128000
+
+statement ok
+SET dp_sum_bounds = NULL;
+
+statement ok
+SET dp_sass_sum_output_bounds = NULL;
+
+statement ok
+SET dp_sass_count_output_bound = NULL;
+
+query I
+SELECT SUM(v)::INTEGER FROM sass_m_users;
+----
+128
+
+statement ok
+SET dp_sass_sum_output_bound = NULL;
+
 query I
 SELECT AVG(v)::INTEGER FROM sass_m_users;
 ----
 1
+
+statement ok
+SET dp_sass_count_output_bound = 10000;
+
+statement ok
+SET dp_sass_sum_output_bound = 10000;
 
 statement ok
 SET dp_sass_avg_method = 'ratio';
@@ -230,6 +343,34 @@ query I
 SELECT AVG(v)::INTEGER FROM sass_m_users;
 ----
 1
+
+statement ok
+SET dp_sass_count_output_bounds = '10000';
+
+query II
+SELECT AVG(v)::INTEGER, COUNT(*)::INTEGER FROM sass_m_users;
+----
+1	128
+
+statement ok
+SET dp_sass_count_output_bounds = NULL;
+
+statement ok
+SET dp_sass_sum_output_bounds = '10000000';
+
+statement ok
+SET dp_sum_bounds = '1000';
+
+query II
+SELECT AVG(v)::INTEGER, SUM(v * 1000.0)::INTEGER FROM sass_m_users;
+----
+1	128000
+
+statement ok
+SET dp_sum_bounds = NULL;
+
+statement ok
+SET dp_sass_sum_output_bounds = NULL;
 
 statement ok
 SET dp_sass_avg_method = 'lane_average';
@@ -670,3 +811,38 @@ SELECT lane_count
 FROM dp_sass_stability_query($$SELECT COUNT(*) AS c FROM sass_m_users$$);
 ----
 128
+
+statement ok
+SET dp_sass_count_output_bound = NULL;
+
+statement ok
+SET dp_sass_sum_output_bound = NULL;
+
+statement ok
+SET dp_sass_count_output_lower_bounds = '1';
+
+statement ok
+SET dp_sass_count_output_upper_bounds = '2';
+
+statement ok
+SET dp_sass_sum_output_lower_bounds = '1';
+
+statement ok
+SET dp_sass_sum_output_upper_bounds = '2';
+
+query II
+SELECT COUNT(*)::INTEGER, SUM(v)::INTEGER FROM sass_m_users;
+----
+2	2
+
+statement ok
+SET dp_sass_count_output_lower_bounds = NULL;
+
+statement ok
+SET dp_sass_count_output_upper_bounds = NULL;
+
+statement ok
+SET dp_sass_sum_output_lower_bounds = NULL;
+
+statement ok
+SET dp_sass_sum_output_upper_bounds = NULL;

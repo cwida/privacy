@@ -783,10 +783,10 @@ static void PacSumAvgFinalizeCountersInternal(Vector &states, AggregateInputData
 	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
 
 	// correction factor for value scaling
-	double correction = input.bind_data ? input.bind_data->Cast<PrivBindData>().correction : 1.0;
+	auto *bind = input.bind_data ? &input.bind_data->Cast<PrivBindData>() : nullptr;
+	double correction = bind ? bind->correction : 1.0;
 	bool dp_sample = MODE == PacSumCountersFinalizeMode::DP_SAMPLE;
-	double dp_sample_rescale =
-	    dp_sample && input.bind_data ? DpSampleRescale(input.bind_data->Cast<PrivBindData>().sample_lanes) : 1.0;
+	double dp_sample_rescale = dp_sample && bind && bind->sample_rescale ? DpSampleRescale(bind->sample_lanes) : 1.0;
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -1254,7 +1254,8 @@ static void DpSampleMSumFinalize(Vector &states, AggregateInputData &input, Vect
 	ListVector::SetListSize(result, total_elements);
 
 	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
-	PAC_FLOAT rescale = static_cast<PAC_FLOAT>(sample_count);
+	bool sample_rescale = input.bind_data ? input.bind_data->Cast<PrivBindData>().sample_rescale : true;
+	PAC_FLOAT rescale = sample_rescale ? static_cast<PAC_FLOAT>(sample_count) : PAC_FLOAT(1.0);
 	for (idx_t i = 0; i < count; i++) {
 		idx_t base = (offset + i) * static_cast<idx_t>(sample_count);
 		list_entries[offset + i].offset = base;

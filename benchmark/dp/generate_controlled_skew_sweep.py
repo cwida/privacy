@@ -147,7 +147,7 @@ def load_template_entries(template_path):
         if dataset_name not in {"tpch", "jcch"}:
             continue
         for query in dataset.get("query_names", []):
-            by_query[(dataset_name, query)] = dataset
+            by_query.setdefault((dataset_name, query), []).append(dataset)
     for dataset_name in ("tpch", "jcch"):
         missing = [query for query in QUERY_ORDER if (dataset_name, query) not in by_query]
         if missing:
@@ -160,31 +160,37 @@ def make_config(template_config, by_query, variants, config_path, results_path, 
     for variant in variants:
         for query in query_names:
             dataset_name = "tpch" if variant["variant"] == "baseline" else "jcch"
-            entry = dict(by_query[(dataset_name, query)])
-            entry["name"] = dataset_name
-            entry["workload"] = "tpch_stock_dp" if dataset_name == "tpch" else "jcch_stock_dp"
-            entry["db"] = variant["db"]
-            entry["query_names"] = [query]
-            entry["modes"] = (
-                ["duckdb", "dp_standard", "dp_elastic", "dp_sass"]
-                if variant["variant"] == "baseline"
-                else ["dp_standard", "dp_elastic", "dp_sass"]
-            )
-            datasets.append(entry)
+            for template_entry in by_query[(dataset_name, query)]:
+                entry = dict(template_entry)
+                entry["name"] = dataset_name
+                entry["workload"] = "tpch_stock_dp" if dataset_name == "tpch" else "jcch_stock_dp"
+                entry["db"] = variant["db"]
+                entry["query_names"] = [query]
+                entry_modes = entry.get("modes", template_config.get("modes", ["dp_standard", "dp_elastic", "dp_sass"]))
+                if variant["variant"] != "baseline":
+                    entry_modes = [mode for mode in entry_modes if mode != "duckdb"]
+                entry["modes"] = entry_modes
+                datasets.append(entry)
 
     config = {
         "out": relpath(results_path),
         "runs": runs,
         "threads": threads,
-        "modes": ["duckdb", "dp_standard", "dp_elastic", "dp_sass"],
+        "modes": template_config.get("modes", ["dp_standard", "dp_elastic", "dp_sass"]),
         "epsilons": template_config.get("epsilons", [1.0]),
         "deltas": template_config.get("deltas", [2.2222222222222222e-7]),
         "bound_multipliers": template_config.get("bound_multipliers", [1.0]),
         "sample_lanes": template_config.get("sample_lanes", [1]),
         "sass_ms": template_config.get("sass_ms", [64]),
-        "sass_releases": ["median", "average"],
+        "sass_releases": template_config.get("sass_releases", ["median", "average"]),
         "datasets": datasets,
     }
+    if "sass_rescales" in template_config:
+        config["sass_rescales"] = template_config["sass_rescales"]
+    elif "sass_rescale" in template_config:
+        config["sass_rescale"] = template_config["sass_rescale"]
+    else:
+        config["sass_rescales"] = [True]
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(config, indent=2) + "\n")
 

@@ -1,0 +1,136 @@
+{
+  "out": "benchmark/dp/tpch_sf30_q01_beta_diagnostic_norescale_central75_m64_m512_1run_results.csv",
+  "runs": 1,
+  "threads": 4,
+  "modes": [
+    "dp_sass"
+  ],
+  "epsilons": [
+    45.0
+  ],
+  "deltas": [
+    0.0045
+  ],
+  "bound_multipliers": [
+    1.0
+  ],
+  "sample_lanes": [
+    1
+  ],
+  "sass_ms": [
+    64,
+    512
+  ],
+  "sass_rescales": [
+    false
+  ],
+  "sass_releases": [
+    "median"
+  ],
+  "datasets": [
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        25.387905,
+        27962.24,
+        0.049742155
+      ],
+      "avg_upper_bounds": [
+        25.670044,
+        38500.83,
+        0.05025479
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "456400,684376000,650133250,676019600"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "35048580,38459730000,37727880000,38291130000"
+      ],
+      "sass_count_output_lower_bound_lists": [
+        "17883"
+      ],
+      "sass_count_output_upper_bound_lists": [
+        "1374556"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        25.183262,
+        27854.576,
+        0.049158875
+      ],
+      "avg_upper_bounds": [
+        25.861692,
+        38824.8125,
+        0.050784115
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "55853,83765610,79526150,82723904"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "4431776,4864000000,4772312600,4843114500"
+      ],
+      "sass_count_output_lower_bound_lists": [
+        "2190"
+      ],
+      "sass_count_output_upper_bound_lists": [
+        "173817"
+      ]
+    }
+  ]
+}

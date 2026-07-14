@@ -326,6 +326,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "Total number of SAA subsamples for privacy_mode='dp_sass'. The default 64 uses the "
 	                             "SIMD bitmask path; larger powers of two use the experimental variable-m path.",
 	                             LogicalType::INTEGER, Value::INTEGER(DP_SASS_DEFAULT_M), ValidateDpSassMSetting);
+	db.config.AddExtensionOption("dp_sass_rescale",
+	                             "When true, dp_sass SUM/COUNT sample answers are rescaled to full-dataset-estimator "
+	                             "scale before release. When false, they remain on raw subsample-answer scale.",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	// Differential privacy budget (ε), used by the dp_standard / dp_elastic / dp_sass modes.
 	db.config.AddExtensionOption("dp_epsilon",
 	                             "Differential privacy budget ε (used by dp_standard, dp_elastic, and dp_sass)",
@@ -336,6 +340,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "Clipping bound for SUM/AVG in DP modes, required when such an aggregate is present "
 	                             "(per-PU total for dp_standard/dp_sass; per-tuple for dp_elastic)",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sum_bounds",
+	                             "Comma-separated clipping bounds for explicit SUM aggregates in query order. "
+	                             "Overrides dp_sum_bound for those SUMs when set; AVG uses AVG bounds.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 	db.config.AddExtensionOption("dp_count_bound",
 	                             "Per-PU row-count bound: max rows one privacy unit contributes to a COUNT over a join "
 	                             "(required for dp_standard/dp_sass COUNT-over-join; also bounds AVG components)",
@@ -371,9 +379,33 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("dp_sass_count_output_bound",
 	                             "Public output-domain upper bound for dp_sass COUNT/COUNT(DISTINCT) sample answers.",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sass_count_output_bounds",
+	                             "Comma-separated public output-domain upper bounds for dp_sass COUNT aggregates in "
+	                             "query order. Overrides dp_sass_count_output_bound when set.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
+	db.config.AddExtensionOption("dp_sass_count_output_lower_bounds",
+	                             "Comma-separated public output-domain lower bounds for dp_sass COUNT aggregates in "
+	                             "query order. Used with dp_sass_count_output_upper_bounds when set.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
+	db.config.AddExtensionOption("dp_sass_count_output_upper_bounds",
+	                             "Comma-separated public output-domain upper bounds for dp_sass COUNT aggregates in "
+	                             "query order. Used with dp_sass_count_output_lower_bounds when set.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 	db.config.AddExtensionOption("dp_sass_sum_output_bound",
 	                             "Public symmetric output-domain bound for dp_sass SUM sample answers.",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sass_sum_output_bounds",
+	                             "Comma-separated public symmetric output-domain bounds for dp_sass SUM aggregates in "
+	                             "query order. Overrides dp_sass_sum_output_bound when set.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
+	db.config.AddExtensionOption("dp_sass_sum_output_lower_bounds",
+	                             "Comma-separated public output-domain lower bounds for dp_sass SUM aggregates in "
+	                             "query order. Used with dp_sass_sum_output_upper_bounds when set.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
+	db.config.AddExtensionOption("dp_sass_sum_output_upper_bounds",
+	                             "Comma-separated public output-domain upper bounds for dp_sass SUM aggregates in "
+	                             "query order. Used with dp_sass_sum_output_lower_bounds when set.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 	db.config.AddExtensionOption("dp_sass_avg_lower_bound",
 	                             "Public output-domain lower bound for dp_sass AVG sample answers.",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));

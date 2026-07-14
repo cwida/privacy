@@ -217,6 +217,36 @@ SELECT SUM(amount) FROM orders;
 ----
 2250.000000
 
+statement ok
+SET dp_sum_bounds = '1000';
+
+statement error
+SELECT SUM(amount), SUM(amount * 1000.0) FROM orders;
+----
+dp_sum_bounds
+
+statement ok
+SET dp_sum_bounds = '1000,45000';
+
+query II
+SELECT SUM(amount)::BIGINT, SUM(amount * 1000.0)::BIGINT FROM orders;
+----
+2250	2250000
+
+statement ok
+SET dp_sum_bound = NULL;
+
+query II
+SELECT SUM(amount)::BIGINT, SUM(amount * 1000.0)::BIGINT FROM orders;
+----
+2250	2250000
+
+statement ok
+SET dp_sum_bound = 1000.0;
+
+statement ok
+SET dp_sum_bounds = NULL;
+
 # FILTER (WHERE ...) on a join must be applied to the per-PU partial, not dropped. Each user's 5
 # orders all carry amount = uid % 10, so amount > 5 keeps only the 40 users with uid % 10 in
 # {6,7,8,9}: SUM = 5 * (6+7+8+9) * 10 = 1500 (vs 2250 unfiltered).

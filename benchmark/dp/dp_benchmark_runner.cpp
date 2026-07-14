@@ -90,15 +90,23 @@ struct DatasetConfig {
 	vector<double> deltas;
 	vector<double> count_bounds;
 	vector<double> sum_bounds;
+	vector<string> sum_bound_lists;
 	vector<double> avg_lower_bounds;
 	vector<double> avg_upper_bounds;
 	vector<double> sass_count_output_bounds;
+	vector<string> sass_count_output_bound_lists;
+	vector<string> sass_count_output_lower_bound_lists;
+	vector<string> sass_count_output_upper_bound_lists;
 	vector<double> sass_sum_output_bounds;
+	vector<string> sass_sum_output_bound_lists;
+	vector<string> sass_sum_output_lower_bound_lists;
+	vector<string> sass_sum_output_upper_bound_lists;
 	vector<double> group_bounds;
 	vector<double> c_u_values;
 	vector<double> bound_multipliers;
 	vector<int> sample_lanes;
 	vector<int> sass_m_values;
+	vector<bool> sass_rescale_values;
 	vector<string> modes;
 	vector<string> sass_releases;
 };
@@ -113,15 +121,23 @@ struct Config {
 	vector<double> deltas;
 	vector<double> count_bounds = {1000.0};
 	vector<double> sum_bounds = {1000.0};
+	vector<string> sum_bound_lists;
 	vector<double> avg_lower_bounds;
 	vector<double> avg_upper_bounds;
 	vector<double> sass_count_output_bounds;
+	vector<string> sass_count_output_bound_lists;
+	vector<string> sass_count_output_lower_bound_lists;
+	vector<string> sass_count_output_upper_bound_lists;
 	vector<double> sass_sum_output_bounds;
+	vector<string> sass_sum_output_bound_lists;
+	vector<string> sass_sum_output_lower_bound_lists;
+	vector<string> sass_sum_output_upper_bound_lists;
 	vector<double> group_bounds = {1.0};
 	vector<double> c_u_values;
 	vector<double> bound_multipliers = {1.0};
 	vector<int> sample_lanes = {1};
 	vector<int> sass_m_values = {64};
+	vector<bool> sass_rescale_values = {true};
 	vector<string> sass_releases = {"median"};
 	vector<DatasetConfig> datasets;
 	bool dry_run = false;
@@ -155,6 +171,12 @@ struct UtilityMetrics {
 	string saa_noise_scale_q1_sum_median;
 	string saa_noise_scale_q1_avg_median;
 	string saa_noise_scale_q1_count_median;
+	string saa_smooth_sensitivity_median;
+	string saa_smooth_sensitivity_mean;
+	string saa_smooth_sensitivity_max;
+	string saa_smooth_sensitivity_q1_sum_median;
+	string saa_smooth_sensitivity_q1_avg_median;
+	string saa_smooth_sensitivity_q1_count_median;
 };
 
 struct RunPoint {
@@ -164,15 +186,23 @@ struct RunPoint {
 	double delta = 0.0;
 	double count_bound = 1000.0;
 	double sum_bound = 1000.0;
+	string sum_bound_list;
 	vector<double> avg_lower_bounds;
 	vector<double> avg_upper_bounds;
 	double sass_count_output_bound = 0.0;
+	string sass_count_output_bound_list;
+	string sass_count_output_lower_bound_list;
+	string sass_count_output_upper_bound_list;
 	double sass_sum_output_bound = 0.0;
+	string sass_sum_output_bound_list;
+	string sass_sum_output_lower_bound_list;
+	string sass_sum_output_upper_bound_list;
 	double group_bound = 1.0;
 	double c_u = 1.0;
 	double bound_multiplier = 1.0;
 	int sample_lanes = 1;
 	int sass_m = 64;
+	bool sass_rescale = true;
 };
 
 static string Timestamp() {
@@ -627,6 +657,25 @@ static vector<int> JsonIntList(const JsonValue &obj, const string &array_key, co
 	return result.empty() ? default_value : result;
 }
 
+static vector<bool> JsonBoolList(const JsonValue &obj, const string &array_key, const string &scalar_key,
+                                 const vector<bool> &default_value) {
+	const auto &scalar = obj.Get(scalar_key);
+	if (scalar.type == JsonType::BOOL) {
+		return {scalar.boolean};
+	}
+	const auto &array = obj.Get(array_key);
+	if (array.type != JsonType::ARRAY) {
+		return default_value;
+	}
+	vector<bool> result;
+	for (auto &entry : array.array) {
+		if (entry.type == JsonType::BOOL) {
+			result.push_back(entry.boolean);
+		}
+	}
+	return result.empty() ? default_value : result;
+}
+
 static bool IsValidMode(const string &mode) {
 	return mode == "duckdb" || mode == "dp_standard" || mode == "dp_elastic" || mode == "dp_sass" ||
 	       mode == "dp_sass_bounded_ratio";
@@ -662,17 +711,25 @@ static Config LoadConfig(const string &path) {
 	config.deltas = JsonNumberList(root, "deltas", "delta", config.deltas);
 	config.count_bounds = JsonNumberList(root, "count_bounds", "count_bound", config.count_bounds);
 	config.sum_bounds = JsonNumberList(root, "sum_bounds", "sum_bound", config.sum_bounds);
+	config.sum_bound_lists = JsonStringList(root, "sum_bound_lists", {});
 	config.avg_lower_bounds = JsonNumberList(root, "avg_lower_bounds", "avg_lower_bound", config.avg_lower_bounds);
 	config.avg_upper_bounds = JsonNumberList(root, "avg_upper_bounds", "avg_upper_bound", config.avg_upper_bounds);
 	config.sass_count_output_bounds =
 	    JsonNumberList(root, "sass_count_output_bounds", "sass_count_output_bound", config.sass_count_output_bounds);
+	config.sass_count_output_bound_lists = JsonStringList(root, "sass_count_output_bound_lists", {});
+	config.sass_count_output_lower_bound_lists = JsonStringList(root, "sass_count_output_lower_bound_lists", {});
+	config.sass_count_output_upper_bound_lists = JsonStringList(root, "sass_count_output_upper_bound_lists", {});
 	config.sass_sum_output_bounds =
 	    JsonNumberList(root, "sass_sum_output_bounds", "sass_sum_output_bound", config.sass_sum_output_bounds);
+	config.sass_sum_output_bound_lists = JsonStringList(root, "sass_sum_output_bound_lists", {});
+	config.sass_sum_output_lower_bound_lists = JsonStringList(root, "sass_sum_output_lower_bound_lists", {});
+	config.sass_sum_output_upper_bound_lists = JsonStringList(root, "sass_sum_output_upper_bound_lists", {});
 	config.group_bounds = JsonNumberList(root, "group_bounds", "group_bound", config.group_bounds);
 	config.c_u_values = JsonNumberList(root, "c_u", "c_u", config.c_u_values);
 	config.bound_multipliers = JsonNumberList(root, "bound_multipliers", "bound_multiplier", config.bound_multipliers);
 	config.sample_lanes = JsonIntList(root, "sample_lanes", "sample_lanes", config.sample_lanes);
 	config.sass_m_values = JsonIntList(root, "sass_ms", "sass_m", config.sass_m_values);
+	config.sass_rescale_values = JsonBoolList(root, "sass_rescales", "sass_rescale", config.sass_rescale_values);
 	config.sass_releases = JsonStringList(root, "sass_releases", config.sass_releases);
 
 	const auto &datasets = root.Get("datasets");
@@ -703,17 +760,31 @@ static Config LoadConfig(const string &path) {
 		ds.deltas = JsonNumberList(entry, "deltas", "delta", config.deltas);
 		ds.count_bounds = JsonNumberList(entry, "count_bounds", "count_bound", config.count_bounds);
 		ds.sum_bounds = JsonNumberList(entry, "sum_bounds", "sum_bound", config.sum_bounds);
+		ds.sum_bound_lists = JsonStringList(entry, "sum_bound_lists", config.sum_bound_lists);
 		ds.avg_lower_bounds = JsonNumberList(entry, "avg_lower_bounds", "avg_lower_bound", config.avg_lower_bounds);
 		ds.avg_upper_bounds = JsonNumberList(entry, "avg_upper_bounds", "avg_upper_bound", config.avg_upper_bounds);
 		ds.sass_count_output_bounds = JsonNumberList(entry, "sass_count_output_bounds", "sass_count_output_bound",
 		                                             config.sass_count_output_bounds);
+		ds.sass_count_output_bound_lists =
+		    JsonStringList(entry, "sass_count_output_bound_lists", config.sass_count_output_bound_lists);
+		ds.sass_count_output_lower_bound_lists =
+		    JsonStringList(entry, "sass_count_output_lower_bound_lists", config.sass_count_output_lower_bound_lists);
+		ds.sass_count_output_upper_bound_lists =
+		    JsonStringList(entry, "sass_count_output_upper_bound_lists", config.sass_count_output_upper_bound_lists);
 		ds.sass_sum_output_bounds =
 		    JsonNumberList(entry, "sass_sum_output_bounds", "sass_sum_output_bound", config.sass_sum_output_bounds);
+		ds.sass_sum_output_bound_lists =
+		    JsonStringList(entry, "sass_sum_output_bound_lists", config.sass_sum_output_bound_lists);
+		ds.sass_sum_output_lower_bound_lists =
+		    JsonStringList(entry, "sass_sum_output_lower_bound_lists", config.sass_sum_output_lower_bound_lists);
+		ds.sass_sum_output_upper_bound_lists =
+		    JsonStringList(entry, "sass_sum_output_upper_bound_lists", config.sass_sum_output_upper_bound_lists);
 		ds.group_bounds = JsonNumberList(entry, "group_bounds", "group_bound", config.group_bounds);
 		ds.c_u_values = JsonNumberList(entry, "c_u", "c_u", config.c_u_values);
 		ds.bound_multipliers = JsonNumberList(entry, "bound_multipliers", "bound_multiplier", config.bound_multipliers);
 		ds.sample_lanes = JsonIntList(entry, "sample_lanes", "sample_lanes", config.sample_lanes);
 		ds.sass_m_values = JsonIntList(entry, "sass_ms", "sass_m", config.sass_m_values);
+		ds.sass_rescale_values = JsonBoolList(entry, "sass_rescales", "sass_rescale", config.sass_rescale_values);
 		ds.sass_releases = JsonStringList(entry, "sass_releases", config.sass_releases);
 		if (ds.name.empty()) {
 			throw std::runtime_error("dataset is missing name");
@@ -933,17 +1004,21 @@ static double DefaultDelta(double epsilon, double privacy_units) {
 	return 1.0 / privacy_units;
 }
 
-static double DeriveSassOutputBound(double per_pu_bound, double pu_count, int sample_lanes,
-                                    const string &setting_name) {
-	(void)sample_lanes;
+static double DpSampleLaneProbability(int sample_lanes) {
+	return 1.0 - std::pow(63.0 / 64.0, static_cast<double>(sample_lanes));
+}
+
+static double DeriveSassOutputBound(double per_pu_bound, double pu_count, int sample_lanes, int sample_count,
+                                    bool rescale, const string &setting_name) {
 	if (pu_count <= 0.0 || !std::isfinite(pu_count)) {
 		throw std::runtime_error("cannot derive " + setting_name + " without a finite privacy unit count");
 	}
-	// SASS aggregate finalizers rescale every lane by DpSampleRescale(sample_lanes)
-	// before dp_smooth_median_noise / dp_gupt_mean_noise clips to this public output
-	// domain. Therefore the terminal bound must be on the rescaled full-output scale,
-	// not the raw per-lane sample scale.
-	return std::max(1.0, per_pu_bound * std::ceil(pu_count));
+	if (rescale) {
+		return std::max(1.0, per_pu_bound * std::ceil(pu_count));
+	}
+	double lane_probability =
+	    sample_count > 64 ? (1.0 / static_cast<double>(sample_count)) : DpSampleLaneProbability(sample_lanes);
+	return std::max(1.0, per_pu_bound * std::ceil(pu_count * lane_probability));
 }
 
 static double ScaleConfiguredSassOutputBound(double output_bound, double multiplier) {
@@ -951,6 +1026,62 @@ static double ScaleConfiguredSassOutputBound(double output_bound, double multipl
 		return 0.0;
 	}
 	return output_bound * multiplier;
+}
+
+static string ScaleConfiguredBoundList(const string &bounds_text, double multiplier, const string &setting_name) {
+	string text = Trim(bounds_text);
+	if (text.empty()) {
+		return "";
+	}
+	auto parts = StringUtil::Split(text, ',');
+	vector<double> scaled;
+	scaled.reserve(parts.size());
+	for (auto &part : parts) {
+		StringUtil::Trim(part);
+		if (part.empty()) {
+			throw std::runtime_error(setting_name + " contains an empty entry");
+		}
+		size_t parsed = 0;
+		double value = 0.0;
+		try {
+			value = std::stod(part, &parsed);
+		} catch (std::exception &) {
+			throw std::runtime_error("could not parse " + setting_name + " entry '" + part + "'");
+		}
+		if (parsed != part.size() || !std::isfinite(value) || value <= 0.0) {
+			throw std::runtime_error("invalid " + setting_name + " entry '" + part + "'");
+		}
+		scaled.push_back(value * multiplier);
+	}
+	return FormatNumberList(scaled);
+}
+
+static string ScaleConfiguredFiniteList(const string &bounds_text, double multiplier, const string &setting_name) {
+	string text = Trim(bounds_text);
+	if (text.empty()) {
+		return "";
+	}
+	auto parts = StringUtil::Split(text, ',');
+	vector<double> scaled;
+	scaled.reserve(parts.size());
+	for (auto &part : parts) {
+		StringUtil::Trim(part);
+		if (part.empty()) {
+			throw std::runtime_error(setting_name + " contains an empty entry");
+		}
+		size_t parsed = 0;
+		double value = 0.0;
+		try {
+			value = std::stod(part, &parsed);
+		} catch (std::exception &) {
+			throw std::runtime_error("could not parse " + setting_name + " entry '" + part + "'");
+		}
+		if (parsed != part.size() || !std::isfinite(value)) {
+			throw std::runtime_error("invalid " + setting_name + " entry '" + part + "'");
+		}
+		scaled.push_back(value * multiplier);
+	}
+	return FormatNumberList(scaled);
 }
 
 static bool ReadLastUtilityLine(const string &path, UtilityMetrics &metrics) {
@@ -1079,6 +1210,10 @@ static vector<double> NonEmpty(const vector<double> &values, const vector<double
 }
 
 static vector<int> NonEmptyInt(const vector<int> &values, const vector<int> &fallback) {
+	return values.empty() ? fallback : values;
+}
+
+static vector<bool> NonEmptyBool(const vector<bool> &values, const vector<bool> &fallback) {
 	return values.empty() ? fallback : values;
 }
 
@@ -1321,7 +1456,8 @@ static NoiseScaleSummary SummarizeNoiseScaleValues(vector<double> values) {
 	return summary;
 }
 
-static NoiseScaleSummary SummarizeNoiseScaleRecordTable(Connection &con, const string &table_name) {
+static NoiseScaleSummary SummarizeNoiseScaleRecordTable(Connection &con, const string &table_name,
+                                                        double value_multiplier = 1.0) {
 	auto snapshot = ReadResultSnapshot(con, table_name);
 	vector<double> values;
 	for (auto &row : snapshot.rows) {
@@ -1330,13 +1466,14 @@ static NoiseScaleSummary SummarizeNoiseScaleRecordTable(Connection &con, const s
 		}
 		double value;
 		if (TryCastDouble(row[4], value)) {
-			values.push_back(std::fabs(value));
+			values.push_back(std::fabs(value) * value_multiplier);
 		}
 	}
 	return SummarizeNoiseScaleValues(std::move(values));
 }
 
-static Q1AggregateMetrics SummarizeQ1NoiseScaleRecordFamilies(Connection &con, const string &table_name) {
+static Q1AggregateMetrics SummarizeQ1NoiseScaleRecordFamilies(Connection &con, const string &table_name,
+                                                              double value_multiplier = 1.0) {
 	auto snapshot = ReadResultSnapshot(con, table_name);
 	Q1AggregateMetrics metrics;
 	vector<double> sum_scales;
@@ -1353,17 +1490,34 @@ static Q1AggregateMetrics SummarizeQ1NoiseScaleRecordFamilies(Connection &con, c
 		}
 		idx_t aggregate_index = static_cast<idx_t>(aggregate_index_value);
 		if (aggregate_index < 4) {
-			sum_scales.push_back(std::fabs(noise_scale));
+			sum_scales.push_back(std::fabs(noise_scale) * value_multiplier);
 		} else if (aggregate_index < 7) {
-			avg_scales.push_back(std::fabs(noise_scale));
+			avg_scales.push_back(std::fabs(noise_scale) * value_multiplier);
 		} else if (aggregate_index == 7) {
-			count_scales.push_back(std::fabs(noise_scale));
+			count_scales.push_back(std::fabs(noise_scale) * value_multiplier);
 		}
 	}
 	metrics.sum_median_error_pct = MedianErrorString(std::move(sum_scales));
 	metrics.avg_median_error_pct = MedianErrorString(std::move(avg_scales));
 	metrics.count_median_error_pct = MedianErrorString(std::move(count_scales));
 	return metrics;
+}
+
+static idx_t CountNoiseScaleAggregates(Connection &con, const string &table_name) {
+	auto snapshot = ReadResultSnapshot(con, table_name);
+	idx_t aggregate_count = 0;
+	for (auto &row : snapshot.rows) {
+		if (row.size() < 2) {
+			continue;
+		}
+		double aggregate_index_value;
+		if (!TryCastDouble(row[1], aggregate_index_value) || aggregate_index_value < 0.0) {
+			continue;
+		}
+		auto aggregate_index = static_cast<idx_t>(aggregate_index_value);
+		aggregate_count = std::max(aggregate_count, aggregate_index + 1);
+	}
+	return aggregate_count;
 }
 
 static Q1AggregateMetrics CompareQ1AggregateFamilies(Connection &con, const string &released_table,
@@ -1542,7 +1696,7 @@ static void FillSaaEstimatorMetrics(Connection &con, const DatasetConfig &datase
 }
 
 static void FillSaaNoiseScaleMetrics(Connection &con, const DatasetConfig &dataset, const QuerySpec &query,
-                                     uint64_t seed, UtilityMetrics &metrics) {
+                                     const RunPoint &point, uint64_t seed, UtilityMetrics &metrics) {
 	string suffix = std::to_string(getpid());
 	string scale_table = "__dp_sass_noise_scale_" + suffix;
 	SaaEstimatorMetricCleanup cleanup(con, {scale_table}, seed);
@@ -1561,6 +1715,28 @@ static void FillSaaNoiseScaleMetrics(Connection &con, const DatasetConfig &datas
 		metrics.saa_noise_scale_q1_sum_median = q1_metrics.sum_median_error_pct;
 		metrics.saa_noise_scale_q1_avg_median = q1_metrics.avg_median_error_pct;
 		metrics.saa_noise_scale_q1_count_median = q1_metrics.count_median_error_pct;
+	}
+
+	if (point.release == "median") {
+		idx_t aggregate_count = CountNoiseScaleAggregates(con, scale_table);
+		if (aggregate_count > 0) {
+			bool grouped = query.key_cols > 0;
+			double group_bound = grouped ? point.group_bound : 1.0;
+			double budget_divisor =
+			    static_cast<double>(aggregate_count + (grouped ? 1 : 0)) * std::max(1.0, group_bound);
+			double epsilon_cell = point.epsilon / budget_divisor;
+			double smooth_multiplier = epsilon_cell / 2.0;
+			auto smooth_summary = SummarizeNoiseScaleRecordTable(con, scale_table, smooth_multiplier);
+			metrics.saa_smooth_sensitivity_median = smooth_summary.median;
+			metrics.saa_smooth_sensitivity_mean = smooth_summary.mean;
+			metrics.saa_smooth_sensitivity_max = smooth_summary.max;
+			if (IsBuiltInTpchQ1(dataset, query)) {
+				auto q1_smooth = SummarizeQ1NoiseScaleRecordFamilies(con, scale_table, smooth_multiplier);
+				metrics.saa_smooth_sensitivity_q1_sum_median = q1_smooth.sum_median_error_pct;
+				metrics.saa_smooth_sensitivity_q1_avg_median = q1_smooth.avg_median_error_pct;
+				metrics.saa_smooth_sensitivity_q1_count_median = q1_smooth.count_median_error_pct;
+			}
+		}
 	}
 }
 
@@ -1605,43 +1781,106 @@ static vector<RunPoint> BuildRunPoints(const DatasetConfig &dataset) {
 		auto releases = mode == "dp_sass"
 		                    ? dataset.sass_releases
 		                    : (mode == "dp_sass_bounded_ratio" ? vector<string> {"average"} : vector<string> {"-"});
+		auto sum_bound_lists =
+		    mode == "dp_sass_bounded_ratio" ? vector<string> {""} : NonEmptyString(dataset.sum_bound_lists, {""});
 		auto sass_count_output_bounds =
 		    mode == "dp_sass" ? NonEmpty(dataset.sass_count_output_bounds, {0.0}) : vector<double> {0.0};
+		auto sass_count_output_bound_lists =
+		    mode == "dp_sass" ? NonEmptyString(dataset.sass_count_output_bound_lists, {""}) : vector<string> {""};
+		auto sass_count_output_lower_bound_lists =
+		    mode == "dp_sass" ? NonEmptyString(dataset.sass_count_output_lower_bound_lists, {""}) : vector<string> {""};
+		auto sass_count_output_upper_bound_lists =
+		    mode == "dp_sass" ? NonEmptyString(dataset.sass_count_output_upper_bound_lists, {""}) : vector<string> {""};
 		auto sass_sum_output_bounds =
 		    mode == "dp_sass" ? NonEmpty(dataset.sass_sum_output_bounds, {0.0}) : vector<double> {0.0};
+		auto sass_sum_output_bound_lists =
+		    mode == "dp_sass" ? NonEmptyString(dataset.sass_sum_output_bound_lists, {""}) : vector<string> {""};
+		auto sass_sum_output_lower_bound_lists =
+		    mode == "dp_sass" ? NonEmptyString(dataset.sass_sum_output_lower_bound_lists, {""}) : vector<string> {""};
+		auto sass_sum_output_upper_bound_lists =
+		    mode == "dp_sass" ? NonEmptyString(dataset.sass_sum_output_upper_bound_lists, {""}) : vector<string> {""};
 		auto lane_values = (mode == "dp_sass" || mode == "dp_sass_bounded_ratio")
 		                       ? NonEmptyInt(dataset.sample_lanes, {1})
 		                       : vector<int> {1};
 		auto sass_m_values = mode == "dp_sass" ? NonEmptyInt(dataset.sass_m_values, {64}) : vector<int> {64};
+		auto sass_rescale_values =
+		    mode == "dp_sass" ? NonEmptyBool(dataset.sass_rescale_values, {true}) : vector<bool> {true};
 		for (double epsilon : dataset.epsilons) {
 			auto deltas = dataset.deltas.empty() ? vector<double> {0.0} : dataset.deltas;
 			for (double delta : deltas) {
 				for (double count_bound : dataset.count_bounds) {
 					for (double sum_bound : dataset.sum_bounds) {
-						for (double c_u : c_u_values) {
-							for (double multiplier : dataset.bound_multipliers) {
-								for (double sass_count_output_bound : sass_count_output_bounds) {
-									for (double sass_sum_output_bound : sass_sum_output_bounds) {
-										for (int lanes : lane_values) {
-											for (int sass_m : sass_m_values) {
-												for (auto &release : releases) {
-													RunPoint point;
-													point.mode = mode;
-													point.release = release;
-													point.epsilon = epsilon;
-													point.delta = delta;
-													point.count_bound = count_bound * multiplier;
-													point.sum_bound = sum_bound * multiplier;
-													point.avg_lower_bounds = dataset.avg_lower_bounds;
-													point.avg_upper_bounds = dataset.avg_upper_bounds;
-													point.sass_count_output_bound = sass_count_output_bound;
-													point.sass_sum_output_bound = sass_sum_output_bound;
-													point.group_bound = c_u;
-													point.c_u = c_u;
-													point.bound_multiplier = multiplier;
-													point.sample_lanes = lanes;
-													point.sass_m = sass_m;
-													points.push_back(std::move(point));
+						for (auto &sum_bound_list : sum_bound_lists) {
+							for (double c_u : c_u_values) {
+								for (double multiplier : dataset.bound_multipliers) {
+									for (double sass_count_output_bound : sass_count_output_bounds) {
+										for (auto &sass_count_output_bound_list : sass_count_output_bound_lists) {
+											for (auto &sass_count_output_lower_bound_list :
+											     sass_count_output_lower_bound_lists) {
+												for (auto &sass_count_output_upper_bound_list :
+												     sass_count_output_upper_bound_lists) {
+													for (double sass_sum_output_bound : sass_sum_output_bounds) {
+														for (auto &sass_sum_output_bound_list :
+														     sass_sum_output_bound_lists) {
+															for (auto &sass_sum_output_lower_bound_list :
+															     sass_sum_output_lower_bound_lists) {
+																for (auto &sass_sum_output_upper_bound_list :
+																     sass_sum_output_upper_bound_lists) {
+																	for (int lanes : lane_values) {
+																		for (int sass_m : sass_m_values) {
+																			for (bool sass_rescale :
+																			     sass_rescale_values) {
+																				for (auto &release : releases) {
+																					RunPoint point;
+																					point.mode = mode;
+																					point.release = release;
+																					point.epsilon = epsilon;
+																					point.delta = delta;
+																					point.count_bound =
+																					    count_bound * multiplier;
+																					point.sum_bound =
+																					    sum_bound * multiplier;
+																					point.sum_bound_list =
+																					    sum_bound_list;
+																					point.avg_lower_bounds =
+																					    dataset.avg_lower_bounds;
+																					point.avg_upper_bounds =
+																					    dataset.avg_upper_bounds;
+																					point.sass_count_output_bound =
+																					    sass_count_output_bound;
+																					point.sass_count_output_bound_list =
+																					    sass_count_output_bound_list;
+																					point
+																					    .sass_count_output_lower_bound_list =
+																					    sass_count_output_lower_bound_list;
+																					point
+																					    .sass_count_output_upper_bound_list =
+																					    sass_count_output_upper_bound_list;
+																					point.sass_sum_output_bound =
+																					    sass_sum_output_bound;
+																					point.sass_sum_output_bound_list =
+																					    sass_sum_output_bound_list;
+																					point
+																					    .sass_sum_output_lower_bound_list =
+																					    sass_sum_output_lower_bound_list;
+																					point
+																					    .sass_sum_output_upper_bound_list =
+																					    sass_sum_output_upper_bound_list;
+																					point.group_bound = c_u;
+																					point.c_u = c_u;
+																					point.bound_multiplier = multiplier;
+																					point.sample_lanes = lanes;
+																					point.sass_m = sass_m;
+																					point.sass_rescale = sass_rescale;
+																					points.push_back(std::move(point));
+																				}
+																			}
+																		}
+																	}
+																}
+															}
+														}
+													}
 												}
 											}
 										}
@@ -1697,15 +1936,67 @@ static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta
 		RunStatement(con, "SET dp_delta=" + FormatNumber(delta));
 	}
 	RunStatement(con, "SET dp_sum_bound=" + FormatNumber(point.sum_bound));
+	RunStatement(con, "SET dp_sum_bounds=NULL");
+	if (!point.sum_bound_list.empty()) {
+		RunStatement(con, "SET dp_sum_bounds=" + SqlQuote(ScaleConfiguredBoundList(
+		                                             point.sum_bound_list, point.bound_multiplier, "sum_bound_lists")));
+	}
 	RunStatement(con, "SET dp_count_bound=" + FormatNumber(point.count_bound));
 	RunStatement(con, "SET dp_max_groups_contributed=" + FormatNumber(point.group_bound));
 	ApplyAvgBoundSettings(con, point);
 	if (point.mode == "dp_sass") {
 		RunStatement(con, "SET dp_sample_lanes=" + std::to_string(point.sample_lanes));
 		RunStatement(con, "SET dp_sass_m=" + std::to_string(point.sass_m));
+		RunStatement(con, string("SET dp_sass_rescale=") + (point.sass_rescale ? "true" : "false"));
 		RunStatement(con, "SET dp_sass_release='" + point.release + "'");
 		RunStatement(con, "SET dp_sass_count_output_bound=" + FormatNumber(sass_count_output_bound));
 		RunStatement(con, "SET dp_sass_sum_output_bound=" + FormatNumber(sass_sum_output_bound));
+		RunStatement(con, "SET dp_sass_count_output_bounds=NULL");
+		RunStatement(con, "SET dp_sass_count_output_lower_bounds=NULL");
+		RunStatement(con, "SET dp_sass_count_output_upper_bounds=NULL");
+		if (!point.sass_count_output_bound_list.empty()) {
+			RunStatement(
+			    con, "SET dp_sass_count_output_bounds=" +
+			             SqlQuote(ScaleConfiguredBoundList(point.sass_count_output_bound_list, point.bound_multiplier,
+			                                               "sass_count_output_bound_lists")));
+		}
+		if (!point.sass_count_output_lower_bound_list.empty() || !point.sass_count_output_upper_bound_list.empty()) {
+			if (point.sass_count_output_lower_bound_list.empty() || point.sass_count_output_upper_bound_list.empty()) {
+				throw std::runtime_error("sass_count_output_lower_bound_lists and "
+				                         "sass_count_output_upper_bound_lists must be set together");
+			}
+			RunStatement(con, "SET dp_sass_count_output_lower_bounds=" +
+			                      SqlQuote(ScaleConfiguredFiniteList(point.sass_count_output_lower_bound_list,
+			                                                         point.bound_multiplier,
+			                                                         "sass_count_output_lower_bound_lists")));
+			RunStatement(con, "SET dp_sass_count_output_upper_bounds=" +
+			                      SqlQuote(ScaleConfiguredBoundList(point.sass_count_output_upper_bound_list,
+			                                                        point.bound_multiplier,
+			                                                        "sass_count_output_upper_bound_lists")));
+		}
+		RunStatement(con, "SET dp_sass_sum_output_bounds=NULL");
+		RunStatement(con, "SET dp_sass_sum_output_lower_bounds=NULL");
+		RunStatement(con, "SET dp_sass_sum_output_upper_bounds=NULL");
+		if (!point.sass_sum_output_bound_list.empty()) {
+			RunStatement(con,
+			             "SET dp_sass_sum_output_bounds=" +
+			                 SqlQuote(ScaleConfiguredBoundList(point.sass_sum_output_bound_list, point.bound_multiplier,
+			                                                   "sass_sum_output_bound_lists")));
+		}
+		if (!point.sass_sum_output_lower_bound_list.empty() || !point.sass_sum_output_upper_bound_list.empty()) {
+			if (point.sass_sum_output_lower_bound_list.empty() || point.sass_sum_output_upper_bound_list.empty()) {
+				throw std::runtime_error("sass_sum_output_lower_bound_lists and sass_sum_output_upper_bound_lists "
+				                         "must be set together");
+			}
+			RunStatement(con, "SET dp_sass_sum_output_lower_bounds=" +
+			                      SqlQuote(ScaleConfiguredFiniteList(point.sass_sum_output_lower_bound_list,
+			                                                         point.bound_multiplier,
+			                                                         "sass_sum_output_lower_bound_lists")));
+			RunStatement(con, "SET dp_sass_sum_output_upper_bounds=" +
+			                      SqlQuote(ScaleConfiguredBoundList(point.sass_sum_output_upper_bound_list,
+			                                                        point.bound_multiplier,
+			                                                        "sass_sum_output_upper_bound_lists")));
+		}
 		RunStatement(con, "SET dp_sass_avg_lower_bound=" +
 		                      FormatNumber(point.avg_lower_bounds.empty() ? 0.0 : point.avg_lower_bounds[0]));
 		RunStatement(con,
@@ -1726,9 +2017,14 @@ static void WriteHeader(std::ofstream &csv) {
 	       "saa_sampling_q1_sum_median_error_pct,saa_sampling_q1_avg_median_error_pct,"
 	       "saa_sampling_q1_count_median_error_pct,saa_noise_scale_median,saa_noise_scale_mean,"
 	       "saa_noise_scale_max,saa_noise_scale_q1_sum_median,saa_noise_scale_q1_avg_median,"
-	       "saa_noise_scale_q1_count_median,epsilon,delta,sf,dp_sum_bound,dp_count_bound,dp_max_groups_contributed,"
+	       "saa_noise_scale_q1_count_median,saa_smooth_sensitivity_median,saa_smooth_sensitivity_mean,"
+	       "saa_smooth_sensitivity_max,saa_smooth_sensitivity_q1_sum_median,"
+	       "saa_smooth_sensitivity_q1_avg_median,saa_smooth_sensitivity_q1_count_median,epsilon,delta,sf,"
+	       "dp_sum_bound,dp_sum_bounds,dp_count_bound,dp_max_groups_contributed,"
 	       "c_u,dp_sass_count_output_bound,dp_sass_sum_output_bound,dp_avg_lower_bounds,dp_avg_upper_bounds,"
-	       "bound_multiplier,dp_sample_lanes,dp_sass_m,seed,db_path,query_path\n";
+	       "dp_sass_count_output_bounds,dp_sass_sum_output_bounds,dp_sass_count_output_lower_bounds,"
+	       "dp_sass_count_output_upper_bounds,dp_sass_sum_output_lower_bounds,dp_sass_sum_output_upper_bounds,"
+	       "bound_multiplier,dp_sample_lanes,dp_sass_m,dp_sass_rescale,seed,db_path,query_path\n";
 }
 
 static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const QuerySpec &query, idx_t query_id,
@@ -1750,13 +2046,35 @@ static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const Que
 	    << metrics.saa_sampling_q1_count_median_error_pct << "," << metrics.saa_noise_scale_median << ","
 	    << metrics.saa_noise_scale_mean << "," << metrics.saa_noise_scale_max << ","
 	    << metrics.saa_noise_scale_q1_sum_median << "," << metrics.saa_noise_scale_q1_avg_median << ","
-	    << metrics.saa_noise_scale_q1_count_median << "," << FormatNumber(point.epsilon) << "," << FormatNumber(delta)
-	    << "," << FormatNumber(dataset.scale_factor) << "," << FormatNumber(point.sum_bound) << ","
-	    << FormatNumber(point.count_bound) << "," << FormatNumber(point.group_bound) << "," << FormatNumber(point.c_u)
-	    << "," << FormatNumber(sass_count_output_bound) << "," << FormatNumber(sass_sum_output_bound) << ","
-	    << CsvQuote(FormatNumberList(point.avg_lower_bounds)) << ","
-	    << CsvQuote(FormatNumberList(point.avg_upper_bounds)) << "," << FormatNumber(point.bound_multiplier) << ","
-	    << point.sample_lanes << "," << point.sass_m << "," << seed << "," << CsvQuote(db_path) << ","
+	    << metrics.saa_noise_scale_q1_count_median << "," << metrics.saa_smooth_sensitivity_median << ","
+	    << metrics.saa_smooth_sensitivity_mean << "," << metrics.saa_smooth_sensitivity_max << ","
+	    << metrics.saa_smooth_sensitivity_q1_sum_median << "," << metrics.saa_smooth_sensitivity_q1_avg_median << ","
+	    << metrics.saa_smooth_sensitivity_q1_count_median << "," << FormatNumber(point.epsilon) << ","
+	    << FormatNumber(delta) << "," << FormatNumber(dataset.scale_factor) << "," << FormatNumber(point.sum_bound)
+	    << "," << CsvQuote(ScaleConfiguredBoundList(point.sum_bound_list, point.bound_multiplier, "sum_bound_lists"))
+	    << "," << FormatNumber(point.count_bound) << "," << FormatNumber(point.group_bound) << ","
+	    << FormatNumber(point.c_u) << "," << FormatNumber(sass_count_output_bound) << ","
+	    << FormatNumber(sass_sum_output_bound) << "," << CsvQuote(FormatNumberList(point.avg_lower_bounds)) << ","
+	    << CsvQuote(FormatNumberList(point.avg_upper_bounds)) << ","
+	    << CsvQuote(ScaleConfiguredBoundList(point.sass_count_output_bound_list, point.bound_multiplier,
+	                                         "sass_count_output_bound_lists"))
+	    << ","
+	    << CsvQuote(ScaleConfiguredBoundList(point.sass_sum_output_bound_list, point.bound_multiplier,
+	                                         "sass_sum_output_bound_lists"))
+	    << ","
+	    << CsvQuote(ScaleConfiguredFiniteList(point.sass_count_output_lower_bound_list, point.bound_multiplier,
+	                                          "sass_count_output_lower_bound_lists"))
+	    << ","
+	    << CsvQuote(ScaleConfiguredBoundList(point.sass_count_output_upper_bound_list, point.bound_multiplier,
+	                                         "sass_count_output_upper_bound_lists"))
+	    << ","
+	    << CsvQuote(ScaleConfiguredFiniteList(point.sass_sum_output_lower_bound_list, point.bound_multiplier,
+	                                          "sass_sum_output_lower_bound_lists"))
+	    << ","
+	    << CsvQuote(ScaleConfiguredBoundList(point.sass_sum_output_upper_bound_list, point.bound_multiplier,
+	                                         "sass_sum_output_upper_bound_lists"))
+	    << "," << FormatNumber(point.bound_multiplier) << "," << point.sample_lanes << "," << point.sass_m << ","
+	    << (point.sass_rescale ? "true" : "false") << "," << seed << "," << CsvQuote(db_path) << ","
 	    << CsvQuote(query.path) << "\n";
 	csv.flush();
 }
@@ -1890,13 +2208,13 @@ static void RunDataset(const Config &config, const DatasetConfig &dataset, std::
 						sass_count_output_bound =
 						    point.sass_count_output_bound > 0.0
 						        ? ScaleConfiguredSassOutputBound(point.sass_count_output_bound, point.bound_multiplier)
-						        : DeriveSassOutputBound(point.count_bound, pu_count, point.sample_lanes,
-						                                "dp_sass_count_output_bound");
+						        : DeriveSassOutputBound(point.count_bound, pu_count, point.sample_lanes, point.sass_m,
+						                                point.sass_rescale, "dp_sass_count_output_bound");
 						sass_sum_output_bound =
 						    point.sass_sum_output_bound > 0.0
 						        ? ScaleConfiguredSassOutputBound(point.sass_sum_output_bound, point.bound_multiplier)
-						        : DeriveSassOutputBound(point.sum_bound, pu_count, point.sample_lanes,
-						                                "dp_sass_sum_output_bound");
+						        : DeriveSassOutputBound(point.sum_bound, pu_count, point.sample_lanes, point.sass_m,
+						                                point.sass_rescale, "dp_sass_sum_output_bound");
 					} else if (point.mode != "duckdb") {
 						ApplyDatasetPrivacy(con, dataset, query);
 						double pu_count = ReadBenchmarkPrivacyUnitCount(con, dataset, query);
@@ -1942,7 +2260,7 @@ static void RunDataset(const Config &config, const DatasetConfig &dataset, std::
 					}
 					if (point.mode == "dp_sass") {
 						FillSaaEstimatorMetrics(con, dataset, query, seed, metrics);
-						FillSaaNoiseScaleMetrics(con, dataset, query, seed, metrics);
+						FillSaaNoiseScaleMetrics(con, dataset, query, point, seed, metrics);
 					}
 					success = true;
 					Log(dataset.name + " " + point.mode + " " + query.name + " run " + std::to_string(run) +
@@ -1976,7 +2294,9 @@ static idx_t ParseRunCount(const string &value) {
 static void PrintUsage() {
 	std::cout << "Usage: dp_benchmark_runner --config PATH [--dry-run] [--out PATH] [--runs N]\n"
 	          << "JSON supports scalar or array sweeps for epsilon(s), delta(s), count_bound(s), sum_bound(s),\n"
-	          << "group_bound(s), c_u, bound_multiplier(s), sample_lanes, sass_ms, modes, and sass_releases.\n";
+	          << "sum_bound_lists, group_bound(s), c_u, bound_multiplier(s), sample_lanes, sass_ms, modes,\n"
+	          << "sass_releases, sass_rescale(s), sass_count_output_bound_lists, sass_sum_output_bound_lists,\n"
+	          << "sass_count/sum_output_lower_bound_lists, and sass_count/sum_output_upper_bound_lists.\n";
 }
 
 static int Main(int argc, char **argv) {

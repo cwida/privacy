@@ -72,18 +72,18 @@ value domains for `lineitem` columns such as `l_quantity`, `l_extendedprice`, or
 
 ## Benchmark parameters
 
-The active parameter grid is:
+The active main grid is:
 
 | Parameter | Value |
 |---|---|
-| `runs` | `3` |
+| `runs` | `1` |
 | `threads` | `4` |
-| `generate_threads` | `16` |
 | `epsilon` | `1.0` |
-| `delta` | `2.2222222222222222e-7` |
+| `delta` | `1e-8`, `1e-7`, `1e-6`, `1e-5`, `1e-4` |
 | `bound_multipliers` | `0.01`, `0.1`, `1`, `10`, `100` |
 | `sample_lanes` | `1` |
 | `dp_sass_m` | `64`, `128`, `256`, `512` |
+| `dp_sass_rescale` | `false` |
 | `dp_sass_release` | `median`, `average` |
 | `seed_base` | `1000003` |
 
@@ -97,11 +97,33 @@ is to bound quality.
 `dp_sass_m` is the number of SAA subsamples. `m = 64` is the default SIMD-SAA
 path. Values above 64 use the experimental variable-m path to test whether more
 subsamples improve utility. The current variable-m path requires
-`sample_lanes = 1`, supports `COUNT`, `SUM`, and `AVG`, and does not support
-`DISTINCT`, `MIN`, or `MAX`.
+`sample_lanes = 1` and supports `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, and the
+tested `COUNT(DISTINCT)` shapes.
 
-`delta = 2.2222222222222222e-7` is `1 / 4,500,000`, using the public TPC-H SF30
-customer scale.
+`dp_sass_rescale = false` means SAA releases the private subsample estimator on
+the lane/subsample scale. The benchmark therefore reports three separate views:
+private output versus the full-data answer, private output versus the non-private
+SAA estimator, and the non-private SAA estimator versus the full-data answer.
+This follows the statistical-estimator interpretation of SAA and avoids
+multiplying DP noise by `m`.
+
+The Q1 beta diagnostic is separate from the main grid. It fixes the bounds and
+uses a much larger per-cell privacy budget for SAA-median:
+
+| Parameter | Values |
+|---|---|
+| query | `q01` |
+| `epsilon` | `45` |
+| `delta` | `0.0045` |
+| `bound_multipliers` | `1` |
+| `dp_sass_m` | `64`, `512` |
+| `dp_sass_rescale` | `false` |
+
+For grouped TPC-H Q1 there are 8 released aggregate cells plus partition
+selection and `C_u = 5`, so the divisor is `(8 + 1) * 5 = 45`. The diagnostic
+therefore gives SAA-median approximately per-cell `(epsilon, delta) = (1, 1e-4)`.
+This is not a realistic full-query privacy setting; it only tests whether the
+small smooth-sensitivity beta is driving Q1's SAA-median error.
 
 The runner derives a deterministic `privacy_seed` for each row from `seed_base`,
 the run number, the query index, and the size of the run-point grid. The emitted
@@ -129,27 +151,44 @@ privately estimated from the benchmark database.
 multiplies them by each `bound_multiplier`. The multipliers test tight and loose
 public clipping settings.
 
-`dp_sass_count_output_bound` and `dp_sass_sum_output_bound` are SAA
+`dp_sass_count_output_*bounds` and `dp_sass_sum_output_*bounds` are SAA
 output-domain bounds, not per-PU contribution bounds. When the config supplies
 them, the benchmark treats them as SAA's own base bounds and multiplies them by
 the same `bound_multiplier`. This keeps the comparison fair: DP-bounded is not
 forced to use an SAA output-domain bound, and SAA is not forced to derive its
 output domain from DP-bounded's contribution bound.
 
+For the no-rescale experiments, the SAA output-domain bounds are lane-scale
+oracle-like evaluation bounds from the SAA diagnostics. For each query,
+aggregate, and `m`, the config computes the central 75% interval of the
+non-private lane outputs per output cell, then uses the minimum lower bound and
+maximum upper bound across cells for that aggregate. This follows the GUPT-style
+approximate-bound idea: the base SAA domain covers the central subsample outputs
+instead of being stretched by outlier lanes. Because the optimal lane-scale
+domain depends on `m`, the config has separate `dp_sass` entries for each tested
+`m`; the `1` multiplier is the central-75 oracle domain for that `m`, while the
+other multipliers intentionally make it tighter or looser.
+
 The public AVG value domains are not scaled by `bound_multiplier`.
 
 `c_u` is the group cap: the maximum number of output groups one privacy unit may
 contribute to.
 
-| Query | Dataset config | `dp_count_bound` | `dp_sum_bound` | `c_u` | `dp_sass_count_output_bound` | `dp_sass_sum_output_bound` |
-|---|---|---:|---:|---:|---:|---:|
-| `q01` | TPC-H/JCC-H | `1000` | `1000000` | `5` | `100000000` | `10000000000000` |
-| `q05` | TPC-H/JCC-H | `1` | `1000000` | `5` | unset | `10000000000` |
-| `q06` | TPC-H | `1` | `100000` | `1` | unset | `4000000000` |
-| `q06` | JCC-H/skew | `1` | `1000000` | `1` | unset | `4000000000` |
-| `q14` | TPC-H/JCC-H | `1` | `1000000` | `1` | unset | `100000000000` |
-| `q19` | TPC-H | `1` | `100000` | `1` | unset | `100000000` |
-| `q19` | JCC-H/skew | `1` | `1000000` | `1` | unset | `100000000` |
+| Query | Dataset config | `dp_count_bound` | `dp_sum_bound` | `dp_sum_bounds` | `c_u` |
+|---|---|---:|---:|---|---:|
+| `q01` | TPC-H/JCC-H | `1000` | `105000000` | `50000,105000000,105000000,113400000` | `5` |
+| `q05` | TPC-H/JCC-H | `1` | `1000000` | unset | `5` |
+| `q06` | TPC-H | `1` | `100000` | unset | `1` |
+| `q06` | JCC-H/skew | `1` | `1000000` | unset | `1` |
+| `q14` | TPC-H/JCC-H | `1` | `1000000` | `1000000,1000000` | `1` |
+| `q19` | TPC-H | `1` | `100000` | unset | `1` |
+| `q19` | JCC-H/skew | `1` | `1000000` | unset | `1` |
+
+The concrete central-75 SAA output domains are stored in
+`benchmark/dp/configs/tpch_jcch_sf30_all5_norescale_central75_m64_m128_m256_m512_delta_1run.json`.
+For example, TPC-H Q1 at `m = 512` uses lane-scale domains:
+`sum_qty = [55853, 4431776]`, `count_order = [2190, 173817]`, and
+`avg_qty = [25.183262, 25.861692]`.
 
 `dp_sass_count_output_bound` is only needed when the query releases a
 COUNT-like aggregate. It is unset for SUM-only queries; the private
@@ -214,13 +253,16 @@ one is omitted, the runner derives a conservative fallback from the already
 multiplied contribution bound and the public privacy-unit count:
 
 ```text
-derived_output_bound = max(1, per_pu_bound * ceil(number_of_privacy_units))
+if dp_sass_rescale = true:
+  derived_output_bound = max(1, per_pu_bound * ceil(number_of_privacy_units))
+else:
+  derived_output_bound = max(1, per_pu_bound * ceil(expected_privacy_units_per_lane))
 ```
 
-This fallback bound is on the rescaled full-output scale. It is not the raw
-per-lane sample scale, because SASS finalizers rescale lane outputs before
-clamping and adding noise. The fallback is a convenience for smoke tests; for
-reported utility results, prefer explicit SAA output-domain base bounds.
+The fallback follows the configured release scale. With `dp_sass_rescale=false`,
+it is on the raw lane/subsample scale. The fallback is a convenience for smoke
+tests; for reported utility results, prefer explicit SAA output-domain base
+bounds.
 
 `dp_elastic` is the exception. It computes FLEX max-frequency statistics from
 the database during query rewriting. Those statistics are part of the elastic
@@ -341,6 +383,13 @@ These diagnostics answer a different question from the main utility columns. The
 main columns measure error against the full-data query answer. The SAA diagnostics
 separate the private release error from the sampling error of the SAA estimator.
 
+The runner also records `saa_noise_scale_*` for SAA releases. These are the
+final Laplace scales used by the mechanism. For SAA-median rows, it additionally
+records `saa_smooth_sensitivity_*`, computed as
+`noise_scale * epsilon_cell / 2`. These smooth-sensitivity columns are blank for
+SAA-average because the average release is calibrated by a fixed
+range-over-`m` global-sensitivity bound, not by smooth sensitivity.
+
 ## Stability analysis
 
 Lane stability is measured separately from the main utility sweep. The stability
@@ -400,7 +449,7 @@ Run the sequential controlled-skew sweep:
 python3 benchmark/dp/generate_controlled_skew_sweep.py \
     --run-sequential \
     --runs 3 \
-    --template benchmark/dp/configs/tpch_jcch_sf30_all5_full_sass_m64_m128_m256_m512_3run.json \
+    --template benchmark/dp/configs/tpch_jcch_sf30_all5_norescale_lane_bounds_m64_m128_m256_m512_3run.json \
     --threads 4 \
     --generate-threads 16
 ```

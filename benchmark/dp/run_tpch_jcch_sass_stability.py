@@ -131,6 +131,7 @@ META_COLUMNS = [
     "sass_count_output_bound",
     "sass_sum_output_bound",
     "sass_m",
+    "sass_rescale",
     "elapsed_ms",
     "success",
     "error",
@@ -149,6 +150,7 @@ SUMMARY_COLUMNS = [
     "sass_count_output_bound",
     "sass_sum_output_bound",
     "sass_m",
+    "sass_rescale",
     "success",
     "aggregate_rows",
     "elapsed_ms",
@@ -186,6 +188,15 @@ def first_value(config, key, default):
     return values[0]
 
 
+def config_list(config, plural, singular, default):
+    if plural in config:
+        value = config[plural]
+        return value if isinstance(value, list) else [value]
+    if singular in config:
+        return [config[singular]]
+    return default
+
+
 def numeric(value):
     if value == "" or value is None:
         return None
@@ -213,6 +224,7 @@ SET dp_epsilon = {format_number(point["epsilon"])};
 SET dp_delta = {format_number(point["delta"])};
 SET dp_sample_lanes = {point["sample_lanes"]};
 SET dp_sass_m = {point["sass_m"]};
+SET dp_sass_rescale = {bool_text(point["sass_rescale"])};
 SET dp_sass_release = 'average';
 SET dp_count_bound = {format_number(point["count_bound"])};
 SET dp_sum_bound = {format_number(point["sum_bound"])};
@@ -310,13 +322,15 @@ def load_points(config, args):
     epsilon = first_value(config, "epsilons", 1.0)
     delta = first_value(config, "deltas", 1e-6)
     sample_lanes = first_value(config, "sample_lanes", 1)
-    sass_m_values = config.get("sass_ms", [64])
+    sass_m_values = config_list(config, "sass_ms", "sass_m", [64])
+    sass_rescale_values = config_list(config, "sass_rescales", "sass_rescale", [True])
 
     points = []
     for dataset in config["datasets"]:
         if dataset_filter and dataset["name"] not in dataset_filter:
             continue
-        dataset_sass_m_values = dataset.get("sass_ms", sass_m_values)
+        dataset_sass_m_values = config_list(dataset, "sass_ms", "sass_m", sass_m_values)
+        dataset_sass_rescale_values = config_list(dataset, "sass_rescales", "sass_rescale", sass_rescale_values)
         for query in dataset.get("query_names", []):
             if query_filter and query not in query_filter:
                 continue
@@ -326,26 +340,28 @@ def load_points(config, args):
                 count_bound = first_value(dataset, "count_bounds", 1.0) * multiplier
                 sum_bound = first_value(dataset, "sum_bounds", 1.0) * multiplier
                 for sass_m in dataset_sass_m_values:
-                    points.append(
-                        {
-                            "dataset": dataset["name"],
-                            "workload": dataset.get("workload", ""),
-                            "sf": dataset.get("sf", ""),
-                            "db": dataset["db"],
-                            "query": query,
-                            "bound_multiplier": multiplier,
-                            "count_bound": count_bound,
-                            "sum_bound": sum_bound,
-                            "c_u": first_value(dataset, "c_u", 1.0),
-                            "sass_count_output_bound": first_value(dataset, "sass_count_output_bounds", 1.0),
-                            "sass_sum_output_bound": first_value(dataset, "sass_sum_output_bounds", 1.0),
-                            "sass_m": sass_m,
-                            "threads": threads,
-                            "epsilon": epsilon,
-                            "delta": delta,
-                            "sample_lanes": sample_lanes,
-                        }
-                    )
+                    for sass_rescale in dataset_sass_rescale_values:
+                        points.append(
+                            {
+                                "dataset": dataset["name"],
+                                "workload": dataset.get("workload", ""),
+                                "sf": dataset.get("sf", ""),
+                                "db": dataset["db"],
+                                "query": query,
+                                "bound_multiplier": multiplier,
+                                "count_bound": count_bound,
+                                "sum_bound": sum_bound,
+                                "c_u": first_value(dataset, "c_u", 1.0),
+                                "sass_count_output_bound": first_value(dataset, "sass_count_output_bounds", 1.0),
+                                "sass_sum_output_bound": first_value(dataset, "sass_sum_output_bounds", 1.0),
+                                "sass_m": sass_m,
+                                "sass_rescale": sass_rescale,
+                                "threads": threads,
+                                "epsilon": epsilon,
+                                "delta": delta,
+                                "sample_lanes": sample_lanes,
+                            }
+                        )
     return points
 
 

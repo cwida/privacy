@@ -363,8 +363,9 @@ void RegisterPacCountFunctions(ExtensionLoader &loader) {
 static void DpSampleCountFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
                                           idx_t offset) {
 	auto aggs = FlatVector::GetData<ScatterState *>(states);
-	int sample_lanes = input.bind_data ? input.bind_data->Cast<PrivBindData>().sample_lanes : 1;
-	double rescale = DpSampleRescale(sample_lanes);
+	auto *bind = input.bind_data ? &input.bind_data->Cast<PrivBindData>() : nullptr;
+	int sample_lanes = bind ? bind->sample_lanes : 1;
+	double rescale = bind && bind->sample_rescale ? DpSampleRescale(sample_lanes) : 1.0;
 
 	auto list_entries = FlatVector::GetData<list_entry_t>(result);
 	auto &child_vec = ListVector::GetEntry(result);
@@ -656,7 +657,8 @@ static void DpSampleMCountFinalize(Vector &states, AggregateInputData &input, Ve
 	ListVector::SetListSize(result, total_elements);
 
 	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
-	PAC_FLOAT rescale = static_cast<PAC_FLOAT>(sample_count);
+	bool sample_rescale = input.bind_data ? input.bind_data->Cast<PrivBindData>().sample_rescale : true;
+	PAC_FLOAT rescale = sample_rescale ? static_cast<PAC_FLOAT>(sample_count) : PAC_FLOAT(1.0);
 	for (idx_t i = 0; i < count; i++) {
 		idx_t base = (offset + i) * static_cast<idx_t>(sample_count);
 		list_entries[offset + i].offset = base;

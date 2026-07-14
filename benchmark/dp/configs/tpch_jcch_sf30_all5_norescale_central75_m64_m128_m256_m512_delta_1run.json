@@ -1,0 +1,2036 @@
+{
+  "out": "benchmark/dp/tpch_jcch_sf30_all5_norescale_central75_m64_m128_m256_m512_delta_1run_results.csv",
+  "runs": 1,
+  "threads": 4,
+  "modes": [
+    "duckdb",
+    "dp_standard",
+    "dp_elastic",
+    "dp_sass"
+  ],
+  "epsilons": [
+    1.0
+  ],
+  "deltas": [
+    1e-08,
+    1e-07,
+    1e-06,
+    1e-05,
+    0.0001
+  ],
+  "bound_multipliers": [
+    0.01,
+    0.1,
+    1.0,
+    10.0,
+    100.0
+  ],
+  "sample_lanes": [
+    1
+  ],
+  "sass_ms": [
+    64,
+    128,
+    256,
+    512
+  ],
+  "sass_rescales": [
+    false
+  ],
+  "sass_releases": [
+    "median",
+    "average"
+  ],
+  "datasets": [
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "avg_upper_bounds": [
+        50.0,
+        105000.0,
+        0.1
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "duckdb"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "avg_upper_bounds": [
+        50.0,
+        105000.0,
+        0.1
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        25.387905,
+        27962.24,
+        0.049742155
+      ],
+      "avg_upper_bounds": [
+        25.670044,
+        38500.83,
+        0.05025479
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "456400,684376000,650133250,676019600"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "35048580,38459730000,37727880000,38291130000"
+      ],
+      "sass_count_output_lower_bound_lists": [
+        "17883"
+      ],
+      "sass_count_output_upper_bound_lists": [
+        "1374556"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        25.349466,
+        37980.785,
+        0.049562536
+      ],
+      "avg_upper_bounds": [
+        25.687595,
+        38541.426,
+        0.050394684
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        128
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "227195,340372260,323305800,336283584"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "17564592,26336412000,25021878000,26022978000"
+      ],
+      "sass_count_output_lower_bound_lists": [
+        "8904"
+      ],
+      "sass_count_output_upper_bound_lists": [
+        "688962"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        25.279287,
+        37874.97,
+        0.04949575
+      ],
+      "avg_upper_bounds": [
+        25.768047,
+        38656.445,
+        0.050511084
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        256
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "112862,169027820,160573470,167011280"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "8821237,13220662000,12560193000,13063238000"
+      ],
+      "sass_count_output_lower_bound_lists": [
+        "4425"
+      ],
+      "sass_count_output_upper_bound_lists": [
+        "346026"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        25.183262,
+        27854.576,
+        0.049158875
+      ],
+      "avg_upper_bounds": [
+        25.861692,
+        38824.8125,
+        0.050784115
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "55853,83765610,79526150,82723904"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "4431776,4864000000,4772312600,4843114500"
+      ],
+      "sass_count_output_lower_bound_lists": [
+        "2190"
+      ],
+      "sass_count_output_upper_bound_lists": [
+        "173817"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q05"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "duckdb"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q05"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q05"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "22743540"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "27248536"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q05"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        128
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "11147992"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "13789083"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q05"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        256
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "5375483"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "7083104"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q05"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "2536866"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "3733447"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q06"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        100000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "duckdb"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q06"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        100000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q06"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        100000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "57307572"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "58276808"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q06"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        100000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        128
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "28560064"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "29203168"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q06"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        100000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        256
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "14190172"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "14672047"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q06"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        100000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "7039630"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "7389005"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q14"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "sum_bound_lists": [
+        "1000000,1000000"
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "duckdb"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q14"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "sum_bound_lists": [
+        "1000000,1000000"
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q14"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "sum_bound_lists": [
+        "1000000,1000000"
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "207401440,1262164000"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "215687900,1286465300"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q14"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "sum_bound_lists": [
+        "1000000,1000000"
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        128
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "103174000,627084400"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "109356330,646783300"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q14"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "sum_bound_lists": [
+        "1000000,1000000"
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        256
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "50799088,311872800"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "55146204,325639260"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q14"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "sum_bound_lists": [
+        "1000000,1000000"
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "24979906,154493860"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "28004546,164391310"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q19"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        100000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "duckdb"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q19"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        100000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q19"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        100000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "1140399"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "1669449"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q19"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        100000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        128
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "542766"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "877923"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q19"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        100000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        256
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "233188"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "477185"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q19"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        100000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "92796"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "264309"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "avg_upper_bounds": [
+        50.0,
+        105000.0,
+        0.1
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "duckdb"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "avg_upper_bounds": [
+        50.0,
+        105000.0,
+        0.1
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        25.411495,
+        38047.48,
+        0.04971354
+      ],
+      "avg_upper_bounds": [
+        37.940636,
+        41688.664,
+        0.07439829
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "428629,642116740,610198300,634776600"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "37401764,39446010000,37600436000,39004650000"
+      ],
+      "sass_count_output_lower_bound_lists": [
+        "16746"
+      ],
+      "sass_count_output_upper_bound_lists": [
+        "986098"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        25.358408,
+        38001.883,
+        0.049552422
+      ],
+      "avg_upper_bounds": [
+        38.776768,
+        41869.22,
+        0.075980276
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        128
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "207734,310596640,295153600,306885020"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "19199290,19828873000,18906354000,19608437000"
+      ],
+      "sass_count_output_lower_bound_lists": [
+        "8135"
+      ],
+      "sass_count_output_upper_bound_lists": [
+        "494968"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        25.291862,
+        37882.297,
+        0.049396202
+      ],
+      "avg_upper_bounds": [
+        40.356983,
+        42284.15,
+        0.07913312
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        256
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "99057,148692640,141188830,146876270"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "9979093,9990706000,9532282000,9880187000"
+      ],
+      "sass_count_output_lower_bound_lists": [
+        "3893"
+      ],
+      "sass_count_output_upper_bound_lists": [
+        "248826"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        25.182163,
+        37718.53,
+        0.049160924
+      ],
+      "avg_upper_bounds": [
+        41.1974,
+        42575.76,
+        0.08080475
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "46229,69175136,65695584,68372610"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "5122335,5057944600,4829008000,5003127000"
+      ],
+      "sass_count_output_lower_bound_lists": [
+        "1813"
+      ],
+      "sass_count_output_upper_bound_lists": [
+        "124924"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q05"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "duckdb"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q05"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q05"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "16141976"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "20132108"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q05"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        128
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "7743396"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "10525980"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q05"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        256
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "3760764"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "5422870"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q05"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "1744759"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "2842413"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q06"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "duckdb"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q06"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q06"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "53510816"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "61869476"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q06"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        128
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "25919312"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "31824352"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q06"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        256
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "12436259"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "16200762"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q06"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "5830333"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "8573272"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q14"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "sum_bound_lists": [
+        "1000000,1000000"
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "duckdb"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q14"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "sum_bound_lists": [
+        "1000000,1000000"
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q14"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "sum_bound_lists": [
+        "1000000,1000000"
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "161975820,901395968"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "174471870,921924600"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q14"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "sum_bound_lists": [
+        "1000000,1000000"
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        128
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "79868064,446846140"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "89052656,465680000"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q14"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "sum_bound_lists": [
+        "1000000,1000000"
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        256
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "39221664,221672080"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "45654476,233670720"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q14"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "sum_bound_lists": [
+        "1000000,1000000"
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "18890180,109688190"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "23466074,118065400"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q19"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "duckdb"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q19"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q19"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "1205325"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "1669561"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q19"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        128
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "531766"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "902686"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q19"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        256
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "219371"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "497489"
+      ]
+    },
+    {
+      "name": "jcch",
+      "workload": "jcch_stock_dp",
+      "sf": 30,
+      "db": "jcch_sass_sf30.db",
+      "query_names": [
+        "q19"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "82914"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "270655"
+      ]
+    }
+  ]
+}
