@@ -681,7 +681,9 @@ static vector<double> GetDpSumContributionBounds(ClientContext &context, const s
 		}
 		if (FindAvgInfoForSumPos(avg_infos, i)) {
 			auto bound = StandardSumContributionBound(i, avg_infos, is_join, 0.0, count_bound);
-			needs_scalar_sum_bound = bound <= 0.0;
+			if (bound <= 0.0) {
+				needs_scalar_sum_bound = true;
+			}
 		} else if (!has_sum_list) {
 			needs_scalar_sum_bound = true;
 		}

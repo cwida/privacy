@@ -322,6 +322,13 @@ SELECT COUNT(*), SUM(amount) FROM orders;
 ----
 500	2250.000000
 
+# Mixed explicit SUM + AVG must still use dp_sum_bound for the explicit SUM even
+# when AVG can derive its internal centered-SUM bound from the AVG domain.
+query II
+SELECT SUM(amount)::BIGINT, (AVG(amount) * 10)::BIGINT FROM orders;
+----
+2250	45
+
 # ---------------------------------------------------------------------------
 # Partition selection. The released set of group keys is data-dependent, so grouped dp_standard
 # queries automatically apply DP partition selection (noised COUNT(DISTINCT pu) ≥ τ, τ computed from

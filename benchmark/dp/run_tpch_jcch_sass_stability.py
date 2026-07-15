@@ -130,7 +130,11 @@ META_COLUMNS = [
     "sum_bound_list",
     "c_u",
     "sass_count_output_bound",
+    "sass_count_output_lower_bound_list",
+    "sass_count_output_upper_bound_list",
     "sass_sum_output_bound",
+    "sass_sum_output_lower_bound_list",
+    "sass_sum_output_upper_bound_list",
     "sass_m",
     "sass_rescale",
     "elapsed_ms",
@@ -150,7 +154,11 @@ SUMMARY_COLUMNS = [
     "sum_bound_list",
     "c_u",
     "sass_count_output_bound",
+    "sass_count_output_lower_bound_list",
+    "sass_count_output_upper_bound_list",
     "sass_sum_output_bound",
+    "sass_sum_output_lower_bound_list",
+    "sass_sum_output_upper_bound_list",
     "sass_m",
     "sass_rescale",
     "success",
@@ -183,14 +191,14 @@ def format_number_list(values):
     return ",".join(format_number(value) for value in values)
 
 
-def scale_bound_list(text, multiplier):
+def scale_bound_list(text, multiplier, setting_name):
     if not text:
         return ""
     scaled = []
     for raw in str(text).split(","):
         value = raw.strip()
         if not value:
-            raise ValueError(f"empty entry in sum_bound_lists: {text}")
+            raise ValueError(f"empty entry in {setting_name}: {text}")
         scaled.append(float(value) * multiplier)
     return format_number_list(scaled)
 
@@ -226,6 +234,13 @@ def config_list(config, plural, singular, default):
     return default
 
 
+def config_modes(config, default):
+    value = config.get("modes", default)
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
 def numeric(value):
     if value == "" or value is None:
         return None
@@ -240,6 +255,30 @@ def build_sql(query_sql, point):
     sum_bound_list_sql = ""
     if point.get("sum_bound_list"):
         sum_bound_list_sql = f"SET dp_sum_bounds = {sql_string(point['sum_bound_list'])};"
+    count_output_lower_list_sql = ""
+    if point.get("sass_count_output_lower_bound_list"):
+        count_output_lower_list_sql = (
+            "SET dp_sass_count_output_lower_bounds = "
+            f"{sql_string(point['sass_count_output_lower_bound_list'])};"
+        )
+    count_output_upper_list_sql = ""
+    if point.get("sass_count_output_upper_bound_list"):
+        count_output_upper_list_sql = (
+            "SET dp_sass_count_output_upper_bounds = "
+            f"{sql_string(point['sass_count_output_upper_bound_list'])};"
+        )
+    sum_output_lower_list_sql = ""
+    if point.get("sass_sum_output_lower_bound_list"):
+        sum_output_lower_list_sql = (
+            "SET dp_sass_sum_output_lower_bounds = "
+            f"{sql_string(point['sass_sum_output_lower_bound_list'])};"
+        )
+    sum_output_upper_list_sql = ""
+    if point.get("sass_sum_output_upper_bound_list"):
+        sum_output_upper_list_sql = (
+            "SET dp_sass_sum_output_upper_bounds = "
+            f"{sql_string(point['sass_sum_output_upper_bound_list'])};"
+        )
     return f"""
 LOAD privacy;
 SET threads = {point["threads"]};
@@ -263,7 +302,11 @@ SET dp_sum_bound = {format_number(point["sum_bound"])};
 {sum_bound_list_sql}
 SET dp_max_groups_contributed = {format_number(point["c_u"])};
 SET dp_sass_count_output_bound = {format_number(point["sass_count_output_bound"])};
+{count_output_lower_list_sql}
+{count_output_upper_list_sql}
 SET dp_sass_sum_output_bound = {format_number(point["sass_sum_output_bound"])};
+{sum_output_lower_list_sql}
+{sum_output_upper_list_sql}
 SET dp_sass_avg_lower_bound = 0;
 SET dp_sass_avg_upper_bound = {format_number(point["sum_bound"])};
 SET dp_sass_minmax_lower_bound = 0;
@@ -357,15 +400,42 @@ def load_points(config, args):
     sample_lanes = first_value(config, "sample_lanes", 1)
     sass_m_values = config_list(config, "sass_ms", "sass_m", [64])
     sass_rescale_values = config_list(config, "sass_rescales", "sass_rescale", [True])
+    default_modes = config_modes(config, ["dp_sass"])
 
     points = []
     for dataset in config["datasets"]:
         if dataset_filter and dataset["name"] not in dataset_filter:
             continue
+        if "dp_sass" not in config_modes(dataset, default_modes):
+            continue
         dataset_sass_m_values = config_list(dataset, "sass_ms", "sass_m", sass_m_values)
         dataset_sass_rescale_values = config_list(dataset, "sass_rescales", "sass_rescale", sass_rescale_values)
         dataset_sum_bound_list = first_string(dataset, "sum_bound_lists", "sum_bound_list",
                                               first_string(config, "sum_bound_lists", "sum_bound_list", ""))
+        dataset_sass_count_output_lower_bound_list = first_string(
+            dataset,
+            "sass_count_output_lower_bound_lists",
+            "sass_count_output_lower_bound_list",
+            first_string(config, "sass_count_output_lower_bound_lists", "sass_count_output_lower_bound_list", ""),
+        )
+        dataset_sass_count_output_upper_bound_list = first_string(
+            dataset,
+            "sass_count_output_upper_bound_lists",
+            "sass_count_output_upper_bound_list",
+            first_string(config, "sass_count_output_upper_bound_lists", "sass_count_output_upper_bound_list", ""),
+        )
+        dataset_sass_sum_output_lower_bound_list = first_string(
+            dataset,
+            "sass_sum_output_lower_bound_lists",
+            "sass_sum_output_lower_bound_list",
+            first_string(config, "sass_sum_output_lower_bound_lists", "sass_sum_output_lower_bound_list", ""),
+        )
+        dataset_sass_sum_output_upper_bound_list = first_string(
+            dataset,
+            "sass_sum_output_upper_bound_lists",
+            "sass_sum_output_upper_bound_list",
+            first_string(config, "sass_sum_output_upper_bound_lists", "sass_sum_output_upper_bound_list", ""),
+        )
         for query in dataset.get("query_names", []):
             if query_filter and query not in query_filter:
                 continue
@@ -374,7 +444,19 @@ def load_points(config, args):
             for multiplier in multipliers:
                 count_bound = first_value(dataset, "count_bounds", 1.0) * multiplier
                 sum_bound = first_value(dataset, "sum_bounds", 1.0) * multiplier
-                sum_bound_list = scale_bound_list(dataset_sum_bound_list, multiplier)
+                sum_bound_list = scale_bound_list(dataset_sum_bound_list, multiplier, "sum_bound_lists")
+                sass_count_output_lower_bound_list = scale_bound_list(
+                    dataset_sass_count_output_lower_bound_list, multiplier, "sass_count_output_lower_bound_lists"
+                )
+                sass_count_output_upper_bound_list = scale_bound_list(
+                    dataset_sass_count_output_upper_bound_list, multiplier, "sass_count_output_upper_bound_lists"
+                )
+                sass_sum_output_lower_bound_list = scale_bound_list(
+                    dataset_sass_sum_output_lower_bound_list, multiplier, "sass_sum_output_lower_bound_lists"
+                )
+                sass_sum_output_upper_bound_list = scale_bound_list(
+                    dataset_sass_sum_output_upper_bound_list, multiplier, "sass_sum_output_upper_bound_lists"
+                )
                 for sass_m in dataset_sass_m_values:
                     for sass_rescale in dataset_sass_rescale_values:
                         points.append(
@@ -390,7 +472,11 @@ def load_points(config, args):
                                 "sum_bound_list": sum_bound_list,
                                 "c_u": first_value(dataset, "c_u", 1.0),
                                 "sass_count_output_bound": first_value(dataset, "sass_count_output_bounds", 1.0),
+                                "sass_count_output_lower_bound_list": sass_count_output_lower_bound_list,
+                                "sass_count_output_upper_bound_list": sass_count_output_upper_bound_list,
                                 "sass_sum_output_bound": first_value(dataset, "sass_sum_output_bounds", 1.0),
+                                "sass_sum_output_lower_bound_list": sass_sum_output_lower_bound_list,
+                                "sass_sum_output_upper_bound_list": sass_sum_output_upper_bound_list,
                                 "sass_m": sass_m,
                                 "sass_rescale": sass_rescale,
                                 "threads": threads,
