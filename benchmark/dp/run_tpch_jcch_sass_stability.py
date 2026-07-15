@@ -128,6 +128,8 @@ META_COLUMNS = [
     "count_bound",
     "sum_bound",
     "sum_bound_list",
+    "avg_lower_bound_list",
+    "avg_upper_bound_list",
     "c_u",
     "sass_count_output_bound",
     "sass_count_output_lower_bound_list",
@@ -152,6 +154,8 @@ SUMMARY_COLUMNS = [
     "count_bound",
     "sum_bound",
     "sum_bound_list",
+    "avg_lower_bound_list",
+    "avg_upper_bound_list",
     "c_u",
     "sass_count_output_bound",
     "sass_count_output_lower_bound_list",
@@ -255,6 +259,14 @@ def build_sql(query_sql, point):
     sum_bound_list_sql = ""
     if point.get("sum_bound_list"):
         sum_bound_list_sql = f"SET dp_sum_bounds = {sql_string(point['sum_bound_list'])};"
+    avg_bound_list_sql = ""
+    if point.get("avg_lower_bound_list") or point.get("avg_upper_bound_list"):
+        if not point.get("avg_lower_bound_list") or not point.get("avg_upper_bound_list"):
+            raise ValueError("avg_lower_bounds and avg_upper_bounds must be set together")
+        avg_bound_list_sql = (
+            f"SET dp_avg_lower_bounds = {sql_string(point['avg_lower_bound_list'])};\n"
+            f"SET dp_avg_upper_bounds = {sql_string(point['avg_upper_bound_list'])};"
+        )
     count_output_lower_list_sql = ""
     if point.get("sass_count_output_lower_bound_list"):
         count_output_lower_list_sql = (
@@ -307,8 +319,11 @@ SET dp_sass_count_output_bound = {format_number(point["sass_count_output_bound"]
 SET dp_sass_sum_output_bound = {format_number(point["sass_sum_output_bound"])};
 {sum_output_lower_list_sql}
 {sum_output_upper_list_sql}
+SET dp_avg_lower_bounds = NULL;
+SET dp_avg_upper_bounds = NULL;
 SET dp_sass_avg_lower_bound = 0;
 SET dp_sass_avg_upper_bound = {format_number(point["sum_bound"])};
+{avg_bound_list_sql}
 SET dp_sass_minmax_lower_bound = 0;
 SET dp_sass_minmax_upper_bound = {format_number(point["sum_bound"])};
 SELECT group_row, aggregate_index, aggregate_name, group_key_json,
@@ -401,6 +416,8 @@ def load_points(config, args):
     sass_m_values = config_list(config, "sass_ms", "sass_m", [64])
     sass_rescale_values = config_list(config, "sass_rescales", "sass_rescale", [True])
     default_modes = config_modes(config, ["dp_sass"])
+    avg_lower_bounds = config_list(config, "avg_lower_bounds", "avg_lower_bound", [])
+    avg_upper_bounds = config_list(config, "avg_upper_bounds", "avg_upper_bound", [])
 
     points = []
     for dataset in config["datasets"]:
@@ -408,6 +425,14 @@ def load_points(config, args):
             continue
         if "dp_sass" not in config_modes(dataset, default_modes):
             continue
+        dataset_avg_lower_bounds = config_list(dataset, "avg_lower_bounds", "avg_lower_bound", avg_lower_bounds)
+        dataset_avg_upper_bounds = config_list(dataset, "avg_upper_bounds", "avg_upper_bound", avg_upper_bounds)
+        if bool(dataset_avg_lower_bounds) != bool(dataset_avg_upper_bounds):
+            raise ValueError("avg_lower_bounds and avg_upper_bounds must be set together")
+        if dataset_avg_lower_bounds and len(dataset_avg_lower_bounds) != len(dataset_avg_upper_bounds):
+            raise ValueError("avg_lower_bounds and avg_upper_bounds must have the same length")
+        avg_lower_bound_list = format_number_list(dataset_avg_lower_bounds)
+        avg_upper_bound_list = format_number_list(dataset_avg_upper_bounds)
         dataset_sass_m_values = config_list(dataset, "sass_ms", "sass_m", sass_m_values)
         dataset_sass_rescale_values = config_list(dataset, "sass_rescales", "sass_rescale", sass_rescale_values)
         dataset_sum_bound_list = first_string(dataset, "sum_bound_lists", "sum_bound_list",
@@ -470,6 +495,8 @@ def load_points(config, args):
                                 "count_bound": count_bound,
                                 "sum_bound": sum_bound,
                                 "sum_bound_list": sum_bound_list,
+                                "avg_lower_bound_list": avg_lower_bound_list,
+                                "avg_upper_bound_list": avg_upper_bound_list,
                                 "c_u": first_value(dataset, "c_u", 1.0),
                                 "sass_count_output_bound": first_value(dataset, "sass_count_output_bounds", 1.0),
                                 "sass_count_output_lower_bound_list": sass_count_output_lower_bound_list,
