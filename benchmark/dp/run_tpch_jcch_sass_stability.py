@@ -127,6 +127,7 @@ META_COLUMNS = [
     "bound_multiplier",
     "count_bound",
     "sum_bound",
+    "sum_bound_list",
     "c_u",
     "sass_count_output_bound",
     "sass_sum_output_bound",
@@ -146,6 +147,7 @@ SUMMARY_COLUMNS = [
     "bound_multiplier",
     "count_bound",
     "sum_bound",
+    "sum_bound_list",
     "c_u",
     "sass_count_output_bound",
     "sass_sum_output_bound",
@@ -177,6 +179,22 @@ def format_number(value):
     return "{:.17g}".format(float(value))
 
 
+def format_number_list(values):
+    return ",".join(format_number(value) for value in values)
+
+
+def scale_bound_list(text, multiplier):
+    if not text:
+        return ""
+    scaled = []
+    for raw in str(text).split(","):
+        value = raw.strip()
+        if not value:
+            raise ValueError(f"empty entry in sum_bound_lists: {text}")
+        scaled.append(float(value) * multiplier)
+    return format_number_list(scaled)
+
+
 def shorten_error(text):
     return " ".join(text.split())[:800]
 
@@ -186,6 +204,17 @@ def first_value(config, key, default):
     if not values:
         return default
     return values[0]
+
+
+def first_string(config, plural, singular, default=""):
+    if plural in config:
+        value = config[plural]
+        if isinstance(value, list):
+            return value[0] if value else default
+        return str(value)
+    if singular in config:
+        return str(config[singular])
+    return default
 
 
 def config_list(config, plural, singular, default):
@@ -208,6 +237,9 @@ def bool_text(value):
 
 
 def build_sql(query_sql, point):
+    sum_bound_list_sql = ""
+    if point.get("sum_bound_list"):
+        sum_bound_list_sql = f"SET dp_sum_bounds = {sql_string(point['sum_bound_list'])};"
     return f"""
 LOAD privacy;
 SET threads = {point["threads"]};
@@ -228,6 +260,7 @@ SET dp_sass_rescale = {bool_text(point["sass_rescale"])};
 SET dp_sass_release = 'average';
 SET dp_count_bound = {format_number(point["count_bound"])};
 SET dp_sum_bound = {format_number(point["sum_bound"])};
+{sum_bound_list_sql}
 SET dp_max_groups_contributed = {format_number(point["c_u"])};
 SET dp_sass_count_output_bound = {format_number(point["sass_count_output_bound"])};
 SET dp_sass_sum_output_bound = {format_number(point["sass_sum_output_bound"])};
@@ -331,6 +364,8 @@ def load_points(config, args):
             continue
         dataset_sass_m_values = config_list(dataset, "sass_ms", "sass_m", sass_m_values)
         dataset_sass_rescale_values = config_list(dataset, "sass_rescales", "sass_rescale", sass_rescale_values)
+        dataset_sum_bound_list = first_string(dataset, "sum_bound_lists", "sum_bound_list",
+                                              first_string(config, "sum_bound_lists", "sum_bound_list", ""))
         for query in dataset.get("query_names", []):
             if query_filter and query not in query_filter:
                 continue
@@ -339,6 +374,7 @@ def load_points(config, args):
             for multiplier in multipliers:
                 count_bound = first_value(dataset, "count_bounds", 1.0) * multiplier
                 sum_bound = first_value(dataset, "sum_bounds", 1.0) * multiplier
+                sum_bound_list = scale_bound_list(dataset_sum_bound_list, multiplier)
                 for sass_m in dataset_sass_m_values:
                     for sass_rescale in dataset_sass_rescale_values:
                         points.append(
@@ -351,6 +387,7 @@ def load_points(config, args):
                                 "bound_multiplier": multiplier,
                                 "count_bound": count_bound,
                                 "sum_bound": sum_bound,
+                                "sum_bound_list": sum_bound_list,
                                 "c_u": first_value(dataset, "c_u", 1.0),
                                 "sass_count_output_bound": first_value(dataset, "sass_count_output_bounds", 1.0),
                                 "sass_sum_output_bound": first_value(dataset, "sass_sum_output_bounds", 1.0),

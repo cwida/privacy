@@ -1993,9 +1993,9 @@ static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta
 			                                                         point.bound_multiplier,
 			                                                         "sass_sum_output_lower_bound_lists")));
 			RunStatement(con, "SET dp_sass_sum_output_upper_bounds=" +
-			                      SqlQuote(ScaleConfiguredBoundList(point.sass_sum_output_upper_bound_list,
-			                                                        point.bound_multiplier,
-			                                                        "sass_sum_output_upper_bound_lists")));
+			                      SqlQuote(ScaleConfiguredFiniteList(point.sass_sum_output_upper_bound_list,
+			                                                         point.bound_multiplier,
+			                                                         "sass_sum_output_upper_bound_lists")));
 		}
 		RunStatement(con, "SET dp_sass_avg_lower_bound=" +
 		                      FormatNumber(point.avg_lower_bounds.empty() ? 0.0 : point.avg_lower_bounds[0]));
@@ -2071,8 +2071,8 @@ static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const Que
 	    << CsvQuote(ScaleConfiguredFiniteList(point.sass_sum_output_lower_bound_list, point.bound_multiplier,
 	                                          "sass_sum_output_lower_bound_lists"))
 	    << ","
-	    << CsvQuote(ScaleConfiguredBoundList(point.sass_sum_output_upper_bound_list, point.bound_multiplier,
-	                                         "sass_sum_output_upper_bound_lists"))
+	    << CsvQuote(ScaleConfiguredFiniteList(point.sass_sum_output_upper_bound_list, point.bound_multiplier,
+	                                          "sass_sum_output_upper_bound_lists"))
 	    << "," << FormatNumber(point.bound_multiplier) << "," << point.sample_lanes << "," << point.sass_m << ","
 	    << (point.sass_rescale ? "true" : "false") << "," << seed << "," << CsvQuote(db_path) << ","
 	    << CsvQuote(query.path) << "\n";
