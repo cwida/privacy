@@ -358,9 +358,9 @@ WHERE p_brand = 'Brand#22';
 statement ok
 SET dp_delta = 1e-6;
 
-# COUNT(DISTINCT) grouped queries auto-apply DP partition selection with a computed τ (there is no
-# privacy_min_group_count knob). At ε = 1 the threshold τ (~29) sits below each group's distinct-PU
-# support, so both groups survive (noise off → deterministic support ≥ τ).
+# COUNT(DISTINCT) grouped queries auto-apply DP partition selection with a computed τ. At ε = 1 the
+# threshold τ (~29) sits below each group's distinct-PU support, so both groups survive
+# (noise off → deterministic support ≥ τ).
 query II rowsort
 SELECT p_brand, supplier_cnt
 FROM (
@@ -371,6 +371,23 @@ FROM (
 ----
 Brand#11	7
 Brand#22	1
+
+# An admin-set privacy_min_group_count raises the same noised support gate. Here a threshold far
+# above the test data's group support suppresses both groups.
+statement ok
+SET privacy_min_group_count = 1000000;
+
+query II rowsort
+SELECT p_brand, supplier_cnt
+FROM (
+    SELECT p_brand, p_type, p_size, COUNT(DISTINCT ps_suppkey) AS supplier_cnt
+    FROM _sass_partsupp JOIN _sass_part ON p_partkey = ps_partkey
+    GROUP BY p_brand, p_type, p_size
+) q;
+----
+
+statement ok
+SET privacy_min_group_count = NULL;
 
 # With a tiny ε the computed τ far exceeds every group's distinct-PU support, so partition
 # selection suppresses all groups.
@@ -1190,6 +1207,30 @@ FROM (
 );
 ----
 0	1
+
+statement ok
+SET privacy_mode = 'dp_standard';
+
+statement ok
+SET dp_count_bound = 1000;
+
+statement ok
+SET privacy_min_group_count = 41;
+
+query II rowsort
+SELECT g, c
+FROM (
+    SELECT g, COUNT(*) AS c
+    FROM sass_group_events
+    GROUP BY g
+);
+----
+
+statement ok
+SET privacy_min_group_count = NULL;
+
+statement ok
+SET privacy_mode = 'dp_sass';
 
 # τ derives from the Google-DP formula over C_u, ε_η, δ_η (Algorithm 2 SIMD-SAA^udp), so it scales
 # with the privacy budget. With a tiny ε the threshold τ far exceeds group 0's 40 distinct PUs, so

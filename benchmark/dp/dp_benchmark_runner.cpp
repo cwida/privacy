@@ -102,6 +102,7 @@ struct DatasetConfig {
 	vector<string> sass_sum_output_lower_bound_lists;
 	vector<string> sass_sum_output_upper_bound_lists;
 	vector<double> group_bounds;
+	vector<double> support_thresholds;
 	vector<double> c_u_values;
 	vector<double> bound_multipliers;
 	vector<int> sample_lanes;
@@ -133,6 +134,7 @@ struct Config {
 	vector<string> sass_sum_output_lower_bound_lists;
 	vector<string> sass_sum_output_upper_bound_lists;
 	vector<double> group_bounds = {1.0};
+	vector<double> support_thresholds = {0.0};
 	vector<double> c_u_values;
 	vector<double> bound_multipliers = {1.0};
 	vector<int> sample_lanes = {1};
@@ -198,6 +200,7 @@ struct RunPoint {
 	string sass_sum_output_lower_bound_list;
 	string sass_sum_output_upper_bound_list;
 	double group_bound = 1.0;
+	double support_threshold = 0.0;
 	double c_u = 1.0;
 	double bound_multiplier = 1.0;
 	int sample_lanes = 1;
@@ -725,6 +728,8 @@ static Config LoadConfig(const string &path) {
 	config.sass_sum_output_lower_bound_lists = JsonStringList(root, "sass_sum_output_lower_bound_lists", {});
 	config.sass_sum_output_upper_bound_lists = JsonStringList(root, "sass_sum_output_upper_bound_lists", {});
 	config.group_bounds = JsonNumberList(root, "group_bounds", "group_bound", config.group_bounds);
+	config.support_thresholds =
+	    JsonNumberList(root, "support_thresholds", "support_threshold", config.support_thresholds);
 	config.c_u_values = JsonNumberList(root, "c_u", "c_u", config.c_u_values);
 	config.bound_multipliers = JsonNumberList(root, "bound_multipliers", "bound_multiplier", config.bound_multipliers);
 	config.sample_lanes = JsonIntList(root, "sample_lanes", "sample_lanes", config.sample_lanes);
@@ -780,6 +785,8 @@ static Config LoadConfig(const string &path) {
 		ds.sass_sum_output_upper_bound_lists =
 		    JsonStringList(entry, "sass_sum_output_upper_bound_lists", config.sass_sum_output_upper_bound_lists);
 		ds.group_bounds = JsonNumberList(entry, "group_bounds", "group_bound", config.group_bounds);
+		ds.support_thresholds =
+		    JsonNumberList(entry, "support_thresholds", "support_threshold", config.support_thresholds);
 		ds.c_u_values = JsonNumberList(entry, "c_u", "c_u", config.c_u_values);
 		ds.bound_multipliers = JsonNumberList(entry, "bound_multipliers", "bound_multiplier", config.bound_multipliers);
 		ds.sample_lanes = JsonIntList(entry, "sample_lanes", "sample_lanes", config.sample_lanes);
@@ -1783,6 +1790,7 @@ static vector<RunPoint> BuildRunPoints(const DatasetConfig &dataset) {
 		                    : (mode == "dp_sass_bounded_ratio" ? vector<string> {"average"} : vector<string> {"-"});
 		auto sum_bound_lists =
 		    mode == "dp_sass_bounded_ratio" ? vector<string> {""} : NonEmptyString(dataset.sum_bound_lists, {""});
+		auto support_thresholds = mode == "duckdb" ? vector<double> {0.0} : NonEmpty(dataset.support_thresholds, {0.0});
 		auto sass_count_output_bounds =
 		    mode == "dp_sass" ? NonEmpty(dataset.sass_count_output_bounds, {0.0}) : vector<double> {0.0};
 		auto sass_count_output_bound_lists =
@@ -1812,67 +1820,76 @@ static vector<RunPoint> BuildRunPoints(const DatasetConfig &dataset) {
 					for (double sum_bound : dataset.sum_bounds) {
 						for (auto &sum_bound_list : sum_bound_lists) {
 							for (double c_u : c_u_values) {
-								for (double multiplier : dataset.bound_multipliers) {
-									for (double sass_count_output_bound : sass_count_output_bounds) {
-										for (auto &sass_count_output_bound_list : sass_count_output_bound_lists) {
-											for (auto &sass_count_output_lower_bound_list :
-											     sass_count_output_lower_bound_lists) {
-												for (auto &sass_count_output_upper_bound_list :
-												     sass_count_output_upper_bound_lists) {
-													for (double sass_sum_output_bound : sass_sum_output_bounds) {
-														for (auto &sass_sum_output_bound_list :
-														     sass_sum_output_bound_lists) {
-															for (auto &sass_sum_output_lower_bound_list :
-															     sass_sum_output_lower_bound_lists) {
-																for (auto &sass_sum_output_upper_bound_list :
-																     sass_sum_output_upper_bound_lists) {
-																	for (int lanes : lane_values) {
-																		for (int sass_m : sass_m_values) {
-																			for (bool sass_rescale :
-																			     sass_rescale_values) {
-																				for (auto &release : releases) {
-																					RunPoint point;
-																					point.mode = mode;
-																					point.release = release;
-																					point.epsilon = epsilon;
-																					point.delta = delta;
-																					point.count_bound =
-																					    count_bound * multiplier;
-																					point.sum_bound =
-																					    sum_bound * multiplier;
-																					point.sum_bound_list =
-																					    sum_bound_list;
-																					point.avg_lower_bounds =
-																					    dataset.avg_lower_bounds;
-																					point.avg_upper_bounds =
-																					    dataset.avg_upper_bounds;
-																					point.sass_count_output_bound =
-																					    sass_count_output_bound;
-																					point.sass_count_output_bound_list =
-																					    sass_count_output_bound_list;
-																					point
-																					    .sass_count_output_lower_bound_list =
-																					    sass_count_output_lower_bound_list;
-																					point
-																					    .sass_count_output_upper_bound_list =
-																					    sass_count_output_upper_bound_list;
-																					point.sass_sum_output_bound =
-																					    sass_sum_output_bound;
-																					point.sass_sum_output_bound_list =
-																					    sass_sum_output_bound_list;
-																					point
-																					    .sass_sum_output_lower_bound_list =
-																					    sass_sum_output_lower_bound_list;
-																					point
-																					    .sass_sum_output_upper_bound_list =
-																					    sass_sum_output_upper_bound_list;
-																					point.group_bound = c_u;
-																					point.c_u = c_u;
-																					point.bound_multiplier = multiplier;
-																					point.sample_lanes = lanes;
-																					point.sass_m = sass_m;
-																					point.sass_rescale = sass_rescale;
-																					points.push_back(std::move(point));
+								for (double support_threshold : support_thresholds) {
+									for (double multiplier : dataset.bound_multipliers) {
+										for (double sass_count_output_bound : sass_count_output_bounds) {
+											for (auto &sass_count_output_bound_list : sass_count_output_bound_lists) {
+												for (auto &sass_count_output_lower_bound_list :
+												     sass_count_output_lower_bound_lists) {
+													for (auto &sass_count_output_upper_bound_list :
+													     sass_count_output_upper_bound_lists) {
+														for (double sass_sum_output_bound : sass_sum_output_bounds) {
+															for (auto &sass_sum_output_bound_list :
+															     sass_sum_output_bound_lists) {
+																for (auto &sass_sum_output_lower_bound_list :
+																     sass_sum_output_lower_bound_lists) {
+																	for (auto &sass_sum_output_upper_bound_list :
+																	     sass_sum_output_upper_bound_lists) {
+																		for (int lanes : lane_values) {
+																			for (int sass_m : sass_m_values) {
+																				for (bool sass_rescale :
+																				     sass_rescale_values) {
+																					for (auto &release : releases) {
+																						RunPoint point;
+																						point.mode = mode;
+																						point.release = release;
+																						point.epsilon = epsilon;
+																						point.delta = delta;
+																						point.count_bound =
+																						    count_bound * multiplier;
+																						point.sum_bound =
+																						    sum_bound * multiplier;
+																						point.sum_bound_list =
+																						    sum_bound_list;
+																						point.avg_lower_bounds =
+																						    dataset.avg_lower_bounds;
+																						point.avg_upper_bounds =
+																						    dataset.avg_upper_bounds;
+																						point.sass_count_output_bound =
+																						    sass_count_output_bound;
+																						point
+																						    .sass_count_output_bound_list =
+																						    sass_count_output_bound_list;
+																						point
+																						    .sass_count_output_lower_bound_list =
+																						    sass_count_output_lower_bound_list;
+																						point
+																						    .sass_count_output_upper_bound_list =
+																						    sass_count_output_upper_bound_list;
+																						point.sass_sum_output_bound =
+																						    sass_sum_output_bound;
+																						point
+																						    .sass_sum_output_bound_list =
+																						    sass_sum_output_bound_list;
+																						point
+																						    .sass_sum_output_lower_bound_list =
+																						    sass_sum_output_lower_bound_list;
+																						point
+																						    .sass_sum_output_upper_bound_list =
+																						    sass_sum_output_upper_bound_list;
+																						point.group_bound = c_u;
+																						point.support_threshold =
+																						    support_threshold;
+																						point.c_u = c_u;
+																						point.bound_multiplier =
+																						    multiplier;
+																						point.sample_lanes = lanes;
+																						point.sass_m = sass_m;
+																						point.sass_rescale =
+																						    sass_rescale;
+																						points.push_back(
+																						    std::move(point));
+																					}
 																				}
 																			}
 																		}
@@ -1919,6 +1936,7 @@ static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta
 	if (point.mode == "duckdb") {
 		RunStatement(con, "SET priv_rewrite=false");
 		RunStatement(con, "SET privacy_diffcols=NULL");
+		RunStatement(con, "SET privacy_min_group_count=NULL");
 		return;
 	}
 	if (point.mode == "dp_sass_bounded_ratio") {
@@ -1943,6 +1961,11 @@ static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta
 	}
 	RunStatement(con, "SET dp_count_bound=" + FormatNumber(point.count_bound));
 	RunStatement(con, "SET dp_max_groups_contributed=" + FormatNumber(point.group_bound));
+	if (point.support_threshold > 0.0) {
+		RunStatement(con, "SET privacy_min_group_count=" + FormatNumber(point.support_threshold));
+	} else {
+		RunStatement(con, "SET privacy_min_group_count=NULL");
+	}
 	ApplyAvgBoundSettings(con, point);
 	if (point.mode == "dp_sass") {
 		RunStatement(con, "SET dp_sample_lanes=" + std::to_string(point.sample_lanes));
@@ -2020,7 +2043,7 @@ static void WriteHeader(std::ofstream &csv) {
 	       "saa_noise_scale_q1_count_median,saa_smooth_sensitivity_median,saa_smooth_sensitivity_mean,"
 	       "saa_smooth_sensitivity_max,saa_smooth_sensitivity_q1_sum_median,"
 	       "saa_smooth_sensitivity_q1_avg_median,saa_smooth_sensitivity_q1_count_median,epsilon,delta,sf,"
-	       "dp_sum_bound,dp_sum_bounds,dp_count_bound,dp_max_groups_contributed,"
+	       "dp_sum_bound,dp_sum_bounds,dp_count_bound,dp_max_groups_contributed,privacy_min_group_count,"
 	       "c_u,dp_sass_count_output_bound,dp_sass_sum_output_bound,dp_avg_lower_bounds,dp_avg_upper_bounds,"
 	       "dp_sass_count_output_bounds,dp_sass_sum_output_bounds,dp_sass_count_output_lower_bounds,"
 	       "dp_sass_count_output_upper_bounds,dp_sass_sum_output_lower_bounds,dp_sass_sum_output_upper_bounds,"
@@ -2053,8 +2076,9 @@ static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const Que
 	    << FormatNumber(delta) << "," << FormatNumber(dataset.scale_factor) << "," << FormatNumber(point.sum_bound)
 	    << "," << CsvQuote(ScaleConfiguredBoundList(point.sum_bound_list, point.bound_multiplier, "sum_bound_lists"))
 	    << "," << FormatNumber(point.count_bound) << "," << FormatNumber(point.group_bound) << ","
-	    << FormatNumber(point.c_u) << "," << FormatNumber(sass_count_output_bound) << ","
-	    << FormatNumber(sass_sum_output_bound) << "," << CsvQuote(FormatNumberList(point.avg_lower_bounds)) << ","
+	    << FormatNumber(point.support_threshold) << "," << FormatNumber(point.c_u) << ","
+	    << FormatNumber(sass_count_output_bound) << "," << FormatNumber(sass_sum_output_bound) << ","
+	    << CsvQuote(FormatNumberList(point.avg_lower_bounds)) << ","
 	    << CsvQuote(FormatNumberList(point.avg_upper_bounds)) << ","
 	    << CsvQuote(ScaleConfiguredBoundList(point.sass_count_output_bound_list, point.bound_multiplier,
 	                                         "sass_count_output_bound_lists"))
@@ -2381,6 +2405,7 @@ static int Main(int argc, char **argv) {
 
 } // namespace duckdb
 
+#ifndef DP_BENCHMARK_RUNNER_NO_MAIN
 int main(int argc, char **argv) {
 	try {
 		return duckdb::Main(argc, argv);
@@ -2389,3 +2414,4 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 }
+#endif

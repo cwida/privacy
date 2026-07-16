@@ -142,6 +142,10 @@ static inline uint64_t BoolListToMask(UnifiedVectorFormat &list_data, UnifiedVec
 // ============================================================================
 static inline bool FilterFromCount(idx_t true_count, idx_t lane_count, double mi, double correction,
                                    std::mt19937_64 &gen) {
+	if (lane_count == 0) {
+		return false;
+	}
+
 	double effective_popcount = static_cast<double>(true_count) * correction;
 	double threshold = static_cast<double>(lane_count) / 2.0;
 

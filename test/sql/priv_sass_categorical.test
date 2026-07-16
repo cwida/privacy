@@ -83,6 +83,15 @@ EXPLAIN SELECT as_sample_count(0::UBIGINT);
 ----
 as_sample_count
 
+# Empty categorical lane lists carry no support and should never pass a filter,
+# including the comparison terminals used by categorical rewrites.
+query III
+SELECT priv_filter([]::BOOLEAN[]),
+       priv_filter_gt(1.0::FLOAT, []::FLOAT[]),
+       priv_filter_gt(1.0::FLOAT, []::FLOAT[], 1000000::FLOAT);
+----
+false	false	false
+
 # Plan check: under PAC mode the categorical rewriter still picks the
 # non-SASS variant — verifying M5b didn't accidentally re-route PAC plans.
 statement ok

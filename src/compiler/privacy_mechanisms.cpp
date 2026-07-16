@@ -2668,6 +2668,10 @@ static void FinalizeDPLaplace(OptimizerExtensionInput &input, unique_ptr<Logical
 			double eps_eta = epsilon / (k + 1.0);
 			double delta_eta = delta / (k + 1.0);
 			tau = ComputeWilsonPartitionThreshold(eps_eta, delta_eta, cu);
+			double manual_threshold = 0.0;
+			if (TryGetPrivacyMinGroupCount(input.context, manual_threshold)) {
+				tau = std::max(tau, manual_threshold);
+			}
 			support_noise_scale = noise_enabled ? (cu / eps_eta) : 0.0;
 			support_gate = 1.0;
 			budget_units = k + 1.0;
@@ -2923,6 +2927,10 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		double cu = static_cast<double>(group_bound);
 		// Google DP / Wilson et al. threshold: P[releasing a group backed by a single PU] ≤ δ_η.
 		tau = ComputeWilsonPartitionThreshold(eps_eta, delta_eta, cu);
+		double manual_threshold = 0.0;
+		if (TryGetPrivacyMinGroupCount(input.context, manual_threshold)) {
+			tau = std::max(tau, manual_threshold);
+		}
 		bool noise_enabled = GetBooleanSetting(input.context, "privacy_noise", true);
 		// One PU changes the per-group distinct count in up to C_u groups by 1 → L1 sensitivity C_u.
 		support_noise_scale = noise_enabled ? (cu / eps_eta) : 0.0;

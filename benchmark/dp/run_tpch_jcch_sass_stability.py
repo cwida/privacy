@@ -124,6 +124,9 @@ META_COLUMNS = [
     "sf",
     "db",
     "query",
+    "epsilon",
+    "delta",
+    "release",
     "bound_multiplier",
     "count_bound",
     "sum_bound",
@@ -150,6 +153,9 @@ SUMMARY_COLUMNS = [
     "sf",
     "db",
     "query",
+    "epsilon",
+    "delta",
+    "release",
     "bound_multiplier",
     "count_bound",
     "sum_bound",
@@ -308,7 +314,7 @@ SET dp_delta = {format_number(point["delta"])};
 SET dp_sample_lanes = {point["sample_lanes"]};
 SET dp_sass_m = {point["sass_m"]};
 SET dp_sass_rescale = {bool_text(point["sass_rescale"])};
-SET dp_sass_release = 'average';
+SET dp_sass_release = {sql_string(point["release"])};
 SET dp_count_bound = {format_number(point["count_bound"])};
 SET dp_sum_bound = {format_number(point["sum_bound"])};
 {sum_bound_list_sql}
@@ -410,11 +416,12 @@ def load_points(config, args):
     query_filter = set(args.queries.split(",")) if args.queries else None
     multipliers = config.get("bound_multipliers", [1.0])
     threads = args.threads if args.threads is not None else config.get("threads", 1)
-    epsilon = first_value(config, "epsilons", 1.0)
-    delta = first_value(config, "deltas", 1e-6)
+    epsilon_values = config_list(config, "epsilons", "epsilon", [1.0])
+    delta_values = config_list(config, "deltas", "delta", [1e-6])
     sample_lanes = first_value(config, "sample_lanes", 1)
     sass_m_values = config_list(config, "sass_ms", "sass_m", [64])
     sass_rescale_values = config_list(config, "sass_rescales", "sass_rescale", [True])
+    sass_release_values = config_list(config, "sass_releases", "sass_release", ["average"])
     default_modes = config_modes(config, ["dp_sass"])
     avg_lower_bounds = config_list(config, "avg_lower_bounds", "avg_lower_bound", [])
     avg_upper_bounds = config_list(config, "avg_upper_bounds", "avg_upper_bound", [])
@@ -425,6 +432,8 @@ def load_points(config, args):
             continue
         if "dp_sass" not in config_modes(dataset, default_modes):
             continue
+        dataset_epsilon_values = config_list(dataset, "epsilons", "epsilon", epsilon_values)
+        dataset_delta_values = config_list(dataset, "deltas", "delta", delta_values)
         dataset_avg_lower_bounds = config_list(dataset, "avg_lower_bounds", "avg_lower_bound", avg_lower_bounds)
         dataset_avg_upper_bounds = config_list(dataset, "avg_upper_bounds", "avg_upper_bound", avg_upper_bounds)
         if bool(dataset_avg_lower_bounds) != bool(dataset_avg_upper_bounds):
@@ -435,6 +444,7 @@ def load_points(config, args):
         avg_upper_bound_list = format_number_list(dataset_avg_upper_bounds)
         dataset_sass_m_values = config_list(dataset, "sass_ms", "sass_m", sass_m_values)
         dataset_sass_rescale_values = config_list(dataset, "sass_rescales", "sass_rescale", sass_rescale_values)
+        dataset_sass_release_values = config_list(dataset, "sass_releases", "sass_release", sass_release_values)
         dataset_sum_bound_list = first_string(dataset, "sum_bound_lists", "sum_bound_list",
                                               first_string(config, "sum_bound_lists", "sum_bound_list", ""))
         dataset_sass_count_output_lower_bound_list = first_string(
@@ -466,52 +476,64 @@ def load_points(config, args):
                 continue
             if query not in TPCH_STOCK_DP_QUERIES:
                 raise ValueError(f"no built-in SQL for query {query}")
-            for multiplier in multipliers:
-                count_bound = first_value(dataset, "count_bounds", 1.0) * multiplier
-                sum_bound = first_value(dataset, "sum_bounds", 1.0) * multiplier
-                sum_bound_list = scale_bound_list(dataset_sum_bound_list, multiplier, "sum_bound_lists")
-                sass_count_output_lower_bound_list = scale_bound_list(
-                    dataset_sass_count_output_lower_bound_list, multiplier, "sass_count_output_lower_bound_lists"
-                )
-                sass_count_output_upper_bound_list = scale_bound_list(
-                    dataset_sass_count_output_upper_bound_list, multiplier, "sass_count_output_upper_bound_lists"
-                )
-                sass_sum_output_lower_bound_list = scale_bound_list(
-                    dataset_sass_sum_output_lower_bound_list, multiplier, "sass_sum_output_lower_bound_lists"
-                )
-                sass_sum_output_upper_bound_list = scale_bound_list(
-                    dataset_sass_sum_output_upper_bound_list, multiplier, "sass_sum_output_upper_bound_lists"
-                )
-                for sass_m in dataset_sass_m_values:
-                    for sass_rescale in dataset_sass_rescale_values:
-                        points.append(
-                            {
-                                "dataset": dataset["name"],
-                                "workload": dataset.get("workload", ""),
-                                "sf": dataset.get("sf", ""),
-                                "db": dataset["db"],
-                                "query": query,
-                                "bound_multiplier": multiplier,
-                                "count_bound": count_bound,
-                                "sum_bound": sum_bound,
-                                "sum_bound_list": sum_bound_list,
-                                "avg_lower_bound_list": avg_lower_bound_list,
-                                "avg_upper_bound_list": avg_upper_bound_list,
-                                "c_u": first_value(dataset, "c_u", 1.0),
-                                "sass_count_output_bound": first_value(dataset, "sass_count_output_bounds", 1.0),
-                                "sass_count_output_lower_bound_list": sass_count_output_lower_bound_list,
-                                "sass_count_output_upper_bound_list": sass_count_output_upper_bound_list,
-                                "sass_sum_output_bound": first_value(dataset, "sass_sum_output_bounds", 1.0),
-                                "sass_sum_output_lower_bound_list": sass_sum_output_lower_bound_list,
-                                "sass_sum_output_upper_bound_list": sass_sum_output_upper_bound_list,
-                                "sass_m": sass_m,
-                                "sass_rescale": sass_rescale,
-                                "threads": threads,
-                                "epsilon": epsilon,
-                                "delta": delta,
-                                "sample_lanes": sample_lanes,
-                            }
+            for epsilon in dataset_epsilon_values:
+                for delta in dataset_delta_values:
+                    for multiplier in multipliers:
+                        count_bound = first_value(dataset, "count_bounds", 1.0) * multiplier
+                        sum_bound = first_value(dataset, "sum_bounds", 1.0) * multiplier
+                        sum_bound_list = scale_bound_list(dataset_sum_bound_list, multiplier, "sum_bound_lists")
+                        sass_count_output_lower_bound_list = scale_bound_list(
+                            dataset_sass_count_output_lower_bound_list,
+                            multiplier,
+                            "sass_count_output_lower_bound_lists",
                         )
+                        sass_count_output_upper_bound_list = scale_bound_list(
+                            dataset_sass_count_output_upper_bound_list,
+                            multiplier,
+                            "sass_count_output_upper_bound_lists",
+                        )
+                        sass_sum_output_lower_bound_list = scale_bound_list(
+                            dataset_sass_sum_output_lower_bound_list, multiplier, "sass_sum_output_lower_bound_lists"
+                        )
+                        sass_sum_output_upper_bound_list = scale_bound_list(
+                            dataset_sass_sum_output_upper_bound_list, multiplier, "sass_sum_output_upper_bound_lists"
+                        )
+                        for sass_m in dataset_sass_m_values:
+                            for sass_rescale in dataset_sass_rescale_values:
+                                for release in dataset_sass_release_values:
+                                    points.append(
+                                        {
+                                            "dataset": dataset["name"],
+                                            "workload": dataset.get("workload", ""),
+                                            "sf": dataset.get("sf", ""),
+                                            "db": dataset["db"],
+                                            "query": query,
+                                            "epsilon": epsilon,
+                                            "delta": delta,
+                                            "release": release,
+                                            "bound_multiplier": multiplier,
+                                            "count_bound": count_bound,
+                                            "sum_bound": sum_bound,
+                                            "sum_bound_list": sum_bound_list,
+                                            "avg_lower_bound_list": avg_lower_bound_list,
+                                            "avg_upper_bound_list": avg_upper_bound_list,
+                                            "c_u": first_value(dataset, "c_u", 1.0),
+                                            "sass_count_output_bound": first_value(
+                                                dataset, "sass_count_output_bounds", 1.0
+                                            ),
+                                            "sass_count_output_lower_bound_list": sass_count_output_lower_bound_list,
+                                            "sass_count_output_upper_bound_list": sass_count_output_upper_bound_list,
+                                            "sass_sum_output_bound": first_value(
+                                                dataset, "sass_sum_output_bounds", 1.0
+                                            ),
+                                            "sass_sum_output_lower_bound_list": sass_sum_output_lower_bound_list,
+                                            "sass_sum_output_upper_bound_list": sass_sum_output_upper_bound_list,
+                                            "sass_m": sass_m,
+                                            "sass_rescale": sass_rescale,
+                                            "threads": threads,
+                                            "sample_lanes": sample_lanes,
+                                        }
+                                    )
     return points
 
 
@@ -550,7 +572,10 @@ def main():
         for index, point in enumerate(points, start=1):
             db_path = ROOT / point["db"] if not Path(point["db"]).is_absolute() else Path(point["db"])
             point["db"] = str(db_path)
-            label = f'{point["dataset"]} {point["query"]} x{point["bound_multiplier"]:g} m={point["sass_m"]}'
+            label = (
+                f'{point["dataset"]} {point["query"]} {point["release"]} '
+                f'delta={point["delta"]:g} x{point["bound_multiplier"]:g} m={point["sass_m"]}'
+            )
             print(f"[{index}/{len(points)}] {label}", flush=True)
             if not db_path.exists():
                 error = f"missing database: {db_path}"

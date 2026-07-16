@@ -114,6 +114,10 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
     add_executable(dp_benchmark_runner benchmark/dp/dp_benchmark_runner.cpp)
     target_link_libraries(dp_benchmark_runner ${PRIVACY_LINK_LIBS})
 
+    # Target-metric postprocessor for selected DP benchmark rows
+    add_executable(dp_target_metric_runner benchmark/dp/dp_target_metric_runner.cpp)
+    target_link_libraries(dp_target_metric_runner ${PRIVACY_LINK_LIBS})
+
     # ClickHouse/ClickBench benchmark runner
     add_executable(pac_clickhouse_benchmark benchmark/clickbench/pac_clickhouse_benchmark.cpp)
     target_link_libraries(pac_clickhouse_benchmark ${PRIVACY_LINK_LIBS})

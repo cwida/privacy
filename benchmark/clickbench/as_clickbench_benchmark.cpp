@@ -267,13 +267,16 @@ static string StripFunctionCalls(const string &sql, const string &name) {
 }
 
 static string RewriteAsFunctionCall(const string &name, const vector<string> &args, int sample_count) {
-	string sample_suffix = sample_count == 64 ? "" : "_m";
+	(void)sample_count;
 	if (name == "as_noised_count") {
 		if (args.empty()) {
 			throw std::runtime_error("as_noised_count rewrite expected at least one argument");
 		}
+		if (args.size() > 2) {
+			throw std::runtime_error("as_noised_count variable-m rewrite supports at most two arguments");
+		}
 		std::ostringstream out;
-		out << "list_avg(as_sample" << sample_suffix << "_count(";
+		out << "list_avg(as_pac_m_count(";
 		for (idx_t i = 0; i < args.size(); i++) {
 			if (i > 0) {
 				out << ", ";
@@ -287,20 +290,16 @@ static string RewriteAsFunctionCall(const string &name, const vector<string> &ar
 		if (args.size() != 2) {
 			throw std::runtime_error("as_noised_sum rewrite expected two arguments");
 		}
-		return "list_avg(as_sample" + sample_suffix + "_sum(" + args[0] + ", CAST(" + args[1] + " AS DOUBLE)))";
+		return "list_avg(as_pac_m_sum(" + args[0] + ", CAST(" + args[1] + " AS DOUBLE)))";
 	}
 	if (name == "as_noised_avg") {
 		if (args.size() != 2) {
 			throw std::runtime_error("as_noised_avg rewrite expected two arguments");
 		}
-		return "list_avg(as_sample" + sample_suffix + "_avg(" + args[0] + ", CAST(" + args[1] + " AS DOUBLE), 1.0))";
+		return "list_avg(as_pac_m_avg(" + args[0] + ", CAST(" + args[1] + " AS DOUBLE), 1.0))";
 	}
 	if (name == "as_noised_min" || name == "as_noised_max") {
-		if (args.size() != 2) {
-			throw std::runtime_error(name + " rewrite expected two arguments");
-		}
-		string sample_name = name == "as_noised_min" ? "min" : "max";
-		return "list_avg(as_sample" + sample_suffix + "_" + sample_name + "(" + args[0] + ", " + args[1] + "))";
+		throw std::runtime_error("variable-m PAC AS rewrite does not support MIN/MAX yet");
 	}
 	throw std::runtime_error("unsupported AS aggregate rewrite: " + name);
 }
@@ -622,9 +621,9 @@ int RunASClickBenchBenchmark(const string &db_path, const string &queries_dir, c
 			} else {
 				con.Query("SET priv_rewrite=false;");
 				for (auto as_m : as_m_values) {
-					con.Query("SET dp_sass_m=" + std::to_string(as_m) + ";");
+					con.Query("SET pac_m=" + std::to_string(as_m) + ";");
 					string query_sql = as_sql;
-					if (sample_aggregation_sweep) {
+					if (sample_aggregation_sweep && as_m != 64) {
 						if (ContainsVariableMUnsupportedAggregate(as_sql)) {
 							Log("SIMD-AS " + entry.label + " m=" + std::to_string(as_m) +
 							    " skipped: sample-aggregation sweep supports COUNT/SUM/AVG only");

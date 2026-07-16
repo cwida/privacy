@@ -539,6 +539,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterDpSampleMSumFunctions(loader);
 	RegisterDpSampleMAvgFunctions(loader);
 	RegisterDpSampleMSumIfFunctions(loader);
+	RegisterPacSampleMSumFunctions(loader);
+	RegisterPacSampleMAvgFunctions(loader);
+	RegisterPacSampleMSumIfFunctions(loader);
 	RegisterPacClipSumFunctions(loader);
 	RegisterPacNoisedClipSumFunctions(loader);
 	RegisterPacNoisedClipSumCountFunctions(loader);
@@ -550,6 +553,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterDpSampleMCountDistinctFunctions(loader);
 	RegisterDpSampleMCountDistinctValuesFunctions(loader);
 	RegisterDpSampleMCountIfFunctions(loader);
+	RegisterPacSampleMCountFunctions(loader);
+	RegisterPacSampleMCountIfFunctions(loader);
 	RegisterPacClipCountFunctions(loader);
 	RegisterPacNoisedClipCountFunctions(loader);
 	// Register as_min/as_max aggregate functions

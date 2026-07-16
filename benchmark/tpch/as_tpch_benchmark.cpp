@@ -402,7 +402,7 @@ static bool ParseEntireFunctionCall(const string &expr, const string &name, vect
 }
 
 static string RewriteAsFunctionCall(const string &name, const vector<string> &args, int sample_count) {
-	string sample_suffix = sample_count == 64 ? "" : "_m";
+	(void)sample_count;
 	if (name == "as_noised") {
 		if (args.size() != 1) {
 			throw std::runtime_error("as_noised rewrite expected one argument");
@@ -413,8 +413,11 @@ static string RewriteAsFunctionCall(const string &name, const vector<string> &ar
 		if (args.empty()) {
 			throw std::runtime_error("as_noised_count rewrite expected at least one argument");
 		}
+		if (args.size() > 2) {
+			throw std::runtime_error("as_noised_count variable-m rewrite supports at most two arguments");
+		}
 		std::ostringstream out;
-		out << "list_avg(as_sample" << sample_suffix << "_count(";
+		out << "list_avg(as_pac_m_count(";
 		for (idx_t i = 0; i < args.size(); i++) {
 			if (i > 0) {
 				out << ", ";
@@ -428,33 +431,32 @@ static string RewriteAsFunctionCall(const string &name, const vector<string> &ar
 		if (args.size() != 2) {
 			throw std::runtime_error("as_noised_sum rewrite expected two arguments");
 		}
-		return "list_avg(as_sample" + sample_suffix + "_sum(" + args[0] + ", CAST(" + args[1] + " AS DOUBLE)))";
+		return "list_avg(as_pac_m_sum(" + args[0] + ", CAST(" + args[1] + " AS DOUBLE)))";
 	}
 	if (name == "as_noised_avg") {
 		if (args.size() != 2) {
 			throw std::runtime_error("as_noised_avg rewrite expected two arguments");
 		}
-		return "list_avg(as_sample" + sample_suffix + "_avg(" + args[0] + ", CAST(" + args[1] + " AS DOUBLE), 1.0))";
+		return "list_avg(as_pac_m_avg(" + args[0] + ", CAST(" + args[1] + " AS DOUBLE), 1.0))";
 	}
 	if (name == "as_noised_min" || name == "as_noised_max") {
-		if (args.size() != 2) {
-			throw std::runtime_error(name + " rewrite expected two arguments");
-		}
-		string sample_name = name == "as_noised_min" ? "min" : "max";
-		return "list_avg(as_sample" + sample_suffix + "_" + sample_name + "(" + args[0] + ", " + args[1] + "))";
+		throw std::runtime_error("variable-m PAC AS rewrite does not support MIN/MAX yet");
 	}
 	if (name == "as_sum") {
 		if (args.size() != 2) {
 			throw std::runtime_error("as_sum rewrite expected two arguments");
 		}
-		return "as_sample" + sample_suffix + "_sum(" + args[0] + ", CAST(" + args[1] + " AS DOUBLE))";
+		return "as_pac_m_sum(" + args[0] + ", CAST(" + args[1] + " AS DOUBLE))";
 	}
 	if (name == "as_count") {
 		if (args.empty()) {
 			throw std::runtime_error("as_count rewrite expected at least one argument");
 		}
+		if (args.size() > 2) {
+			throw std::runtime_error("as_count variable-m rewrite supports at most two arguments");
+		}
 		std::ostringstream out;
-		out << "as_sample" << sample_suffix << "_count(";
+		out << "as_pac_m_count(";
 		for (idx_t i = 0; i < args.size(); i++) {
 			if (i > 0) {
 				out << ", ";
@@ -465,11 +467,7 @@ static string RewriteAsFunctionCall(const string &name, const vector<string> &ar
 		return out.str();
 	}
 	if (name == "as_min" || name == "as_max") {
-		if (args.size() != 2) {
-			throw std::runtime_error(name + " rewrite expected two arguments");
-		}
-		string sample_name = name == "as_min" ? "min" : "max";
-		return "as_sample" + sample_suffix + "_" + sample_name + "(" + args[0] + ", " + args[1] + ")";
+		throw std::runtime_error("variable-m PAC AS rewrite does not support MIN/MAX yet");
 	}
 	if (name == "as_noised_div") {
 		if (args.size() != 2) {
@@ -483,8 +481,7 @@ static string RewriteAsFunctionCall(const string &name, const vector<string> &ar
 			throw std::runtime_error("variable-m AS rewrite only supports as_noised_div(as_sum(key, value), "
 			                         "as_count(key, value)) AVG patterns");
 		}
-		return "list_avg(as_sample" + sample_suffix + "_avg(" + sum_args[0] + ", CAST(" + sum_args[1] +
-		       " AS DOUBLE), 1.0))";
+		return "list_avg(as_pac_m_avg(" + sum_args[0] + ", CAST(" + sum_args[1] + " AS DOUBLE), 1.0))";
 	}
 	throw std::runtime_error("unsupported AS aggregate rewrite: " + name);
 }
@@ -543,12 +540,12 @@ static string RewriteAsQueryForSampleAggregation(const string &sql, int sample_c
 
 static bool TryRewriteSelectedTpchQuery(const string &label, int sample_count, string &rewritten_sql) {
 	if (label == "q17") {
-		rewritten_sql = R"(SELECT list_avg(as_sample_m_sum_if(
+		rewritten_sql = R"(SELECT list_avg(as_pac_m_sum_if(
                  hash(o_custkey),
                  CAST(l_extendedprice AS DOUBLE),
                  list_transform(
-                   (SELECT priv_div(as_sample_m_sum(hash(o_sub.o_custkey), CAST(l_sub.l_quantity AS DOUBLE)),
-                                    as_sample_m_count(hash(o_sub.o_custkey), l_sub.l_quantity))
+                   (SELECT priv_div(as_pac_m_sum(hash(o_sub.o_custkey), CAST(l_sub.l_quantity AS DOUBLE)),
+                                    as_pac_m_count(hash(o_sub.o_custkey), l_sub.l_quantity))
                       FROM lineitem AS l_sub JOIN orders AS o_sub ON l_sub.l_orderkey = o_sub.o_orderkey
                      WHERE l_sub.l_partkey = part.p_partkey),
                    lambda x: CAST(lineitem.l_quantity * 5 < x AS BOOLEAN)))) / 7.0 AS avg_yearly
@@ -557,17 +554,16 @@ static bool TryRewriteSelectedTpchQuery(const string &label, int sample_count, s
 		return true;
 	}
 	if (label == "q22") {
-		auto mask = static_cast<uint64_t>(sample_count - 1);
-		std::ostringstream out;
-		out << R"(SELECT cntrycode,
-       list_avg(as_sample_m_count_if(as_hash, as_pred)) AS numcust,
-       list_avg(as_sample_m_sum_if(as_hash, CAST(c_acctbal AS DOUBLE), as_pred)) AS totacctbal
+		(void)sample_count;
+		rewritten_sql = R"(SELECT cntrycode,
+       list_avg(as_pac_m_count_if(as_hash, as_pred)) AS numcust,
+       list_avg(as_pac_m_sum_if(as_hash, CAST(c_acctbal AS DOUBLE), as_pred)) AS totacctbal
 FROM (SELECT substring(c_phone FROM 1 FOR 2) AS cntrycode,
              c_acctbal,
              hash(c_custkey) AS as_hash,
              list_transform(
-               (SELECT priv_div(as_sample_m_sum(hash(c_custkey), CAST(c_acctbal AS DOUBLE)),
-                                as_sample_m_count(hash(c_custkey), c_acctbal))
+               (SELECT priv_div(as_pac_m_sum(hash(c_custkey), CAST(c_acctbal AS DOUBLE)),
+                                as_pac_m_count(hash(c_custkey), c_acctbal))
                   FROM customer
                  WHERE c_acctbal > 0.00
                    AND substring(c_phone FROM 1 FOR 2) IN ('13', '31', '23', '29', '30', '18', '17')),
@@ -575,11 +571,9 @@ FROM (SELECT substring(c_phone FROM 1 FOR 2) AS cntrycode,
         FROM customer
        WHERE substring(c_phone FROM 1 FOR 2) IN ('13', '31', '23', '29', '30', '18', '17')
          AND NOT EXISTS (FROM orders WHERE o_custkey = customer.c_custkey)) AS custsale
-WHERE COALESCE(list_extract(as_pred, CAST((as_hash & )"
-		    << mask << R"(::UBIGINT) + 1::UBIGINT AS BIGINT)), false)
+WHERE list_bool_or(as_pred)
 GROUP BY ALL
 ORDER BY ALL)";
-		rewritten_sql = out.str();
 		return true;
 	}
 	return false;
@@ -1023,7 +1017,7 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 				for (int as_m : as_m_values) {
 					try {
 						string query_sql = as_sql;
-						if (rewrite_for_m_sweep) {
+						if (rewrite_for_m_sweep && as_m != 64) {
 							if (mode_str != "SIMD AS" || !TryRewriteSelectedTpchQuery(entry.label, as_m, query_sql)) {
 								query_sql = RewriteAsQueryForSampleAggregation(as_sql, as_m);
 							}
@@ -1032,8 +1026,7 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 						vector<double> as_times_ms;
 						bool as_failed = false;
 						for (int run = 1; run <= 5; ++run) {
-							con.Query("SET dp_sample_lanes=1;");
-							con.Query("SET dp_sass_m=" + std::to_string(as_m) + ";");
+							con.Query("SET pac_m=" + std::to_string(as_m) + ";");
 							con.Query("SET priv_rewrite=false;");
 							auto t0 = std::chrono::steady_clock::now();
 							auto r_as = con.Query(query_sql);

@@ -1,0 +1,72 @@
+{
+  "out": "/tmp/tpch_sf10_all5_delta_sweep_m64_m512_1run_results.csv",
+  "runs": 1,
+  "threads": 4,
+  "modes": ["dp_standard", "dp_elastic", "dp_sass"],
+  "epsilons": [1.0],
+  "deltas": [1e-8, 1e-7, 1e-6, 1e-5, 1e-4],
+  "bound_multipliers": [1.0],
+  "sample_lanes": [1],
+  "sass_ms": [64, 512],
+  "sass_releases": ["average", "median"],
+  "datasets": [
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 10,
+      "db": "tpch_sass_sf10.db",
+      "query_names": ["q01"],
+      "count_bounds": [1000.0],
+      "sum_bounds": [1000000.0],
+      "avg_lower_bounds": [0.0, 0.0, 0.0],
+      "avg_upper_bounds": [50.0, 105000.0, 0.1],
+      "c_u": [5.0],
+      "sass_count_output_bounds": [33333333.0],
+      "sass_sum_output_bounds": [3333333333333.0]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 10,
+      "db": "tpch_sass_sf10.db",
+      "query_names": ["q05"],
+      "count_bounds": [1.0],
+      "sum_bounds": [1000000.0],
+      "c_u": [5.0],
+      "sass_sum_output_bounds": [3333333333.0]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 10,
+      "db": "tpch_sass_sf10.db",
+      "query_names": ["q06"],
+      "count_bounds": [1.0],
+      "sum_bounds": [100000.0],
+      "c_u": [1.0],
+      "sass_sum_output_bounds": [1333333333.0]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 10,
+      "db": "tpch_sass_sf10.db",
+      "query_names": ["q14"],
+      "count_bounds": [1.0],
+      "sum_bounds": [1000000.0],
+      "c_u": [1.0],
+      "sass_sum_output_bounds": [33333333333.0]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 10,
+      "db": "tpch_sass_sf10.db",
+      "query_names": ["q19"],
+      "count_bounds": [1.0],
+      "sum_bounds": [100000.0],
+      "c_u": [1.0],
+      "sass_sum_output_bounds": [33333333.0]
+    }
+  ]
+}

@@ -46,12 +46,18 @@ if (!dir.exists(output_dir)) {
 raw <- suppressWarnings(readr::read_csv(input_csv, show_col_types = FALSE))
 
 expected_cols <- c(
-  "dataset", "query", "mode", "release", "success", "time_ms",
-  "median_error_pct", "recall", "bound_multiplier", "run"
+	"dataset", "query", "mode", "release", "success", "time_ms",
+	"median_error_pct", "recall", "bound_multiplier", "run"
 )
 missing_cols <- setdiff(expected_cols, colnames(raw))
 if (length(missing_cols) > 0) {
-  stop("Missing expected columns in CSV: ", paste(missing_cols, collapse = ", "))
+	stop("Missing expected columns in CSV: ", paste(missing_cols, collapse = ", "))
+}
+if (!("delta" %in% colnames(raw))) {
+	raw$delta <- NA_real_
+}
+if (!("dp_sass_m" %in% colnames(raw))) {
+	raw$dp_sass_m <- NA_integer_
 }
 
 scenario_levels <- c("terrible tight", "bad tight", "good", "bad loose", "terrible loose")
@@ -76,12 +82,13 @@ utility_mechanism_shapes <- c(
   "DP-SAA median" = 15,
   "DP-SAA average" = 18
 )
-runtime_mechanism_levels <- c("DuckDB", "Bounded DP", "DP-Elastic", "DP-SAA")
+runtime_mechanism_levels <- c("DuckDB", "Bounded DP", "DP-Elastic", "DP-SAA m=64", "DP-SAA m=512")
 runtime_mechanism_colors <- c(
-  "DuckDB" = "#95a5a6",
-  "Bounded DP" = "#d55e00",
-  "DP-Elastic" = "#0072b2",
-  "DP-SAA" = "#4dff4d"
+	"DuckDB" = "#95a5a6",
+	"Bounded DP" = "#d55e00",
+	"DP-Elastic" = "#0072b2",
+	"DP-SAA m=64" = "#4dff4d",
+	"DP-SAA m=512" = "#009900"
 )
 runtime_query_spacing <- 0.82
 
@@ -93,9 +100,11 @@ normalized <- raw %>%
       TRUE ~ toupper(dataset)
     ),
     query = toupper(query),
-    run = as.integer(run),
-    bound_multiplier = as.numeric(bound_multiplier),
-    time_ms = as.numeric(time_ms),
+		run = as.integer(run),
+		bound_multiplier = as.numeric(bound_multiplier),
+		delta = as.numeric(delta),
+		dp_sass_m = as.integer(dp_sass_m),
+		time_ms = as.numeric(time_ms),
     median_error_pct = as.numeric(median_error_pct),
     recall = as.numeric(recall),
     mechanism = case_when(
@@ -201,35 +210,57 @@ group_bounded_ratio <- function(df) {
 utility_summary_grouped <- group_bounded_ratio(utility_summary)
 runtime_summary_grouped <- group_bounded_ratio(runtime_summary)
 
-runtime_compact <- runtime_summary_grouped %>%
-  mutate(
-    mechanism = as.character(mechanism),
-    mechanism = ifelse(mechanism == "DP-SAA average", "DP-SAA", mechanism),
-    mechanism = factor(mechanism, levels = runtime_mechanism_levels)
-  ) %>%
-  filter(mechanism %in% runtime_mechanism_levels) %>%
-  group_by(query, mechanism) %>%
-  summarize(
-    avg_time_ms = mean(median_time_ms, na.rm = TRUE),
-    median_time_ms = median(median_time_ms, na.rm = TRUE),
-    avg_slowdown = mean(slowdown, na.rm = TRUE),
-    median_slowdown = median(slowdown, na.rm = TRUE),
-    min_slowdown = min(slowdown, na.rm = TRUE),
+runtime_delta <- 1e-6
+runtime_compact <- normalized %>%
+	filter(dataset == "TPC-H", usable) %>%
+	filter(
+		mode == "duckdb" |
+			(
+				abs(bound_multiplier - 1.0) <= 1e-12 &
+					(is.na(delta) | abs(delta - runtime_delta) <= max(1e-12, runtime_delta * 1e-8)) &
+					(
+						mode %in% c("dp_standard", "dp_elastic") |
+							(mode == "dp_sass" & release == "average" & dp_sass_m %in% c(64L, 512L))
+					)
+			)
+	) %>%
+	mutate(
+		mechanism = case_when(
+			mode == "duckdb" ~ "DuckDB",
+			mode == "dp_standard" ~ "Bounded DP",
+			mode == "dp_elastic" ~ "DP-Elastic",
+			mode == "dp_sass" & release == "average" & dp_sass_m == 64L ~ "DP-SAA m=64",
+			mode == "dp_sass" & release == "average" & dp_sass_m == 512L ~ "DP-SAA m=512",
+			TRUE ~ NA_character_
+		),
+		mechanism = factor(mechanism, levels = runtime_mechanism_levels)
+	) %>%
+	filter(mechanism %in% runtime_mechanism_levels) %>%
+	left_join(duckdb_baseline, by = c("dataset", "query")) %>%
+	mutate(slowdown = time_ms / duckdb_time_ms) %>%
+	group_by(query, mechanism) %>%
+	summarize(
+		avg_time_ms = mean(time_ms, na.rm = TRUE),
+		median_time_ms = median(time_ms, na.rm = TRUE),
+		avg_slowdown = mean(slowdown, na.rm = TRUE),
+		median_slowdown = median(slowdown, na.rm = TRUE),
+		min_slowdown = min(slowdown, na.rm = TRUE),
     max_slowdown = max(slowdown, na.rm = TRUE),
     .groups = "drop"
   ) %>%
   mutate(
     query = factor(query, levels = query_levels),
     mechanism = factor(mechanism, levels = runtime_mechanism_levels),
-    qidx = match(as.character(query), query_levels),
-    x_base = qidx * runtime_query_spacing,
-    x_pos = x_base + case_when(
-      mechanism == "DuckDB" ~ -0.24,
-      mechanism == "Bounded DP" ~ -0.08,
-      mechanism == "DP-Elastic" ~ 0.08,
-      mechanism == "DP-SAA" ~ 0.24,
-      TRUE ~ 0.0
-    ),
+		qidx = match(as.character(query), query_levels),
+		x_base = qidx * runtime_query_spacing,
+		x_pos = x_base + case_when(
+			mechanism == "DuckDB" ~ -0.28,
+			mechanism == "Bounded DP" ~ -0.14,
+			mechanism == "DP-Elastic" ~ 0.0,
+			mechanism == "DP-SAA m=64" ~ 0.14,
+			mechanism == "DP-SAA m=512" ~ 0.28,
+			TRUE ~ 0.0
+		),
     label_y = avg_time_ms * 1.15,
     slowdown_label = ifelse(mechanism == "DuckDB", "",
                             ifelse(avg_slowdown >= 10, sprintf("%.0fx", avg_slowdown),
@@ -344,11 +375,11 @@ runtime_compact_plot_obj <- ggplot(
   aes(x = x_pos, y = avg_time_ms, fill = mechanism)
 ) +
   geom_col(width = 0.14, color = "black", linewidth = 0.25, na.rm = TRUE) +
-  geom_text(
-    data = runtime_compact %>% filter(mechanism != "DuckDB"),
-    aes(x = x_pos, y = label_y, label = slowdown_label),
-    inherit.aes = FALSE,
-    size = 5,
+	geom_text(
+		data = runtime_compact %>% filter(mechanism != "DuckDB"),
+		aes(x = x_pos, y = label_y, label = slowdown_label),
+		inherit.aes = FALSE,
+		size = 4.5,
     vjust = 0,
     fontface = "bold",
     family = base_font,
@@ -369,10 +400,13 @@ runtime_compact_plot_obj <- ggplot(
     panel.border = element_rect(linewidth = 1.0),
     panel.grid.major = element_line(linewidth = 1.0),
     panel.grid.minor = element_blank(),
-    legend.position = "top",
-    legend.title = element_blank(),
-    legend.text = element_text(size = 26),
-    legend.key.size = unit(0.6, "cm"),
+		legend.position = "top",
+		legend.justification = "right",
+		legend.box.just = "right",
+		legend.direction = "horizontal",
+		legend.title = element_blank(),
+		legend.text = element_text(size = 22),
+		legend.key.size = unit(0.5, "cm"),
     legend.margin = margin(0, 0, -5, 0),
     legend.box.margin = margin(0, 0, -20, 0),
     axis.text.x = element_text(angle = 0, hjust = 0.5, size = 24),

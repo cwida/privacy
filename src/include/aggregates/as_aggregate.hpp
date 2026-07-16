@@ -93,6 +93,29 @@ static inline bool GetDpSassRescale(duckdb::ClientContext &ctx) {
 	return true;
 }
 
+static inline int ValidatePacM(int64_t m) {
+	if (m < DP_SASS_DEFAULT_M || m > DP_SASS_MAX_M || (m & (m - 1)) != 0) {
+		throw duckdb::InvalidInputException("pac_m must be a power of two between 64 and 512");
+	}
+	return static_cast<int>(m);
+}
+
+static inline int GetPacSampleM(duckdb::ClientContext &ctx) {
+	duckdb::Value m_val;
+	if (ctx.TryGetCurrentSetting("pac_m", m_val) && !m_val.IsNull()) {
+		return ValidatePacM(m_val.GetValue<int64_t>());
+	}
+	return DP_SASS_DEFAULT_M;
+}
+
+static inline bool GetPacHashRepair(duckdb::ClientContext &ctx) {
+	duckdb::Value hash_repair_val;
+	if (ctx.TryGetCurrentSetting("pac_hash_repair", hash_repair_val) && !hash_repair_val.IsNull()) {
+		return hash_repair_val.GetValue<bool>();
+	}
+	return true;
+}
+
 struct PacIdentityHash {
 	static inline uint64_t Transform(uint64_t key_hash) {
 		return key_hash;
@@ -129,6 +152,22 @@ static inline int pac_clzll(uint64_t x) {
 #endif
 	return 64; // x == 0
 }
+static inline int pac_ctzll(uint64_t x) {
+	unsigned long index;
+#if defined(_M_X64) || defined(_M_AMD64)
+	if (_BitScanForward64(&index, x)) {
+		return static_cast<int>(index);
+	}
+#else
+	if (_BitScanForward(&index, static_cast<uint32_t>(x))) {
+		return static_cast<int>(index);
+	}
+	if (_BitScanForward(&index, static_cast<uint32_t>(x >> 32))) {
+		return 32 + static_cast<int>(index);
+	}
+#endif
+	return 64;
+}
 #else
 // GCC/Clang have __builtin_popcountll
 static inline int pac_popcount64(uint64_t x) {
@@ -137,6 +176,9 @@ static inline int pac_popcount64(uint64_t x) {
 // GCC/Clang have __builtin_clzll
 static inline int pac_clzll(uint64_t x) {
 	return x ? __builtin_clzll(x) : 64;
+}
+static inline int pac_ctzll(uint64_t x) {
+	return x ? __builtin_ctzll(x) : 64;
 }
 #endif
 
@@ -178,6 +220,9 @@ double ComputeDeltaFromValues(const vector<PAC_FLOAT> &values, double mi);
 
 // Register priv_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
 void RegisterPacHashFunction(ExtensionLoader &loader);
+
+// Repair a 64-bit hash to exactly 32 set bits. This is the same operation used by priv_hash().
+uint64_t PacRepairHash32(uint64_t num);
 
 // Register pac_aggregate scalar function (LIST vals, LIST cnts, DOUBLE mi, INTEGER k -> DOUBLE):
 // terminal for the naive PAC sample-and-aggregate path (collapses per-subsample answers + PAC noise)
@@ -357,6 +402,34 @@ inline unique_ptr<FunctionData> MakeDpSampleBindData(ClientContext &ctx) {
 inline unique_ptr<FunctionData> MakeDpSampleMBindData(ClientContext &ctx) {
 	return make_uniq<PrivBindData>(ctx, 0.0, 1.0, 1.0, false, GetDpSampleLanes(ctx), GetDpSassM(ctx),
 	                               GetDpSassRescale(ctx));
+}
+
+inline unique_ptr<FunctionData> MakePacSampleMBindData(ClientContext &ctx) {
+	return make_uniq<PrivBindData>(ctx, 0.0, 1.0, 1.0, GetPacHashRepair(ctx), 0, GetPacSampleM(ctx), true);
+}
+
+static inline uint64_t PacMBlockMask(uint64_t key_hash, const PrivBindData &bind, idx_t block_idx) {
+	uint64_t block_hash = key_hash ^ bind.query_hash;
+	if (block_idx != 0) {
+		block_hash ^= PAC_MAGIC_HASH * static_cast<uint64_t>(block_idx);
+	}
+	return bind.hash_repair ? PacRepairHash32(block_hash) : block_hash;
+}
+
+template <class FUNC>
+static inline void ForEachPacMSelectedLane(uint64_t key_hash, const PrivBindData &bind, FUNC &&func) {
+	int sample_count = bind.sample_count;
+	D_ASSERT(sample_count >= DP_SASS_DEFAULT_M);
+	D_ASSERT(sample_count <= DP_SASS_MAX_M);
+	for (idx_t block_idx = 0; block_idx < static_cast<idx_t>(sample_count / 64); block_idx++) {
+		uint64_t mask = PacMBlockMask(key_hash, bind, block_idx);
+		idx_t lane_base = block_idx * 64;
+		while (mask) {
+			int bit = pac_ctzll(mask);
+			func(lane_base + static_cast<idx_t>(bit));
+			mask &= mask - 1;
+		}
+	}
 }
 
 // Common bind helper: reads mi from setting, extracts correction from args[correction_arg_index],
