@@ -110,6 +110,7 @@ struct DatasetConfig {
 	vector<bool> sass_rescale_values;
 	vector<string> modes;
 	vector<string> sass_releases;
+	string sass_sum_method = "lane_average";
 };
 
 struct Config {
@@ -141,6 +142,7 @@ struct Config {
 	vector<int> sass_m_values = {64};
 	vector<bool> sass_rescale_values = {true};
 	vector<string> sass_releases = {"median"};
+	string sass_sum_method = "lane_average";
 	vector<DatasetConfig> datasets;
 	bool dry_run = false;
 };
@@ -206,6 +208,7 @@ struct RunPoint {
 	int sample_lanes = 1;
 	int sass_m = 64;
 	bool sass_rescale = true;
+	string sass_sum_method = "lane_average";
 };
 
 static string Timestamp() {
@@ -736,6 +739,7 @@ static Config LoadConfig(const string &path) {
 	config.sass_m_values = JsonIntList(root, "sass_ms", "sass_m", config.sass_m_values);
 	config.sass_rescale_values = JsonBoolList(root, "sass_rescales", "sass_rescale", config.sass_rescale_values);
 	config.sass_releases = JsonStringList(root, "sass_releases", config.sass_releases);
+	config.sass_sum_method = JsonString(root, "sass_sum_method", config.sass_sum_method);
 
 	const auto &datasets = root.Get("datasets");
 	if (datasets.type != JsonType::ARRAY || datasets.array.empty()) {
@@ -793,6 +797,7 @@ static Config LoadConfig(const string &path) {
 		ds.sass_m_values = JsonIntList(entry, "sass_ms", "sass_m", config.sass_m_values);
 		ds.sass_rescale_values = JsonBoolList(entry, "sass_rescales", "sass_rescale", config.sass_rescale_values);
 		ds.sass_releases = JsonStringList(entry, "sass_releases", config.sass_releases);
+		ds.sass_sum_method = JsonString(entry, "sass_sum_method", config.sass_sum_method);
 		if (ds.name.empty()) {
 			throw std::runtime_error("dataset is missing name");
 		}
@@ -1887,6 +1892,8 @@ static vector<RunPoint> BuildRunPoints(const DatasetConfig &dataset) {
 																						point.sass_m = sass_m;
 																						point.sass_rescale =
 																						    sass_rescale;
+																						point.sass_sum_method =
+																						    dataset.sass_sum_method;
 																						points.push_back(
 																						    std::move(point));
 																					}
@@ -1972,6 +1979,7 @@ static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta
 		RunStatement(con, "SET dp_sass_m=" + std::to_string(point.sass_m));
 		RunStatement(con, string("SET dp_sass_rescale=") + (point.sass_rescale ? "true" : "false"));
 		RunStatement(con, "SET dp_sass_release='" + point.release + "'");
+		RunStatement(con, "SET dp_sass_sum_method=" + SqlQuote(point.sass_sum_method));
 		RunStatement(con, "SET dp_sass_count_output_bound=" + FormatNumber(sass_count_output_bound));
 		RunStatement(con, "SET dp_sass_sum_output_bound=" + FormatNumber(sass_sum_output_bound));
 		RunStatement(con, "SET dp_sass_count_output_bounds=NULL");
@@ -2047,7 +2055,7 @@ static void WriteHeader(std::ofstream &csv) {
 	       "c_u,dp_sass_count_output_bound,dp_sass_sum_output_bound,dp_avg_lower_bounds,dp_avg_upper_bounds,"
 	       "dp_sass_count_output_bounds,dp_sass_sum_output_bounds,dp_sass_count_output_lower_bounds,"
 	       "dp_sass_count_output_upper_bounds,dp_sass_sum_output_lower_bounds,dp_sass_sum_output_upper_bounds,"
-	       "bound_multiplier,dp_sample_lanes,dp_sass_m,dp_sass_rescale,seed,db_path,query_path\n";
+	       "bound_multiplier,dp_sample_lanes,dp_sass_m,dp_sass_rescale,dp_sass_sum_method,seed,db_path,query_path\n";
 }
 
 static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const QuerySpec &query, idx_t query_id,
@@ -2098,8 +2106,8 @@ static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const Que
 	    << CsvQuote(ScaleConfiguredFiniteList(point.sass_sum_output_upper_bound_list, point.bound_multiplier,
 	                                          "sass_sum_output_upper_bound_lists"))
 	    << "," << FormatNumber(point.bound_multiplier) << "," << point.sample_lanes << "," << point.sass_m << ","
-	    << (point.sass_rescale ? "true" : "false") << "," << seed << "," << CsvQuote(db_path) << ","
-	    << CsvQuote(query.path) << "\n";
+	    << (point.sass_rescale ? "true" : "false") << "," << point.sass_sum_method << "," << seed << ","
+	    << CsvQuote(db_path) << "," << CsvQuote(query.path) << "\n";
 	csv.flush();
 }
 
@@ -2319,7 +2327,8 @@ static void PrintUsage() {
 	std::cout << "Usage: dp_benchmark_runner --config PATH [--dry-run] [--out PATH] [--runs N]\n"
 	          << "JSON supports scalar or array sweeps for epsilon(s), delta(s), count_bound(s), sum_bound(s),\n"
 	          << "sum_bound_lists, group_bound(s), c_u, bound_multiplier(s), sample_lanes, sass_ms, modes,\n"
-	          << "sass_releases, sass_rescale(s), sass_count_output_bound_lists, sass_sum_output_bound_lists,\n"
+	          << "sass_releases, sass_rescale(s), sass_sum_method, sass_count_output_bound_lists, "
+	             "sass_sum_output_bound_lists,\n"
 	          << "sass_count/sum_output_lower_bound_lists, and sass_count/sum_output_upper_bound_lists.\n";
 }
 
