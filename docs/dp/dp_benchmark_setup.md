@@ -153,10 +153,14 @@ public clipping settings.
 
 `dp_sass_count_output_*bounds` and `dp_sass_sum_output_*bounds` are SAA
 output-domain bounds, not per-PU contribution bounds. When the config supplies
-them, the benchmark treats them as SAA's own base bounds and multiplies them by
-the same `bound_multiplier`. This keeps the comparison fair: DP-bounded is not
-forced to use an SAA output-domain bound, and SAA is not forced to derive its
-output domain from DP-bounded's contribution bound.
+them, the benchmark treats them as SAA's own base bounds. For a paired domain
+`[L, U]`, `bound_multiplier = k` keeps the midpoint fixed and scales the
+half-width: `[c-kh, c+kh]`, where `c=(L+U)/2` and `h=(U-L)/2`. Thus multipliers
+below one tighten the oracle-like domain and multipliers above one loosen it;
+they do not shift a positive interval away from the observed outputs. This
+keeps the comparison fair: DP-bounded is not forced to use an SAA output-domain
+bound, and SAA is not forced to derive its output domain from DP-bounded's
+contribution bound.
 
 For the no-rescale experiments, the SAA output-domain bounds are lane-scale
 oracle-like evaluation bounds from the SAA diagnostics. For each query,
@@ -176,8 +180,8 @@ contribute to.
 
 | Query | Dataset config | `dp_count_bound` | `dp_sum_bound` | `dp_sum_bounds` | `c_u` |
 |---|---|---:|---:|---|---:|
-| `q01` | TPC-H/JCC-H | `1000` | `105000000` | `50000,105000000,105000000,113400000` | `5` |
-| `q05` | TPC-H/JCC-H | `1` | `1000000` | unset | `5` |
+| `q01` | TPC-H/JCC-H | `1000` | `105000000` | `50000,105000000,105000000,113400000` | `4` |
+| `q05` | TPC-H/JCC-H | `1` | `1000000` | unset | `1` |
 | `q06` | TPC-H | `1` | `100000` | unset | `1` |
 | `q06` | JCC-H/skew | `1` | `1000000` | unset | `1` |
 | `q14` | TPC-H/JCC-H | `1` | `1000000` | `1000000,1000000` | `1` |

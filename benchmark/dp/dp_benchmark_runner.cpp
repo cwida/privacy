@@ -1068,14 +1068,14 @@ static string ScaleConfiguredBoundList(const string &bounds_text, double multipl
 	return FormatNumberList(scaled);
 }
 
-static string ScaleConfiguredFiniteList(const string &bounds_text, double multiplier, const string &setting_name) {
+static vector<double> ParseConfiguredFiniteList(const string &bounds_text, const string &setting_name) {
 	string text = Trim(bounds_text);
 	if (text.empty()) {
-		return "";
+		return {};
 	}
 	auto parts = StringUtil::Split(text, ',');
-	vector<double> scaled;
-	scaled.reserve(parts.size());
+	vector<double> values;
+	values.reserve(parts.size());
 	for (auto &part : parts) {
 		StringUtil::Trim(part);
 		if (part.empty()) {
@@ -1091,9 +1091,46 @@ static string ScaleConfiguredFiniteList(const string &bounds_text, double multip
 		if (parsed != part.size() || !std::isfinite(value)) {
 			throw std::runtime_error("invalid " + setting_name + " entry '" + part + "'");
 		}
-		scaled.push_back(value * multiplier);
+		values.push_back(value);
 	}
-	return FormatNumberList(scaled);
+	return values;
+}
+
+static pair<string, string> ScaleConfiguredDomainLists(const string &lower_text, const string &upper_text,
+                                                       double multiplier, const string &lower_setting_name,
+                                                       const string &upper_setting_name) {
+	auto lower = ParseConfiguredFiniteList(lower_text, lower_setting_name);
+	auto upper = ParseConfiguredFiniteList(upper_text, upper_setting_name);
+	if (lower.empty() && upper.empty()) {
+		return {"", ""};
+	}
+	if (lower.empty() || upper.empty() || lower.size() != upper.size()) {
+		throw std::runtime_error(lower_setting_name + " and " + upper_setting_name +
+		                         " must have the same non-zero length");
+	}
+	if (!std::isfinite(multiplier) || multiplier <= 0.0) {
+		throw std::runtime_error("bound multiplier must be finite and positive");
+	}
+	vector<double> scaled_lower;
+	vector<double> scaled_upper;
+	scaled_lower.reserve(lower.size());
+	scaled_upper.reserve(upper.size());
+	for (idx_t i = 0; i < lower.size(); i++) {
+		if (!(lower[i] < upper[i])) {
+			throw std::runtime_error(lower_setting_name + " entry must be smaller than the corresponding " +
+			                         upper_setting_name + " entry");
+		}
+		double half_width = (upper[i] - lower[i]) / 2.0;
+		double adjustment = (multiplier - 1.0) * half_width;
+		double new_lower = lower[i] - adjustment;
+		double new_upper = upper[i] + adjustment;
+		if (!std::isfinite(new_lower) || !std::isfinite(new_upper) || !(new_lower < new_upper)) {
+			throw std::runtime_error("scaled SAA output domain is not finite and ordered");
+		}
+		scaled_lower.push_back(new_lower);
+		scaled_upper.push_back(new_upper);
+	}
+	return {FormatNumberList(scaled_lower), FormatNumberList(scaled_upper)};
 }
 
 static bool ReadLastUtilityLine(const string &path, UtilityMetrics &metrics) {
@@ -1992,18 +2029,11 @@ static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta
 			                                               "sass_count_output_bound_lists")));
 		}
 		if (!point.sass_count_output_lower_bound_list.empty() || !point.sass_count_output_upper_bound_list.empty()) {
-			if (point.sass_count_output_lower_bound_list.empty() || point.sass_count_output_upper_bound_list.empty()) {
-				throw std::runtime_error("sass_count_output_lower_bound_lists and "
-				                         "sass_count_output_upper_bound_lists must be set together");
-			}
-			RunStatement(con, "SET dp_sass_count_output_lower_bounds=" +
-			                      SqlQuote(ScaleConfiguredFiniteList(point.sass_count_output_lower_bound_list,
-			                                                         point.bound_multiplier,
-			                                                         "sass_count_output_lower_bound_lists")));
-			RunStatement(con, "SET dp_sass_count_output_upper_bounds=" +
-			                      SqlQuote(ScaleConfiguredBoundList(point.sass_count_output_upper_bound_list,
-			                                                        point.bound_multiplier,
-			                                                        "sass_count_output_upper_bound_lists")));
+			auto scaled_domain = ScaleConfiguredDomainLists(
+			    point.sass_count_output_lower_bound_list, point.sass_count_output_upper_bound_list,
+			    point.bound_multiplier, "sass_count_output_lower_bound_lists", "sass_count_output_upper_bound_lists");
+			RunStatement(con, "SET dp_sass_count_output_lower_bounds=" + SqlQuote(scaled_domain.first));
+			RunStatement(con, "SET dp_sass_count_output_upper_bounds=" + SqlQuote(scaled_domain.second));
 		}
 		RunStatement(con, "SET dp_sass_sum_output_bounds=NULL");
 		RunStatement(con, "SET dp_sass_sum_output_lower_bounds=NULL");
@@ -2015,18 +2045,11 @@ static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta
 			                                                   "sass_sum_output_bound_lists")));
 		}
 		if (!point.sass_sum_output_lower_bound_list.empty() || !point.sass_sum_output_upper_bound_list.empty()) {
-			if (point.sass_sum_output_lower_bound_list.empty() || point.sass_sum_output_upper_bound_list.empty()) {
-				throw std::runtime_error("sass_sum_output_lower_bound_lists and sass_sum_output_upper_bound_lists "
-				                         "must be set together");
-			}
-			RunStatement(con, "SET dp_sass_sum_output_lower_bounds=" +
-			                      SqlQuote(ScaleConfiguredFiniteList(point.sass_sum_output_lower_bound_list,
-			                                                         point.bound_multiplier,
-			                                                         "sass_sum_output_lower_bound_lists")));
-			RunStatement(con, "SET dp_sass_sum_output_upper_bounds=" +
-			                      SqlQuote(ScaleConfiguredFiniteList(point.sass_sum_output_upper_bound_list,
-			                                                         point.bound_multiplier,
-			                                                         "sass_sum_output_upper_bound_lists")));
+			auto scaled_domain = ScaleConfiguredDomainLists(
+			    point.sass_sum_output_lower_bound_list, point.sass_sum_output_upper_bound_list, point.bound_multiplier,
+			    "sass_sum_output_lower_bound_lists", "sass_sum_output_upper_bound_lists");
+			RunStatement(con, "SET dp_sass_sum_output_lower_bounds=" + SqlQuote(scaled_domain.first));
+			RunStatement(con, "SET dp_sass_sum_output_upper_bounds=" + SqlQuote(scaled_domain.second));
 		}
 		RunStatement(con, "SET dp_sass_avg_lower_bound=" +
 		                      FormatNumber(point.avg_lower_bounds.empty() ? 0.0 : point.avg_lower_bounds[0]));
@@ -2062,6 +2085,12 @@ static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const Que
                      const RunPoint &point, idx_t run, bool success, const string &error, const UtilityMetrics &metrics,
                      double time_ms, double delta, double sass_count_output_bound, double sass_sum_output_bound,
                      uint64_t seed, const string &db_path) {
+	auto scaled_count_domain = ScaleConfiguredDomainLists(
+	    point.sass_count_output_lower_bound_list, point.sass_count_output_upper_bound_list, point.bound_multiplier,
+	    "sass_count_output_lower_bound_lists", "sass_count_output_upper_bound_lists");
+	auto scaled_sum_domain = ScaleConfiguredDomainLists(
+	    point.sass_sum_output_lower_bound_list, point.sass_sum_output_upper_bound_list, point.bound_multiplier,
+	    "sass_sum_output_lower_bound_lists", "sass_sum_output_upper_bound_lists");
 	csv << dataset.name << "," << dataset.workload << "," << query.name << "," << query_id << "," << point.mode << ","
 	    << point.release << "," << (query.profile == PrivacyProfile::PART ? "part" : "customer") << "," << run << ","
 	    << (success ? "true" : "false") << "," << CsvQuote(error) << ",utility," << FormatNumber(time_ms) << ","
@@ -2093,19 +2122,9 @@ static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const Que
 	    << ","
 	    << CsvQuote(ScaleConfiguredBoundList(point.sass_sum_output_bound_list, point.bound_multiplier,
 	                                         "sass_sum_output_bound_lists"))
-	    << ","
-	    << CsvQuote(ScaleConfiguredFiniteList(point.sass_count_output_lower_bound_list, point.bound_multiplier,
-	                                          "sass_count_output_lower_bound_lists"))
-	    << ","
-	    << CsvQuote(ScaleConfiguredBoundList(point.sass_count_output_upper_bound_list, point.bound_multiplier,
-	                                         "sass_count_output_upper_bound_lists"))
-	    << ","
-	    << CsvQuote(ScaleConfiguredFiniteList(point.sass_sum_output_lower_bound_list, point.bound_multiplier,
-	                                          "sass_sum_output_lower_bound_lists"))
-	    << ","
-	    << CsvQuote(ScaleConfiguredFiniteList(point.sass_sum_output_upper_bound_list, point.bound_multiplier,
-	                                          "sass_sum_output_upper_bound_lists"))
-	    << "," << FormatNumber(point.bound_multiplier) << "," << point.sample_lanes << "," << point.sass_m << ","
+	    << "," << CsvQuote(scaled_count_domain.first) << "," << CsvQuote(scaled_count_domain.second) << ","
+	    << CsvQuote(scaled_sum_domain.first) << "," << CsvQuote(scaled_sum_domain.second) << ","
+	    << FormatNumber(point.bound_multiplier) << "," << point.sample_lanes << "," << point.sass_m << ","
 	    << (point.sass_rescale ? "true" : "false") << "," << point.sass_sum_method << "," << seed << ","
 	    << CsvQuote(db_path) << "," << CsvQuote(query.path) << "\n";
 	csv.flush();
