@@ -1034,7 +1034,8 @@ struct NonEmptyMeanStats {
 
 static bool NonEmptyMeanStatsRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
                                  const PAC_FLOAT *child_values, double epsilon, int sample_lanes_raw,
-                                 double lower_bound, double upper_bound, NonEmptyMeanStats &stats) {
+                                 double lower_bound, double upper_bound, double empty_baseline,
+                                 double value_sensitivity, NonEmptyMeanStats &stats) {
 	bool variable_m = entry.length > DP_SASS_DEFAULT_M;
 	if (entry.length < DP_SASS_DEFAULT_M || entry.length > DP_SASS_MAX_M ||
 	    (variable_m && (entry.length & (entry.length - 1)) != 0)) {
@@ -1050,6 +1051,10 @@ static bool NonEmptyMeanStatsRow(const list_entry_t &entry, const UnifiedVectorF
 	if (!std::isfinite(lower_bound) || !std::isfinite(upper_bound) || lower_bound >= upper_bound) {
 		return false;
 	}
+	if (!std::isfinite(empty_baseline) || empty_baseline < lower_bound || empty_baseline > upper_bound ||
+	    !std::isfinite(value_sensitivity) || value_sensitivity <= 0.0) {
+		return false;
+	}
 
 	for (idx_t j = 0; j < entry.length; j++) {
 		auto child_idx = child_data.sel->get_index(entry.offset + j);
@@ -1057,22 +1062,22 @@ static bool NonEmptyMeanStatsRow(const list_entry_t &entry, const UnifiedVectorF
 			continue;
 		}
 		double value = std::max(lower_bound, std::min(upper_bound, static_cast<double>(child_values[child_idx])));
-		stats.shifted_sum += value - lower_bound;
+		stats.shifted_sum += value - empty_baseline;
 		stats.valid_count += 1.0;
 	}
 
 	// Split the cell budget equally across the shifted SUM and populated-lane COUNT.
 	double component_epsilon = epsilon / 2.0;
-	stats.numerator_noise_scale = (static_cast<double>(sample_lanes) * (upper_bound - lower_bound)) / component_epsilon;
+	stats.numerator_noise_scale = (static_cast<double>(sample_lanes) * value_sensitivity) / component_epsilon;
 	stats.denominator_noise_scale = static_cast<double>(sample_lanes) / component_epsilon;
-	stats.mean = lower_bound + stats.shifted_sum / std::max(1.0, stats.valid_count);
+	stats.mean = empty_baseline + stats.shifted_sum / std::max(1.0, stats.valid_count);
 	stats.mean = std::max(lower_bound, std::min(upper_bound, stats.mean));
 	return true;
 }
 
 static double ReleaseNonEmptyMean(const NonEmptyMeanStats &stats, double lower_bound, double upper_bound,
-                                  bool noise_enabled, uint64_t seed, uint64_t group_identity, uint64_t aggregate_index,
-                                  uint64_t aggregate_count) {
+                                  double empty_baseline, bool noise_enabled, uint64_t seed, uint64_t group_identity,
+                                  uint64_t aggregate_index, uint64_t aggregate_count) {
 	if (!noise_enabled) {
 		return stats.mean;
 	}
@@ -1089,7 +1094,7 @@ static double ReleaseNonEmptyMean(const NonEmptyMeanStats &stats, double lower_b
 	}
 	double noised_sum = AddLaplaceNoise(stats.shifted_sum, stats.numerator_noise_scale, seed, cell_nonce * 2);
 	double noised_count = AddLaplaceNoise(stats.valid_count, stats.denominator_noise_scale, seed, cell_nonce * 2 + 1);
-	double released = lower_bound + noised_sum / std::max(1.0, noised_count);
+	double released = empty_baseline + noised_sum / std::max(1.0, noised_count);
 	return std::max(lower_bound, std::min(upper_bound, released));
 }
 
@@ -1105,17 +1110,20 @@ static void DpNonEmptyMeanNoiseFunctionInternal(DataChunk &args, ExpressionState
 
 	idx_t count = args.size();
 	auto &list_vec = args.data[0];
-	UnifiedVectorFormat list_data, epsilon_data, sample_lanes_data, lower_data, upper_data, aggregate_index_data;
+	UnifiedVectorFormat list_data, epsilon_data, sample_lanes_data, lower_data, upper_data, baseline_data,
+	    sensitivity_data, aggregate_index_data;
 	UnifiedVectorFormat aggregate_count_data, group_identity_data;
 	list_vec.ToUnifiedFormat(count, list_data);
 	args.data[1].ToUnifiedFormat(count, epsilon_data);
 	args.data[2].ToUnifiedFormat(count, sample_lanes_data);
 	args.data[3].ToUnifiedFormat(count, lower_data);
 	args.data[4].ToUnifiedFormat(count, upper_data);
-	args.data[5].ToUnifiedFormat(count, aggregate_index_data);
+	args.data[5].ToUnifiedFormat(count, baseline_data);
+	args.data[6].ToUnifiedFormat(count, sensitivity_data);
+	args.data[7].ToUnifiedFormat(count, aggregate_index_data);
 	if (!record_scales) {
-		args.data[6].ToUnifiedFormat(count, aggregate_count_data);
-		args.data[7].ToUnifiedFormat(count, group_identity_data);
+		args.data[8].ToUnifiedFormat(count, aggregate_count_data);
+		args.data[9].ToUnifiedFormat(count, group_identity_data);
 	}
 
 	auto &child_vec = ListVector::GetEntry(list_vec);
@@ -1127,6 +1135,8 @@ static void DpNonEmptyMeanNoiseFunctionInternal(DataChunk &args, ExpressionState
 	auto sample_lanes_values = UnifiedVectorFormat::GetData<int32_t>(sample_lanes_data);
 	auto lower_values = UnifiedVectorFormat::GetData<double>(lower_data);
 	auto upper_values = UnifiedVectorFormat::GetData<double>(upper_data);
+	auto baseline_values = UnifiedVectorFormat::GetData<double>(baseline_data);
+	auto sensitivity_values = UnifiedVectorFormat::GetData<double>(sensitivity_data);
 	auto aggregate_indexes = UnifiedVectorFormat::GetData<int32_t>(aggregate_index_data);
 	auto aggregate_counts = record_scales ? nullptr : UnifiedVectorFormat::GetData<int32_t>(aggregate_count_data);
 	auto group_identities = record_scales ? nullptr : UnifiedVectorFormat::GetData<int64_t>(group_identity_data);
@@ -1139,12 +1149,15 @@ static void DpNonEmptyMeanNoiseFunctionInternal(DataChunk &args, ExpressionState
 		auto sample_lanes_idx = sample_lanes_data.sel->get_index(i);
 		auto lower_idx = lower_data.sel->get_index(i);
 		auto upper_idx = upper_data.sel->get_index(i);
+		auto baseline_idx = baseline_data.sel->get_index(i);
+		auto sensitivity_idx = sensitivity_data.sel->get_index(i);
 		auto aggregate_index_idx = aggregate_index_data.sel->get_index(i);
 		auto aggregate_count_idx = record_scales ? 0 : aggregate_count_data.sel->get_index(i);
 		auto group_identity_idx = record_scales ? 0 : group_identity_data.sel->get_index(i);
 		if (!list_data.validity.RowIsValid(list_idx) || !epsilon_data.validity.RowIsValid(epsilon_idx) ||
 		    !sample_lanes_data.validity.RowIsValid(sample_lanes_idx) || !lower_data.validity.RowIsValid(lower_idx) ||
-		    !upper_data.validity.RowIsValid(upper_idx) ||
+		    !upper_data.validity.RowIsValid(upper_idx) || !baseline_data.validity.RowIsValid(baseline_idx) ||
+		    !sensitivity_data.validity.RowIsValid(sensitivity_idx) ||
 		    !aggregate_index_data.validity.RowIsValid(aggregate_index_idx) ||
 		    (!record_scales && (!aggregate_count_data.validity.RowIsValid(aggregate_count_idx) ||
 		                        !group_identity_data.validity.RowIsValid(group_identity_idx)))) {
@@ -1155,8 +1168,10 @@ static void DpNonEmptyMeanNoiseFunctionInternal(DataChunk &args, ExpressionState
 		NonEmptyMeanStats stats;
 		double lower_bound = lower_values[lower_idx];
 		double upper_bound = upper_values[upper_idx];
+		double empty_baseline = baseline_values[baseline_idx];
 		if (!NonEmptyMeanStatsRow(list_entries[list_idx], child_data, child_values, epsilons[epsilon_idx],
-		                          sample_lanes_values[sample_lanes_idx], lower_bound, upper_bound, stats)) {
+		                          sample_lanes_values[sample_lanes_idx], lower_bound, upper_bound, empty_baseline,
+		                          sensitivity_values[sensitivity_idx], stats)) {
 			result_validity.SetInvalid(i);
 			continue;
 		}
@@ -1169,7 +1184,7 @@ static void DpNonEmptyMeanNoiseFunctionInternal(DataChunk &args, ExpressionState
 			if (aggregate_counts[aggregate_count_idx] <= 0 || group_identities[group_identity_idx] <= 0) {
 				throw InternalException("dp_nonempty_mean_noise: invalid aggregate-cell identity");
 			}
-			result_data[i] = ReleaseNonEmptyMean(stats, lower_bound, upper_bound, noise_enabled, seed,
+			result_data[i] = ReleaseNonEmptyMean(stats, lower_bound, upper_bound, empty_baseline, noise_enabled, seed,
 			                                     static_cast<uint64_t>(group_identities[group_identity_idx]),
 			                                     static_cast<uint64_t>(aggregate_indexes[aggregate_index_idx]),
 			                                     static_cast<uint64_t>(aggregate_counts[aggregate_count_idx]));
@@ -1363,7 +1378,8 @@ void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
 
 	ScalarFunction nonempty_mean("dp_nonempty_mean_noise",
 	                             {list_type, LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::DOUBLE,
-	                              LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::BIGINT},
+	                              LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::INTEGER,
+	                              LogicalType::INTEGER, LogicalType::BIGINT},
 	                             LogicalType::DOUBLE, DpNonEmptyMeanNoiseFunction);
 	CreateScalarFunctionInfo nonempty_mean_info(nonempty_mean);
 	FunctionDescription nonempty_mean_desc;
@@ -1374,7 +1390,8 @@ void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
 
 	ScalarFunction nonempty_mean_record("dp_nonempty_mean_record_noise_scale",
 	                                    {list_type, LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::DOUBLE,
-	                                     LogicalType::DOUBLE, LogicalType::INTEGER},
+	                                     LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE,
+	                                     LogicalType::INTEGER},
 	                                    LogicalType::DOUBLE, DpNonEmptyMeanRecordNoiseScaleFunction);
 	CreateScalarFunctionInfo nonempty_mean_record_info(nonempty_mean_record);
 	FunctionDescription nonempty_mean_record_desc;

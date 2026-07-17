@@ -97,6 +97,7 @@ loudly rather than releasing something unproven:
 | `dp_sample_lanes` | number of sample lanes a PU is hashed into (`m` is fixed at 64) | subsample assignment (`m`; see §11) |
 | `dp_sass_release` | `'median'` (smooth-sensitivity, (ε,δ)) or `'average'` (GUPT mean, pure ε) | release rule |
 | `dp_sass_avg_method` | `dp_sass` AVG estimator: `'lane_average'` (default), `'nonempty_lane_average'`, or `'ratio'` (§13) | — |
+| `dp_sass_sum_method` | `dp_sass` SUM estimator under average release: `'lane_average'` (default) or `'nonempty_lane_average'` (§13) | — |
 | `dp_sass_count_output_bound` / `dp_sass_sum_output_bound` | public output domain `[L,Λ]` for rescaled COUNT/SUM lane answers | `L_i, Λ_i` |
 | `dp_sass_avg_lower/upper_bound`, `dp_sass_minmax_lower/upper_bound` | public output domain for `dp_sass` AVG / MIN-MAX | `L_i, Λ_i` |
 | `dp_minmax_lower/upper_bound` | public domain `[L,U]` for MIN/MAX under **`dp_standard`** (sensitivity = `U−L`) | `L_i, Λ_i` |
@@ -341,7 +342,7 @@ smooth sensitivity, same NRS `β`.
 |---|---|---|
 | `COUNT(*)` | clip per-PU row count (join: `dp_count_bound`), Laplace | per-lane count, median/mean of 64 |
 | `COUNT(DISTINCT x)` | per-PU distinct count, clip, sum, Laplace | per-PU distinct count, clip, sample-sum, median/mean; single DISTINCT may use the lane-mask specialization |
-| `SUM(x)` | clip `x` to `dp_sum_bound`, sum, Laplace | per-lane sum, median/mean |
+| `SUM(x)` | clip `x` to `dp_sum_bound`, sum, Laplace | per-lane sum; average release supports fixed-lane or privately-counted non-empty-lane estimators |
 | `AVG(x)` | decomposed → `SUM(clip x)` + `COUNT`; released as `noised_sum / max(noised_count, 1)` (Google bounded-mean shape) | **three estimators** (`dp_sass_avg_method`): `lane_average` (default) fills empty lanes before releasing the lane mean; `nonempty_lane_average` divides a noisy shifted sum of populated-lane averages by their noisy count; `ratio` releases independent row SUM and COUNT SAA cells and divides them |
 | `MIN(x)` / `MAX(x)` | **`dp_standard`: supported** — values clipped to the public domain `[dp_minmax_lower_bound, dp_minmax_upper_bound]`, global sensitivity = range `U−L` (`×C_u` grouped), `Laplace`, output clamped back into the domain. `dp_elastic`: unsupported (elastic sensitivity is defined only for counting queries) | per-lane min/max, median/mean; empty-lane identity = Λ (min) / L (max) |
 
@@ -352,6 +353,14 @@ their noisy count. It splits the AVG cell's ε equally, clamps the denominator t
 clips the output to the public domain. `ratio` instead decomposes the original `AVG` into
 row `SUM` and `COUNT` SAA cells. It releases their clamped ratio. All three satisfy DP; the
 setting supports utility comparisons (§16).
+
+**SUM estimators (`dp_sass`, average release).** `lane_average` averages over the fixed
+number of lanes and represents an empty SUM as zero. The opt-in `nonempty_lane_average`
+instead preserves exact lane occupancy and divides the noisy SUM of populated lane answers
+by their noisy count. Its numerator sensitivity is the enforced per-PU SUM contribution
+bound, multiplied by the sample rescaling factor when `dp_sass_rescale=true`; its denominator
+sensitivity is one for disjoint lanes. The SUM cell's ε is split equally between these two
+releases. A populated lane whose values cancel to zero remains populated.
 
 Aggregate `FILTER (WHERE …)` is folded into the value (`CASE WHEN cond THEN x END`) rather
 than kept as a separate filter, so it survives the per-PU rewrite (`FoldFilterIntoValue`).
@@ -399,6 +408,10 @@ constant, chosen per aggregate kind from the admin-set output domain `[L, Λ]` (
 | `MIN` | `Λ` (public upper bound) | min of the empty set is +∞ → clamp to the top of the domain |
 | `MAX` | `L` (public lower bound) | max of the empty set is −∞ → clamp to the bottom of the domain |
 | `AVG` | midpoint `(L+Λ)/2` | neutral in-range value |
+
+For SUM under the opt-in `nonempty_lane_average` method, empty lanes are represented as
+NULL internally rather than filled with zero. Their private count is released together with
+the lane-answer sum, so the data-dependent number of populated lanes is not exposed.
 
 Because the fill depends only on the public bounds (`dp_sass_count_output_bound`,
 `dp_sass_minmax_lower/upper_bound`, …), swapping one PU in or out cannot change what an

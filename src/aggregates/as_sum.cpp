@@ -761,7 +761,7 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 // it returns all 64 counters so the outer query can evaluate the comparison
 // against all subsamples and produce a mask.
 
-enum class PacSumCountersFinalizeMode : uint8_t { PAC, DP_SAMPLE };
+enum class PacSumCountersFinalizeMode : uint8_t { PAC, DP_SAMPLE, DP_SAMPLE_NULLABLE };
 
 // FinalizeCounters for as_sum.
 // Returns LIST<DOUBLE> with exactly 64 elements (no NULLs).
@@ -781,12 +781,17 @@ static void PacSumAvgFinalizeCountersInternal(Vector &states, AggregateInputData
 	ListVector::SetListSize(result, total_elements);
 
 	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
+	auto &child_validity = FlatVector::Validity(child_vec);
 
 	// correction factor for value scaling
 	auto *bind = input.bind_data ? &input.bind_data->Cast<PrivBindData>() : nullptr;
 	double correction = bind ? bind->correction : 1.0;
-	bool dp_sample = MODE == PacSumCountersFinalizeMode::DP_SAMPLE;
+	bool dp_sample = MODE != PacSumCountersFinalizeMode::PAC;
+	bool nullable = MODE == PacSumCountersFinalizeMode::DP_SAMPLE_NULLABLE;
 	double dp_sample_rescale = dp_sample && bind && bind->sample_rescale ? DpSampleRescale(bind->sample_lanes) : 1.0;
+	if (nullable) {
+		child_validity.SetAllValid(total_elements);
+	}
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -830,6 +835,9 @@ static void PacSumAvgFinalizeCountersInternal(Vector &states, AggregateInputData
 		for (int j = 0; j < 64; j++) {
 			if (dp_sample) {
 				child_data[base + j] = static_cast<PAC_FLOAT>(buf[j] * dp_sample_rescale);
+				if (nullable && ((key_hash >> j) & 1ULL) == 0) {
+					child_validity.SetInvalid(base + j);
+				}
 			} else if ((key_hash >> j) & 1ULL) {
 				child_data[base + j] = static_cast<PAC_FLOAT>(buf[j] * 2.0 * correction);
 			} else {
@@ -861,6 +869,12 @@ static void PacSumFinalizeCountersDouble(Vector &states, AggregateInputData &inp
 static void DpSampleSumFinalizeCountersDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
                                               idx_t offset) {
 	PacSumAvgFinalizeCountersInternal<ScatterDoubleState, true, PacSumCountersFinalizeMode::DP_SAMPLE>(
+	    states, input, result, count, offset);
+}
+
+static void DpSampleNullableSumFinalizeCountersDouble(Vector &states, AggregateInputData &input, Vector &result,
+                                                      idx_t count, idx_t offset) {
+	PacSumAvgFinalizeCountersInternal<ScatterDoubleState, true, PacSumCountersFinalizeMode::DP_SAMPLE_NULLABLE>(
 	    states, input, result, count, offset);
 }
 
@@ -952,6 +966,18 @@ void RegisterDpSampleSumFunctions(ExtensionLoader &loader) {
 	desc.description = "[INTERNAL] Returns 64 sample-median DP counters for SUM-like values.";
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
+
+	AggregateFunctionSet nullable_set("as_sample_nullable_sum");
+	nullable_set.AddFunction(
+	    AggregateFunction("as_sample_nullable_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE}, list_type,
+	                      PacSumDoubleStateSize, PacSumDoubleInitialize, DpSampleSumScatterUpdateDouble,
+	                      PacSumCombineDoubleWrapper, DpSampleNullableSumFinalizeCountersDouble,
+	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, DpSampleSumUpdateDouble, DpSampleSumBind));
+	CreateAggregateFunctionInfo nullable_info(nullable_set);
+	FunctionDescription nullable_desc;
+	nullable_desc.description = "[INTERNAL] Returns 64 SAA SUM lanes with empty lanes represented as NULL.";
+	nullable_info.descriptions.push_back(std::move(nullable_desc));
+	loader.RegisterFunction(std::move(nullable_info));
 }
 
 struct DpSampleAvgState {
@@ -1096,6 +1122,11 @@ struct DpSampleMSumState {
 	PAC_FLOAT *values;
 };
 
+struct DpSampleMNullableSumState {
+	PAC_FLOAT *values;
+	uint8_t *occupied;
+};
+
 static idx_t DpSampleMSumStateSize(const AggregateFunction &) {
 	return sizeof(DpSampleMSumState);
 }
@@ -1104,12 +1135,28 @@ static void DpSampleMSumInitialize(const AggregateFunction &, data_ptr_t state_p
 	memset(state_ptr, 0, sizeof(DpSampleMSumState));
 }
 
+static idx_t DpSampleMNullableSumStateSize(const AggregateFunction &) {
+	return sizeof(DpSampleMNullableSumState);
+}
+
+static void DpSampleMNullableSumInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
+	memset(state_ptr, 0, sizeof(DpSampleMNullableSumState));
+}
+
 static PAC_FLOAT *EnsureDpSampleMArray(PAC_FLOAT *&values, ArenaAllocator &allocator, int sample_count) {
 	if (!values) {
 		values = reinterpret_cast<PAC_FLOAT *>(allocator.Allocate(sample_count * sizeof(PAC_FLOAT)));
 		memset(values, 0, sample_count * sizeof(PAC_FLOAT));
 	}
 	return values;
+}
+
+static uint8_t *EnsureDpSampleMOccupancy(uint8_t *&occupied, ArenaAllocator &allocator, int sample_count) {
+	if (!occupied) {
+		occupied = allocator.Allocate(sample_count);
+		memset(occupied, 0, sample_count);
+	}
+	return occupied;
 }
 
 static void DpSampleMSumUpdateOne(DpSampleMSumState &state, ArenaAllocator &allocator, uint64_t hash, double value,
@@ -1150,6 +1197,53 @@ static void DpSampleMSumScatterUpdate(Vector inputs[], AggregateInputData &aggr,
 		if (hash_data.validity.RowIsValid(h_idx) && value_data.validity.RowIsValid(v_idx)) {
 			auto *state = state_ptrs[state_data.sel->get_index(i)];
 			DpSampleMSumUpdateOne(*state, aggr.allocator, hashes[h_idx], values[v_idx], sample_count);
+		}
+	}
+}
+
+static void DpSampleMNullableSumUpdateOne(DpSampleMNullableSumState &state, ArenaAllocator &allocator, uint64_t hash,
+                                          double value, int sample_count) {
+	idx_t lane = DpSassLaneIndex(hash, sample_count);
+	auto values = EnsureDpSampleMArray(state.values, allocator, sample_count);
+	auto occupied = EnsureDpSampleMOccupancy(state.occupied, allocator, sample_count);
+	values[lane] += static_cast<PAC_FLOAT>(value);
+	occupied[lane] = 1;
+}
+
+static void DpSampleMNullableSumUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr,
+                                       idx_t count) {
+	auto &state = *reinterpret_cast<DpSampleMNullableSumState *>(state_ptr);
+	int sample_count = GetPrivSampleCount(aggr);
+	UnifiedVectorFormat hash_data, value_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, value_data);
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto values = UnifiedVectorFormat::GetData<double>(value_data);
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto v_idx = value_data.sel->get_index(i);
+		if (hash_data.validity.RowIsValid(h_idx) && value_data.validity.RowIsValid(v_idx)) {
+			DpSampleMNullableSumUpdateOne(state, aggr.allocator, hashes[h_idx], values[v_idx], sample_count);
+		}
+	}
+}
+
+static void DpSampleMNullableSumScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
+                                              idx_t count) {
+	int sample_count = GetPrivSampleCount(aggr);
+	UnifiedVectorFormat hash_data, value_data, state_data;
+	inputs[0].ToUnifiedFormat(count, hash_data);
+	inputs[1].ToUnifiedFormat(count, value_data);
+	states.ToUnifiedFormat(count, state_data);
+	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+	auto values = UnifiedVectorFormat::GetData<double>(value_data);
+	auto state_ptrs = UnifiedVectorFormat::GetData<DpSampleMNullableSumState *>(state_data);
+	for (idx_t i = 0; i < count; i++) {
+		auto h_idx = hash_data.sel->get_index(i);
+		auto v_idx = value_data.sel->get_index(i);
+		if (hash_data.validity.RowIsValid(h_idx) && value_data.validity.RowIsValid(v_idx)) {
+			auto *state = state_ptrs[state_data.sel->get_index(i)];
+			DpSampleMNullableSumUpdateOne(*state, aggr.allocator, hashes[h_idx], values[v_idx], sample_count);
 		}
 	}
 }
@@ -1243,6 +1337,27 @@ static void DpSampleMSumCombine(Vector &src, Vector &dst, AggregateInputData &ag
 	}
 }
 
+static void DpSampleMNullableSumCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t count) {
+	int sample_count = GetPrivSampleCount(aggr);
+	auto src_states = FlatVector::GetData<DpSampleMNullableSumState *>(src);
+	auto dst_states = FlatVector::GetData<DpSampleMNullableSumState *>(dst);
+	for (idx_t i = 0; i < count; i++) {
+		auto *source = src_states[i];
+		if (!source->occupied) {
+			continue;
+		}
+		auto *target = dst_states[i];
+		auto target_values = EnsureDpSampleMArray(target->values, aggr.allocator, sample_count);
+		auto target_occupied = EnsureDpSampleMOccupancy(target->occupied, aggr.allocator, sample_count);
+		for (int j = 0; j < sample_count; j++) {
+			if (source->occupied[j]) {
+				target_values[j] += source->values[j];
+				target_occupied[j] = 1;
+			}
+		}
+	}
+}
+
 static void DpSampleMSumFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
 	int sample_count = GetPrivSampleCount(input);
 	auto state_ptrs = FlatVector::GetData<DpSampleMSumState *>(states);
@@ -1271,6 +1386,36 @@ static void DpSampleMSumFinalize(Vector &states, AggregateInputData &input, Vect
 	}
 }
 
+static void DpSampleMNullableSumFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                         idx_t offset) {
+	int sample_count = GetPrivSampleCount(input);
+	auto state_ptrs = FlatVector::GetData<DpSampleMNullableSumState *>(states);
+	auto list_entries = FlatVector::GetData<list_entry_t>(result);
+	auto &child_vec = ListVector::GetEntry(result);
+	idx_t total_elements = (offset + count) * static_cast<idx_t>(sample_count);
+	ListVector::Reserve(result, total_elements);
+	ListVector::SetListSize(result, total_elements);
+	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
+	auto &child_validity = FlatVector::Validity(child_vec);
+	child_validity.SetAllValid(total_elements);
+	bool sample_rescale = input.bind_data ? input.bind_data->Cast<PrivBindData>().sample_rescale : true;
+	PAC_FLOAT rescale = sample_rescale ? static_cast<PAC_FLOAT>(sample_count) : PAC_FLOAT(1.0);
+	for (idx_t i = 0; i < count; i++) {
+		idx_t base = (offset + i) * static_cast<idx_t>(sample_count);
+		list_entries[offset + i].offset = base;
+		list_entries[offset + i].length = sample_count;
+		auto *state = state_ptrs[i];
+		for (int j = 0; j < sample_count; j++) {
+			if (!state->occupied || !state->occupied[j]) {
+				child_data[base + j] = 0.0;
+				child_validity.SetInvalid(base + j);
+			} else {
+				child_data[base + j] = state->values[j] * rescale;
+			}
+		}
+	}
+}
+
 static unique_ptr<FunctionData> DpSampleMBind(ClientContext &ctx, AggregateFunction &,
                                               vector<unique_ptr<Expression>> &) {
 	int sample_lanes = GetDpSampleLanes(ctx);
@@ -1292,6 +1437,19 @@ void RegisterDpSampleMSumFunctions(ExtensionLoader &loader) {
 	desc.description = "[INTERNAL] Experimental variable-m SAA counters for SUM-like values.";
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
+
+	AggregateFunctionSet nullable_set("as_sample_m_nullable_sum");
+	nullable_set.AddFunction(
+	    AggregateFunction("as_sample_m_nullable_sum", {LogicalType::UBIGINT, LogicalType::DOUBLE}, list_type,
+	                      DpSampleMNullableSumStateSize, DpSampleMNullableSumInitialize,
+	                      DpSampleMNullableSumScatterUpdate, DpSampleMNullableSumCombine, DpSampleMNullableSumFinalize,
+	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, DpSampleMNullableSumUpdate, DpSampleMBind));
+	CreateAggregateFunctionInfo nullable_info(nullable_set);
+	FunctionDescription nullable_desc;
+	nullable_desc.description =
+	    "[INTERNAL] Experimental variable-m SAA SUM lanes with empty lanes represented as NULL.";
+	nullable_info.descriptions.push_back(std::move(nullable_desc));
+	loader.RegisterFunction(std::move(nullable_info));
 }
 
 void RegisterDpSampleMSumIfFunctions(ExtensionLoader &loader) {

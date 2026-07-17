@@ -429,6 +429,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "original row SUM and COUNT).",
 	                             LogicalType::VARCHAR, Value("lane_average"));
 	db.config.AddExtensionOption(
+	    "dp_sass_sum_method",
+	    "dp_sass SUM estimator under average release: 'lane_average' (fixed lane count; default) or "
+	    "'nonempty_lane_average' (noisy SUM of populated lane answers divided by noisy populated-lane COUNT).",
+	    LogicalType::VARCHAR, Value("lane_average"));
+	db.config.AddExtensionOption(
 	    "dp_sass_fast_count_star",
 	    "[INTERNAL] Enable a fast Laplace COUNT(*) path for ungrouped dp_sass single-table PU queries. "
 	    "This treats dp_count_bound as a public data-validity assumption instead of enforcing clipping.",

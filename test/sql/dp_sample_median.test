@@ -1058,6 +1058,187 @@ SET dp_sass_release = 'average';
 statement ok
 SET dp_sass_avg_method = 'lane_average';
 
+# --- SUM estimator flag (dp_sass_sum_method) ---
+# The opt-in non-empty estimator preserves lane occupancy, privately releases the SUM and populated-lane
+# COUNT, and calibrates numerator noise to the enforced per-PU SUM bound. The fixed-lane estimator remains
+# the default. With one unscaled populated lane, their non-private targets are respectively 10 and 10/64.
+statement ok
+CREATE PU TABLE sass_sparse_lane_sum(uid INTEGER, v DOUBLE, PRIVACY_KEY(uid));
+
+statement ok
+INSERT INTO sass_sparse_lane_sum VALUES (1, 10.0);
+
+statement ok
+SET dp_sample_lanes = 1;
+
+statement ok
+SET dp_sass_sum_output_bounds = NULL;
+
+statement ok
+SET dp_sass_sum_output_lower_bounds = NULL;
+
+statement ok
+SET dp_sass_sum_output_upper_bounds = NULL;
+
+statement ok
+SET dp_sass_sum_output_bound = 10000.0;
+
+statement ok
+SET dp_sum_bound = 100.0;
+
+statement ok
+SET dp_sass_rescale = false;
+
+statement ok
+SET dp_sass_sum_method = 'lane_average';
+
+query I
+SELECT abs(SUM(v) - (10.0 / 64.0)) < 1e-6 FROM sass_sparse_lane_sum;
+----
+true
+
+statement ok
+SET dp_sass_sum_method = 'nonempty_lane_average';
+
+query I nosort explain_nonempty_lane_sum
+EXPLAIN SELECT SUM(v) FROM sass_sparse_lane_sum;
+----
+as_sample_nullable_sum
+
+query I nosort explain_nonempty_lane_sum_terminal
+EXPLAIN SELECT SUM(v) FROM sass_sparse_lane_sum;
+----
+dp_nonempty_mean_noise
+
+query I
+SELECT SUM(v)::INTEGER FROM sass_sparse_lane_sum;
+----
+10
+
+# The cell epsilon is split equally. With C_sum=100 and no rescaling, numerator scale is 200;
+# populated-lane-count scale is 2, and a real zero-valued lane would still count as populated.
+query III
+SELECT numerator_noise_scale::INTEGER, denominator_noise_scale::INTEGER, valid_lane_count
+FROM dp_sass_noise_scale_query('SELECT SUM(v) FROM sass_sparse_lane_sum');
+----
+200	2	1
+
+# Multiple SUM cells use independent numerator/count noise streams.
+statement ok
+SET dp_epsilon = 100.0;
+
+statement ok
+SET privacy_noise = true;
+
+query I
+SELECT SUM(a) <> SUM(b) FROM sass_multi_lane_avg;
+----
+true
+
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET dp_epsilon = 1.0;
+
+statement ok
+INSERT INTO sass_sparse_lane_sum VALUES (2, 0.0);
+
+statement ok
+DELETE FROM sass_sparse_lane_sum WHERE uid = 1;
+
+query I
+SELECT valid_lane_count
+FROM dp_sass_noise_scale_query('SELECT SUM(v) FROM sass_sparse_lane_sum');
+----
+1
+
+# Rescaled lane SUMs and their per-PU sensitivity both gain the 64x sampling factor.
+statement ok
+DELETE FROM sass_sparse_lane_sum;
+
+statement ok
+INSERT INTO sass_sparse_lane_sum VALUES (1, 10.0);
+
+statement ok
+SET dp_sass_rescale = true;
+
+query I
+SELECT SUM(v)::INTEGER FROM sass_sparse_lane_sum;
+----
+640
+
+query I
+SELECT numerator_noise_scale::INTEGER
+FROM dp_sass_noise_scale_query('SELECT SUM(v) FROM sass_sparse_lane_sum');
+----
+12800
+
+# The variable-m path preserves the same occupancy semantics and uses its configured rescaling factor.
+statement ok
+SET dp_sass_m = 128;
+
+query I nosort explain_nonempty_lane_sum_m
+EXPLAIN SELECT SUM(v) FROM sass_sparse_lane_sum;
+----
+as_sample_m_nullable_sum
+
+query I
+SELECT SUM(v)::INTEGER FROM sass_sparse_lane_sum;
+----
+1280
+
+query III
+SELECT numerator_noise_scale::INTEGER, denominator_noise_scale::INTEGER, valid_lane_count
+FROM dp_sass_noise_scale_query('SELECT SUM(v) FROM sass_sparse_lane_sum');
+----
+25600	2	1
+
+statement ok
+SET dp_sass_rescale = false;
+
+query I
+SELECT SUM(v)::INTEGER FROM sass_sparse_lane_sum;
+----
+10
+
+statement ok
+SET dp_sass_m = 64;
+
+statement ok
+SET dp_sass_sum_method = 'bogus';
+
+# SUM-only configuration is ignored by queries that do not contain SUM.
+query I
+SELECT COUNT(v) IS NOT NULL FROM sass_sparse_lane_sum;
+----
+true
+
+statement error
+SELECT SUM(v) FROM sass_sparse_lane_sum;
+----
+must be 'lane_average' or 'nonempty_lane_average'
+
+statement ok
+SET dp_sass_sum_method = 'nonempty_lane_average';
+
+statement ok
+SET dp_sass_release = 'median';
+
+statement error
+SELECT SUM(v) FROM sass_sparse_lane_sum;
+----
+requires dp_sass_release='average'
+
+statement ok
+SET dp_sass_sum_method = 'lane_average';
+
+statement ok
+SET dp_sass_release = 'average';
+
+statement ok
+SET dp_sass_rescale = true;
+
 statement ok
 SET dp_sample_lanes = 8;
 
