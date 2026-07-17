@@ -96,7 +96,7 @@ loudly rather than releasing something unproven:
 | `dp_max_groups_contributed` | max output groups one PU may affect | **`C_u`** |
 | `dp_sample_lanes` | number of sample lanes a PU is hashed into (`m` is fixed at 64) | subsample assignment (`m`; see §11) |
 | `dp_sass_release` | `'median'` (smooth-sensitivity, (ε,δ)) or `'average'` (GUPT mean, pure ε) | release rule |
-| `dp_sass_avg_method` | `dp_sass` AVG estimator: `'lane_average'` (default) or `'ratio'` (§13) | — |
+| `dp_sass_avg_method` | `dp_sass` AVG estimator: `'lane_average'` (default), `'nonempty_lane_average'`, or `'ratio'` (§13) | — |
 | `dp_sass_count_output_bound` / `dp_sass_sum_output_bound` | public output domain `[L,Λ]` for rescaled COUNT/SUM lane answers | `L_i, Λ_i` |
 | `dp_sass_avg_lower/upper_bound`, `dp_sass_minmax_lower/upper_bound` | public output domain for `dp_sass` AVG / MIN-MAX | `L_i, Λ_i` |
 | `dp_minmax_lower/upper_bound` | public domain `[L,U]` for MIN/MAX under **`dp_standard`** (sensitivity = `U−L`) | `L_i, Λ_i` |
@@ -342,15 +342,16 @@ smooth sensitivity, same NRS `β`.
 | `COUNT(*)` | clip per-PU row count (join: `dp_count_bound`), Laplace | per-lane count, median/mean of 64 |
 | `COUNT(DISTINCT x)` | per-PU distinct count, clip, sum, Laplace | per-PU distinct count, clip, sample-sum, median/mean; single DISTINCT may use the lane-mask specialization |
 | `SUM(x)` | clip `x` to `dp_sum_bound`, sum, Laplace | per-lane sum, median/mean |
-| `AVG(x)` | decomposed → `SUM(clip x)` + `COUNT`; released as `noised_sum / max(noised_count, 1)` (Google bounded-mean shape) | **two estimators** (`dp_sass_avg_method`): `lane_average` (default) = median/mean of the 64 per-lane averages; `ratio` = two independent SAA mechanisms for SUM and COUNT, released as `noised_sum / noised_count` |
+| `AVG(x)` | decomposed → `SUM(clip x)` + `COUNT`; released as `noised_sum / max(noised_count, 1)` (Google bounded-mean shape) | **three estimators** (`dp_sass_avg_method`): `lane_average` (default) fills empty lanes before releasing the lane mean; `nonempty_lane_average` divides a noisy shifted sum of populated-lane averages by their noisy count; `ratio` releases independent row SUM and COUNT SAA cells and divides them |
 | `MIN(x)` / `MAX(x)` | **`dp_standard`: supported** — values clipped to the public domain `[dp_minmax_lower_bound, dp_minmax_upper_bound]`, global sensitivity = range `U−L` (`×C_u` grouped), `Laplace`, output clamped back into the domain. `dp_elastic`: unsupported (elastic sensitivity is defined only for counting queries) | per-lane min/max, median/mean; empty-lane identity = Λ (min) / L (max) |
 
 **AVG estimators (`dp_sass`).** `lane_average` is the NRS/GUPT sample-and-aggregate of the
-mean (median/mean of the per-lane averages). `ratio` decomposes `AVG` into `SUM`+`COUNT`,
-privatises each with its own SAA mechanism (each gets `ε/2`, `δ/2` of the AVG cell), and
-releases the ratio clamped into `[dp_sass_avg_lower_bound, dp_sass_avg_upper_bound]` — the
-Google-DP bounded-mean shape (reuses the Laplace modes' `RewriteAvgAggregates` +
-`WrapAvgRatioProjection`). Both satisfy DP; the flag exists to compare utility (§16).
+mean and fills empty lanes with the public-domain midpoint. `nonempty_lane_average` shifts
+populated-lane averages by the public lower bound, then releases their noisy sum divided by
+their noisy count. It splits the AVG cell's ε equally, clamps the denominator to one, and
+clips the output to the public domain. `ratio` instead decomposes the original `AVG` into
+row `SUM` and `COUNT` SAA cells. It releases their clamped ratio. All three satisfy DP; the
+setting supports utility comparisons (§16).
 
 Aggregate `FILTER (WHERE …)` is folded into the value (`CASE WHEN cond THEN x END`) rather
 than kept as a separate filter, so it survives the per-PU rewrite (`FoldFilterIntoValue`).
@@ -454,11 +455,9 @@ releasing the raw value; `privacy_noise = false` zeroes noise for deterministic 
 - **`N_PU` public (`δ = 1/N_PU`).** Accepted: revealing `N_PU` is fine in the current
   model. Keep `δ = 1/N_PU` derived from a *public* estimate of the dataset scale, not the
   exact private PU count.
-- **AVG estimator.** Both are now implemented and selectable via `dp_sass_avg_method`
-  (§13): `lane_average` (NRS/GUPT sample-and-aggregate of the mean) and `ratio` (two
-  independent SAA mechanisms for SUM/COUNT, released as their clamped ratio — the
-  Google-DP shape). Both satisfy DP; which gives better utility is the empirical
-  comparison the flag enables.
+- **AVG estimator.** Three implementations are selectable via `dp_sass_avg_method` (§13):
+  fixed-fill `lane_average`, noisy populated-lane `nonempty_lane_average`, and row-weighted
+  `ratio`. All satisfy DP; the setting supports empirical utility comparisons.
 - **MIN/MAX under the Laplace modes.** `dp_standard` now supports MIN/MAX via bounded
   global sensitivity (`U−L` over the public `[dp_minmax_lower_bound, dp_minmax_upper_bound]`
   domain, `×C_u` grouped, output clamped) — confirmed sound and expected to give better

@@ -185,6 +185,18 @@ static vector<DpSassNoiseScaleQueryRecord> &DpSassNoiseScaleQueryRecords() {
 	return records;
 }
 
+DpSassNoiseScaleQueryRecord DpSassNoiseScaleQueryRecord::Additive(int32_t aggregate_index, double noise_scale) {
+	return {aggregate_index, Value::DOUBLE(noise_scale), Value(LogicalType::DOUBLE), Value(LogicalType::DOUBLE),
+	        Value(LogicalType::INTEGER)};
+}
+
+DpSassNoiseScaleQueryRecord DpSassNoiseScaleQueryRecord::Ratio(int32_t aggregate_index, double numerator_noise_scale,
+                                                               double denominator_noise_scale,
+                                                               int32_t valid_lane_count) {
+	return {aggregate_index, Value(LogicalType::DOUBLE), Value::DOUBLE(numerator_noise_scale),
+	        Value::DOUBLE(denominator_noise_scale), Value::INTEGER(valid_lane_count)};
+}
+
 void ClearDpSassStabilityQueryRecords() {
 	DpSassStabilityQueryRecords().clear();
 }
@@ -582,7 +594,8 @@ static void DpSmoothMedianNoiseFunctionInternal(DataChunk &args, ExpressionState
 			                         sample_lanes_values[sample_lanes_idx], bounded, lower_bound, upper_bound,
 			                         empty_default, median, scale)) {
 				if (record_scale) {
-					DpSassNoiseScaleQueryRecords().push_back({aggregate_indexes[aggregate_index_idx], scale});
+					DpSassNoiseScaleQueryRecords().push_back(
+					    DpSassNoiseScaleQueryRecord::Additive(aggregate_indexes[aggregate_index_idx], scale));
 					result_data[i] = median;
 				} else {
 					result_data[i] = scale;
@@ -819,7 +832,8 @@ static void DpGuptMeanNoiseFunctionInternal(DataChunk &args, ExpressionState &st
 			                     sample_lanes_values[sample_lanes_idx], lower_bound, upper_bound, empty_default, mean,
 			                     scale)) {
 				if (record_scale) {
-					DpSassNoiseScaleQueryRecords().push_back({aggregate_indexes[aggregate_index_idx], scale});
+					DpSassNoiseScaleQueryRecords().push_back(
+					    DpSassNoiseScaleQueryRecord::Additive(aggregate_indexes[aggregate_index_idx], scale));
 					result_data[i] = mean;
 				} else {
 					result_data[i] = scale;
@@ -976,7 +990,8 @@ static void DpGuptMeanMNoiseFunctionInternal(DataChunk &args, ExpressionState &s
 			                      sample_lanes_values[sample_lanes_idx], lower_bound, upper_bound, empty_default, mean,
 			                      scale)) {
 				if (record_scale) {
-					DpSassNoiseScaleQueryRecords().push_back({aggregate_indexes[aggregate_index_idx], scale});
+					DpSassNoiseScaleQueryRecords().push_back(
+					    DpSassNoiseScaleQueryRecord::Additive(aggregate_indexes[aggregate_index_idx], scale));
 					result_data[i] = mean;
 				} else {
 					result_data[i] = scale;
@@ -1007,6 +1022,170 @@ static void DpGuptMeanMNoiseScaleFunction(DataChunk &args, ExpressionState &stat
 
 static void DpGuptMeanMRecordNoiseScaleFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	DpGuptMeanMNoiseFunctionInternal(args, state, result, false, true);
+}
+
+struct NonEmptyMeanStats {
+	double shifted_sum = 0.0;
+	double valid_count = 0.0;
+	double mean = 0.0;
+	double numerator_noise_scale = 0.0;
+	double denominator_noise_scale = 0.0;
+};
+
+static bool NonEmptyMeanStatsRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
+                                 const PAC_FLOAT *child_values, double epsilon, int sample_lanes_raw,
+                                 double lower_bound, double upper_bound, NonEmptyMeanStats &stats) {
+	bool variable_m = entry.length > DP_SASS_DEFAULT_M;
+	if (entry.length < DP_SASS_DEFAULT_M || entry.length > DP_SASS_MAX_M ||
+	    (variable_m && (entry.length & (entry.length - 1)) != 0)) {
+		return false;
+	}
+	int sample_lanes = ValidateDpSampleLanes(sample_lanes_raw);
+	if (variable_m && sample_lanes != 1) {
+		return false;
+	}
+	if (epsilon <= 0.0 || !std::isfinite(epsilon)) {
+		return false;
+	}
+	if (!std::isfinite(lower_bound) || !std::isfinite(upper_bound) || lower_bound >= upper_bound) {
+		return false;
+	}
+
+	for (idx_t j = 0; j < entry.length; j++) {
+		auto child_idx = child_data.sel->get_index(entry.offset + j);
+		if (!child_data.validity.RowIsValid(child_idx)) {
+			continue;
+		}
+		double value = std::max(lower_bound, std::min(upper_bound, static_cast<double>(child_values[child_idx])));
+		stats.shifted_sum += value - lower_bound;
+		stats.valid_count += 1.0;
+	}
+
+	// Split the cell budget equally across the shifted SUM and populated-lane COUNT.
+	double component_epsilon = epsilon / 2.0;
+	stats.numerator_noise_scale = (static_cast<double>(sample_lanes) * (upper_bound - lower_bound)) / component_epsilon;
+	stats.denominator_noise_scale = static_cast<double>(sample_lanes) / component_epsilon;
+	stats.mean = lower_bound + stats.shifted_sum / std::max(1.0, stats.valid_count);
+	stats.mean = std::max(lower_bound, std::min(upper_bound, stats.mean));
+	return true;
+}
+
+static double ReleaseNonEmptyMean(const NonEmptyMeanStats &stats, double lower_bound, double upper_bound,
+                                  bool noise_enabled, uint64_t seed, uint64_t group_identity, uint64_t aggregate_index,
+                                  uint64_t aggregate_count) {
+	if (!noise_enabled) {
+		return stats.mean;
+	}
+	if (group_identity == 0 || aggregate_count == 0 || aggregate_index >= aggregate_count) {
+		throw InternalException("dp_nonempty_mean_noise: invalid aggregate-cell identity");
+	}
+	uint64_t group_offset = group_identity - 1;
+	if (group_offset > std::numeric_limits<uint64_t>::max() / aggregate_count) {
+		throw InvalidInputException("dp_nonempty_mean_noise: aggregate-cell identity overflow");
+	}
+	uint64_t cell_nonce = group_offset * aggregate_count + aggregate_index;
+	if (cell_nonce > (std::numeric_limits<uint64_t>::max() - 1) / 2) {
+		throw InvalidInputException("dp_nonempty_mean_noise: aggregate-cell nonce overflow");
+	}
+	double noised_sum = AddLaplaceNoise(stats.shifted_sum, stats.numerator_noise_scale, seed, cell_nonce * 2);
+	double noised_count = AddLaplaceNoise(stats.valid_count, stats.denominator_noise_scale, seed, cell_nonce * 2 + 1);
+	double released = lower_bound + noised_sum / std::max(1.0, noised_count);
+	return std::max(lower_bound, std::min(upper_bound, released));
+}
+
+static void DpNonEmptyMeanNoiseFunctionInternal(DataChunk &args, ExpressionState &state, Vector &result,
+                                                bool record_scales) {
+	auto &context = state.GetContext();
+	uint64_t seed = GetDpNoiseSeed(context);
+	bool noise_enabled = true;
+	Value noise_val;
+	if (context.TryGetCurrentSetting("privacy_noise", noise_val) && !noise_val.IsNull()) {
+		noise_enabled = noise_val.GetValue<bool>();
+	}
+
+	idx_t count = args.size();
+	auto &list_vec = args.data[0];
+	UnifiedVectorFormat list_data, epsilon_data, sample_lanes_data, lower_data, upper_data, aggregate_index_data;
+	UnifiedVectorFormat aggregate_count_data, group_identity_data;
+	list_vec.ToUnifiedFormat(count, list_data);
+	args.data[1].ToUnifiedFormat(count, epsilon_data);
+	args.data[2].ToUnifiedFormat(count, sample_lanes_data);
+	args.data[3].ToUnifiedFormat(count, lower_data);
+	args.data[4].ToUnifiedFormat(count, upper_data);
+	args.data[5].ToUnifiedFormat(count, aggregate_index_data);
+	if (!record_scales) {
+		args.data[6].ToUnifiedFormat(count, aggregate_count_data);
+		args.data[7].ToUnifiedFormat(count, group_identity_data);
+	}
+
+	auto &child_vec = ListVector::GetEntry(list_vec);
+	UnifiedVectorFormat child_data;
+	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
+	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+	auto epsilons = UnifiedVectorFormat::GetData<double>(epsilon_data);
+	auto sample_lanes_values = UnifiedVectorFormat::GetData<int32_t>(sample_lanes_data);
+	auto lower_values = UnifiedVectorFormat::GetData<double>(lower_data);
+	auto upper_values = UnifiedVectorFormat::GetData<double>(upper_data);
+	auto aggregate_indexes = UnifiedVectorFormat::GetData<int32_t>(aggregate_index_data);
+	auto aggregate_counts = record_scales ? nullptr : UnifiedVectorFormat::GetData<int32_t>(aggregate_count_data);
+	auto group_identities = record_scales ? nullptr : UnifiedVectorFormat::GetData<int64_t>(group_identity_data);
+	auto result_data = FlatVector::GetData<double>(result);
+	auto &result_validity = FlatVector::Validity(result);
+
+	for (idx_t i = 0; i < count; i++) {
+		auto list_idx = list_data.sel->get_index(i);
+		auto epsilon_idx = epsilon_data.sel->get_index(i);
+		auto sample_lanes_idx = sample_lanes_data.sel->get_index(i);
+		auto lower_idx = lower_data.sel->get_index(i);
+		auto upper_idx = upper_data.sel->get_index(i);
+		auto aggregate_index_idx = aggregate_index_data.sel->get_index(i);
+		auto aggregate_count_idx = record_scales ? 0 : aggregate_count_data.sel->get_index(i);
+		auto group_identity_idx = record_scales ? 0 : group_identity_data.sel->get_index(i);
+		if (!list_data.validity.RowIsValid(list_idx) || !epsilon_data.validity.RowIsValid(epsilon_idx) ||
+		    !sample_lanes_data.validity.RowIsValid(sample_lanes_idx) || !lower_data.validity.RowIsValid(lower_idx) ||
+		    !upper_data.validity.RowIsValid(upper_idx) ||
+		    !aggregate_index_data.validity.RowIsValid(aggregate_index_idx) ||
+		    (!record_scales && (!aggregate_count_data.validity.RowIsValid(aggregate_count_idx) ||
+		                        !group_identity_data.validity.RowIsValid(group_identity_idx)))) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+
+		NonEmptyMeanStats stats;
+		double lower_bound = lower_values[lower_idx];
+		double upper_bound = upper_values[upper_idx];
+		if (!NonEmptyMeanStatsRow(list_entries[list_idx], child_data, child_values, epsilons[epsilon_idx],
+		                          sample_lanes_values[sample_lanes_idx], lower_bound, upper_bound, stats)) {
+			result_validity.SetInvalid(i);
+			continue;
+		}
+		if (record_scales) {
+			DpSassNoiseScaleQueryRecords().push_back(DpSassNoiseScaleQueryRecord::Ratio(
+			    aggregate_indexes[aggregate_index_idx], stats.numerator_noise_scale, stats.denominator_noise_scale,
+			    static_cast<int32_t>(stats.valid_count)));
+			result_data[i] = stats.mean;
+		} else {
+			if (aggregate_counts[aggregate_count_idx] <= 0 || group_identities[group_identity_idx] <= 0) {
+				throw InternalException("dp_nonempty_mean_noise: invalid aggregate-cell identity");
+			}
+			result_data[i] = ReleaseNonEmptyMean(stats, lower_bound, upper_bound, noise_enabled, seed,
+			                                     static_cast<uint64_t>(group_identities[group_identity_idx]),
+			                                     static_cast<uint64_t>(aggregate_indexes[aggregate_index_idx]),
+			                                     static_cast<uint64_t>(aggregate_counts[aggregate_count_idx]));
+		}
+		PRIVACY_DEBUG_PRINT("dp_sass nonempty-lane mean: valid=" + std::to_string(stats.valid_count) +
+		                    " numerator_scale=" + std::to_string(stats.numerator_noise_scale) +
+		                    " denominator_scale=" + std::to_string(stats.denominator_noise_scale));
+	}
+}
+
+static void DpNonEmptyMeanNoiseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	DpNonEmptyMeanNoiseFunctionInternal(args, state, result, false);
+}
+
+static void DpNonEmptyMeanRecordNoiseScaleFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	DpNonEmptyMeanNoiseFunctionInternal(args, state, result, true);
 }
 
 void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
@@ -1181,6 +1360,28 @@ void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
 	    "[INTERNAL] Records the variable-m GUPT-style SASS mean-release scale and returns the non-private estimator.";
 	gupt_m_record_scale_info.descriptions.push_back(std::move(gupt_m_record_scale_desc));
 	loader.RegisterFunction(std::move(gupt_m_record_scale_info));
+
+	ScalarFunction nonempty_mean("dp_nonempty_mean_noise",
+	                             {list_type, LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::DOUBLE,
+	                              LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::BIGINT},
+	                             LogicalType::DOUBLE, DpNonEmptyMeanNoiseFunction);
+	CreateScalarFunctionInfo nonempty_mean_info(nonempty_mean);
+	FunctionDescription nonempty_mean_desc;
+	nonempty_mean_desc.description =
+	    "Releases the mean of non-empty SASS lanes using independently-noised shifted SUM and lane COUNT.";
+	nonempty_mean_info.descriptions.push_back(std::move(nonempty_mean_desc));
+	loader.RegisterFunction(std::move(nonempty_mean_info));
+
+	ScalarFunction nonempty_mean_record("dp_nonempty_mean_record_noise_scale",
+	                                    {list_type, LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::DOUBLE,
+	                                     LogicalType::DOUBLE, LogicalType::INTEGER},
+	                                    LogicalType::DOUBLE, DpNonEmptyMeanRecordNoiseScaleFunction);
+	CreateScalarFunctionInfo nonempty_mean_record_info(nonempty_mean_record);
+	FunctionDescription nonempty_mean_record_desc;
+	nonempty_mean_record_desc.description =
+	    "[INTERNAL] Records numerator/count noise scales for the non-empty-lane SASS mean.";
+	nonempty_mean_record_info.descriptions.push_back(std::move(nonempty_mean_record_desc));
+	loader.RegisterFunction(std::move(nonempty_mean_record_info));
 
 	// dp_aggregate: naive DP sample-and-aggregate terminal, mirroring pac_aggregate's shape
 	// (samples, counts, ...). `counts` is accepted for symmetry and ignored by the median path.

@@ -36,6 +36,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace duckdb {
 
@@ -706,16 +707,24 @@ static vector<double> GetDpSumContributionBounds(ClientContext &context, const s
 	return result;
 }
 
-// Clip an expression to [lo, hi] in DOUBLE domain, then cast back to `restore_type`:
-// greatest(least(cast(expr, DOUBLE), hi), lo).
+// Clip a non-NULL expression to [lo, hi] in DOUBLE domain, then cast back to `restore_type`.
+// DuckDB's least/greatest ignore NULL arguments, so preserve NULL explicitly for SQL aggregate semantics.
 static unique_ptr<Expression> ClipToBounds(OptimizerExtensionInput &input, unique_ptr<Expression> expr, double lo,
                                            double hi, const LogicalType &restore_type) {
 	auto as_double = BoundCastExpression::AddCastToType(input.context, std::move(expr), LogicalType::DOUBLE);
+	auto is_null = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NULL, LogicalType::BOOLEAN);
+	is_null->children.push_back(as_double->Copy());
 	auto hi_const = make_uniq<BoundConstantExpression>(Value::DOUBLE(hi));
 	auto lo_const = make_uniq<BoundConstantExpression>(Value::DOUBLE(lo));
 	auto upper = input.optimizer.BindScalarFunction("least", std::move(as_double), std::move(hi_const));
 	auto clipped = input.optimizer.BindScalarFunction("greatest", std::move(upper), std::move(lo_const));
-	return BoundCastExpression::AddCastToType(input.context, std::move(clipped), restore_type);
+	auto preserve_null = make_uniq<BoundCaseExpression>(LogicalType::DOUBLE);
+	BoundCaseCheck null_check;
+	null_check.when_expr = std::move(is_null);
+	null_check.then_expr = make_uniq<BoundConstantExpression>(Value(LogicalType::DOUBLE));
+	preserve_null->case_checks.push_back(std::move(null_check));
+	preserve_null->else_expr = std::move(clipped);
+	return BoundCastExpression::AddCastToType(input.context, std::move(preserve_null), restore_type);
 }
 
 static void ClipSumInputs(OptimizerExtensionInput &input, LogicalAggregate *agg, const vector<double> &sum_bounds) {
@@ -1838,11 +1847,33 @@ static string GetDpSassAvgMethod(ClientContext &context) {
 		return "lane_average";
 	}
 	string method = StringUtil::Lower(v.ToString());
-	if (method != "lane_average" && method != "ratio") {
-		throw InvalidInputException("dp_sass: dp_sass_avg_method must be 'lane_average' or 'ratio' (got '" + method +
-		                            "')");
+	if (method != "lane_average" && method != "nonempty_lane_average" && method != "ratio") {
+		throw InvalidInputException("dp_sass: dp_sass_avg_method must be 'lane_average', "
+		                            "'nonempty_lane_average', or 'ratio' (got '" +
+		                            method + "')");
 	}
 	return method;
+}
+
+static idx_t InsertDpSassNoiseIdentityWindow(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                             LogicalOperator *&insert_above) {
+	auto *slot = FindOperatorSlotByPointer(plan, insert_above);
+	if (!slot) {
+		throw InternalException("dp_sass: could not locate insertion point for aggregate-cell identity");
+	}
+	idx_t window_index = input.optimizer.binder.GenerateTableIndex();
+	auto window = make_uniq<LogicalWindow>(window_index);
+	auto row_number =
+	    make_uniq<BoundWindowExpression>(ExpressionType::WINDOW_ROW_NUMBER, LogicalType::BIGINT, nullptr, nullptr);
+	row_number->start = WindowBoundary::UNBOUNDED_PRECEDING;
+	row_number->end = WindowBoundary::CURRENT_ROW_ROWS;
+	window->expressions.push_back(std::move(row_number));
+	window->children.push_back(std::move(*slot));
+	window->ResolveOperatorTypes();
+	insert_above = window.get();
+	*slot = std::move(window);
+	PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] added chunk-global group identity for independent AVG cell noise");
+	return window_index;
 }
 
 static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
@@ -1851,7 +1882,8 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
                                                   const vector<double> &lower_bounds,
                                                   const vector<double> &upper_bounds,
                                                   const vector<double> &empty_defaults, LogicalOperator *insert_above,
-                                                  const string &release_method, const vector<idx_t> &agg_positions) {
+                                                  const string &release_method, const vector<idx_t> &agg_positions,
+                                                  const vector<bool> &nonempty_lane_means) {
 	idx_t n_groups = agg->groups.size();
 	idx_t n_aggs = output_types.size();
 	D_ASSERT(epsilons.size() == n_aggs);
@@ -1860,10 +1892,19 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 	D_ASSERT(upper_bounds.size() == n_aggs);
 	D_ASSERT(empty_defaults.size() == n_aggs);
 	D_ASSERT(agg_positions.size() == n_aggs);
+	D_ASSERT(nonempty_lane_means.size() == n_aggs);
 	bool stability_query_mode = GetBooleanSetting(input.context, "dp_sass_stability_query_mode", false);
 	bool noise_scale_query_mode = GetBooleanSetting(input.context, "dp_sass_noise_scale_query_mode", false);
 	bool average_release = release_method == "average";
 	bool variable_m = GetDpSassM(input.context) > DP_SASS_DEFAULT_M;
+	optional_idx noise_identity_index;
+	if (!stability_query_mode && !noise_scale_query_mode &&
+	    std::any_of(nonempty_lane_means.begin(), nonempty_lane_means.end(), [](bool enabled) { return enabled; })) {
+		if (n_aggs > static_cast<idx_t>(std::numeric_limits<int32_t>::max())) {
+			throw InvalidInputException("dp_sass: too many aggregate cells for independent noise assignment");
+		}
+		noise_identity_index = InsertDpSassNoiseIdentityWindow(input, plan, insert_above);
+	}
 
 	vector<unique_ptr<Expression>> proj_exprs;
 	proj_exprs.reserve(n_groups + n_aggs);
@@ -1895,11 +1936,25 @@ static NoiseProjection WrapSampleMedianProjection(OptimizerExtensionInput &input
 		children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(sample_lanes)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(lower_bounds[ai])));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(upper_bounds[ai])));
-		// Per-kind public default used to fill empty lanes so the populated-lane count is
-		// data-independent (no NULL leak; fixed GUPT denominator).
-		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(empty_defaults[ai])));
+		if (!nonempty_lane_means[ai]) {
+			// Per-kind public default used to fill empty lanes so the populated-lane count is
+			// data-independent (no NULL leak; fixed GUPT denominator).
+			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(empty_defaults[ai])));
+		}
 		const char *terminal = nullptr;
-		if (noise_scale_query_mode) {
+		if (nonempty_lane_means[ai]) {
+			if (noise_scale_query_mode) {
+				children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(static_cast<int32_t>(ai))));
+				terminal = "dp_nonempty_mean_record_noise_scale";
+			} else {
+				D_ASSERT(noise_identity_index.IsValid());
+				children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(static_cast<int32_t>(ai))));
+				children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(static_cast<int32_t>(n_aggs))));
+				children.push_back(make_uniq<BoundColumnRefExpression>(
+				    LogicalType::BIGINT, ColumnBinding(noise_identity_index.GetIndex(), 0)));
+				terminal = "dp_nonempty_mean_noise";
+			}
+		} else if (noise_scale_query_mode) {
 			children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(static_cast<int32_t>(ai))));
 			terminal = average_release
 			               ? (variable_m ? "dp_gupt_mean_m_record_noise_scale" : "dp_gupt_mean_record_noise_scale")
@@ -2842,12 +2897,20 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		throw InvalidInputException("dp_sass: could not build a stable privacy-unit hash for this query shape");
 	}
 
-	// AVG estimator selection. 'lane_average' (default): keep AVG as one as_sample_avg cell (the
-	// NRS/GUPT sample-and-aggregate of the mean). 'ratio': decompose AVG → SUM + COUNT and privatize
-	// each with its own SAA mechanism, then release the ratio (Google-DP-style). We reuse the Laplace
-	// modes' RewriteAvgAggregates + WrapAvgRatioProjection; use_bounded_mean=false gives a plain
-	// (non-centered) sum/count ratio, so midpoint = 0 and no add-back is applied.
+	// AVG estimator selection. 'lane_average' (default) fills empty lanes with a public value before
+	// averaging. 'nonempty_lane_average' releases a noisy shifted SUM and populated-lane COUNT, then
+	// divides them. 'ratio' decomposes the original AVG into row-level SUM and COUNT SAA cells.
 	idx_t avg_count = CountAvgAggregates(agg);
+	string avg_method = GetDpSassAvgMethod(input.context);
+	bool use_nonempty_lane_average = avg_method == "nonempty_lane_average" && avg_count > 0;
+	if (use_nonempty_lane_average && release_method != "average") {
+		throw InvalidInputException(
+		    "dp_sass: dp_sass_avg_method='nonempty_lane_average' requires dp_sass_release='average'");
+	}
+	if (use_nonempty_lane_average) {
+		PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] AVG non-empty-lane mode: split each AVG cell budget equally "
+		                    "between shifted SUM and populated-lane COUNT");
+	}
 	AvgBounds avg_bounds;
 	const AvgBounds *avg_bounds_ptr = nullptr;
 	if (avg_count > 0) {
@@ -2857,7 +2920,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	vector<AvgInfo> avg_infos;
 	double ratio_avg_lower = 0.0;
 	double ratio_avg_upper = 0.0;
-	if (GetDpSassAvgMethod(input.context) == "ratio" && AggregateContainsAvg(agg)) {
+	if (avg_method == "ratio" && AggregateContainsAvg(agg)) {
 		// Read + validate the public AVG output domain even in ratio mode (so an inverted range is
 		// still caught), and clamp the released ratio into it below — matching the lane_average
 		// estimator's output domain (free DP post-processing).
@@ -2944,6 +3007,8 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	deltas.reserve(agg->expressions.size());
 	vector<idx_t> sample_output_positions;
 	sample_output_positions.reserve(agg->expressions.size());
+	vector<bool> nonempty_lane_means;
+	nonempty_lane_means.reserve(agg->expressions.size());
 	idx_t avg_output_idx = 0;
 	idx_t count_count = 0;
 	idx_t sum_count = 0;
@@ -3014,6 +3079,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		epsilons.push_back(epsilon / cell_divisor);
 		deltas.push_back(delta / cell_divisor);
 		sample_output_positions.push_back(ai);
+		nonempty_lane_means.push_back(use_nonempty_lane_average && name == "avg");
 	}
 
 	bool distinct_support_filter = apply_support_filter && IsDpSampleCountDistinct(agg);
@@ -3034,9 +3100,9 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		projection_anchor = ApplySupportFilter(input, plan, agg, support_pos, tau, support_noise_scale);
 	}
 
-	auto noise_proj =
-	    WrapSampleMedianProjection(input, plan, agg, epsilons, deltas, output_types, lower_bounds, upper_bounds,
-	                               empty_defaults, projection_anchor, release_method, sample_output_positions);
+	auto noise_proj = WrapSampleMedianProjection(input, plan, agg, epsilons, deltas, output_types, lower_bounds,
+	                                             upper_bounds, empty_defaults, projection_anchor, release_method,
+	                                             sample_output_positions, nonempty_lane_means);
 
 	// 'ratio' AVG: divide the independently-noised SUM and COUNT releases (noised_sum / max(noised_count, 1)),
 	// then clamp into the public avg domain. Skipped under stability-query mode, which emits raw per-lane

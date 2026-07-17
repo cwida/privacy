@@ -774,8 +774,9 @@ true
 
 # --- AVG estimator flag (dp_sass_avg_method) ---
 # 'lane_average' (default): median/mean of the 64 per-lane averages (NRS/GUPT sample-and-aggregate of
-# the mean). 'ratio': two independent SAA mechanisms for SUM and COUNT, released as noised_sum /
-# noised_count (Google-DP-style). Both satisfy DP; the flag lets us compare utility.
+# the mean). 'nonempty_lane_average': noisy shifted SUM of populated-lane averages divided by their
+# noisy count. 'ratio': two independent SAA mechanisms for the original row SUM and COUNT. All three
+# satisfy DP; the flag lets us compare utility.
 statement ok
 CREATE PU TABLE sass_avg_flag(uid INTEGER, v DOUBLE, PRIVACY_KEY(uid));
 
@@ -901,10 +902,164 @@ SET dp_sass_avg_method = 'bogus';
 statement error
 SELECT AVG(v) FROM sass_avg_flag;
 ----
-must be 'lane_average' or 'ratio'
+must be 'lane_average', 'nonempty_lane_average', or 'ratio'
+
+# Non-empty-lane AVG removes fixed-fill bias by privately releasing the shifted SUM of populated
+# lane averages and their populated-lane count. With noise disabled, sparse and NULL-heavy inputs
+# therefore retain their ordinary AVG rather than drifting toward the public-domain midpoint.
+statement ok
+CREATE PU TABLE sass_sparse_lane_avg(uid INTEGER, v DOUBLE, PRIVACY_KEY(uid));
+
+statement ok
+INSERT INTO sass_sparse_lane_avg SELECT i, 100.0 FROM range(8) t(i);
+
+statement ok
+SET dp_sum_bound = 1000.0;
+
+statement ok
+SET dp_sass_avg_lower_bound = 0.0;
+
+statement ok
+SET dp_sass_avg_upper_bound = 1000.0;
+
+statement ok
+SET dp_sass_avg_method = 'nonempty_lane_average';
+
+query I nosort explain_nonempty_lane_avg
+EXPLAIN SELECT AVG(v) FROM sass_sparse_lane_avg;
+----
+dp_nonempty_mean_noise
+
+query I
+SELECT AVG(v) FROM sass_sparse_lane_avg;
+----
+100
+
+# Each released aggregate cell receives independent numerator/count noise. Separate list vectors
+# start at the same child offset, so this catches accidental nonce reuse across AVG expressions.
+statement ok
+CREATE PU TABLE sass_multi_lane_avg_users(uid INTEGER, PRIVACY_KEY(uid));
+
+statement ok
+CREATE TABLE sass_multi_lane_avg(uid INTEGER, g INTEGER, a DOUBLE, b DOUBLE);
+
+statement ok
+INSERT INTO sass_multi_lane_avg_users SELECT i FROM range(8) t(i);
+
+statement ok
+INSERT INTO sass_multi_lane_avg SELECT i, i % 2, 100.0, 100.0 FROM range(8) t(i);
+
+statement ok
+ALTER TABLE sass_multi_lane_avg ADD PRIVACY_LINK (uid) REFERENCES sass_multi_lane_avg_users(uid);
+
+statement ok
+SET dp_epsilon = 100.0;
+
+statement ok
+SET privacy_noise = true;
+
+query I
+SELECT AVG(a) <> AVG(b) FROM sass_multi_lane_avg;
+----
+true
+
+statement ok
+SET dp_max_groups_contributed = 1;
+
+query II rowsort
+SELECT g, AVG(a) <> AVG(b) FROM sass_multi_lane_avg GROUP BY g;
+----
+0	true
+1	true
+
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET dp_epsilon = 1.0;
+
+statement ok
+INSERT INTO sass_sparse_lane_avg SELECT i, NULL FROM range(8, 12) t(i);
+
+query I
+SELECT AVG(v) FROM sass_sparse_lane_avg;
+----
+100
+
+# Shifting by the public lower bound keeps the numerator sensitivity at U-L even when a populated
+# lane disappears. This also preserves means whose public domain does not contain zero.
+statement ok
+SET dp_sample_lanes = 1;
+
+statement ok
+CREATE PU TABLE sass_positive_lane_avg(uid INTEGER, v DOUBLE, PRIVACY_KEY(uid));
+
+statement ok
+INSERT INTO sass_positive_lane_avg SELECT i, 39000.0 FROM range(4) t(i);
+
+statement ok
+SET dp_sum_bound = 40000.0;
+
+statement ok
+SET dp_sass_avg_lower_bound = 38000.0;
+
+statement ok
+SET dp_sass_avg_upper_bound = 40000.0;
+
+query I
+SELECT AVG(v) FROM sass_positive_lane_avg;
+----
+39000
+
+# The same terminal handles the variable-m list representation.
+statement ok
+SET dp_sass_m = 128;
+
+query I
+SELECT AVG(v) FROM sass_positive_lane_avg;
+----
+39000
+
+statement ok
+SET dp_sass_m = 64;
+
+# The cell epsilon is split equally: with epsilon=1 and [38000,40000], numerator scale is 4000 and
+# populated-lane-count scale is 2. The legacy scalar noise_scale is NULL because this is a ratio.
+query III
+SELECT numerator_noise_scale::INTEGER, denominator_noise_scale::INTEGER, valid_lane_count
+FROM dp_sass_noise_scale_query('SELECT AVG(v) FROM sass_positive_lane_avg');
+----
+4000	2	4
+
+# With no populated lanes and noise disabled, max(1, noisy_count) makes the shifted ratio well-defined.
+statement ok
+CREATE PU TABLE sass_empty_lane_avg(uid INTEGER, v DOUBLE, PRIVACY_KEY(uid));
+
+statement ok
+INSERT INTO sass_empty_lane_avg SELECT i, NULL FROM range(4) t(i);
+
+query I
+SELECT AVG(v) FROM sass_empty_lane_avg;
+----
+38000
+
+# This estimator is a pure-epsilon average release, not a smooth-median release.
+statement ok
+SET dp_sass_release = 'median';
+
+statement error
+SELECT AVG(v) FROM sass_sparse_lane_avg;
+----
+requires dp_sass_release='average'
+
+statement ok
+SET dp_sass_release = 'average';
 
 statement ok
 SET dp_sass_avg_method = 'lane_average';
+
+statement ok
+SET dp_sample_lanes = 8;
 
 # Restore the default median release for the subsequent tests.
 statement ok

@@ -13,7 +13,14 @@ struct DpSassStabilityQueryRecord {
 
 struct DpSassNoiseScaleQueryRecord {
 	int32_t aggregate_index;
-	double noise_scale;
+	Value noise_scale;
+	Value numerator_noise_scale;
+	Value denominator_noise_scale;
+	Value valid_lane_count;
+
+	static DpSassNoiseScaleQueryRecord Additive(int32_t aggregate_index, double noise_scale);
+	static DpSassNoiseScaleQueryRecord Ratio(int32_t aggregate_index, double numerator_noise_scale,
+	                                         double denominator_noise_scale, int32_t valid_lane_count);
 };
 
 void ClearDpSassStabilityQueryRecords();

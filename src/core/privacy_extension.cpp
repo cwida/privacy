@@ -424,8 +424,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             LogicalType::VARCHAR, Value("median"));
 	db.config.AddExtensionOption("dp_sass_avg_method",
 	                             "dp_sass AVG estimator: 'lane_average' (sample-and-aggregate of the mean, "
-	                             "NRS/GUPT-native; default) or 'ratio' (two independent SAA mechanisms for SUM and "
-	                             "COUNT, released as their ratio; Google-DP-style).",
+	                             "NRS/GUPT-native; default), 'nonempty_lane_average' (noisy shifted SUM divided by "
+	                             "noisy populated-lane COUNT), or 'ratio' (two independent SAA mechanisms for the "
+	                             "original row SUM and COUNT).",
 	                             LogicalType::VARCHAR, Value("lane_average"));
 	db.config.AddExtensionOption(
 	    "dp_sass_fast_count_star",

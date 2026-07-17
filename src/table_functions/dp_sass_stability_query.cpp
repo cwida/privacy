@@ -67,6 +67,9 @@ static void AddNoiseScaleOutputColumns(vector<LogicalType> &return_types, vector
 	AddOutputColumn(return_types, names, "aggregate_name", LogicalType::VARCHAR);
 	AddOutputColumn(return_types, names, "group_key_json", LogicalType::VARCHAR);
 	AddOutputColumn(return_types, names, "noise_scale", LogicalType::DOUBLE);
+	AddOutputColumn(return_types, names, "numerator_noise_scale", LogicalType::DOUBLE);
+	AddOutputColumn(return_types, names, "denominator_noise_scale", LogicalType::DOUBLE);
+	AddOutputColumn(return_types, names, "valid_lane_count", LogicalType::INTEGER);
 }
 
 static string EscapeJsonString(const string &input) {
@@ -334,7 +337,7 @@ static vector<DpSassStabilityQueryRow> ExecuteNoiseScaleQuery(ClientContext &con
 		string group_key_json = group_row < group_keys.size() ? group_keys[group_row] : "{}";
 
 		vector<Value> values;
-		values.reserve(5);
+		values.reserve(8);
 		values.push_back(Value::BIGINT(static_cast<int64_t>(group_row)));
 		values.push_back(Value::INTEGER(record.aggregate_index));
 		idx_t result_name_idx = group_cols + aggregate_index;
@@ -344,7 +347,10 @@ static vector<DpSassStabilityQueryRow> ExecuteNoiseScaleQuery(ClientContext &con
 			values.push_back(Value("agg_" + std::to_string(record.aggregate_index)));
 		}
 		values.push_back(Value(group_key_json));
-		values.push_back(Value::DOUBLE(record.noise_scale));
+		values.push_back(record.noise_scale);
+		values.push_back(record.numerator_noise_scale);
+		values.push_back(record.denominator_noise_scale);
+		values.push_back(record.valid_lane_count);
 		rows.push_back({std::move(values)});
 	}
 	return rows;
