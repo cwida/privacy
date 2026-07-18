@@ -250,27 +250,3 @@ ALTER PU TABLE t DROP PROTECTED (col2);
 
 For implementation details, see the [docs/](docs/README.md) folder: \
 [Syntax](docs/syntax.md) | [SIMD aggregates](docs/simd-asa/aggregates.md) | [Query Operators](docs/pac/query_operators.md) | [DP mechanisms](docs/dp/dp_mechanisms.md) | [Runtime Checks](docs/pac/runtime_checks.md) | [Tests](docs/test/README.md) | [Benchmarks](docs/benchmark/README.md)
-
-## Literature
-
-I. Battiston, D. Yuan, X. Zhu, P. Boncz. [SIMD-PAC-DB: Pretty Performant PAC Privacy](https://arxiv.org/abs/2603.15023). 2026.
-
-N. Johnson, J.M. Near, D. Song. [Towards Practical Differential Privacy for SQL Queries](https://arxiv.org/abs/1706.09479) (Flex / Elastic Sensitivity). VLDB 2018.
-
-R. Wilson, C. Zhang, W. Lam, D. Desfontaines, D. Simmons-Marengo, B. Gipson. [Differentially Private SQL with Bounded User Contribution](https://arxiv.org/abs/1909.01917). PoPETs 2020.
-
-```bibtex
-@misc{battiston2026simdpacdbprettyperformantpac,
-      title={SIMD-PAC-DB: Pretty Performant PAC Privacy},
-      author={Ilaria Battiston and Dandan Yuan and Xiaochen Zhu and Peter Boncz},
-      year={2026},
-      eprint={2603.15023},
-      archivePrefix={arXiv},
-      primaryClass={cs.DB},
-      url={https://arxiv.org/abs/2603.15023},
-}
-```
-
-## Maintainer
-
-This extension is maintained by **@ila** (ilaria@cwi.nl).
