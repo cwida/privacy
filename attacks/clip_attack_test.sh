@@ -117,14 +117,14 @@ for CLIP in off 50 100; do
     run_scenario "atk5" 1000 999999 999 "$CLIP" 15
 done
 
-# --- Attack 6: Clip after filter vs clip on full table (Dandan's concern) ---
+# --- Attack 6: Clip after filter vs clip on full table ---
 # pac_clip_sum clips AFTER filtering (only filtered rows enter the aggregate).
 # An adversary might exploit this: the clipping behavior differs depending on
 # which users are in the filter. Compare filter-then-clip (what pac_clip_sum does)
 # vs clip-all-then-filter (manual pre-clipping of the full table, then query).
 echo "## ATTACK 6: Clip-after-filter vs clip-full-table"
 echo "N=1000, target=999999, filter<=3, $NT trials"
-echo "Tests Dandan's hypothesis: clipping after filtering leaks more than"
+echo "Tests whether clipping after filtering leaks more than"
 echo "clipping the entire dataset. We compare pac_clip_sum (clips filtered rows)"
 echo "vs manual pre-clipping of all rows then querying without clip_support."
 echo ""

@@ -2770,7 +2770,7 @@ static void FinalizeDPLaplace(OptimizerExtensionInput &input, unique_ptr<Logical
 		// dp_elastic: row-level FLEX baseline (public/enumerated partitions). privacy_min_group_count
 		// here is a RAW, un-noised admin support filter — NOT DP partition selection. Under FLEX's
 		// public-partition assumption it's a utility convenience; a row-level-DP-safe version would need
-		// a noised τ with C_u = 1 (Dandan's row-level branch). Deferred — dp_elastic is the FLEX baseline.
+		// a noised τ with C_u = 1 (the row-level branch). Deferred — dp_elastic is the FLEX baseline.
 		double support_threshold = 0.0;
 		bool want_support = TryGetPrivacyMinGroupCount(input.context, support_threshold);
 		apply_support_filter = want_support && allow_group_suppression;

@@ -144,7 +144,7 @@ Setup:
 - Bounds: oracle-like central 75 percent SAA output domains, checked against
   printed lane outputs
 
-The latest discussion with Dandan focused on making sure the AVG bounds are
+The latest utility review focused on making sure the AVG bounds are
 per-column and match the non-private lane outputs. Keep the lane-output CSVs
 above; they are the audit trail for those bounds.
 
@@ -251,7 +251,7 @@ Keep these files; they are not disposable outputs.
 - `benchmark/dp/plot_q01_sum_count_rescale.R`
 - `benchmark/tpch/plot_tpch_as_m_sweep.R`
 
-Target/noise CSVs used during the Dandan discussion:
+Target/noise CSVs used during that review:
 
 - `benchmark/dp/tpch_target_metrics_delta1e-6.csv`
 - `benchmark/dp/tpch_target_metrics_delta1e-6_saaavg_m64.csv`

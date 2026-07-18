@@ -488,12 +488,12 @@ releasing the raw value; `privacy_noise = false` zeroes noise for deterministic 
    sets ≤ `sample_lanes` bits) and charge `beta_eff = β/sample_lanes`; this differs from a
    Bernoulli-`1/m` inclusion model, under which a PU appears in up to O(√m) subsamples
    (Nissim et al.) and that factor must enter the analysis. Confirm our hard-cap scaling is
-   sound, or restrict `sample_lanes > 1`. (Dandan offered pseudocode for this case.)
+   sound, or restrict `sample_lanes > 1`. An alternative derivation provides pseudocode for this case.
 2. **Configurable `m`.** `m` is fixed at 64 (SIMD/perf). SAA supports general `m`; `m ≤ 64`
    is achievable by using a subset of the 64-bit mask, `m > 64` needs a wider multi-word
    representation. Worth exposing `m` as a setting (64 the recommended default) — future work.
 3. **τ under very small δ.** A very small `δ_η` drives τ large enough to suppress all
-   groups. Possible mitigation (Dandan): give partition selection a relatively larger
+   groups. One possible mitigation is to give partition selection a relatively larger
    `δ_η` (an uneven δ split) so τ stays practical. Currently `δ_η = δ/(c+1)` (even split).
 4. **User-level FLEX.** Extending `dp_elastic` from row-level to user-level needs new
    per-user statistics + a sensitivity analysis and proof (future work).

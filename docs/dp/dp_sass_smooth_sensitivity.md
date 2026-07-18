@@ -6,7 +6,7 @@ those answers, and adds Laplace noise calibrated by a smooth-sensitivity
 calculation over the sorted sample answers.
 
 This note explains what the implementation does and how it differs from the
-smooth-sensitivity median algorithms in the literature and Dandan's note.
+smooth-sensitivity median algorithms in the literature and an alternative derivation.
 
 ## Quick Example
 
@@ -99,7 +99,7 @@ m = median rank
 release median(x) + noise calibrated to S*_median(x)
 ```
 
-For one changed input affecting one sample answer, Dandan's note gives the exact
+For one changed input affecting one sample answer, the alternative derivation gives the exact
 local-sensitivity envelope:
 
 ```text
@@ -163,14 +163,14 @@ PU distance. For the default `s = 1` this is the source algorithm verbatim; for
 `s > 1` it is a sound upper bound on the PU-level smooth sensitivity (it can only
 add noise, never remove it).
 
-## Difference From Dandan's Note
+## Difference From the Alternative Derivation
 
 The implementation now matches the note's exact sensitivity formula. The
 remaining differences are structural:
 
 1. **Fixed 64 sample answers.**
 
-   Dandan's note describes median smooth sensitivity over arbitrary `n`. Our
+   The alternative derivation describes median smooth sensitivity over arbitrary `n`. Our
    `n` is always 64, because the extension already has a 64-counter execution
    model.
 
