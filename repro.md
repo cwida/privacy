@@ -267,14 +267,14 @@ For each output cell, stability is the coefficient of variation of its non-priva
 are collected separately because only the latter change scale.
 
 ```bash
-python3 benchmark/dp/run_tpch_jcch_sass_stability.py \
+python3 benchmark/dp/run_tpch_sass_stability.py \
   --config benchmark/configs/utility/dp_tpch_sf30_q01_stability_avg.json \
   --duckdb build/release/duckdb \
   --out benchmark/results/utility/q01_stability_avg.csv \
   --summary-out benchmark/results/utility/q01_stability_avg_summary.csv \
   --strict
 
-python3 benchmark/dp/run_tpch_jcch_sass_stability.py \
+python3 benchmark/dp/run_tpch_sass_stability.py \
   --config benchmark/configs/utility/dp_tpch_sf30_q01_stability_sum_count.json \
   --duckdb build/release/duckdb \
   --out benchmark/results/utility/q01_stability_sum_count.csv \

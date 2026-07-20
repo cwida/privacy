@@ -12,6 +12,3 @@
 [submodule ".claude/skills/shared"]
 	path = .claude/skills/shared
 	url = https://github.com/ila/duckdb-claude-skills.git
-[submodule "benchmark/jcch/dbgen.JCC-H"]
-	path = benchmark/jcch/dbgen.JCC-H
-	url = https://github.com/ldbc/dbgen.JCC-H

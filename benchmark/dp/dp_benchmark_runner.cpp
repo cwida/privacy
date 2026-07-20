@@ -674,14 +674,6 @@ static void LoadTpch(Connection &con) {
 	RunStatement(con, "LOAD tpch");
 }
 
-static void GenerateJcchSkew(Connection &con, double scale_factor) {
-	int64_t n_hot_customers = std::max<int64_t>(10, static_cast<int64_t>(150.0 * scale_factor));
-	Log("Applying JCC-H skew to " + std::to_string(n_hot_customers) + " hot customers");
-	RunStatement(con, "UPDATE orders SET o_custkey = 1 + (o_orderkey % " + std::to_string(n_hot_customers) +
-	                      ") WHERE o_orderkey % 10 < 3");
-	RunStatement(con, "CHECKPOINT");
-}
-
 static void EnsureTpchData(Connection &con, const DatasetConfig &dataset) {
 	if (TableHasRows(con, "customer")) {
 		return;
@@ -689,9 +681,6 @@ static void EnsureTpchData(Connection &con, const DatasetConfig &dataset) {
 	LoadTpch(con);
 	Log("Generating " + dataset.name + " data at SF " + FormatNumber(dataset.scale_factor));
 	RunStatement(con, "CALL dbgen(sf=" + FormatNumber(dataset.scale_factor) + ")");
-	if (dataset.name == "jcch") {
-		GenerateJcchSkew(con, dataset.scale_factor);
-	}
 }
 
 static void SetupCustomerPrivacy(Connection &con) {
@@ -854,7 +843,7 @@ static string DefaultDbPath(const DatasetConfig &dataset) {
 	if (!dataset.db_path.empty()) {
 		return dataset.db_path;
 	}
-	if (dataset.name == "tpch" || dataset.name == "jcch") {
+	if (dataset.name == "tpch") {
 		return dataset.name + "_dp_sf" + FormatNumber(dataset.scale_factor) + ".db";
 	}
 	if (dataset.name == "sqlstorm_tpch") {
@@ -867,9 +856,9 @@ static string DefaultDbPath(const DatasetConfig &dataset) {
 }
 
 static vector<QuerySpec> LoadDatasetQueries(const DatasetConfig &dataset) {
-	if (dataset.name == "tpch" || dataset.name == "jcch") {
-		if (dataset.workload != "tpch_stock_dp" && dataset.workload != "jcch_stock_dp") {
-			throw std::runtime_error("unknown built-in TPC-H/JCC-H workload: " + dataset.workload);
+	if (dataset.name == "tpch") {
+		if (dataset.workload != "tpch_stock_dp") {
+			throw std::runtime_error("unknown built-in TPC-H workload: " + dataset.workload);
 		}
 		auto queries = GetTpchStockDpQueries();
 		if (dataset.query_limit > 0 && queries.size() > dataset.query_limit) {
@@ -1359,8 +1348,7 @@ private:
 using SaaEstimatorMetricCleanup = MetricCleanup;
 
 static bool IsBuiltInTpchQ1(const DatasetConfig &dataset, const QuerySpec &query) {
-	bool built_in_tpch = (dataset.name == "tpch" && dataset.workload == "tpch_stock_dp") ||
-	                     (dataset.name == "jcch" && dataset.workload == "jcch_stock_dp");
+	bool built_in_tpch = dataset.name == "tpch" && dataset.workload == "tpch_stock_dp";
 	return built_in_tpch && query.name == "q01" && query.key_cols == 2;
 }
 
@@ -1862,7 +1850,7 @@ static void ValidateDataset(const DatasetConfig &dataset) {
 }
 
 static void PrepareDataset(Connection &con, const DatasetConfig &dataset, bool dry_run) {
-	if (dataset.name == "tpch" || dataset.name == "jcch" || dataset.name == "sqlstorm_tpch") {
+	if (dataset.name == "tpch" || dataset.name == "sqlstorm_tpch") {
 		if (!dry_run) {
 			EnsureTpchData(con, dataset);
 		}
@@ -1874,7 +1862,7 @@ static void PrepareDataset(Connection &con, const DatasetConfig &dataset, bool d
 }
 
 static void ApplyDatasetPrivacy(Connection &con, const DatasetConfig &dataset, const QuerySpec &query) {
-	if (dataset.name == "tpch" || dataset.name == "jcch") {
+	if (dataset.name == "tpch") {
 		SetupTpchPrivacy(con, query.profile);
 		return;
 	}
@@ -1886,7 +1874,7 @@ static void ApplyDatasetPrivacy(Connection &con, const DatasetConfig &dataset, c
 }
 
 static double ReadPrivacyUnitCount(Connection &con, const DatasetConfig &dataset, const QuerySpec &query) {
-	if (dataset.name == "tpch" || dataset.name == "jcch" || dataset.name == "sqlstorm_tpch") {
+	if (dataset.name == "tpch" || dataset.name == "sqlstorm_tpch") {
 		return ReadTpchPrivacyUnitCount(con, query.profile);
 	}
 	return ReadGenericPrivacyUnitCount(con, dataset);
@@ -1917,7 +1905,7 @@ static DatasetRun CreateDatasetRun(const Config &config, const DatasetConfig &da
 	}
 	result.points = BuildRunPoints(dataset);
 	result.db_path = DefaultDbPath(dataset);
-	if (!(dataset.name == "tpch" || dataset.name == "jcch" || dataset.name == "sqlstorm_tpch") &&
+	if (!(dataset.name == "tpch" || dataset.name == "sqlstorm_tpch") &&
 	    !dataset.allow_create && !FileExists(result.db_path)) {
 		throw std::runtime_error("database does not exist for dataset " + dataset.name + ": " + result.db_path);
 	}

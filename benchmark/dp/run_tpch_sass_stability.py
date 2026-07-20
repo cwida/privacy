@@ -555,6 +555,7 @@ def load_points(config, args):
         dataset_sass_m_values = config_list(dataset, "sass_ms", "sass_m", sass_m_values)
         dataset_sass_rescale_values = config_list(dataset, "sass_rescales", "sass_rescale", sass_rescale_values)
         dataset_sass_release_values = config_list(dataset, "sass_releases", "sass_release", sass_release_values)
+        dataset_multiplier_values = config_list(dataset, "bound_multipliers", "bound_multiplier", multipliers)
         dataset_sum_bound_list = first_string(dataset, "sum_bound_lists", "sum_bound_list",
                                               first_string(config, "sum_bound_lists", "sum_bound_list", ""))
         dataset_sass_count_output_lower_bound_list = first_string(
@@ -588,7 +589,7 @@ def load_points(config, args):
                 raise ValueError(f"no built-in SQL for query {query}")
             for epsilon in dataset_epsilon_values:
                 for delta in dataset_delta_values:
-                    for multiplier in multipliers:
+                    for multiplier in dataset_multiplier_values:
                         count_bound = first_value(dataset, "count_bounds", 1.0) * multiplier
                         sum_bound = first_value(dataset, "sum_bounds", 1.0) * multiplier
                         sum_bound_list = scale_bound_list(dataset_sum_bound_list, multiplier, "sum_bound_lists")
@@ -648,12 +649,12 @@ def load_points(config, args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run SASS lane-stability analysis for the TPCH/JCC-H DP queries.")
-    parser.add_argument("--config", default="benchmark/dp/configs/tpch_jcch_sf30_all5_full_runtime_3run.json")
+    parser = argparse.ArgumentParser(description="Run SASS lane-stability analysis for the TPC-H DP queries.")
+    parser.add_argument("--config", default="benchmark/configs/utility/dp_tpch_sf30_utility.json")
     parser.add_argument("--duckdb", default="build/release/duckdb")
-    parser.add_argument("--out", default="benchmark/dp/tpch_jcch_sf30_all5_sass_stability.csv")
-    parser.add_argument("--summary-out", default="benchmark/dp/tpch_jcch_sf30_all5_sass_stability_summary.csv")
-    parser.add_argument("--datasets", help="comma-separated dataset names, e.g. tpch,jcch")
+    parser.add_argument("--out", default="benchmark/results/sanity/tpch_sf30_sass_stability.csv")
+    parser.add_argument("--summary-out", default="benchmark/results/sanity/tpch_sf30_sass_stability_summary.csv")
+    parser.add_argument("--datasets", help="comma-separated dataset names, e.g. tpch")
     parser.add_argument("--queries", help="comma-separated query names, e.g. q01,q06")
     parser.add_argument("--threads", type=int)
     parser.add_argument("--timeout", type=float, default=1800)

@@ -79,7 +79,6 @@ normalized <- raw %>%
   mutate(
     dataset = case_when(
       tolower(dataset) == "tpch" ~ "TPC-H",
-      tolower(dataset) == "jcch" ~ "JCC-H",
       TRUE ~ toupper(dataset)
     ),
     query = toupper(query),
@@ -268,9 +267,9 @@ runtime_compact <- normalized %>%
                                    sprintf("%.1fx", avg_slowdown)))
   )
 
-utility_csv <- file.path(output_dir, "tpch_jcch_sf30_all5_utility_summary.csv")
-runtime_csv <- file.path(output_dir, "tpch_jcch_sf30_all5_runtime_summary.csv")
-runtime_compact_csv <- file.path(output_dir, "tpch_jcch_sf30_all5_runtime_compact_summary.csv")
+utility_csv <- file.path(output_dir, "tpch_sf30_all5_utility_summary.csv")
+runtime_csv <- file.path(output_dir, "tpch_sf30_all5_runtime_summary.csv")
+runtime_compact_csv <- file.path(output_dir, "tpch_sf30_all5_runtime_compact_summary.csv")
 readr::write_csv(utility_summary, utility_csv)
 readr::write_csv(runtime_summary, runtime_csv)
 readr::write_csv(runtime_compact, runtime_compact_csv)
@@ -312,12 +311,12 @@ make_metric_plot <- function(df, y_label, out_file, breaks, labels) {
   message("Plot saved to: ", out_file)
 }
 
-utility_plot <- file.path(output_dir, "tpch_jcch_sf30_all5_utility_paper.png")
-runtime_plot <- file.path(output_dir, "tpch_jcch_sf30_all5_runtime_paper.png")
-utility_grouped_plot <- file.path(output_dir, "tpch_jcch_sf30_all5_utility_grouped_paper.png")
-runtime_compact_plot <- file.path(output_dir, "tpch_jcch_sf30_all5_runtime_compact_paper.png")
-combined_plot <- file.path(output_dir, "tpch_jcch_sf30_all5_utility_runtime_paper.png")
-combined_grouped_plot <- file.path(output_dir, "tpch_jcch_sf30_all5_utility_runtime_grouped_paper.png")
+utility_plot <- file.path(output_dir, "tpch_sf30_all5_utility_paper.png")
+runtime_plot <- file.path(output_dir, "tpch_sf30_all5_runtime_paper.png")
+utility_grouped_plot <- file.path(output_dir, "tpch_sf30_all5_utility_grouped_paper.png")
+runtime_compact_plot <- file.path(output_dir, "tpch_sf30_all5_runtime_compact_paper.png")
+combined_plot <- file.path(output_dir, "tpch_sf30_all5_utility_runtime_paper.png")
+combined_grouped_plot <- file.path(output_dir, "tpch_sf30_all5_utility_runtime_grouped_paper.png")
 
 make_metric_plot(
   utility_summary,
