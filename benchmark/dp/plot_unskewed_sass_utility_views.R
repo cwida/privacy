@@ -1,24 +1,9 @@
 #!/usr/bin/env Rscript
 # Paper-style utility views for the unskewed DP/SAA run.
 
-user_lib <- Sys.getenv("R_LIBS_USER")
-if (user_lib == "") {
-  user_lib <- file.path(Sys.getenv("HOME"), "R", "libs")
-}
-if (!dir.exists(user_lib)) {
-  dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
-}
-.libPaths(c(user_lib, .libPaths()))
-
-required_packages <- c("ggplot2", "dplyr", "readr", "scales", "systemfonts")
-options(repos = c(CRAN = "https://cloud.r-project.org"))
-installed <- rownames(installed.packages())
-for (pkg in required_packages) {
-  if (!(pkg %in% installed)) {
-    message("Installing package: ", pkg)
-    install.packages(pkg, dependencies = TRUE, lib = user_lib)
-  }
-}
+script_file <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)[1])
+source(file.path(dirname(dirname(normalizePath(script_file))), "plot_common.R"))
+RequirePlotPackages(c("ggplot2", "dplyr", "readr", "scales", "systemfonts"))
 
 suppressPackageStartupMessages({
   library(ggplot2)
@@ -27,9 +12,7 @@ suppressPackageStartupMessages({
   library(scales)
 })
 
-base_font <- tryCatch({
-  if (any(grepl("Linux Libertine", systemfonts::system_fonts()$family, fixed = TRUE))) "Linux Libertine" else "serif"
-}, error = function(e) "serif")
+base_font <- PaperFont()
 
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 1) {
@@ -285,7 +268,7 @@ dev.off()
 message("Target-error plot saved to: ", target_plot_file)
 
 two_error_summary <- summary %>%
-	filter(metric %in% c("Full error (%)", "Target error (%)"))
+	filter(metric == "Full error (%)")
 
 two_error_plot <- ggplot(
 	two_error_summary,
@@ -293,7 +276,7 @@ two_error_plot <- ggplot(
 ) +
 	geom_line(linewidth = 1.15, na.rm = TRUE) +
 	geom_point(size = 3.6, stroke = 1.0, na.rm = TRUE) +
-	facet_grid(metric ~ query, scales = "free_y") +
+	facet_wrap(~query, nrow = 1, scales = "free_y") +
 	scale_color_manual(values = mechanism_colors, drop = TRUE) +
 	scale_shape_manual(values = mechanism_shapes, drop = TRUE) +
 	scale_x_log10(
@@ -313,12 +296,11 @@ two_error_plot <- ggplot(
 		axis.text.y = element_text(size = 14),
 		axis.title = element_text(size = 22),
 		strip.text.x = element_text(size = 19, face = "bold", margin = margin(3, 0, 3, 0)),
-		strip.text.y = element_text(size = 13, face = "bold", margin = margin(0, 4, 0, 4)),
 		plot.margin = margin(1, 6, 3, 6)
 	)
 
 two_error_plot_file <- file.path(output_dir, paste0("unskewed_sass_two_error_views_", suffix, "_paper.png"))
-png(filename = two_error_plot_file, width = 4000, height = 1600, res = 350)
+png(filename = two_error_plot_file, width = 4000, height = 1300, res = 350)
 print(two_error_plot)
 dev.off()
 message("Two-error plot saved to: ", two_error_plot_file)

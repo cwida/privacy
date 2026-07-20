@@ -29,6 +29,116 @@ WHERE l_shipdate <= CAST('1998-09-02' AS date)
 GROUP BY l_returnflag, l_linestatus
 ORDER BY l_returnflag, l_linestatus
 """,
+    "q01_avg_qty_all": """
+SELECT
+    avg(l_quantity) AS avg_qty
+FROM lineitem
+WHERE l_shipdate <= CAST('1998-09-02' AS date)
+""",
+    "q01_avg_price_all": """
+SELECT
+    avg(l_extendedprice) AS avg_price
+FROM lineitem
+WHERE l_shipdate <= CAST('1998-09-02' AS date)
+""",
+    "q01_avg_disc_all": """
+SELECT
+    avg(l_discount) AS avg_disc
+FROM lineitem
+WHERE l_shipdate <= CAST('1998-09-02' AS date)
+""",
+    "q01_avg_all": """
+SELECT
+    avg(l_quantity) AS avg_qty,
+    avg(l_extendedprice) AS avg_price,
+    avg(l_discount) AS avg_disc
+FROM lineitem
+WHERE l_shipdate <= CAST('1998-09-02' AS date)
+""",
+    "q01_avg_by_linestatus": """
+SELECT
+    l_linestatus,
+    avg(l_quantity) AS avg_qty,
+    avg(l_extendedprice) AS avg_price,
+    avg(l_discount) AS avg_disc
+FROM lineitem
+WHERE l_shipdate <= CAST('1998-09-02' AS date)
+GROUP BY l_linestatus
+ORDER BY l_linestatus
+""",
+    "q01_avg_by_returnflag": """
+SELECT
+    l_returnflag,
+    avg(l_quantity) AS avg_qty,
+    avg(l_extendedprice) AS avg_price,
+    avg(l_discount) AS avg_disc
+FROM lineitem
+WHERE l_shipdate <= CAST('1998-09-02' AS date)
+GROUP BY l_returnflag
+ORDER BY l_returnflag
+""",
+    "q01_avg_by_returnflag_linestatus": """
+SELECT
+    l_returnflag,
+    l_linestatus,
+    avg(l_quantity) AS avg_qty,
+    avg(l_extendedprice) AS avg_price,
+    avg(l_discount) AS avg_disc
+FROM lineitem
+WHERE l_shipdate <= CAST('1998-09-02' AS date)
+GROUP BY l_returnflag, l_linestatus
+ORDER BY l_returnflag, l_linestatus
+""",
+    "q01_sum_count_all": """
+SELECT
+    sum(l_quantity) AS sum_qty,
+    sum(l_extendedprice) AS sum_base_price,
+    sum(l_extendedprice * (1 - l_discount)) AS sum_disc_price,
+    sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge,
+    count(*) AS count_order
+FROM lineitem
+WHERE l_shipdate <= CAST('1998-09-02' AS date)
+""",
+    "q01_sum_count_by_linestatus": """
+SELECT
+    l_linestatus,
+    sum(l_quantity) AS sum_qty,
+    sum(l_extendedprice) AS sum_base_price,
+    sum(l_extendedprice * (1 - l_discount)) AS sum_disc_price,
+    sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge,
+    count(*) AS count_order
+FROM lineitem
+WHERE l_shipdate <= CAST('1998-09-02' AS date)
+GROUP BY l_linestatus
+ORDER BY l_linestatus
+""",
+    "q01_sum_count_by_returnflag": """
+SELECT
+    l_returnflag,
+    sum(l_quantity) AS sum_qty,
+    sum(l_extendedprice) AS sum_base_price,
+    sum(l_extendedprice * (1 - l_discount)) AS sum_disc_price,
+    sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge,
+    count(*) AS count_order
+FROM lineitem
+WHERE l_shipdate <= CAST('1998-09-02' AS date)
+GROUP BY l_returnflag
+ORDER BY l_returnflag
+""",
+    "q01_sum_count_by_returnflag_linestatus": """
+SELECT
+    l_returnflag,
+    l_linestatus,
+    sum(l_quantity) AS sum_qty,
+    sum(l_extendedprice) AS sum_base_price,
+    sum(l_extendedprice * (1 - l_discount)) AS sum_disc_price,
+    sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge,
+    count(*) AS count_order
+FROM lineitem
+WHERE l_shipdate <= CAST('1998-09-02' AS date)
+GROUP BY l_returnflag, l_linestatus
+ORDER BY l_returnflag, l_linestatus
+""",
     "q05": """
 SELECT
     n_name,

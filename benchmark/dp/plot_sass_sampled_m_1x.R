@@ -1,24 +1,9 @@
 #!/usr/bin/env Rscript
 # Compact paper-style DP-SASS sampled-target utility plot at 1x bounds.
 
-user_lib <- Sys.getenv("R_LIBS_USER")
-if (user_lib == "") {
-  user_lib <- file.path(Sys.getenv("HOME"), "R", "libs")
-}
-if (!dir.exists(user_lib)) {
-  dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
-}
-.libPaths(c(user_lib, .libPaths()))
-
-required_packages <- c("ggplot2", "dplyr", "readr", "scales", "systemfonts")
-options(repos = c(CRAN = "https://cloud.r-project.org"))
-installed <- rownames(installed.packages())
-for (pkg in required_packages) {
-  if (!(pkg %in% installed)) {
-    message("Installing package: ", pkg)
-    install.packages(pkg, dependencies = TRUE, lib = user_lib)
-  }
-}
+script_file <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)[1])
+source(file.path(dirname(dirname(normalizePath(script_file))), "plot_common.R"))
+RequirePlotPackages(c("ggplot2", "dplyr", "readr", "scales", "systemfonts"))
 
 suppressPackageStartupMessages({
   library(ggplot2)
@@ -27,28 +12,33 @@ suppressPackageStartupMessages({
   library(scales)
 })
 
-base_font <- tryCatch({
-  if (any(grepl("Linux Libertine", systemfonts::system_fonts()$family, fixed = TRUE))) {
-    "Linux Libertine"
-  } else {
-    "serif"
-  }
-}, error = function(e) "serif")
+base_font <- PaperFont()
 
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 1) {
-  stop("Usage: Rscript plot_sass_sampled_m_1x.R results.csv [output_png] [dataset=tpch] [delta=1e-6]")
+  stop(
+    "Usage: Rscript plot_sass_sampled_m_1x.R results.csv [output_png] [dataset=tpch] ",
+    "[delta=1e-6] [error=median|mean] [runs=median|mean]"
+  )
 }
 
 input_csv <- args[1]
 output_png <- if (length(args) >= 2) args[2] else "benchmark/dp/tpch_sass_sampled_m_1x_paper.png"
 target_dataset <- if (length(args) >= 3) tolower(args[3]) else "tpch"
 target_delta <- if (length(args) >= 4) as.numeric(args[4]) else 1e-6
+error_metric <- if (length(args) >= 5) tolower(args[5]) else "median"
+if (!(error_metric %in% c("median", "mean"))) {
+  stop("error must be 'median' or 'mean'")
+}
+run_summary <- if (length(args) >= 6) tolower(args[6]) else "median"
+if (!(run_summary %in% c("median", "mean"))) {
+  stop("runs must be 'median' or 'mean'")
+}
 
 raw <- suppressWarnings(readr::read_csv(input_csv, show_col_types = FALSE))
 needed <- c(
   "dataset", "query", "mode", "release", "success", "bound_multiplier", "dp_sass_m", "delta",
-  "saa_estimator_median_error_pct"
+  if (error_metric == "mean") "saa_estimator_utility" else "saa_estimator_median_error_pct"
 )
 missing <- setdiff(needed, colnames(raw))
 if (length(missing) > 0) {
@@ -71,7 +61,9 @@ plot_data <- raw %>%
     dp_sass_m = suppressWarnings(as.integer(dp_sass_m)),
     delta = suppressWarnings(as.numeric(delta)),
     release = tolower(as.character(release)),
-    sampled_error = suppressWarnings(as.numeric(saa_estimator_median_error_pct))
+    sampled_error = suppressWarnings(as.numeric(
+      if (error_metric == "mean") saa_estimator_utility else saa_estimator_median_error_pct
+    ))
   ) %>%
   filter(
     dataset == target_dataset,
@@ -87,7 +79,11 @@ plot_data <- raw %>%
   ) %>%
   group_by(query, dp_sass_m) %>%
   summarize(
-    sampled_error = median(sampled_error, na.rm = TRUE),
+    sampled_error = if (run_summary == "mean") {
+      mean(sampled_error, na.rm = TRUE)
+    } else {
+      median(sampled_error, na.rm = TRUE)
+    },
     rows = n(),
     .groups = "drop"
   ) %>%
@@ -128,7 +124,7 @@ p <- ggplot(plot_data, aes(x = m_label, y = plot_error, group = 1)) +
     labels = label_number(accuracy = 0.01),
     breaks = c(0.001, 0.01, 0.1, 1, 10, 100)
   ) +
-  labs(x = "SAA subsamples (m)", y = "Median error (%)") +
+  labs(x = "SAA subsamples (m)", y = if (error_metric == "mean") "Mean error (%)" else "Median error (%)") +
   coord_cartesian(clip = "off") +
   base_theme
 

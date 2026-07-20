@@ -1,0 +1,24 @@
+{
+  "out": "benchmark/results/sanity/dp_reddit_results.csv",
+  "runs": 1,
+  "threads": 1,
+  "modes": ["dp_standard", "dp_elastic", "dp_sass"],
+  "epsilons": [0.1, 0.5, 1.0],
+  "deltas": [1e-6],
+  "count_bounds": [1.0, 10.0, 100.0],
+  "sum_bounds": [100.0, 1000.0],
+  "c_u": [1.0, 10.0],
+  "bound_multipliers": [1.0, 2.0],
+  "sample_lanes": [1, 8],
+  "sass_releases": ["median"],
+  "datasets": [
+    {
+      "name": "reddit",
+      "workload": "reddit",
+      "db": "reddit.db",
+      "queries_dir": "benchmark/reddit/queries",
+      "privacy_sql": "benchmark/reddit/privacy_schema.sql",
+      "key_cols": 0
+    }
+  ]
+}

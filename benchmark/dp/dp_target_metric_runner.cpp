@@ -409,8 +409,14 @@ static double GetSyntheticSumBound(const RunPoint &point, const vector<double> &
 	return point.sum_bound;
 }
 
+static double SaaLaneInclusionProbability(const RunPoint &reference_point) {
+	return reference_point.sass_m > 64 ? 1.0 / static_cast<double>(reference_point.sass_m)
+	                                   : DpSampleLaneProbability(reference_point.sample_lanes);
+}
+
 static void CreateSyntheticDpNoiseTable(Connection &con, const string &private_table, const string &target_table,
                                         const DatasetConfig &dataset, const QuerySpec &query, const RunPoint &point,
+                                        const RunPoint &reference_point, const TargetMetricOptions &options,
                                         uint64_t seed) {
 	if (point.mode != "dp_standard") {
 		throw std::runtime_error("saa-estimator-plus-dp-noise is currently implemented for dp_standard only");
@@ -432,6 +438,7 @@ static void CreateSyntheticDpNoiseTable(Connection &con, const string &private_t
 	auto sum_bounds = ParseScaledPositiveList(point.sum_bound_list, point.bound_multiplier, "sum_bound_lists");
 	idx_t sum_idx = 0;
 	idx_t avg_idx = 0;
+	double target_scale = options.saa_rescale ? 1.0 : SaaLaneInclusionProbability(reference_point);
 
 	vector<string> projections;
 	projections.reserve(column_names.size());
@@ -449,11 +456,13 @@ static void CreateSyntheticDpNoiseTable(Connection &con, const string &private_t
 		switch (spec.kind) {
 		case SyntheticMeasureKind::SUM: {
 			double scale = GetSyntheticSumBound(point, sum_bounds, sum_idx++) * budget_units / epsilon;
+			scale *= target_scale;
 			noised_expr = BuildNoisedSyntheticExpression(value_expr, scale, nonce);
 			break;
 		}
 		case SyntheticMeasureKind::COUNT: {
 			double scale = point.count_bound * budget_units / epsilon;
+			scale *= target_scale;
 			noised_expr = BuildNoisedSyntheticExpression(value_expr, scale, nonce);
 			break;
 		}
@@ -474,6 +483,8 @@ static void CreateSyntheticDpNoiseTable(Connection &con, const string &private_t
 			string count_expr = "greatest(CAST(" + count_col + " AS DOUBLE), 1.0)";
 			double sum_scale = avg_normalized_bound * point.count_bound * budget_units * 2.0 / epsilon;
 			double count_scale = point.count_bound * budget_units * 2.0 / epsilon;
+			sum_scale *= target_scale;
+			count_scale *= target_scale;
 			string centered_sum = "((" + value_expr + " - " + FormatNumber(avg_midpoint) + ") * " + count_expr + ")";
 			string noised_sum = BuildNoisedSyntheticExpression(centered_sum, sum_scale, nonce ^ DP_TARGET_MAGIC_HASH);
 			string noised_count =
@@ -495,6 +506,19 @@ static void CreateSyntheticDpNoiseTable(Connection &con, const string &private_t
 	                      " FROM " + target_table);
 }
 
+static bool UsesUnscaledSumOrCountTarget(const DatasetConfig &dataset, const QuerySpec &query,
+                                         const TargetMetricOptions &options, idx_t measure_count, idx_t measure_idx) {
+	if (options.saa_rescale) {
+		return false;
+	}
+	if (IsBuiltInTpchQ1(dataset, query) && measure_count == 8) {
+		auto specs = InferSyntheticMeasureSpecs(dataset, query, measure_count);
+		return specs[measure_idx].kind == SyntheticMeasureKind::SUM ||
+		       specs[measure_idx].kind == SyntheticMeasureKind::COUNT;
+	}
+	return measure_count == 1 && (query.name == "q05" || query.name == "q06" || query.name == "q19");
+}
+
 static string QualifiedColumn(const string &alias, const string &column_name) {
 	return alias + "." + QuoteIdentifier(column_name);
 }
@@ -502,6 +526,7 @@ static string QualifiedColumn(const string &alias, const string &column_name) {
 static void CreateResidualDpNoiseTable(Connection &con, const string &private_table, const string &target_table,
                                        const string &dp_private_table, const string &dp_no_noise_table,
                                        const DatasetConfig &dataset, const QuerySpec &query, const RunPoint &point,
+                                       const RunPoint &reference_point, const TargetMetricOptions &options,
                                        uint64_t seed) {
 	ApplyDatasetPrivacy(con, dataset, query);
 	double delta = 0.0;
@@ -536,8 +561,12 @@ static void CreateResidualDpNoiseTable(Connection &con, const string &private_ta
 		string target_expr = "CAST(" + QualifiedColumn("t", target_columns[i]) + " AS DOUBLE)";
 		string private_expr = "CAST(" + QualifiedColumn("p", dp_private_columns[i]) + " AS DOUBLE)";
 		string no_noise_expr = "CAST(" + QualifiedColumn("n", dp_no_noise_columns[i]) + " AS DOUBLE)";
-		projections.push_back("(" + target_expr + " + (" + private_expr + " - " + no_noise_expr + ")) AS " +
-		                      QuoteIdentifier(target_columns[i]));
+		double divisor = UsesUnscaledSumOrCountTarget(dataset, query, options, target_columns.size() - query.key_cols,
+		                                              i - query.key_cols)
+		                     ? 1.0 / SaaLaneInclusionProbability(reference_point)
+		                     : 1.0;
+		projections.push_back("(" + target_expr + " + ((" + private_expr + " - " + no_noise_expr + ") / " +
+		                      FormatNumber(divisor) + ")) AS " + QuoteIdentifier(target_columns[i]));
 	}
 
 	string from_clause = target_table + " t";
@@ -623,10 +652,11 @@ static void FillSaaReferencePlusDpNoiseMetric(Connection &con, const Config &con
 	CreateTempResultTable(con, target_table, query.sql);
 
 	if (point.mode == "dp_standard" && query.name != "q14") {
-		CreateSyntheticDpNoiseTable(con, private_table, target_table, dataset, query, point, seed);
+		CreateSyntheticDpNoiseTable(con, private_table, target_table, dataset, query, point, reference_point, options,
+		                            seed);
 	} else if (point.mode == "dp_standard" || point.mode == "dp_elastic") {
 		CreateResidualDpNoiseTable(con, private_table, target_table, dp_private_table, dp_no_noise_table, dataset,
-		                           query, point, seed);
+		                           query, point, reference_point, options, seed);
 	} else {
 		throw std::runtime_error("saa-estimator-plus-dp-noise does not support mode " + point.mode);
 	}
@@ -715,6 +745,7 @@ static void RunTargetMetricDataset(const Config &config, const DatasetConfig &da
 static int TargetMetricMain(int argc, char **argv) {
 	auto options = ParseTargetMetricArgs(argc, argv);
 	auto config = LoadConfig(options.config_path);
+	EnsureOutputParentDirectory(options.out_path);
 	std::ofstream csv(options.out_path, std::ofstream::out | std::ofstream::trunc);
 	if (!csv.is_open()) {
 		throw std::runtime_error("could not open output CSV: " + options.out_path);

@@ -156,8 +156,8 @@ ninja -C build clang lld
 
 ### Run benchmarks
 ```bash
-git clone --recurse-submodules https://github.com/cwida/pac.git
-cd pac/benchmark/pac_microbench
+git clone --recurse-submodules https://github.com/cwida/privacy.git
+cd privacy/benchmark/pac_microbench
 ./build_variants.sh
 ./create_test_db.sh
 nohup ./run_all.sh &

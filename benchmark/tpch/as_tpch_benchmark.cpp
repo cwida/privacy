@@ -5,6 +5,8 @@
 // Implement the TPCH benchmark runner.
 
 #include "as_tpch_benchmark.hpp"
+#include "benchmark_json.hpp"
+#include "benchmark_paths.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/connection.hpp"
@@ -221,6 +223,36 @@ static string ReadFileToString(const string &path) {
 	std::ostringstream ss;
 	ss << in.rdbuf();
 	return ss.str();
+}
+
+struct ASTpchOptions {
+	double scale_factor = 10.0;
+	string db_path = "tpch.db";
+	string queries_dir = "benchmark";
+	string out_csv;
+	bool run_simple_hash = false;
+	bool skip_naive = false;
+	bool skip_plot = false;
+	int threads = 8;
+	vector<int> as_m_values = {64};
+};
+
+static ASTpchOptions LoadASTpchOptions(const string &config_path) {
+	auto root = JsonParser(ReadFileToString(config_path)).Parse();
+	if (root.type != JsonType::OBJECT) {
+		throw std::runtime_error("AS TPC-H config must contain a JSON object");
+	}
+	ASTpchOptions options;
+	options.scale_factor = JsonNumber(root, "sf", options.scale_factor);
+	options.db_path = JsonString(root, "db", options.db_path);
+	options.queries_dir = JsonString(root, "queries_dir", options.queries_dir);
+	options.out_csv = JsonString(root, "out", options.out_csv);
+	options.run_simple_hash = JsonBool(root, "run_simple_hash", options.run_simple_hash);
+	options.skip_naive = JsonBool(root, "skip_naive", options.skip_naive);
+	options.skip_plot = !JsonBool(root, "plot", !options.skip_plot);
+	options.threads = static_cast<int>(JsonNumber(root, "threads", options.threads));
+	options.as_m_values = JsonIntList(root, "as_ms", "as_m", options.as_m_values);
+	return options;
 }
 
 static bool IsIdentifierChar(char c) {
@@ -815,6 +847,16 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 	try {
 		Log(string("run_simple_hash flag: ") + (run_simple_hash ? string("true") : string("false")));
 		Log(string("skip_naive flag: ") + (skip_naive ? string("true") : string("false")));
+		string actual_out = out_csv;
+		if (actual_out.empty()) {
+			string sf_token = FormatNumber(sf);
+			sf_token.erase(std::remove(sf_token.begin(), sf_token.end(), '.'), sf_token.end());
+			sf_token.erase(std::remove(sf_token.begin(), sf_token.end(), '_'), sf_token.end());
+			char ofn[256];
+			snprintf(ofn, sizeof(ofn), "benchmark/tpch/tpch_benchmark_results_sf%s.csv", sf_token.c_str());
+			actual_out = string(ofn);
+		}
+		EnsureOutputParentDirectory(actual_out);
 
 		// Open (file-backed) DuckDB database
 		// Decide whether the caller explicitly provided a DB path (not the default) so we can
@@ -852,19 +894,6 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 			Log(string("SET temp_directory error: ") + r_temp->GetError());
 		}
 
-		// Decide output filename if empty
-		string actual_out = out_csv;
-		if (actual_out.empty()) {
-			// sanitize scale factor into a string (remove '.' and '_')
-			string sf_token = FormatNumber(sf);
-			sf_token.erase(std::remove(sf_token.begin(), sf_token.end(), '.'), sf_token.end());
-			sf_token.erase(std::remove(sf_token.begin(), sf_token.end(), '_'), sf_token.end());
-			char ofn[256];
-			// use 'tpch_benchmark_results' (expanded 'benchmark')
-			snprintf(ofn, sizeof(ofn), "benchmark/tpch/tpch_benchmark_results_sf%s.csv", sf_token.c_str());
-			actual_out = string(ofn);
-		}
-
 		Log("Installing TPCH extension...");
 		auto r_install = con.Query("INSTALL tpch;");
 		if (r_install && r_install->HasError()) {
@@ -892,14 +921,6 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 			Log(string("Skipping CALL dbgen since database file already exists: ") + db_actual);
 		}
 
-		// Prepare CSV output (overwrite if exists)
-		std::ofstream csv(actual_out, std::ofstream::out | std::ofstream::trunc);
-		if (!csv.is_open()) {
-			throw std::runtime_error("Failed to open output CSV: " + actual_out);
-		}
-		// CSV columns: query,mode,m,median_ms (median of 5 hot runs)
-		csv << "query,mode,m,median_ms\n";
-
 		// Locate AS query directories
 		string bitslice_dir = queries_dir + string("/tpch/tpch_as_queries");
 		string simple_hash_dir = queries_dir + string("/tpch/tpch_as_simple_hash_queries");
@@ -914,6 +935,11 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 		for (auto &e : query_entries) {
 			Log("  " + e.label + " (baseline Q" + std::to_string(e.query_number) + ")");
 		}
+		std::ofstream csv(actual_out, std::ofstream::out | std::ofstream::trunc);
+		if (!csv.is_open()) {
+			throw std::runtime_error("Failed to open output CSV: " + actual_out);
+		}
+		csv << "query,mode,m,median_ms\n";
 
 		// Cache baseline median per query number (avoid re-running for variants like q08-nolambda)
 		std::map<int, double> baseline_cache;
@@ -1169,13 +1195,15 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 
 // Add a small helper for printing usage (placed outside of namespace to avoid analyzer warnings)
 static void PrintUsageMain() {
-	std::cout << "Usage: as_tpch_benchmark [sf] [db_path] [queries_dir] [out_csv] [--run-simple-hash]\n"
+	std::cout << "Usage: as_tpch_benchmark [sf] [db_path] [queries_dir] [out_csv] [options]\n"
 	          << "  sf: TPCH scale factor (int, default 10)\n"
 	          << "  db_path: DuckDB database file (default 'tpch.db')\n"
 	          << "  queries_dir: root directory containing AS SQL variants (default 'benchmark').\n"
 	          << "               subdirectories expected: 'tpch/tpch_as_queries' (bitslice), "
 	             "'tpch/tpch_as_simple_hash_queries' (simple hash), 'tpch/tpch_naive_as_queries' (Naive-AS)\n"
 	          << "  out_csv: optional output CSV path (auto-named if omitted)\n"
+	          << "  --config <json>: load benchmark options from a JSON config\n"
+	          << "  --dry-run: validate options without opening the database\n"
 	          << "  --run-simple-hash: optional flag to run a simple hash AS variant as well\n"
 	          << "  --as-ms <csv>: AS sample counts to run, e.g. 64,512 (default 64)\n"
 	          << "  --skip-naive: skip Naive-AS setup and runs\n"
@@ -1183,86 +1211,89 @@ static void PrintUsageMain() {
 	          << "  --threads=N: number of DuckDB threads (default 8)\n";
 }
 
-// Add a small main so this file builds to an executable
 int main(int argc, char **argv) {
-	// quick arg validation: help or too many args
-	if (argc > 1) {
-		std::string arg1 = argv[1];
-		if (arg1 == "-h" || arg1 == "--help") {
-			PrintUsageMain();
+	try {
+		std::string config_path = duckdb::FindConfigPathArgument(argc, argv);
+		bool dry_run = false;
+
+		duckdb::ASTpchOptions options =
+		    config_path.empty() ? duckdb::ASTpchOptions() : duckdb::LoadASTpchOptions(config_path);
+		std::vector<std::string> positional;
+		for (int i = 1; i < argc; i++) {
+			std::string arg = argv[i];
+			if (arg == "-h" || arg == "--help") {
+				PrintUsageMain();
+				return 0;
+			}
+			if (arg == "--config") {
+				i++;
+				continue;
+			}
+			if (arg.rfind("--config=", 0) == 0) {
+				continue;
+			}
+			if (arg == "--dry-run") {
+				dry_run = true;
+			} else if (arg == "--run-simple-hash") {
+				options.run_simple_hash = true;
+			} else if (arg == "--skip-naive") {
+				options.skip_naive = true;
+			} else if (arg == "--no-plot") {
+				options.skip_plot = true;
+			} else if (arg == "--as-ms" && i + 1 < argc) {
+				options.as_m_values = duckdb::ParseIntListCSV(argv[++i]);
+			} else if (arg.rfind("--as-ms=", 0) == 0) {
+				options.as_m_values = duckdb::ParseIntListCSV(arg.substr(8));
+			} else if (arg == "--threads" && i + 1 < argc) {
+				options.threads = std::stoi(argv[++i]);
+			} else if (arg.rfind("--threads=", 0) == 0) {
+				options.threads = std::stoi(arg.substr(10));
+			} else if (arg.rfind("--", 0) == 0) {
+				throw std::runtime_error("unknown option: " + arg);
+			} else {
+				positional.push_back(arg);
+			}
+		}
+		if (positional.size() > 4) {
+			throw std::runtime_error("expected at most four positional arguments");
+		}
+		if (positional.size() > 0) {
+			options.scale_factor = std::stod(positional[0]);
+		}
+		if (positional.size() > 1) {
+			options.db_path = positional[1];
+		}
+		if (positional.size() > 2) {
+			options.queries_dir = positional[2];
+		}
+		if (positional.size() > 3) {
+			options.out_csv = positional[3];
+		}
+		if (options.threads <= 0) {
+			throw std::runtime_error("threads must be positive");
+		}
+		if (options.as_m_values.empty()) {
+			throw std::runtime_error("AS sample-count list must not be empty");
+		}
+		for (int as_m : options.as_m_values) {
+			if (!duckdb::IsValidSampleCount(as_m)) {
+				throw std::runtime_error("AS sample counts must be powers of two between 64 and 512");
+			}
+		}
+		if (dry_run) {
+			std::cout << "Valid AS TPC-H config: sf=" << options.scale_factor << ", threads=" << options.threads
+			          << ", m=";
+			for (size_t i = 0; i < options.as_m_values.size(); i++) {
+				std::cout << (i == 0 ? "" : ",") << options.as_m_values[i];
+			}
+			std::cout << "\n";
 			return 0;
 		}
-	}
-	if (argc > 16) {
-		std::cout << "Error: too many arguments provided." << '\n';
-		PrintUsageMain();
+		return duckdb::RunASTPCHBenchmark(options.db_path, options.queries_dir, options.scale_factor, options.out_csv,
+		                                  options.run_simple_hash, options.threads, options.as_m_values,
+		                                  options.skip_naive, options.skip_plot);
+	} catch (std::exception &ex) {
+		std::cerr << "error: " << ex.what() << "\n";
 		return 1;
 	}
-
-	// Preprocess argv to detect optional flags and remove them from positional parsing
-	bool run_simple_hash = false;
-	bool skip_naive = false;
-	bool skip_plot = false;
-	int threads = 8;
-	duckdb::vector<int> as_m_values = {64};
-	std::vector<char *> filtered_argv;
-	filtered_argv.reserve(argc);
-	filtered_argv.push_back(argv[0]);
-	for (int i = 1; i < argc; ++i) {
-		std::string a = argv[i];
-		if (a == "--run-simple-hash") {
-			run_simple_hash = true;
-			continue;
-		}
-		if (a == "--skip-naive") {
-			skip_naive = true;
-			continue;
-		}
-		if (a == "--no-plot") {
-			skip_plot = true;
-			continue;
-		}
-		if (a == "--as-ms" && i + 1 < argc) {
-			as_m_values = duckdb::ParseIntListCSV(argv[++i]);
-			continue;
-		}
-		if (a.rfind("--as-ms=", 0) == 0) {
-			as_m_values = duckdb::ParseIntListCSV(a.substr(8));
-			continue;
-		}
-		if (a.rfind("--threads=", 0) == 0) {
-			threads = std::stoi(a.substr(10));
-			continue;
-		}
-		filtered_argv.push_back(argv[i]);
-	}
-	int filtered_argc = static_cast<int>(filtered_argv.size());
-
-	// Parse positional arguments as before
-	double sf = 10;
-	std::string db_path = "tpch.db";
-	std::string queries_dir = "benchmark";
-	std::string out_csv;
-	if (filtered_argc > 1)
-		sf = std::stod(filtered_argv[1]);
-	if (filtered_argc > 2)
-		db_path = filtered_argv[2];
-	if (filtered_argc > 3)
-		queries_dir = filtered_argv[3];
-	if (filtered_argc > 4)
-		out_csv = filtered_argv[4];
-
-	if (as_m_values.empty()) {
-		std::cerr << "--as-ms must contain at least one sample count\n";
-		return 1;
-	}
-	for (int as_m : as_m_values) {
-		if (!duckdb::IsValidSampleCount(as_m)) {
-			std::cerr << "Invalid AS sample count " << as_m << "; expected a power of two between 64 and 512\n";
-			return 1;
-		}
-	}
-
-	return duckdb::RunASTPCHBenchmark(db_path, queries_dir, sf, out_csv, run_simple_hash, threads, as_m_values,
-	                                  skip_naive, skip_plot);
 }

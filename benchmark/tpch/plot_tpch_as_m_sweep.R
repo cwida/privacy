@@ -3,36 +3,20 @@
 # Input CSVs are produced by as_tpch_benchmark:
 #   query,mode,m,median_ms
 
-user_lib <- Sys.getenv("R_LIBS_USER")
-if (user_lib == "") user_lib <- file.path(Sys.getenv("HOME"), "R", "libs")
-if (!dir.exists(user_lib)) dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
-.libPaths(c(user_lib, .libPaths()))
-
-required_packages <- c("ggplot2", "dplyr", "readr", "scales", "stringr", "systemfonts")
-options(repos = c(CRAN = "https://cloud.r-project.org"))
-installed <- rownames(installed.packages())
-for (pkg in required_packages) {
-  if (!(pkg %in% installed)) {
-    message("Installing package: ", pkg)
-    install.packages(pkg, dependencies = TRUE, lib = user_lib)
-  }
-}
+script_file <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)[1])
+source(file.path(dirname(dirname(normalizePath(script_file))), "plot_common.R"))
+RequirePlotPackages(c("ggplot2", "ggpattern", "dplyr", "readr", "scales", "stringr", "systemfonts"))
 
 suppressPackageStartupMessages({
   library(ggplot2)
+  library(ggpattern)
   library(dplyr)
   library(readr)
   library(scales)
   library(stringr)
 })
 
-base_font <- tryCatch({
-  if (any(grepl("Linux Libertine", systemfonts::system_fonts()$family, fixed = TRUE))) {
-    "Linux Libertine"
-  } else {
-    "serif"
-  }
-}, error = function(e) "serif")
+base_font <- PaperFont()
 
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 1) {
@@ -47,6 +31,13 @@ if (length(input_csvs) == 0) {
 output_dir_arg <- args[!is_csv_arg(args)]
 output_dir <- if (length(output_dir_arg) >= 1) output_dir_arg[1] else dirname(input_csvs[1])
 if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+drop_m_env <- Sys.getenv("DROP_M")
+drop_m_values <- integer()
+if (nzchar(drop_m_env)) {
+  drop_m_values <- as.integer(strsplit(drop_m_env, ",", fixed = TRUE)[[1]])
+  drop_m_values <- drop_m_values[!is.na(drop_m_values)]
+}
 
 read_one <- function(path) {
   df <- suppressWarnings(readr::read_csv(path, show_col_types = FALSE))
@@ -94,6 +85,7 @@ as_data <- raw %>%
 	filter(mode == "SIMD AS") %>%
 	inner_join(baseline_df, by = c("query", "qnum")) %>%
 	filter(baseline_ms > 0, median_ms > 0, !failed) %>%
+	filter(!(m %in% drop_m_values)) %>%
 	mutate(
 		slowdown = median_ms / baseline_ms,
     query_label = paste0("Q", qnum),
@@ -113,10 +105,10 @@ query_levels <- as_data %>%
 m_levels <- levels(as_data$m_label)
 m_palette_all <- c(
 	"DuckDB" = "#95a5a6",
-	"m=64" = "#009900",
-	"m=128" = "#0072b2",
-	"m=256" = "#d55e00",
-	"m=512" = "#cc79a7"
+	"m=64" = "#4dff4d",
+	"m=128" = "#b7e4c7",
+	"m=256" = "#52b788",
+	"m=512" = "#009900"
 )
 mode_levels <- c("DuckDB", m_levels)
 missing_colors <- setdiff(mode_levels, names(m_palette_all))
@@ -126,6 +118,10 @@ if (length(missing_colors) > 0) {
 	m_palette_all <- c(m_palette_all, extra)
 }
 m_palette <- m_palette_all[mode_levels]
+m_patterns_all <- c("DuckDB" = "none", "m=64" = "none", "m=128" = "stripe", "m=256" = "crosshatch", "m=512" = "stripe")
+m_pattern_angles_all <- c("DuckDB" = 0, "m=64" = 0, "m=128" = 45, "m=256" = 135, "m=512" = 0)
+m_patterns <- m_patterns_all[mode_levels]
+m_pattern_angles <- m_pattern_angles_all[mode_levels]
 
 summary_df <- as_data %>%
 	group_by(m_label) %>%
@@ -174,30 +170,46 @@ plot_data <- bind_rows(
 	mutate(m_label = factor(as.character(m_label), levels = mode_levels))
 
 label_data <- plot_data %>%
-	filter(as.character(m_label) != "DuckDB") %>%
 	mutate(
-		label = ifelse(slowdown >= 10, sprintf("%.0fx", slowdown), sprintf("%.1fx", slowdown)),
+		label = ifelse(
+			as.character(m_label) == "m=512" & is.finite(slowdown),
+			ifelse(slowdown >= 10, sprintf("%.0fx", slowdown), sprintf("%.1fx", slowdown)),
+			""
+		),
 		y_pos = median_ms * 1.10
 	)
 
 y_upper <- max(c(plot_data$median_ms, label_data$y_pos), na.rm = TRUE) * 1.45
 
-p <- ggplot(plot_data, aes(x = factor(query_label, levels = query_levels), y = median_ms, fill = m_label)) +
-	geom_col(position = position_dodge2(width = 0.86, preserve = "single"), width = 0.72) +
+p <- ggplot(plot_data, aes(x = factor(query_label, levels = query_levels), y = median_ms, fill = m_label, pattern = m_label, pattern_angle = m_label)) +
+	geom_col_pattern(
+		position = position_dodge(width = 0.86),
+		width = 0.72,
+		color = NA,
+		pattern_fill = "black",
+		pattern_colour = "black",
+		pattern_alpha = 0.25,
+		pattern_density = 0.10,
+		pattern_spacing = 0.045,
+		pattern_key_scale_factor = 0.45
+	) +
 	geom_text(
 		data = label_data,
-		aes(label = label, y = y_pos, group = m_label),
-    position = position_dodge2(width = 0.86, preserve = "single"),
+		aes(x = factor(query_label, levels = query_levels), label = label, y = y_pos, group = m_label),
+    position = position_dodge(width = 0.86),
     size = 4.4,
     vjust = 0,
     fontface = "bold",
     family = base_font
 	) +
 	scale_fill_manual(values = m_palette, name = NULL) +
+	scale_pattern_manual(values = m_patterns, name = NULL) +
+	scale_pattern_angle_manual(values = m_pattern_angles, guide = "none") +
+	guides(fill = guide_legend(override.aes = list(pattern = unname(m_patterns), pattern_angle = unname(m_pattern_angles)))) +
 	scale_y_log10(
 		labels = function(x) ifelse(x >= 100, paste0(x / 1000, "s"), paste0(x, "ms"))
 	) +
-	scale_x_discrete(drop = FALSE) +
+	scale_x_discrete(drop = FALSE, expand = expansion(add = c(0.6, 0.66))) +
 	coord_cartesian(ylim = c(NA, y_upper), clip = "off") +
 	labs(x = NULL, y = NULL) +
 	theme_bw(base_size = 40, base_family = base_font) +
@@ -207,22 +219,25 @@ p <- ggplot(plot_data, aes(x = factor(query_label, levels = query_levels), y = m
     panel.grid.minor = element_blank(),
     legend.position = "top",
     legend.title = element_blank(),
-    legend.text = element_text(size = 28),
+    legend.text = element_text(size = 29),
     legend.margin = margin(0, 0, -5, 0),
     legend.box.margin = margin(0, 0, -20, 0),
-    axis.text.x = element_text(angle = 45, hjust = 1, size = 24),
-    axis.text.y = element_text(size = 24),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 25),
+    axis.text.y = element_text(size = 25),
     axis.title = element_blank(),
     plot.title = element_blank(),
 	plot.margin = margin(2, 8, 5, 5)
 	)
 
 out_file <- file.path(output_dir, "tpch_as_m_sweep_paper.png")
-png(filename = out_file, width = 4000, height = 1350, res = 200)
+png(filename = out_file, width = 4000, height = 1500, res = 350)
 print(p)
 dev.off()
 
 message("font: ", base_font)
 message("input CSVs: ", paste(input_csvs, collapse = ", "))
+if (length(drop_m_values) > 0) {
+	message("dropped m values: ", paste(drop_m_values, collapse = ", "))
+}
 message("summary saved to: ", summary_file)
 message("plot saved to: ", out_file)

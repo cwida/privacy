@@ -1,0 +1,136 @@
+{
+  "out": "benchmark/results/sanity/dp_tpch_sf30_q01_beta.csv",
+  "runs": 1,
+  "threads": 4,
+  "modes": [
+    "dp_sass"
+  ],
+  "epsilons": [
+    45.0
+  ],
+  "deltas": [
+    0.0045
+  ],
+  "bound_multipliers": [
+    1.0
+  ],
+  "sample_lanes": [
+    1
+  ],
+  "sass_ms": [
+    64,
+    512
+  ],
+  "sass_rescales": [
+    false
+  ],
+  "sass_releases": [
+    "median"
+  ],
+  "datasets": [
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        25.474849939346313,
+        38195.18017578125,
+        0.04993929294869304
+      ],
+      "avg_upper_bounds": [
+        25.537498950958252,
+        38291.95263671875,
+        0.05005759187042713
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "462704.5,693593576,658947328,685343144"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "34841949.5,52234087424,49619351552,51604147200"
+      ],
+      "sass_count_output_lower_bound_lists": [
+        "18119.125"
+      ],
+      "sass_count_output_upper_bound_lists": [
+        "1366269.125"
+      ]
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        25.424561738967896,
+        38115.63330078125,
+        0.04982634540647268
+      ],
+      "avg_upper_bounds": [
+        25.586665391921997,
+        38381.5576171875,
+        0.0501811858266592
+      ],
+      "c_u": [
+        5.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "57799.75,86672369,82326506,85580393"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "4353707.25,6530515072,6203462528,6451648320"
+      ],
+      "sass_count_output_lower_bound_lists": [
+        "2264"
+      ],
+      "sass_count_output_upper_bound_lists": [
+        "170729.375"
+      ]
+    }
+  ]
+}

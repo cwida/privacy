@@ -3,25 +3,9 @@
 # Reads CSV with columns: query, mode, median_ms
 # When "simple hash AS" data is present, splits AS bars into core + sampling key join overhead
 
-# Configure user-local library path for package installation
-user_lib <- Sys.getenv("R_LIBS_USER")
-if (user_lib == "") {
-  user_lib <- file.path(Sys.getenv("HOME"), "R", "libs")
-}
-if (!dir.exists(user_lib)) {
-  dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
-}
-.libPaths(c(user_lib, .libPaths()))
-
-required_packages <- c("ggplot2", "dplyr", "readr", "scales", "stringr")
-options(repos = c(CRAN = "https://cloud.r-project.org"))
-installed <- rownames(installed.packages())
-for (pkg in required_packages) {
-  if (!(pkg %in% installed)) {
-    message("Installing package: ", pkg)
-    install.packages(pkg, dependencies = TRUE, lib = user_lib)
-  }
-}
+script_file <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)[1])
+source(file.path(dirname(dirname(normalizePath(script_file))), "plot_common.R"))
+RequirePlotPackages(c("ggplot2", "dplyr", "readr", "scales", "stringr", "systemfonts"))
 
 suppressPackageStartupMessages({
   library(ggplot2)
@@ -31,10 +15,7 @@ suppressPackageStartupMessages({
   library(stringr)
 })
 
-# Font fallback: use Linux Libertine if available, otherwise serif
-base_font <- tryCatch({
-  if (any(grepl("Linux Libertine", systemfonts::system_fonts()$family, fixed = TRUE))) "Linux Libertine" else "serif"
-}, error = function(e) "serif")
+base_font <- PaperFont()
 
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 1) stop("Usage: Rscript plot_tpch_results.R path/to/results.csv [output_dir]")

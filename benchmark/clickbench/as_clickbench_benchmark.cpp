@@ -3,6 +3,8 @@
 //
 
 #include "as_clickbench_benchmark.hpp"
+#include "benchmark_json.hpp"
+#include "benchmark_paths.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/common/printer.hpp"
@@ -94,6 +96,36 @@ static string ReadFileToString(const string &path) {
 	std::ostringstream ss;
 	ss << in.rdbuf();
 	return ss.str();
+}
+
+struct ASClickBenchOptions {
+	bool micro = false;
+	string db_path;
+	string queries_dir = "benchmark/clickbench/clickbench_queries";
+	string out_csv;
+	string memory_limit;
+	std::set<int> query_filter;
+	vector<int> as_m_values = {64};
+	int threads = 8;
+};
+
+static ASClickBenchOptions LoadASClickBenchOptions(const string &config_path) {
+	auto root = JsonParser(ReadFileToString(config_path)).Parse();
+	if (root.type != JsonType::OBJECT) {
+		throw std::runtime_error("AS ClickBench config must contain a JSON object");
+	}
+	ASClickBenchOptions options;
+	options.micro = JsonBool(root, "micro", options.micro);
+	options.db_path = JsonString(root, "db", options.db_path);
+	options.queries_dir = JsonString(root, "queries_dir", options.queries_dir);
+	options.out_csv = JsonString(root, "out", options.out_csv);
+	options.memory_limit = JsonString(root, "memory_limit", options.memory_limit);
+	options.as_m_values = JsonIntList(root, "as_ms", "as_m", options.as_m_values);
+	options.threads = static_cast<int>(JsonNumber(root, "threads", options.threads));
+	for (auto query_id : JsonIntList(root, "query_list", "query", {})) {
+		options.query_filter.insert(query_id);
+	}
+	return options;
 }
 
 static vector<string> SplitLines(const string &content) {
@@ -487,6 +519,12 @@ int RunASClickBenchBenchmark(const string &db_path, const string &queries_dir, c
 				throw std::runtime_error("AS m values must be powers of two between 64 and 512");
 			}
 		}
+		string actual_out = out_csv;
+		if (actual_out.empty()) {
+			actual_out = micro ? "benchmark/clickbench/as_clickbench_micro_results.csv"
+			                   : "benchmark/clickbench/as_clickbench_results.csv";
+		}
+		EnsureOutputParentDirectory(actual_out);
 
 		char cwd[PATH_MAX];
 		if (!getcwd(cwd, sizeof(cwd))) {
@@ -584,12 +622,6 @@ int RunASClickBenchBenchmark(const string &db_path, const string &queries_dir, c
 		}
 		Log("Selected " + std::to_string(selected_entries.size()) + " AS ClickBench queries.");
 		bool sample_aggregation_sweep = as_m_values.size() > 1 || as_m_values[0] != 64;
-
-		string actual_out = out_csv;
-		if (actual_out.empty()) {
-			actual_out = micro ? "benchmark/clickbench/as_clickbench_micro_results.csv"
-			                   : "benchmark/clickbench/as_clickbench_results.csv";
-		}
 		std::ofstream csv(actual_out, std::ofstream::out | std::ofstream::trunc);
 		if (!csv.is_open()) {
 			throw std::runtime_error("Failed to open output CSV: " + actual_out);
@@ -655,6 +687,8 @@ int RunASClickBenchBenchmark(const string &db_path, const string &queries_dir, c
 static void PrintUsageMain() {
 	std::cout << "Usage: as_clickbench_benchmark [options]\n"
 	          << "Options:\n"
+	          << "  --config <json>   Load benchmark options from a JSON config\n"
+	          << "  --dry-run         Validate options without opening the database\n"
 	          << "  --micro           Run with clickbench_micro.db / 5M-row load\n"
 	          << "  --db <path>       DuckDB database file\n"
 	          << "  --queries <dir>   Directory containing create.sql, load.sql, queries.sql\n"
@@ -666,45 +700,71 @@ static void PrintUsageMain() {
 }
 
 int main(int argc, char **argv) {
-	bool micro = false;
-	std::string db_path;
-	std::string queries_dir = "benchmark/clickbench/clickbench_queries";
-	std::string out_csv;
-	std::string memory_limit;
-	std::set<int> query_filter;
-	std::vector<int> as_m_values = {64};
-	int threads = 8;
+	try {
+		std::string config_path = duckdb::FindConfigPathArgument(argc, argv);
+		bool dry_run = false;
+		duckdb::ASClickBenchOptions options =
+		    config_path.empty() ? duckdb::ASClickBenchOptions() : duckdb::LoadASClickBenchOptions(config_path);
 
-	for (int i = 1; i < argc; i++) {
-		std::string arg = argv[i];
-		if (arg == "-h" || arg == "--help") {
-			PrintUsageMain();
-			return 0;
-		} else if (arg == "--micro") {
-			micro = true;
-		} else if (arg == "--db" && i + 1 < argc) {
-			db_path = argv[++i];
-		} else if (arg == "--queries" && i + 1 < argc) {
-			queries_dir = argv[++i];
-		} else if (arg == "--out" && i + 1 < argc) {
-			out_csv = argv[++i];
-		} else if (arg == "--query-list" && i + 1 < argc) {
-			query_filter = duckdb::ParseIntSetCSV(argv[++i]);
-		} else if (arg == "--as-ms" && i + 1 < argc) {
-			as_m_values = duckdb::ParseIntListCSV(argv[++i]);
-		} else if (arg.rfind("--as-ms=", 0) == 0) {
-			as_m_values = duckdb::ParseIntListCSV(arg.substr(8));
-		} else if (arg == "--memory-limit" && i + 1 < argc) {
-			memory_limit = argv[++i];
-		} else if (arg.rfind("--threads=", 0) == 0) {
-			threads = std::stoi(arg.substr(10));
-		} else {
-			std::cerr << "Unknown option: " << arg << "\n";
-			PrintUsageMain();
-			return 1;
+		for (int i = 1; i < argc; i++) {
+			std::string arg = argv[i];
+			if (arg == "-h" || arg == "--help") {
+				PrintUsageMain();
+				return 0;
+			} else if (arg == "--config") {
+				i++;
+			} else if (arg.rfind("--config=", 0) == 0) {
+				continue;
+			} else if (arg == "--dry-run") {
+				dry_run = true;
+			} else if (arg == "--micro") {
+				options.micro = true;
+			} else if (arg == "--db" && i + 1 < argc) {
+				options.db_path = argv[++i];
+			} else if (arg == "--queries" && i + 1 < argc) {
+				options.queries_dir = argv[++i];
+			} else if (arg == "--out" && i + 1 < argc) {
+				options.out_csv = argv[++i];
+			} else if (arg == "--query-list" && i + 1 < argc) {
+				options.query_filter = duckdb::ParseIntSetCSV(argv[++i]);
+			} else if (arg == "--as-ms" && i + 1 < argc) {
+				options.as_m_values = duckdb::ParseIntListCSV(argv[++i]);
+			} else if (arg.rfind("--as-ms=", 0) == 0) {
+				options.as_m_values = duckdb::ParseIntListCSV(arg.substr(8));
+			} else if (arg == "--memory-limit" && i + 1 < argc) {
+				options.memory_limit = argv[++i];
+			} else if (arg == "--threads" && i + 1 < argc) {
+				options.threads = std::stoi(argv[++i]);
+			} else if (arg.rfind("--threads=", 0) == 0) {
+				options.threads = std::stoi(arg.substr(10));
+			} else {
+				throw std::runtime_error("unknown option: " + arg);
+			}
 		}
+		if (options.threads <= 0) {
+			throw std::runtime_error("threads must be positive");
+		}
+		if (options.as_m_values.empty()) {
+			throw std::runtime_error("AS sample-count list must not be empty");
+		}
+		for (int as_m : options.as_m_values) {
+			if (!duckdb::IsValidSampleCount(as_m)) {
+				throw std::runtime_error("AS sample counts must be powers of two between 64 and 512");
+			}
+		}
+		if (dry_run) {
+			std::cout << "Valid AS ClickBench config: threads=" << options.threads << ", m=";
+			for (size_t i = 0; i < options.as_m_values.size(); i++) {
+				std::cout << (i == 0 ? "" : ",") << options.as_m_values[i];
+			}
+			std::cout << "\n";
+			return 0;
+		}
+		return duckdb::RunASClickBenchBenchmark(options.db_path, options.queries_dir, options.out_csv, options.micro,
+		                                        options.query_filter, options.threads, options.memory_limit,
+		                                        options.as_m_values);
+	} catch (std::exception &ex) {
+		std::cerr << "error: " << ex.what() << "\n";
+		return 1;
 	}
-
-	return duckdb::RunASClickBenchBenchmark(db_path, queries_dir, out_csv, micro, query_filter, threads, memory_limit,
-	                                        as_m_values);
 }

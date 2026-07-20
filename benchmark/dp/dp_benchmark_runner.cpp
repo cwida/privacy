@@ -1,13 +1,15 @@
 // Unified DP utility benchmark runner.
 //
 // This runner is intentionally DP-only. PAC benchmark binaries remain separate.
-// It executes configured workloads under dp_standard, dp_elastic, and/or dp_sass,
-// enables privacy_diffcols, and writes utility metrics plus the concrete privacy
-// and bound parameters used for each row.
+// It executes configured workloads under dp_standard, dp_elastic, and/or dp_sass.
+// Private-query timings are collected before utility diagnostics so metric
+// materialization cannot affect later timed runs.
 
 #include "duckdb.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/main/connection.hpp"
+#include "benchmark_json.hpp"
+#include "benchmark_paths.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -19,6 +21,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -29,30 +32,7 @@
 
 namespace duckdb {
 
-enum class JsonType : uint8_t { NIL, BOOL, NUMBER, STRING, ARRAY, OBJECT };
 enum class PrivacyProfile : uint8_t { CUSTOMER, PART };
-
-struct JsonValue {
-	JsonType type = JsonType::NIL;
-	bool boolean = false;
-	double number = 0;
-	string str;
-	vector<JsonValue> array;
-	std::map<string, JsonValue> object;
-
-	bool Has(const string &key) const {
-		return type == JsonType::OBJECT && object.find(key) != object.end();
-	}
-
-	const JsonValue &Get(const string &key) const {
-		static JsonValue nil;
-		if (type != JsonType::OBJECT) {
-			return nil;
-		}
-		auto it = object.find(key);
-		return it == object.end() ? nil : it->second;
-	}
-};
 
 struct QuerySpec {
 	string name;
@@ -209,6 +189,33 @@ struct RunPoint {
 	int sass_m = 64;
 	bool sass_rescale = true;
 	string sass_sum_method = "lane_average";
+};
+
+struct BenchmarkRow {
+	idx_t query_index = 0;
+	idx_t query_id = 0;
+	idx_t run = 0;
+	RunPoint point;
+	UtilityMetrics metrics;
+	bool runtime_success = false;
+	bool metrics_success = false;
+	string runtime_error;
+	string metrics_error;
+	double time_ms = 0.0;
+	double delta = 0.0;
+	double sass_count_output_bound = 0.0;
+	double sass_sum_output_bound = 0.0;
+	uint64_t seed = 0;
+};
+
+struct DatasetRun {
+	DatasetConfig config;
+	vector<QuerySpec> queries;
+	vector<RunPoint> points;
+	vector<BenchmarkRow> rows;
+	string db_path;
+	std::shared_ptr<DuckDB> database;
+	std::unique_ptr<Connection> connection;
 };
 
 static string Timestamp() {
@@ -390,296 +397,6 @@ static bool TableHasRows(Connection &con, const string &table_name) {
 	} catch (...) {
 		return false;
 	}
-}
-
-class JsonParser {
-public:
-	explicit JsonParser(string input_p) : input(std::move(input_p)) {
-	}
-
-	JsonValue Parse() {
-		SkipWs();
-		auto value = ParseValue();
-		SkipWs();
-		if (pos != input.size()) {
-			throw std::runtime_error("unexpected trailing JSON at byte " + std::to_string(pos));
-		}
-		return value;
-	}
-
-private:
-	string input;
-	idx_t pos = 0;
-
-	void SkipWs() {
-		while (pos < input.size() && std::isspace(static_cast<unsigned char>(input[pos]))) {
-			pos++;
-		}
-	}
-
-	bool Consume(char c) {
-		SkipWs();
-		if (pos < input.size() && input[pos] == c) {
-			pos++;
-			return true;
-		}
-		return false;
-	}
-
-	void Expect(char c) {
-		if (!Consume(c)) {
-			throw std::runtime_error(string("expected '") + c + "' at byte " + std::to_string(pos));
-		}
-	}
-
-	JsonValue ParseValue() {
-		SkipWs();
-		if (pos >= input.size()) {
-			throw std::runtime_error("unexpected end of JSON");
-		}
-		char c = input[pos];
-		if (c == '{') {
-			return ParseObject();
-		}
-		if (c == '[') {
-			return ParseArray();
-		}
-		if (c == '"') {
-			JsonValue v;
-			v.type = JsonType::STRING;
-			v.str = ParseString();
-			return v;
-		}
-		if (c == '-' || std::isdigit(static_cast<unsigned char>(c))) {
-			return ParseNumber();
-		}
-		if (input.compare(pos, 4, "true") == 0) {
-			pos += 4;
-			JsonValue v;
-			v.type = JsonType::BOOL;
-			v.boolean = true;
-			return v;
-		}
-		if (input.compare(pos, 5, "false") == 0) {
-			pos += 5;
-			JsonValue v;
-			v.type = JsonType::BOOL;
-			v.boolean = false;
-			return v;
-		}
-		if (input.compare(pos, 4, "null") == 0) {
-			pos += 4;
-			return JsonValue();
-		}
-		throw std::runtime_error("unexpected JSON token at byte " + std::to_string(pos));
-	}
-
-	JsonValue ParseObject() {
-		JsonValue v;
-		v.type = JsonType::OBJECT;
-		Expect('{');
-		if (Consume('}')) {
-			return v;
-		}
-		while (true) {
-			SkipWs();
-			if (pos >= input.size() || input[pos] != '"') {
-				throw std::runtime_error("expected object key at byte " + std::to_string(pos));
-			}
-			string key = ParseString();
-			Expect(':');
-			v.object[key] = ParseValue();
-			if (Consume('}')) {
-				break;
-			}
-			Expect(',');
-		}
-		return v;
-	}
-
-	JsonValue ParseArray() {
-		JsonValue v;
-		v.type = JsonType::ARRAY;
-		Expect('[');
-		if (Consume(']')) {
-			return v;
-		}
-		while (true) {
-			v.array.push_back(ParseValue());
-			if (Consume(']')) {
-				break;
-			}
-			Expect(',');
-		}
-		return v;
-	}
-
-	string ParseString() {
-		Expect('"');
-		string out;
-		while (pos < input.size()) {
-			char c = input[pos++];
-			if (c == '"') {
-				return out;
-			}
-			if (c == '\\') {
-				if (pos >= input.size()) {
-					throw std::runtime_error("unterminated JSON escape");
-				}
-				char esc = input[pos++];
-				switch (esc) {
-				case '"':
-				case '\\':
-				case '/':
-					out += esc;
-					break;
-				case 'b':
-					out += '\b';
-					break;
-				case 'f':
-					out += '\f';
-					break;
-				case 'n':
-					out += '\n';
-					break;
-				case 'r':
-					out += '\r';
-					break;
-				case 't':
-					out += '\t';
-					break;
-				default:
-					throw std::runtime_error("unsupported JSON escape");
-				}
-			} else {
-				out += c;
-			}
-		}
-		throw std::runtime_error("unterminated JSON string");
-	}
-
-	JsonValue ParseNumber() {
-		idx_t start = pos;
-		if (input[pos] == '-') {
-			pos++;
-		}
-		while (pos < input.size() && std::isdigit(static_cast<unsigned char>(input[pos]))) {
-			pos++;
-		}
-		if (pos < input.size() && input[pos] == '.') {
-			pos++;
-			while (pos < input.size() && std::isdigit(static_cast<unsigned char>(input[pos]))) {
-				pos++;
-			}
-		}
-		if (pos < input.size() && (input[pos] == 'e' || input[pos] == 'E')) {
-			pos++;
-			if (pos < input.size() && (input[pos] == '+' || input[pos] == '-')) {
-				pos++;
-			}
-			while (pos < input.size() && std::isdigit(static_cast<unsigned char>(input[pos]))) {
-				pos++;
-			}
-		}
-		JsonValue v;
-		v.type = JsonType::NUMBER;
-		v.number = std::stod(input.substr(start, pos - start));
-		return v;
-	}
-};
-
-static string JsonString(const JsonValue &obj, const string &key, const string &default_value = "") {
-	const auto &v = obj.Get(key);
-	return v.type == JsonType::STRING ? v.str : default_value;
-}
-
-static double JsonNumber(const JsonValue &obj, const string &key, double default_value) {
-	const auto &v = obj.Get(key);
-	return v.type == JsonType::NUMBER ? v.number : default_value;
-}
-
-static idx_t JsonIdx(const JsonValue &obj, const string &key, idx_t default_value) {
-	const auto &v = obj.Get(key);
-	return v.type == JsonType::NUMBER ? static_cast<idx_t>(v.number) : default_value;
-}
-
-static bool JsonBool(const JsonValue &obj, const string &key, bool default_value) {
-	const auto &v = obj.Get(key);
-	return v.type == JsonType::BOOL ? v.boolean : default_value;
-}
-
-static vector<string> JsonStringList(const JsonValue &obj, const string &key, const vector<string> &default_value) {
-	const auto &v = obj.Get(key);
-	if (v.type == JsonType::STRING) {
-		return {v.str};
-	}
-	if (v.type != JsonType::ARRAY) {
-		return default_value;
-	}
-	vector<string> result;
-	for (auto &entry : v.array) {
-		if (entry.type == JsonType::STRING) {
-			result.push_back(entry.str);
-		}
-	}
-	return result.empty() ? default_value : result;
-}
-
-static vector<double> JsonNumberList(const JsonValue &obj, const string &array_key, const string &scalar_key,
-                                     const vector<double> &default_value) {
-	const auto &scalar = obj.Get(scalar_key);
-	if (scalar.type == JsonType::NUMBER) {
-		return {scalar.number};
-	}
-	const auto &array = obj.Get(array_key);
-	if (array.type != JsonType::ARRAY) {
-		return default_value;
-	}
-	vector<double> result;
-	for (auto &entry : array.array) {
-		if (entry.type == JsonType::NUMBER) {
-			result.push_back(entry.number);
-		}
-	}
-	return result.empty() ? default_value : result;
-}
-
-static vector<int> JsonIntList(const JsonValue &obj, const string &array_key, const string &scalar_key,
-                               const vector<int> &default_value) {
-	const auto &scalar = obj.Get(scalar_key);
-	if (scalar.type == JsonType::NUMBER) {
-		return {static_cast<int>(scalar.number)};
-	}
-	const auto &array = obj.Get(array_key);
-	if (array.type != JsonType::ARRAY) {
-		return default_value;
-	}
-	vector<int> result;
-	for (auto &entry : array.array) {
-		if (entry.type == JsonType::NUMBER) {
-			result.push_back(static_cast<int>(entry.number));
-		}
-	}
-	return result.empty() ? default_value : result;
-}
-
-static vector<bool> JsonBoolList(const JsonValue &obj, const string &array_key, const string &scalar_key,
-                                 const vector<bool> &default_value) {
-	const auto &scalar = obj.Get(scalar_key);
-	if (scalar.type == JsonType::BOOL) {
-		return {scalar.boolean};
-	}
-	const auto &array = obj.Get(array_key);
-	if (array.type != JsonType::ARRAY) {
-		return default_value;
-	}
-	vector<bool> result;
-	for (auto &entry : array.array) {
-		if (entry.type == JsonType::BOOL) {
-			result.push_back(entry.boolean);
-		}
-	}
-	return result.empty() ? default_value : result;
 }
 
 static bool IsValidMode(const string &mode) {
@@ -1131,33 +848,6 @@ static pair<string, string> ScaleConfiguredDomainLists(const string &lower_text,
 		scaled_upper.push_back(new_upper);
 	}
 	return {FormatNumberList(scaled_lower), FormatNumberList(scaled_upper)};
-}
-
-static bool ReadLastUtilityLine(const string &path, UtilityMetrics &metrics) {
-	std::ifstream in(path);
-	if (!in.is_open()) {
-		return false;
-	}
-	string line;
-	string last;
-	while (std::getline(in, line)) {
-		line = Trim(line);
-		if (!line.empty()) {
-			last = line;
-		}
-	}
-	if (last.empty()) {
-		return false;
-	}
-	std::istringstream ss(last);
-	if (!(std::getline(ss, metrics.utility, ',') && std::getline(ss, metrics.recall, ',') &&
-	      std::getline(ss, metrics.precision, ','))) {
-		return false;
-	}
-	if (!std::getline(ss, metrics.median_error_pct, ',')) {
-		metrics.median_error_pct = "";
-	}
-	return true;
 }
 
 static string DefaultDbPath(const DatasetConfig &dataset) {
@@ -1637,16 +1327,16 @@ static void CreateTempResultTable(Connection &con, const string &table_name, con
 	RunStatement(con, "CREATE TEMP TABLE " + table_name + " AS " + StripTrailingSemicolon(sql));
 }
 
-struct SaaEstimatorMetricCleanup {
+struct MetricCleanup {
 	Connection &con;
 	vector<string> table_names;
 	uint64_t seed;
 
-	SaaEstimatorMetricCleanup(Connection &con_p, vector<string> table_names_p, uint64_t seed_p)
+	MetricCleanup(Connection &con_p, vector<string> table_names_p, uint64_t seed_p)
 	    : con(con_p), table_names(std::move(table_names_p)), seed(seed_p) {
 	}
 
-	~SaaEstimatorMetricCleanup() {
+	~MetricCleanup() {
 		for (auto &table_name : table_names) {
 			TryRun("DROP TABLE IF EXISTS " + table_name);
 		}
@@ -1666,58 +1356,52 @@ private:
 	}
 };
 
+using SaaEstimatorMetricCleanup = MetricCleanup;
+
 static bool IsBuiltInTpchQ1(const DatasetConfig &dataset, const QuerySpec &query) {
 	bool built_in_tpch = (dataset.name == "tpch" && dataset.workload == "tpch_stock_dp") ||
 	                     (dataset.name == "jcch" && dataset.workload == "jcch_stock_dp");
 	return built_in_tpch && query.name == "q01" && query.key_cols == 2;
 }
 
-static void FillQ1FullAnswerMetrics(Connection &con, const DatasetConfig &dataset, const QuerySpec &query,
-                                    uint64_t seed, UtilityMetrics &metrics) {
-	if (!IsBuiltInTpchQ1(dataset, query)) {
+static void FillUtilityMetrics(Connection &con, const DatasetConfig &dataset, const QuerySpec &query,
+                               const RunPoint &point, uint64_t seed, UtilityMetrics &metrics) {
+	string suffix = std::to_string(getpid());
+	string private_table = "__dp_private_" + suffix;
+	string estimator_table = "__dp_sass_estimator_" + suffix;
+	string full_table = "__dp_full_" + suffix;
+	MetricCleanup cleanup(con, {private_table, estimator_table, full_table}, seed);
+
+	RunStatement(con, "SET privacy_diffcols=NULL");
+	RunStatement(con, "SET privacy_seed=" + std::to_string(seed));
+	RunStatement(con, "SET priv_rewrite=true");
+	RunStatement(con, "SET privacy_noise=true");
+	CreateTempResultTable(con, private_table, query.sql);
+
+	RunStatement(con, "SET priv_rewrite=false");
+	RunStatement(con, "SET privacy_noise=false");
+	CreateTempResultTable(con, full_table, query.sql);
+
+	auto full_metrics = CompareResultTables(con, private_table, full_table, query.key_cols, "full answer");
+	metrics.utility = full_metrics.utility;
+	metrics.recall = full_metrics.recall;
+	metrics.precision = full_metrics.precision;
+	metrics.median_error_pct = full_metrics.median_error_pct;
+
+	if (IsBuiltInTpchQ1(dataset, query)) {
+		auto full_q1 = CompareQ1AggregateFamilies(con, private_table, full_table, query.key_cols, "Q1 full-answer");
+		metrics.q1_sum_median_error_pct = full_q1.sum_median_error_pct;
+		metrics.q1_avg_median_error_pct = full_q1.avg_median_error_pct;
+		metrics.q1_count_median_error_pct = full_q1.count_median_error_pct;
+	}
+
+	if (point.mode != "dp_sass") {
 		return;
 	}
-	string suffix = std::to_string(getpid());
-	string private_table = "__q1_private_" + suffix;
-	string full_table = "__q1_full_" + suffix;
-	SaaEstimatorMetricCleanup cleanup(con, {private_table, full_table}, seed);
 
-	RunStatement(con, "SET privacy_diffcols=NULL");
-	RunStatement(con, "SET privacy_seed=" + std::to_string(seed));
 	RunStatement(con, "SET priv_rewrite=true");
-	RunStatement(con, "SET privacy_noise=true");
-	CreateTempResultTable(con, private_table, query.sql);
-
-	RunStatement(con, "SET priv_rewrite=false");
-	RunStatement(con, "SET privacy_noise=false");
-	CreateTempResultTable(con, full_table, query.sql);
-
-	auto q1_metrics = CompareQ1AggregateFamilies(con, private_table, full_table, query.key_cols, "Q1 full-answer");
-	metrics.q1_sum_median_error_pct = q1_metrics.sum_median_error_pct;
-	metrics.q1_avg_median_error_pct = q1_metrics.avg_median_error_pct;
-	metrics.q1_count_median_error_pct = q1_metrics.count_median_error_pct;
-}
-
-static void FillSaaEstimatorMetrics(Connection &con, const DatasetConfig &dataset, const QuerySpec &query,
-                                    uint64_t seed, UtilityMetrics &metrics) {
-	string suffix = std::to_string(getpid());
-	string private_table = "__dp_sass_private_" + suffix;
-	string estimator_table = "__dp_sass_estimator_" + suffix;
-	string full_table = "__dp_sass_full_" + suffix;
-	SaaEstimatorMetricCleanup cleanup(con, {private_table, estimator_table, full_table}, seed);
-
-	RunStatement(con, "SET privacy_diffcols=NULL");
-	RunStatement(con, "SET privacy_seed=" + std::to_string(seed));
-	RunStatement(con, "SET priv_rewrite=true");
-	RunStatement(con, "SET privacy_noise=true");
-	CreateTempResultTable(con, private_table, query.sql);
-
 	RunStatement(con, "SET privacy_noise=false");
 	CreateTempResultTable(con, estimator_table, query.sql);
-
-	RunStatement(con, "SET priv_rewrite=false");
-	RunStatement(con, "SET privacy_noise=false");
-	CreateTempResultTable(con, full_table, query.sql);
 
 	auto estimator_metrics = CompareResultTables(con, private_table, estimator_table, query.key_cols, "SAA estimator");
 	auto sampling_metrics = CompareResultTables(con, estimator_table, full_table, query.key_cols, "SAA sampling");
@@ -1748,11 +1432,19 @@ static void FillSaaNoiseScaleMetrics(Connection &con, const DatasetConfig &datas
                                      const RunPoint &point, uint64_t seed, UtilityMetrics &metrics) {
 	string suffix = std::to_string(getpid());
 	string scale_table = "__dp_sass_noise_scale_" + suffix;
-	SaaEstimatorMetricCleanup cleanup(con, {scale_table}, seed);
+	MetricCleanup cleanup(con, {scale_table}, seed);
 
 	RunStatement(con, "SET privacy_diffcols=NULL");
 	RunStatement(con, "SET privacy_seed=" + std::to_string(seed));
-	CreateTempResultTable(con, scale_table, "SELECT * FROM dp_sass_noise_scale_query(" + SqlQuote(query.sql) + ")");
+	try {
+		CreateTempResultTable(con, scale_table, "SELECT * FROM dp_sass_noise_scale_query(" + SqlQuote(query.sql) + ")");
+	} catch (std::exception &ex) {
+		string message = ex.what();
+		if (message.find("query produced no SASS aggregate noise-scale records") != string::npos) {
+			return;
+		}
+		throw;
+	}
 
 	auto summary = SummarizeNoiseScaleRecordTable(con, scale_table);
 	metrics.saa_noise_scale_median = summary.median;
@@ -2078,43 +1770,55 @@ static void WriteHeader(std::ofstream &csv) {
 	       "c_u,dp_sass_count_output_bound,dp_sass_sum_output_bound,dp_avg_lower_bounds,dp_avg_upper_bounds,"
 	       "dp_sass_count_output_bounds,dp_sass_sum_output_bounds,dp_sass_count_output_lower_bounds,"
 	       "dp_sass_count_output_upper_bounds,dp_sass_sum_output_lower_bounds,dp_sass_sum_output_upper_bounds,"
-	       "bound_multiplier,dp_sample_lanes,dp_sass_m,dp_sass_rescale,dp_sass_sum_method,seed,db_path,query_path\n";
+	       "bound_multiplier,dp_sample_lanes,dp_sass_m,dp_sass_rescale,dp_sass_sum_method,seed,db_path,query_path,"
+	       "runtime_success,runtime_error,metrics_success,metrics_error,timing_scope\n";
 }
 
-static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const QuerySpec &query, idx_t query_id,
-                     const RunPoint &point, idx_t run, bool success, const string &error, const UtilityMetrics &metrics,
-                     double time_ms, double delta, double sass_count_output_bound, double sass_sum_output_bound,
-                     uint64_t seed, const string &db_path) {
+static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const QuerySpec &query, const BenchmarkRow &row,
+                     const string &db_path) {
+	auto &point = row.point;
+	auto &metrics = row.metrics;
+	bool success = row.runtime_success && row.metrics_success;
+	string error;
+	if (!row.runtime_error.empty()) {
+		error = "runtime: " + row.runtime_error;
+	}
+	if (!row.metrics_error.empty()) {
+		if (!error.empty()) {
+			error += "; ";
+		}
+		error += "metrics: " + row.metrics_error;
+	}
 	auto scaled_count_domain = ScaleConfiguredDomainLists(
 	    point.sass_count_output_lower_bound_list, point.sass_count_output_upper_bound_list, point.bound_multiplier,
 	    "sass_count_output_lower_bound_lists", "sass_count_output_upper_bound_lists");
 	auto scaled_sum_domain = ScaleConfiguredDomainLists(
 	    point.sass_sum_output_lower_bound_list, point.sass_sum_output_upper_bound_list, point.bound_multiplier,
 	    "sass_sum_output_lower_bound_lists", "sass_sum_output_upper_bound_lists");
-	csv << dataset.name << "," << dataset.workload << "," << query.name << "," << query_id << "," << point.mode << ","
-	    << point.release << "," << (query.profile == PrivacyProfile::PART ? "part" : "customer") << "," << run << ","
-	    << (success ? "true" : "false") << "," << CsvQuote(error) << ",utility," << FormatNumber(time_ms) << ","
-	    << metrics.utility << "," << metrics.recall << "," << metrics.precision << "," << metrics.median_error_pct
-	    << "," << metrics.q1_sum_median_error_pct << "," << metrics.q1_avg_median_error_pct << ","
-	    << metrics.q1_count_median_error_pct << "," << metrics.saa_estimator_utility << ","
-	    << metrics.saa_estimator_recall << "," << metrics.saa_estimator_precision << ","
-	    << metrics.saa_estimator_median_error_pct << "," << metrics.saa_estimator_q1_sum_median_error_pct << ","
-	    << metrics.saa_estimator_q1_avg_median_error_pct << "," << metrics.saa_estimator_q1_count_median_error_pct
-	    << "," << metrics.saa_sampling_utility << "," << metrics.saa_sampling_recall << ","
-	    << metrics.saa_sampling_precision << "," << metrics.saa_sampling_median_error_pct << ","
-	    << metrics.saa_sampling_q1_sum_median_error_pct << "," << metrics.saa_sampling_q1_avg_median_error_pct << ","
-	    << metrics.saa_sampling_q1_count_median_error_pct << "," << metrics.saa_noise_scale_median << ","
-	    << metrics.saa_noise_scale_mean << "," << metrics.saa_noise_scale_max << ","
-	    << metrics.saa_noise_scale_q1_sum_median << "," << metrics.saa_noise_scale_q1_avg_median << ","
+	csv << dataset.name << "," << dataset.workload << "," << query.name << "," << row.query_id << "," << point.mode
+	    << "," << point.release << "," << (query.profile == PrivacyProfile::PART ? "part" : "customer") << ","
+	    << row.run << "," << (success ? "true" : "false") << "," << CsvQuote(error) << ",utility,"
+	    << FormatNumber(row.time_ms) << "," << metrics.utility << "," << metrics.recall << "," << metrics.precision
+	    << "," << metrics.median_error_pct << "," << metrics.q1_sum_median_error_pct << ","
+	    << metrics.q1_avg_median_error_pct << "," << metrics.q1_count_median_error_pct << ","
+	    << metrics.saa_estimator_utility << "," << metrics.saa_estimator_recall << ","
+	    << metrics.saa_estimator_precision << "," << metrics.saa_estimator_median_error_pct << ","
+	    << metrics.saa_estimator_q1_sum_median_error_pct << "," << metrics.saa_estimator_q1_avg_median_error_pct << ","
+	    << metrics.saa_estimator_q1_count_median_error_pct << "," << metrics.saa_sampling_utility << ","
+	    << metrics.saa_sampling_recall << "," << metrics.saa_sampling_precision << ","
+	    << metrics.saa_sampling_median_error_pct << "," << metrics.saa_sampling_q1_sum_median_error_pct << ","
+	    << metrics.saa_sampling_q1_avg_median_error_pct << "," << metrics.saa_sampling_q1_count_median_error_pct << ","
+	    << metrics.saa_noise_scale_median << "," << metrics.saa_noise_scale_mean << "," << metrics.saa_noise_scale_max
+	    << "," << metrics.saa_noise_scale_q1_sum_median << "," << metrics.saa_noise_scale_q1_avg_median << ","
 	    << metrics.saa_noise_scale_q1_count_median << "," << metrics.saa_smooth_sensitivity_median << ","
 	    << metrics.saa_smooth_sensitivity_mean << "," << metrics.saa_smooth_sensitivity_max << ","
 	    << metrics.saa_smooth_sensitivity_q1_sum_median << "," << metrics.saa_smooth_sensitivity_q1_avg_median << ","
 	    << metrics.saa_smooth_sensitivity_q1_count_median << "," << FormatNumber(point.epsilon) << ","
-	    << FormatNumber(delta) << "," << FormatNumber(dataset.scale_factor) << "," << FormatNumber(point.sum_bound)
+	    << FormatNumber(row.delta) << "," << FormatNumber(dataset.scale_factor) << "," << FormatNumber(point.sum_bound)
 	    << "," << CsvQuote(ScaleConfiguredBoundList(point.sum_bound_list, point.bound_multiplier, "sum_bound_lists"))
 	    << "," << FormatNumber(point.count_bound) << "," << FormatNumber(point.group_bound) << ","
 	    << FormatNumber(point.support_threshold) << "," << FormatNumber(point.c_u) << ","
-	    << FormatNumber(sass_count_output_bound) << "," << FormatNumber(sass_sum_output_bound) << ","
+	    << FormatNumber(row.sass_count_output_bound) << "," << FormatNumber(row.sass_sum_output_bound) << ","
 	    << CsvQuote(FormatNumberList(point.avg_lower_bounds)) << ","
 	    << CsvQuote(FormatNumberList(point.avg_upper_bounds)) << ","
 	    << CsvQuote(ScaleConfiguredBoundList(point.sass_count_output_bound_list, point.bound_multiplier,
@@ -2125,8 +1829,10 @@ static void WriteRow(std::ofstream &csv, const DatasetConfig &dataset, const Que
 	    << "," << CsvQuote(scaled_count_domain.first) << "," << CsvQuote(scaled_count_domain.second) << ","
 	    << CsvQuote(scaled_sum_domain.first) << "," << CsvQuote(scaled_sum_domain.second) << ","
 	    << FormatNumber(point.bound_multiplier) << "," << point.sample_lanes << "," << point.sass_m << ","
-	    << (point.sass_rescale ? "true" : "false") << "," << point.sass_sum_method << "," << seed << ","
-	    << CsvQuote(db_path) << "," << CsvQuote(query.path) << "\n";
+	    << (point.sass_rescale ? "true" : "false") << "," << point.sass_sum_method << "," << row.seed << ","
+	    << CsvQuote(db_path) << "," << CsvQuote(query.path) << "," << (row.runtime_success ? "true" : "false") << ","
+	    << CsvQuote(row.runtime_error) << "," << (row.metrics_success ? "true" : "false") << ","
+	    << CsvQuote(row.metrics_error) << ",private_query\n";
 	csv.flush();
 }
 
@@ -2201,136 +1907,200 @@ static double ReadBenchmarkPrivacyUnitCount(Connection &con, const DatasetConfig
 	}
 }
 
-static void RunDataset(const Config &config, const DatasetConfig &dataset, std::ofstream &csv) {
+static DatasetRun CreateDatasetRun(const Config &config, const DatasetConfig &dataset) {
 	ValidateDataset(dataset);
-	auto queries = FilterQueriesByName(LoadDatasetQueries(dataset), dataset.query_names);
-	if (queries.empty()) {
+	DatasetRun result;
+	result.config = dataset;
+	result.queries = FilterQueriesByName(LoadDatasetQueries(dataset), dataset.query_names);
+	if (result.queries.empty()) {
 		throw std::runtime_error("dataset " + dataset.name + " has no queries");
 	}
-	string db_path = DefaultDbPath(dataset);
-
-	Log("Dataset " + dataset.name + ": " + std::to_string(queries.size()) + " queries");
-	if (config.dry_run) {
-		for (idx_t i = 0; i < queries.size(); i++) {
-			Log("  dry-run query " + std::to_string(i + 1) + ": " + queries[i].name);
-		}
-		return;
-	}
-
+	result.points = BuildRunPoints(dataset);
+	result.db_path = DefaultDbPath(dataset);
 	if (!(dataset.name == "tpch" || dataset.name == "jcch" || dataset.name == "sqlstorm_tpch") &&
-	    !dataset.allow_create && !FileExists(db_path)) {
-		throw std::runtime_error("database does not exist for dataset " + dataset.name + ": " + db_path);
+	    !dataset.allow_create && !FileExists(result.db_path)) {
+		throw std::runtime_error("database does not exist for dataset " + dataset.name + ": " + result.db_path);
 	}
 
-	DuckDB db(db_path);
-	Connection con(db);
-	RunStatement(con, "LOAD privacy");
-	RunStatement(con, "SET threads=" + std::to_string(config.threads));
-	RunStatement(con, "SET privacy_noise=true");
-	PrepareDataset(con, dataset, false);
-
-	auto points = BuildRunPoints(dataset);
-	string utility_path = "/tmp/dp_benchmark_utility_" + std::to_string(getpid()) + ".csv";
 	for (idx_t run = 0; run < config.runs; run++) {
-		for (idx_t qi = 0; qi < queries.size(); qi++) {
-			const auto &query = queries[qi];
-			for (auto &point : points) {
-				UtilityMetrics metrics;
-				string error;
-				bool success = false;
-				double time_ms = 0.0;
-				uint64_t seed = config.seed_base + 9973ULL * static_cast<uint64_t>(run) +
-				                131ULL * static_cast<uint64_t>(qi) + static_cast<uint64_t>(points.size());
-				double delta = point.delta;
-				double sass_count_output_bound = 0.0;
-				double sass_sum_output_bound = 0.0;
-				std::remove(utility_path.c_str());
-				try {
-					if (point.mode == "dp_sass_bounded_ratio") {
-						if (query.name != "q14") {
-							throw std::runtime_error("dp_sass_bounded_ratio is only implemented for built-in q14");
-						}
-					} else if (point.mode == "dp_sass") {
-						ApplyDatasetPrivacy(con, dataset, query);
-						double pu_count = ReadBenchmarkPrivacyUnitCount(con, dataset, query);
-						if (delta <= 0.0) {
-							delta = DefaultDelta(point.epsilon, pu_count);
-						}
-						sass_count_output_bound =
-						    point.sass_count_output_bound > 0.0
-						        ? ScaleConfiguredSassOutputBound(point.sass_count_output_bound, point.bound_multiplier)
-						        : DeriveSassOutputBound(point.count_bound, pu_count, point.sample_lanes, point.sass_m,
-						                                point.sass_rescale, "dp_sass_count_output_bound");
-						sass_sum_output_bound =
-						    point.sass_sum_output_bound > 0.0
-						        ? ScaleConfiguredSassOutputBound(point.sass_sum_output_bound, point.bound_multiplier)
-						        : DeriveSassOutputBound(point.sum_bound, pu_count, point.sample_lanes, point.sass_m,
-						                                point.sass_rescale, "dp_sass_sum_output_bound");
-					} else if (point.mode != "duckdb") {
-						ApplyDatasetPrivacy(con, dataset, query);
-						double pu_count = ReadBenchmarkPrivacyUnitCount(con, dataset, query);
-						if (delta <= 0.0) {
-							delta = DefaultDelta(point.epsilon, pu_count);
-						}
-					}
-					ApplyDpSettings(con, point, delta, sass_count_output_bound, sass_sum_output_bound);
-					RunStatement(con, "SET privacy_seed=" + std::to_string(seed));
-					if (point.mode != "duckdb" && point.mode != "dp_sass_bounded_ratio") {
-						RunStatement(con, "SET privacy_diffcols=" +
-						                      SqlQuote(std::to_string(query.key_cols) + ":" + utility_path));
-					}
-					auto start = std::chrono::steady_clock::now();
-					double released_scalar = 0.0;
-					double reference_scalar = 0.0;
-					if (point.mode == "dp_sass_bounded_ratio") {
-						reference_scalar = ReadScalarDouble(con, query.sql);
-						released_scalar =
-						    ReadScalarDouble(con, BuildQ14BoundedSampledRatioSql(point.epsilon, point.sample_lanes));
-					} else {
-						MaterializeQuery(con, query.sql);
-					}
-					auto end = std::chrono::steady_clock::now();
-					time_ms = std::chrono::duration<double, std::milli>(end - start).count();
-					if (point.mode == "duckdb") {
-						metrics.utility = "0";
-						metrics.recall = "1";
-						metrics.precision = "1";
-						metrics.median_error_pct = "0";
-						if (IsBuiltInTpchQ1(dataset, query)) {
-							metrics.q1_sum_median_error_pct = "0";
-							metrics.q1_avg_median_error_pct = "0";
-							metrics.q1_count_median_error_pct = "0";
-						}
-					} else if (point.mode == "dp_sass_bounded_ratio") {
-						FillScalarUtility(released_scalar, reference_scalar, metrics);
-					} else if (!ReadLastUtilityLine(utility_path, metrics)) {
-						throw std::runtime_error("privacy_diffcols did not write utility output");
-					}
-					if (point.mode != "duckdb" && point.mode != "dp_sass_bounded_ratio") {
-						FillQ1FullAnswerMetrics(con, dataset, query, seed, metrics);
-					}
-					if (point.mode == "dp_sass") {
-						FillSaaEstimatorMetrics(con, dataset, query, seed, metrics);
-						FillSaaNoiseScaleMetrics(con, dataset, query, point, seed, metrics);
-					}
-					success = true;
-					Log(dataset.name + " " + point.mode + " " + query.name + " run " + std::to_string(run) +
-					    " utility=" + metrics.utility);
-				} catch (std::exception &ex) {
-					error = CleanError(ex.what());
-					Log(dataset.name + " " + point.mode + " " + query.name + " run " + std::to_string(run) +
-					    " failed: " + error);
-				}
-				try {
-					RunStatement(con, "SET privacy_diffcols=NULL");
-				} catch (...) {
-				}
-				WriteRow(csv, dataset, query, qi + 1, point, run, success, error, metrics, time_ms, delta,
-				         sass_count_output_bound, sass_sum_output_bound, seed, db_path);
+		for (idx_t query_index = 0; query_index < result.queries.size(); query_index++) {
+			for (auto &point : result.points) {
+				BenchmarkRow row;
+				row.query_index = query_index;
+				row.query_id = query_index + 1;
+				row.run = run;
+				row.point = point;
+				row.seed = config.seed_base + 9973ULL * static_cast<uint64_t>(run) +
+				           131ULL * static_cast<uint64_t>(query_index) + static_cast<uint64_t>(result.points.size());
+				result.rows.push_back(std::move(row));
 			}
 		}
 	}
-	std::remove(utility_path.c_str());
+	return result;
+}
+
+static void ResolveRuntimeSettings(BenchmarkRow &row, double pu_count) {
+	row.delta = row.point.delta;
+	row.sass_count_output_bound = 0.0;
+	row.sass_sum_output_bound = 0.0;
+	if (row.point.mode == "duckdb" || row.point.mode == "dp_sass_bounded_ratio") {
+		return;
+	}
+	if (row.delta <= 0.0) {
+		row.delta = DefaultDelta(row.point.epsilon, pu_count);
+	}
+	if (row.point.mode != "dp_sass") {
+		return;
+	}
+	row.sass_count_output_bound =
+	    row.point.sass_count_output_bound > 0.0
+	        ? ScaleConfiguredSassOutputBound(row.point.sass_count_output_bound, row.point.bound_multiplier)
+	        : DeriveSassOutputBound(row.point.count_bound, pu_count, row.point.sample_lanes, row.point.sass_m,
+	                                row.point.sass_rescale, "dp_sass_count_output_bound");
+	row.sass_sum_output_bound =
+	    row.point.sass_sum_output_bound > 0.0
+	        ? ScaleConfiguredSassOutputBound(row.point.sass_sum_output_bound, row.point.bound_multiplier)
+	        : DeriveSassOutputBound(row.point.sum_bound, pu_count, row.point.sample_lanes, row.point.sass_m,
+	                                row.point.sass_rescale, "dp_sass_sum_output_bound");
+}
+
+static void ConfigureConnection(Connection &con, const Config &config, const DatasetConfig &dataset) {
+	RunStatement(con, "LOAD privacy");
+	RunStatement(con, "SET threads=" + std::to_string(config.threads));
+	RunStatement(con, "SET privacy_noise=true");
+	RunStatement(con, "SET privacy_diffcols=NULL");
+}
+
+static void PrepareDatasetRun(const Config &config, DatasetRun &dataset_run,
+                              std::map<string, std::shared_ptr<DuckDB>> &databases) {
+	if (dataset_run.db_path == ":memory:") {
+		dataset_run.database = std::make_shared<DuckDB>(dataset_run.db_path);
+	} else {
+		auto entry = databases.find(dataset_run.db_path);
+		if (entry == databases.end()) {
+			entry = databases.emplace(dataset_run.db_path, std::make_shared<DuckDB>(dataset_run.db_path)).first;
+		}
+		dataset_run.database = entry->second;
+	}
+	dataset_run.connection = std::unique_ptr<Connection>(new Connection(*dataset_run.database));
+	ConfigureConnection(*dataset_run.connection, config, dataset_run.config);
+	PrepareDataset(*dataset_run.connection, dataset_run.config, false);
+}
+
+static void RunTimingPass(const Config &config, DatasetRun &dataset_run) {
+	auto &con = *dataset_run.connection;
+	vector<double> pu_counts(dataset_run.queries.size(), -1.0);
+
+	for (auto &row : dataset_run.rows) {
+		auto &query = dataset_run.queries[row.query_index];
+		try {
+			if (row.point.mode == "dp_sass_bounded_ratio" && query.name != "q14") {
+				throw std::runtime_error("dp_sass_bounded_ratio is only implemented for built-in q14");
+			}
+			if (row.point.mode != "duckdb" && row.point.mode != "dp_sass_bounded_ratio") {
+				ApplyDatasetPrivacy(con, dataset_run.config, query);
+				if (pu_counts[row.query_index] < 0.0) {
+					pu_counts[row.query_index] = ReadBenchmarkPrivacyUnitCount(con, dataset_run.config, query);
+				}
+			}
+			ResolveRuntimeSettings(row, pu_counts[row.query_index]);
+			ApplyDpSettings(con, row.point, row.delta, row.sass_count_output_bound, row.sass_sum_output_bound);
+			RunStatement(con, "SET privacy_diffcols=NULL");
+			RunStatement(con, "SET privacy_noise=true");
+			RunStatement(con, "SET privacy_seed=" + std::to_string(row.seed));
+
+			auto start = std::chrono::steady_clock::now();
+			if (row.point.mode == "dp_sass_bounded_ratio") {
+				ReadScalarDouble(con, BuildQ14BoundedSampledRatioSql(row.point.epsilon, row.point.sample_lanes));
+			} else {
+				MaterializeQuery(con, query.sql);
+			}
+			auto end = std::chrono::steady_clock::now();
+			row.time_ms = std::chrono::duration<double, std::milli>(end - start).count();
+			row.runtime_success = true;
+			Log("timing " + dataset_run.config.name + " " + row.point.mode + " " + query.name + " run " +
+			    std::to_string(row.run) + " time_ms=" + FormatNumber(row.time_ms));
+		} catch (std::exception &ex) {
+			row.runtime_error = CleanError(ex.what());
+			Log("timing " + dataset_run.config.name + " " + row.point.mode + " " + query.name + " run " +
+			    std::to_string(row.run) + " failed: " + row.runtime_error);
+		}
+		try {
+			RunStatement(con, "SET privacy_diffcols=NULL");
+		} catch (...) {
+		}
+	}
+}
+
+static void FillDuckDbMetrics(const DatasetConfig &dataset, const QuerySpec &query, UtilityMetrics &metrics) {
+	metrics.utility = "0";
+	metrics.recall = "1";
+	metrics.precision = "1";
+	metrics.median_error_pct = "0";
+	if (IsBuiltInTpchQ1(dataset, query)) {
+		metrics.q1_sum_median_error_pct = "0";
+		metrics.q1_avg_median_error_pct = "0";
+		metrics.q1_count_median_error_pct = "0";
+	}
+}
+
+static void RunMetricsPass(const Config &config, DatasetRun &dataset_run) {
+	auto &con = *dataset_run.connection;
+
+	for (auto &row : dataset_run.rows) {
+		auto &query = dataset_run.queries[row.query_index];
+		if (!row.runtime_success) {
+			row.metrics_error = "skipped because runtime execution failed";
+			continue;
+		}
+		try {
+			if (row.point.mode != "duckdb" && row.point.mode != "dp_sass_bounded_ratio") {
+				ApplyDatasetPrivacy(con, dataset_run.config, query);
+			}
+			ApplyDpSettings(con, row.point, row.delta, row.sass_count_output_bound, row.sass_sum_output_bound);
+			RunStatement(con, "SET privacy_diffcols=NULL");
+			RunStatement(con, "SET privacy_seed=" + std::to_string(row.seed));
+			if (row.point.mode == "duckdb") {
+				FillDuckDbMetrics(dataset_run.config, query, row.metrics);
+			} else if (row.point.mode == "dp_sass_bounded_ratio") {
+				double reference = ReadScalarDouble(con, query.sql);
+				double released =
+				    ReadScalarDouble(con, BuildQ14BoundedSampledRatioSql(row.point.epsilon, row.point.sample_lanes));
+				FillScalarUtility(released, reference, row.metrics);
+			} else {
+				FillUtilityMetrics(con, dataset_run.config, query, row.point, row.seed, row.metrics);
+				if (row.point.mode == "dp_sass") {
+					FillSaaNoiseScaleMetrics(con, dataset_run.config, query, row.point, row.seed, row.metrics);
+				}
+			}
+			row.metrics_success = true;
+			Log("metrics " + dataset_run.config.name + " " + row.point.mode + " " + query.name + " run " +
+			    std::to_string(row.run) + " utility=" + row.metrics.utility);
+		} catch (std::exception &ex) {
+			row.metrics_error = CleanError(ex.what());
+			Log("metrics " + dataset_run.config.name + " " + row.point.mode + " " + query.name + " run " +
+			    std::to_string(row.run) + " failed: " + row.metrics_error);
+		}
+		try {
+			RunStatement(con, "SET privacy_diffcols=NULL");
+			RunStatement(con, "SET privacy_noise=true");
+		} catch (...) {
+		}
+	}
+}
+
+static void WriteResults(const string &out_path, const vector<DatasetRun> &dataset_runs) {
+	EnsureOutputParentDirectory(out_path);
+	std::ofstream csv(out_path, std::ofstream::out | std::ofstream::trunc);
+	if (!csv.is_open()) {
+		throw std::runtime_error("could not open output CSV: " + out_path);
+	}
+	WriteHeader(csv);
+	for (auto &dataset_run : dataset_runs) {
+		for (auto &row : dataset_run.rows) {
+			WriteRow(csv, dataset_run.config, dataset_run.queries[row.query_index], row, dataset_run.db_path);
+		}
+	}
 }
 
 static idx_t ParseRunCount(const string &value) {
@@ -2412,22 +2182,43 @@ static int Main(int argc, char **argv) {
 		config.dry_run = true;
 	}
 
-	std::ofstream csv;
-	if (!config.dry_run) {
-		csv.open(config.out_path, std::ofstream::out | std::ofstream::trunc);
-		if (!csv.is_open()) {
-			throw std::runtime_error("could not open output CSV: " + config.out_path);
-		}
-		WriteHeader(csv);
-	}
+	vector<DatasetRun> dataset_runs;
 	for (auto &dataset : config.datasets) {
-		RunDataset(config, dataset, csv);
+		auto dataset_run = CreateDatasetRun(config, dataset);
+		Log("Dataset " + dataset.name + ": " + std::to_string(dataset_run.queries.size()) + " queries, " +
+		    std::to_string(dataset_run.points.size()) + " configurations");
+		if (config.dry_run) {
+			for (idx_t i = 0; i < dataset_run.queries.size(); i++) {
+				Log("  dry-run query " + std::to_string(i + 1) + ": " + dataset_run.queries[i].name);
+			}
+		}
+		dataset_runs.push_back(std::move(dataset_run));
 	}
 	if (config.dry_run) {
 		Log("Dry-run succeeded for " + std::to_string(config.datasets.size()) + " datasets");
-	} else {
-		Log("Wrote " + config.out_path);
+		return 0;
 	}
+
+	WriteResults(config.out_path, dataset_runs);
+	Log("Preparing datasets");
+	std::map<string, std::shared_ptr<DuckDB>> databases;
+	for (auto &dataset_run : dataset_runs) {
+		PrepareDatasetRun(config, dataset_run, databases);
+	}
+
+	Log("Starting private-query timing pass");
+	for (auto &dataset_run : dataset_runs) {
+		RunTimingPass(config, dataset_run);
+		WriteResults(config.out_path, dataset_runs);
+	}
+	Log("Timing pass complete; checkpointed " + config.out_path);
+
+	Log("Starting untimed utility and diagnostic pass");
+	for (auto &dataset_run : dataset_runs) {
+		RunMetricsPass(config, dataset_run);
+		WriteResults(config.out_path, dataset_runs);
+	}
+	Log("Wrote " + config.out_path);
 	return 0;
 }
 

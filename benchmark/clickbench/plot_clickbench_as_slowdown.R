@@ -3,20 +3,9 @@
 # query,mode,median_ms or query,mode,m,median_ms with modes "baseline" and "SIMD-AS".
 # Optional third argument selects the SIMD-AS m value to plot; defaults to the largest observed m.
 
-user_lib <- Sys.getenv("R_LIBS_USER")
-if (user_lib == "") user_lib <- file.path(Sys.getenv("HOME"), "R", "libs")
-if (!dir.exists(user_lib)) dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
-.libPaths(c(user_lib, .libPaths()))
-
-required_packages <- c("ggplot2", "dplyr", "readr", "scales", "stringr", "systemfonts")
-options(repos = c(CRAN = "https://cloud.r-project.org"))
-installed <- rownames(installed.packages())
-for (pkg in required_packages) {
-  if (!(pkg %in% installed)) {
-    message("Installing package: ", pkg)
-    install.packages(pkg, dependencies = TRUE, lib = user_lib)
-  }
-}
+script_file <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)[1])
+source(file.path(dirname(dirname(normalizePath(script_file))), "plot_common.R"))
+RequirePlotPackages(c("ggplot2", "dplyr", "readr", "scales", "stringr", "systemfonts"))
 
 suppressPackageStartupMessages({
   library(ggplot2)
@@ -26,13 +15,7 @@ suppressPackageStartupMessages({
   library(stringr)
 })
 
-base_font <- tryCatch({
-  if (any(grepl("Linux Libertine", systemfonts::system_fonts()$family, fixed = TRUE))) {
-    "Linux Libertine"
-  } else {
-    "serif"
-  }
-}, error = function(e) "serif")
+base_font <- PaperFont()
 
 args <- commandArgs(trailingOnly = TRUE)
 get_script_dir <- function() {

@@ -10,8 +10,8 @@
 ## Clone
 
 ```bash
-git clone --recurse-submodules https://github.com/cwida/pac.git
-cd pac
+git clone --recurse-submodules https://github.com/cwida/privacy.git
+cd privacy
 ```
 
 If you already cloned without `--recurse-submodules`, run:

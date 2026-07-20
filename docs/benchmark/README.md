@@ -2,7 +2,7 @@
 
 This document provides an overview of the benchmark suite for the PAC extension. To clone the repository, do the following:
 ```bash
-git clone --recurse-submodules https://github.com/cwida/pac.git
+git clone --recurse-submodules https://github.com/cwida/privacy.git
 ```
 
 ## Why Benchmarks?
