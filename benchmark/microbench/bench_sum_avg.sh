@@ -1,5 +1,5 @@
 #!/bin/bash
-# PAC SUM/AVG Benchmark
+# AS SUM/AVG benchmark
 # Uses data1/data10/data100 views (10M/100M/1B rows).
 #
 # Tests:
@@ -9,11 +9,11 @@
 #
 # Variants:
 #   - standard: DuckDB's native SUM (baseline)
-#   - default: PAC SUM with all optimizations (buffering, approx cascading)
-#   - nobuffering: PAC SUM without input buffering (grouped tests only)
-#   - exactsum: PAC SUM with exact cascading su (without the approximation optimization)
-#   - nocascading: PAC SUM without cascading (direct to largest type -- implies exactsum)
-#   - nosimd: PAC SUM nocascading with simd-unfriendly update kernel and auto-vectorization disabled
+#   - default: AS SUM with all optimizations (buffering, approx cascading)
+#   - nobuffering: AS SUM without input buffering (grouped tests only)
+#   - exactsum: AS SUM with exact cascading (without the approximation optimization)
+#   - nocascading: AS SUM without cascading (direct to largest type -- implies exactsum)
+#   - nosimd: AS SUM nocascading with simd-unfriendly update kernel and auto-vectorization disabled
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +38,7 @@ get_binary() {
     fi
 }
 
-print_header "PAC SUM/AVG Benchmark"
+print_header "AS SUM/AVG Benchmark"
 echo "Results: $RESULTS_FILE"
 echo ""
 

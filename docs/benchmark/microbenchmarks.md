@@ -1,6 +1,7 @@
-# PAC Microbenchmark Suite
+# SIMD-ASA Microbenchmark Suite
 
-Comprehensive performance benchmarks for PAC aggregate functions (priv_count, priv_sum, priv_avg, priv_min, priv_max) with various optimization configurations. The extension should be compiled with clang.
+Performance benchmarks for the SIMD-ASA aggregate functions (`as_count`, `as_sum`, `as_avg`, `as_min`, and `as_max`)
+under several optimization configurations. Compile the extension with Clang.
 
 ## Quick Start
 Install the required dependencies (assuming a Debian-based system):
@@ -9,7 +10,7 @@ sudo apt install make ninja-build cmake clang
 export CC=clang
 export CXX=clang++
 ```
-Then, run the scripts (from the `microbenchmark` directory):
+Then, run the scripts from `benchmark/microbench/`:
 ```bash
 ./create_test_db.sh
 
@@ -46,14 +47,14 @@ The suite builds multiple DuckDB binaries with different optimization flags:
 
 ## Benchmarks
 
-### priv_count (`bench_count.sh`)
+### ASCount (`bench_count.sh`)
 
 Tests counter overflow handling and banked vs non-banked performance:
 
 - **Ungrouped**: 10M, 100M, 500M, 1B+ rows (tests 16→32→64 bit counter upgrade)
 - **Grouped**: 1 to 10M groups (tests per-group state overhead)
 
-### priv_sum/avg (`bench_sum_avg.sh`)
+### ASSum and ASAvg (`bench_sum_avg.sh`)
 
 Tests cascading accumulator performance:
 
@@ -62,7 +63,7 @@ Tests cascading accumulator performance:
 - **Grouped vs ungrouped**
 - **Scaling**: 10M to 500M rows
 
-### priv_min/max (`bench_min_max.sh`)
+### ASMin and ASMax (`bench_min_max.sh`)
 
 Tests bound optimization and bank allocation:
 
@@ -157,19 +158,17 @@ ninja -C build clang lld
 ### Run benchmarks
 ```bash
 git clone --recurse-submodules https://github.com/cwida/privacy.git
-cd privacy/benchmark/pac_microbench
+cd privacy/benchmark/microbench
 ./build_variants.sh
 ./create_test_db.sh
 nohup ./run_all.sh &
 # Results in results/ directory. Experiments take ~6 hours, ~$3/machine.
 ```
 
-### Analysis scripts
-```
-benchmark/pac_microbench/plot_simd_improvements.py
-benchmark/pac_microbench/plot_count_optimizations.py
-benchmark/pac_microbench/plot_minmax_optimizations.py
-benchmark/pac_microbench/plot_sum_optimizations.py
-benchmark/pac_microbench/approx_sum_stability.sql    # run with duckdb_default and duckdb_exactsum
-benchmark/pac_microbench/bionmial.sql                # generates output for plot_hash_distribution.py
+### Analysis and plotting
+```bash
+benchmark/microbench/analyze_results.py
+Rscript --vanilla benchmark/microbench/plot_microbenchmark.R
+benchmark/microbench/approx_sum_stability.sql  # run with duckdb_default and duckdb_exactsum
+benchmark/microbench/binomial.sql              # generate hash-distribution validation data
 ```

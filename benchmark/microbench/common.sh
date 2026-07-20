@@ -1,5 +1,5 @@
 #!/bin/bash
-# Common functions for PAC microbenchmarks
+# Common functions for the aggregation microbenchmarks
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINARIES_DIR="$SCRIPT_DIR/binaries"

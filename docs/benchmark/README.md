@@ -101,7 +101,7 @@ benchmark/
 │   ├── pac_sqlstorm_benchmark.cpp
 │   ├── pac_stackoverflow_schema.sql
 │   └── SQLStorm/                      # SQLStorm submodule
-└── pac_microbench/                    # Microbenchmark suite
+└── microbench/                        # Aggregation microbenchmark suite
 ```
 
 ## Output

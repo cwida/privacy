@@ -1,5 +1,5 @@
 #!/bin/bash
-# Create test database for PAC microbenchmarks
+# Create the aggregation microbenchmark database
 # Generates views data1, data10, data100 with 10M, 100M, 1B rows respectively.
 
 set -e
@@ -21,7 +21,7 @@ get_duckdb_binary() {
 DUCKDB=$(get_duckdb_binary)
 
 echo "========================================"
-echo "Creating PAC Microbenchmark Test Database"
+echo "Creating Aggregation Microbenchmark Test Database"
 echo "========================================"
 echo "Binary: $DUCKDB"
 echo "Output: $DB_FILE"

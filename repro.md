@@ -43,18 +43,19 @@ same storage class used for the reported machine.
 
 ## Aggregation Microbenchmarks
 
-The aggregation microbenchmarks under `benchmark/pac_microbench/` compare seven implementations over synthetic data.
+The aggregation microbenchmarks under `benchmark/microbench/` compare seven implementations over synthetic data.
 They cover 10M, 100M, and 1B rows; several value distributions and domains; and grouped and ungrouped execution.
 
 ```bash
-cd benchmark/pac_microbench
+cd benchmark/microbench
 ./build_variants.sh
 ./create_test_db.sh
 ./run_all.sh
+Rscript --vanilla plot_microbenchmark.R
 ```
 
 The seven variants are `default`, `nobuffering`, `noboundopt`, `signedsum`, `exactsum`, `nocascading`, and `nosimd`.
-Results and the microbenchmark plotting programs remain self-contained in that directory.
+Results and the R plotting program remain self-contained in that directory.
 
 ## Standalone Benchmarks
 

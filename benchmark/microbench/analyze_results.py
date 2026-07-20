@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Analyze and visualize PAC microbenchmark results.
+Analyze and visualize aggregation microbenchmark results.
 Generates comparison tables and summary statistics.
 """
 
@@ -28,7 +28,7 @@ def format_speedup(base, opt):
 def analyze_count(results):
     """Analyze COUNT benchmark results."""
     print("\n" + "="*60)
-    print("PAC COUNT Analysis")
+    print("AS COUNT Analysis")
     print("="*60)
 
     # Group by test type
@@ -68,7 +68,7 @@ def analyze_count(results):
 def analyze_sum_avg(results):
     """Analyze SUM/AVG benchmark results."""
     print("\n" + "="*60)
-    print("PAC SUM/AVG Analysis")
+    print("AS SUM/AVG Analysis")
     print("="*60)
 
     # Group by dtype
@@ -111,7 +111,7 @@ def analyze_sum_avg(results):
 def analyze_min_max(results):
     """Analyze MIN/MAX benchmark results."""
     print("\n" + "="*60)
-    print("PAC MIN/MAX Analysis")
+    print("AS MIN/MAX Analysis")
     print("="*60)
 
     # Distribution impact
@@ -166,7 +166,7 @@ def main():
     sum_avg_files = sorted(results_dir.glob("sum_avg_*.csv"))
     min_max_files = sorted(results_dir.glob("min_max_*.csv"))
 
-    print("PAC Microbenchmark Results Analysis")
+    print("Aggregation Microbenchmark Results Analysis")
     print("=" * 60)
 
     if count_files:

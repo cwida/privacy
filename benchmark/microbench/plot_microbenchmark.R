@@ -1,5 +1,5 @@
 #!/usr/bin/env Rscript
-# PAC Microbenchmark Plotting Script
+# Aggregation Microbenchmark Plotting Script
 # Converts all Python plotting scripts to R with ggplot2
 
 # Configure user-local library path for package installation
@@ -53,7 +53,7 @@ PLATFORM_ORDER <- c('graviton', 'macbook', 'granite-rapids', 'epyc')
 
 # Consistent color scheme across all plots:
 # - Gray: DuckDB standard
-# - Green: Best PAC optimization (with buffering)
+# - Green: Best AS optimization (with buffering)
 # - Blue: Mid-tier optimization (without buffering)
 # - Orange: Alternative method (Exact sum)
 # - Red: Naive/SIMD-Unfriendly
@@ -111,12 +111,12 @@ MINMAX_VARIANT_ORDER <- c('DuckDB', 'Buffering+Pruning',
 
 # SIMD aggregate colors - unique colors for each aggregate
 AGG_COLORS <- c(
-  'pac_count' = '#ff66cc',    # Purple
-  'pac_max' = '#ffff00',       # Orange
-  'pac_sum' = '#99ffcc'        # Teal
+  'as_count' = '#ff66cc',    # Purple
+  'as_max' = '#ffff00',      # Orange
+  'as_sum' = '#99ffcc'       # Teal
 )
 
-AGG_ORDER <- c('pac_max', 'pac_count', 'pac_sum')
+AGG_ORDER <- c('as_max', 'as_count', 'as_sum')
 
 # Pattern fills for better distinguishability
 # These will be used with ggpattern if available
@@ -156,9 +156,9 @@ VARIANT_COLORS <- c(
 )
 
 AGG_PATTERNS <- c(
-  'pac_count' = 'stripe',
-  'pac_max' = 'crosshatch',
-  'pac_sum' = 'circle'
+  'as_count' = 'stripe',
+  'as_max' = 'crosshatch',
+  'as_sum' = 'circle'
 )
 
 # ============================================================================
@@ -786,9 +786,9 @@ plot_simd_improvements <- function(results_dir, output_dir) {
       data <- bind_rows(data, data.frame(
         platform = platform,
         platform_name = PLATFORM_NAMES[platform],
-        pac_count = ifelse(is.na(count_result$factor), 0, count_result$factor),
-        pac_max = ifelse(is.na(max_result$factor), 0, max_result$factor),
-        pac_sum = ifelse(is.na(sum_result$factor), 0, sum_result$factor)
+        as_count = ifelse(is.na(count_result$factor), 0, count_result$factor),
+        as_max = ifelse(is.na(max_result$factor), 0, max_result$factor),
+        as_sum = ifelse(is.na(sum_result$factor), 0, sum_result$factor)
       ))
     }
   }
@@ -800,7 +800,7 @@ plot_simd_improvements <- function(results_dir, output_dir) {
 
   # Reshape for ggplot
   data_long <- data %>%
-    pivot_longer(cols = c(pac_count, pac_max, pac_sum),
+    pivot_longer(cols = c(as_count, as_max, as_sum),
                  names_to = 'aggregate',
                  values_to = 'factor')
 
@@ -938,7 +938,7 @@ main <- function() {
     dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   }
 
-  message("\n=== Plotting PAC Microbenchmarks ===\n")
+  message("\n=== Plotting Aggregation Microbenchmarks ===\n")
 
   # Plot per-platform optimizations
   for (platform in list.dirs(results_dir, full.names = FALSE, recursive = FALSE)) {

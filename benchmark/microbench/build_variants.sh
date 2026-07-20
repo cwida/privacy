@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build PAC DuckDB variants with different optimization flags
+# Build DuckDB-Privacy variants with different aggregate optimization flags
 # Each variant is built to a separate binary for benchmarking
 #
 # Consolidated binary names (aggregate-agnostic):
@@ -14,8 +14,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PAC_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-BUILD_DIR="$PAC_ROOT/build/bench"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+BUILD_DIR="$PROJECT_ROOT/build/bench"
 BINARIES_DIR="$SCRIPT_DIR/binaries"
 
 mkdir -p "$BUILD_DIR"
@@ -89,7 +89,7 @@ build_variant() {
     echo "CXXFLAGS: $flags"
     echo "========================================"
 
-    cd "$PAC_ROOT"
+    cd "$PROJECT_ROOT"
 
     # Clean and build
     rm -rf build/release

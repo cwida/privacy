@@ -1,5 +1,5 @@
 #!/bin/bash
-# PAC Microbenchmark Suite - Main Runner
+# Aggregation Microbenchmark Suite - Main Runner
 # Builds all variants and runs all benchmarks
 
 set -e
@@ -73,7 +73,7 @@ if [[ ${#BENCHMARKS[@]} -eq 0 ]]; then
 fi
 
 echo "========================================"
-echo "PAC Microbenchmark Suite"
+echo "Aggregation Microbenchmark Suite"
 echo "========================================"
 echo "Date: $(date)"
 echo "Host: $(hostname)"
@@ -127,7 +127,7 @@ if [[ $RUN -eq 1 ]]; then
 fi
 
 echo "========================================"
-echo "PAC Microbenchmark Suite Complete"
+echo "Aggregation Microbenchmark Suite Complete"
 echo "========================================"
 echo ""
 echo "Results are in: $SCRIPT_DIR/results/"

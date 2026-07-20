@@ -1,5 +1,5 @@
 #!/bin/bash
-# PAC COUNT Benchmark
+# AS COUNT benchmark
 # Uses data1/data10/data100 views (10M/100M/1B rows).
 #
 # Tests:
@@ -9,10 +9,10 @@
 #
 # Variants:
 #   - standard: DuckDB's native COUNT (baseline)
-#   - default: PAC COUNT with all optimizations (buffering, cascading)
-#   - nobuffering: PAC COUNT without buffering (lazy alloc)
-#   - nocascading: PAC COUNT directly into uint64 totals
-#   - nosimd: PAC COUNT nocascading with simd-unfriendly update kernel
+#   - default: AS COUNT with all optimizations (buffering, cascading)
+#   - nobuffering: AS COUNT without buffering (lazy alloc)
+#   - nocascading: AS COUNT directly into uint64 totals
+#   - nosimd: AS COUNT nocascading with simd-unfriendly update kernel
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,7 +36,7 @@ get_binary() {
     fi
 }
 
-print_header "PAC COUNT Benchmark"
+print_header "AS COUNT Benchmark"
 echo "Results: $RESULTS_FILE"
 echo ""
 

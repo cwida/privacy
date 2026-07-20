@@ -1,5 +1,5 @@
 #!/bin/bash
-# PAC MIN/MAX Benchmark
+# AS MIN/MAX benchmark
 # Uses data1/data10/data100 views (10M/100M/1B rows).
 #
 # Tests:
@@ -11,10 +11,10 @@
 #
 # Variants:
 #   - standard: DuckDB's native MAX (baseline)
-#   - default: PAC MAX with all optimizations (buffering, bound opt)
-#   - noboundopt: PAC MAX without bound optimization
-#   - nobuffering: PAC MAX without input buffering (grouped tests only)
-#   - nosimd: PAC MAX with simd-unfriendly update kernel and auto-vectorization disabled
+#   - default: AS MAX with all optimizations (buffering, bound opt)
+#   - noboundopt: AS MAX without bound optimization
+#   - nobuffering: AS MAX without input buffering (grouped tests only)
+#   - nosimd: AS MAX with simd-unfriendly update kernel and auto-vectorization disabled
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,7 +39,7 @@ get_binary() {
     fi
 }
 
-print_header "PAC MIN/MAX Benchmark"
+print_header "AS MIN/MAX Benchmark"
 echo "Results: $RESULTS_FILE"
 echo ""
 
