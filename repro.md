@@ -15,8 +15,9 @@ modify the `duckdb/` submodule.
 ```bash
 git clone --recurse-submodules git@github.com:cwida/privacy.git
 cd privacy
-export CC=clang
-export CXX=clang++
+export CC=clang-22
+export CXX=clang++-22
+$CC --version  # must report Clang 22.1.0 for the paper build
 GEN=ninja make
 ```
 
@@ -76,9 +77,9 @@ discovery and database initialization succeed.
 
 ### TPC-H AS performance
 
-The main SF30 benchmark measures DuckDB, SIMD-AS with `m=64`, and the naive sampling implementation. It creates
-`tpch_sf30_graviton.db` with DuckDB's TPC-H generator when the database is absent. Each reported runtime is the median
-of five hot executions after one warm execution.
+The main SF30 benchmark measures DuckDB, SIMD-AS with `m=64`, the naive sampling implementation, and a simple-hash
+control used to isolate sampling-key join overhead. It creates `tpch_sf30_graviton.db` with DuckDB's TPC-H generator
+when the database is absent. Each reported runtime is the median of five hot executions after one warm execution.
 
 ```bash
 build/release/extension/privacy/as_tpch_benchmark \
@@ -120,10 +121,12 @@ lineitem.l_orderkey -> orders.o_orderkey
 orders.o_custkey    -> customer.c_custkey (privacy unit)
 ```
 
-All mechanisms use `epsilon=1` and `delta=1e-6`. The benchmark performs three runs and evaluates bound multipliers
-`0.01,0.1,1,10,100`. It compares user-level bounded DP, row-level elastic DP, and SAA-average with
-`m=64,128,256,512`; DuckDB supplies the exact runtime and utility reference. `sample_lanes=1`, so SAA lanes are
-disjoint. SUM and COUNT outputs are rescaled to the full-data scale; AVG, MIN, and MAX are not rescaled.
+All mechanisms use `epsilon=1` and `delta=1e-6`. The benchmark performs three runs. At `m=64`, it evaluates bound
+multipliers `0.01,0.1,1,10,100` for user-level bounded DP, row-level elastic DP, and SAA-average. The SAA `m` sweep
+uses `m=64,128,256,512` at the `1x` bound; DuckDB supplies the exact runtime and utility reference.
+`sample_lanes=1`, so SAA lanes are disjoint. SUM and COUNT outputs are rescaled to the full-data scale; AVG, MIN, and
+MAX are not rescaled. Relative SAA-target error is unchanged by this common rescaling of the private release and its
+non-private estimator, so the same run supplies the paper's estimator-relative `m` sweep.
 
 ```bash
 build/release/extension/privacy/dp_benchmark_runner \
@@ -140,9 +143,9 @@ the FLEX sensitivity calculation is part of the measured query.
 
 ### Q01 AVG study
 
-Two configurations isolate the three Q01 AVG columns and then vary the grouping keys. Both use three runs, the same
-privacy parameters as the main utility benchmark, and compare bounded DP, elastic DP, and SAA-average at `m=64` and
-`m=512`.
+Two configurations isolate the three Q01 AVG columns and then vary the grouping keys. Both use three runs,
+`epsilon=1`, `delta=1e-6`, and the mechanism-specific `1x` oracle bounds shown in the paper. They compare bounded DP,
+elastic DP, and SAA-average at `m=64` and `m=512`, without rescaling AVG outputs.
 
 ```bash
 build/release/extension/privacy/dp_benchmark_runner \
@@ -280,6 +283,15 @@ python3 benchmark/dp/run_tpch_sass_stability.py \
   --out benchmark/results/utility/q01_stability_sum_count.csv \
   --summary-out benchmark/results/utility/q01_stability_sum_count_summary.csv \
   --strict
+```
+
+Plot the AVG rows from the first summary together with the rescaled SUM/COUNT rows from the second:
+
+```bash
+Rscript --vanilla benchmark/dp/plot_q01_stability.R \
+  benchmark/results/utility/q01_stability_avg_summary.csv \
+  benchmark/results/utility/q01_stability_sum_count_summary.csv \
+  benchmark/results/figures/q01_stability_m64_m512_rescaled_sumcount_paper.png
 ```
 
 The remaining files in `benchmark/configs/sanity/` are focused smoke, beta, support-threshold, bounds, Reddit, and

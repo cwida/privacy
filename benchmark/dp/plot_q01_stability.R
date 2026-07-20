@@ -15,11 +15,11 @@ suppressPackageStartupMessages({
 base_font <- PaperFont()
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) != 2) {
-	stop("Usage: Rscript plot_q01_stability.R input.csv output.png")
+if (!(length(args) %in% c(2, 3))) {
+	stop("Usage: Rscript plot_q01_stability.R avg.csv [sum_count.csv] output.png")
 }
-input_csv <- args[1]
-output_png <- args[2]
+input_csvs <- if (length(args) == 2) args[1] else args[1:2]
+output_png <- args[length(args)]
 
 success_flag <- function(x) {
 	tolower(as.character(x)) %in% c("true", "t", "1")
@@ -53,12 +53,15 @@ m_colors <- c(
 	"m=512" = "#009900"
 )
 
-raw <- suppressWarnings(readr::read_csv(input_csv, show_col_types = FALSE))
+raw <- bind_rows(lapply(input_csvs, function(input_csv) {
+	suppressWarnings(readr::read_csv(input_csv, show_col_types = FALSE))
+}))
 plot_data <- raw %>%
 	mutate(
 		success = success_flag(success),
 		query = as.character(query),
 		sass_m = suppressWarnings(as.integer(sass_m)),
+		sass_rescale = success_flag(sass_rescale),
 		median_cv = suppressWarnings(as.numeric(median_cv)),
 		cv_pct = 100.0 * median_cv,
 		m_label = factor(paste0("m=", sass_m), levels = m_levels),
@@ -68,6 +71,10 @@ plot_data <- raw %>%
 	filter(
 		success,
 		query %in% names(query_labels),
+		(
+			(query != "q01_sum_count_by_returnflag_linestatus" & !sass_rescale) |
+			(query == "q01_sum_count_by_returnflag_linestatus" & sass_rescale)
+		),
 		m_label %in% m_levels,
 		!is.na(cv_pct),
 		is.finite(cv_pct)
