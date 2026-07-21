@@ -26,7 +26,7 @@ To rebuild only the paper benchmark executables:
 ```bash
 cmake --build build/release --target \
   as_tpch_benchmark as_clickbench_benchmark \
-  dp_benchmark_runner dp_target_metric_runner
+  dp_benchmark_runner
 ```
 
 The paper uses the following machines:
@@ -251,6 +251,44 @@ Rscript --vanilla benchmark/dp/plot_q01_avg_compact_grid.R \
 ```
 
 Plot scripts fail with a direct dependency or schema error; they do not install packages or modify benchmark inputs.
+
+The exact CSV inputs retained for the paper figures are versioned in `benchmark/results/paper/`. Fresh benchmark runs
+write to `benchmark/results/utility/`; they do not overwrite the archived submission data.
+
+To regenerate the submitted figures directly from the archived inputs:
+
+```bash
+mkdir -p benchmark/results/figures
+
+Rscript --vanilla benchmark/tpch/plot_tpch_results.R \
+  benchmark/results/paper/as_tpch_m64.csv benchmark/results/figures
+
+DROP_M=64 Rscript --vanilla benchmark/tpch/plot_tpch_as_m_sweep.R \
+  benchmark/results/paper/as_tpch_m_sweep.csv benchmark/results/figures
+
+Rscript --vanilla benchmark/clickbench/plot_clickbench_as_slowdown.R \
+  benchmark/results/paper/as_clickbench_m64_m512.csv benchmark/results/figures 64
+
+Rscript --vanilla benchmark/dp/plot_unskewed_sass_utility_views.R \
+  benchmark/results/paper/dp_tpch_utility_raw.csv benchmark/results/figures 1e-6 64 true
+
+Rscript --vanilla benchmark/dp/plot_sass_sampled_m_1x.R \
+  benchmark/results/paper/dp_tpch_utility_raw.csv \
+  benchmark/results/figures/tpch_sass_sampled_m_1x_paper.png tpch 1e-6 median mean
+
+Rscript --vanilla benchmark/dp/plot_dp_full_utility_runtime.R \
+  benchmark/results/paper/dp_tpch_runtime_raw.csv benchmark/results/figures
+
+Rscript --vanilla benchmark/dp/plot_q01_avg_compact_grid.R \
+  benchmark/results/paper/q01_avg_columns_raw.csv \
+  benchmark/results/paper/q01_avg_groups_raw.csv \
+  benchmark/results/figures/q01_avg_compact_grid_paper.png
+
+Rscript --vanilla benchmark/dp/plot_q01_stability.R \
+  benchmark/results/paper/q01_stability_avg_summary_raw.csv \
+  benchmark/results/paper/q01_stability_sum_count_summary_raw.csv \
+  benchmark/results/figures/q01_stability_m64_m512_rescaled_sumcount_paper.png
+```
 
 ## Optional Sanity Checks
 

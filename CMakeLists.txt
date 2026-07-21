@@ -110,10 +110,6 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
     add_executable(dp_benchmark_runner benchmark/dp/dp_benchmark_runner.cpp)
     target_link_libraries(dp_benchmark_runner ${PRIVACY_LINK_LIBS})
 
-    # Target-metric postprocessor for selected DP benchmark rows
-    add_executable(dp_target_metric_runner benchmark/dp/dp_target_metric_runner.cpp)
-    target_link_libraries(dp_target_metric_runner ${PRIVACY_LINK_LIBS})
-
     # IMDb/JOB benchmark runner
     add_executable(imdb_benchmark benchmark/imdb/imdb_benchmark.cpp)
     target_link_libraries(imdb_benchmark ${PRIVACY_LINK_LIBS})

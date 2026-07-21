@@ -9,7 +9,7 @@ Run commands from the repository root. Build the paper executables with:
 ```bash
 cmake --build build/release --target \
   as_tpch_benchmark as_clickbench_benchmark \
-  dp_benchmark_runner dp_target_metric_runner
+  dp_benchmark_runner
 ```
 
 ## Paper Benchmarks

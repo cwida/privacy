@@ -18,7 +18,10 @@ test/python/__pycache__/
 benchmark/**/*.png
 benchmark/**/*.log
 benchmark/**/__pycache__/
-benchmark/results/
+benchmark/results/*
+!benchmark/results/paper/
+!benchmark/results/paper/*.csv
+!benchmark/results/paper/README.md
 benchmark/dp/tmp/
 benchmark/tpch/dp_elastic_*.csv
 benchmark/tpch/dp_sass_*.csv
