@@ -87,6 +87,8 @@ build/release/extension/privacy/as_tpch_benchmark \
   --config benchmark/configs/utility/as_tpch_sf30.json
 ```
 
+Each AS query/mode is executed once without timing before its five measured executions. The CSV reports their median.
+
 The variable-`m` configuration measures the separate aggregate path for `m=128,256,512`. It reuses the same database
 and skips the naive implementation.
 
@@ -111,6 +113,8 @@ build/release/extension/privacy/as_clickbench_benchmark \
   --config benchmark/configs/utility/as_clickbench_graviton.json
 ```
 
+Each AS query/mode is executed once without timing before its five measured executions. The CSV reports their median.
+
 Output: `benchmark/results/utility/as_clickbench_graviton.csv`.
 
 ### DP utility and runtime
@@ -133,6 +137,9 @@ non-private estimator, so the same run supplies the paper's estimator-relative `
 build/release/extension/privacy/dp_benchmark_runner \
   --config benchmark/configs/utility/dp_tpch_sf30_utility.json
 ```
+
+The runner executes one untimed warmup immediately before every measured private-query execution. Utility and diagnostic
+queries run separately and are not included in `time_ms`.
 
 Output: `benchmark/results/utility/dp_tpch_sf30_utility.csv`.
 

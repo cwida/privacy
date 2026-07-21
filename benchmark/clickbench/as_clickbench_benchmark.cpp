@@ -664,8 +664,15 @@ int RunASClickBenchBenchmark(const string &db_path, const string &queries_dir, c
 						}
 						query_sql = RewriteAsQueryForSampleAggregation(as_sql, as_m);
 					}
-					double as_median =
-					    RunMedian(con, query_sql, 5, "SIMD-AS " + entry.label + " m=" + std::to_string(as_m));
+					string warmup_error;
+					double as_median = -1;
+					if (!RunSql(con, query_sql, warmup_error)) {
+						Log("SIMD-AS " + entry.label + " m=" + std::to_string(as_m) + " warmup error: " + warmup_error);
+					} else {
+						Log("SIMD-AS " + entry.label + " m=" + std::to_string(as_m) + " warmup complete");
+						as_median =
+						    RunMedian(con, query_sql, 5, "SIMD-AS " + entry.label + " m=" + std::to_string(as_m));
+					}
 					csv << entry.label << ",SIMD-AS," << as_m << "," << FormatNumber(as_median) << "\n";
 				}
 				con.Query("SET priv_rewrite=true;");

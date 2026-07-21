@@ -1048,6 +1048,16 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 								query_sql = RewriteAsQueryForSampleAggregation(as_sql, as_m);
 							}
 						}
+						con.Query("SET pac_m=" + std::to_string(as_m) + ";");
+						con.Query("SET priv_rewrite=false;");
+						auto r_warmup = con.Query(query_sql);
+						if (r_warmup && r_warmup->HasError()) {
+							Log("AS (" + mode_str + ") " + entry.label + " m=" + std::to_string(as_m) +
+							    " warmup error: " + r_warmup->GetError());
+							csv << entry.label << "," << mode_str << "," << as_m << ",-1\n";
+							continue;
+						}
+						Log("AS (" + mode_str + ") " + entry.label + " m=" + std::to_string(as_m) + " warmup complete");
 						// Run AS query 5 times, take median
 						vector<double> as_times_ms;
 						bool as_failed = false;
@@ -1113,6 +1123,14 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 							if (!setup_ok) {
 								csv << entry.label << ",Naive-AS,64,-1\n";
 							} else {
+								auto r_warmup = con.Query(execute_sql);
+								if (r_warmup && r_warmup->HasError()) {
+									Log("Naive-AS " + entry.label + " warmup error: " + r_warmup->GetError());
+									csv << entry.label << ",Naive-AS,64,-1\n";
+									con.Query("DEALLOCATE PREPARE run_query;");
+									continue;
+								}
+								Log("Naive-AS " + entry.label + " warmup complete");
 								// Time EXECUTE 5 times, take median
 								vector<double> naive_as_times_ms;
 								bool naive_as_failed = false;

@@ -1905,8 +1905,8 @@ static DatasetRun CreateDatasetRun(const Config &config, const DatasetConfig &da
 	}
 	result.points = BuildRunPoints(dataset);
 	result.db_path = DefaultDbPath(dataset);
-	if (!(dataset.name == "tpch" || dataset.name == "sqlstorm_tpch") &&
-	    !dataset.allow_create && !FileExists(result.db_path)) {
+	if (!(dataset.name == "tpch" || dataset.name == "sqlstorm_tpch") && !dataset.allow_create &&
+	    !FileExists(result.db_path)) {
 		throw std::runtime_error("database does not exist for dataset " + dataset.name + ": " + result.db_path);
 	}
 
@@ -1975,6 +1975,14 @@ static void PrepareDatasetRun(const Config &config, DatasetRun &dataset_run,
 	PrepareDataset(*dataset_run.connection, dataset_run.config, false);
 }
 
+static void ExecuteBenchmarkQuery(Connection &con, const BenchmarkRow &row, const QuerySpec &query) {
+	if (row.point.mode == "dp_sass_bounded_ratio") {
+		ReadScalarDouble(con, BuildQ14BoundedSampledRatioSql(row.point.epsilon, row.point.sample_lanes));
+	} else {
+		MaterializeQuery(con, query.sql);
+	}
+}
+
 static void RunTimingPass(const Config &config, DatasetRun &dataset_run) {
 	auto &con = *dataset_run.connection;
 	vector<double> pu_counts(dataset_run.queries.size(), -1.0);
@@ -1997,12 +2005,11 @@ static void RunTimingPass(const Config &config, DatasetRun &dataset_run) {
 			RunStatement(con, "SET privacy_noise=true");
 			RunStatement(con, "SET privacy_seed=" + std::to_string(row.seed));
 
+			ExecuteBenchmarkQuery(con, row, query);
+			Log("warmup " + dataset_run.config.name + " " + row.point.mode + " " + query.name + " run " +
+			    std::to_string(row.run) + " complete");
 			auto start = std::chrono::steady_clock::now();
-			if (row.point.mode == "dp_sass_bounded_ratio") {
-				ReadScalarDouble(con, BuildQ14BoundedSampledRatioSql(row.point.epsilon, row.point.sample_lanes));
-			} else {
-				MaterializeQuery(con, query.sql);
-			}
+			ExecuteBenchmarkQuery(con, row, query);
 			auto end = std::chrono::steady_clock::now();
 			row.time_ms = std::chrono::duration<double, std::milli>(end - start).count();
 			row.runtime_success = true;
