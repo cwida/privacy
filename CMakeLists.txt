@@ -106,10 +106,6 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
     add_executable(as_clickbench_benchmark benchmark/clickbench/as_clickbench_benchmark.cpp)
     target_link_libraries(as_clickbench_benchmark ${PRIVACY_LINK_LIBS})
 
-    # TPCH Compiler benchmark runner (compares PAC vs regular TPC-H)
-    add_executable(pac_tpch_compiler_benchmark benchmark/tpch/pac_tpch_compiler_benchmark.cpp)
-    target_link_libraries(pac_tpch_compiler_benchmark ${PRIVACY_LINK_LIBS})
-
     # Unified DP utility benchmark runner
     add_executable(dp_benchmark_runner benchmark/dp/dp_benchmark_runner.cpp)
     target_link_libraries(dp_benchmark_runner ${PRIVACY_LINK_LIBS})
@@ -118,15 +114,7 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
     add_executable(dp_target_metric_runner benchmark/dp/dp_target_metric_runner.cpp)
     target_link_libraries(dp_target_metric_runner ${PRIVACY_LINK_LIBS})
 
-    # ClickHouse/ClickBench benchmark runner
-    add_executable(pac_clickhouse_benchmark benchmark/clickbench/pac_clickhouse_benchmark.cpp)
-    target_link_libraries(pac_clickhouse_benchmark ${PRIVACY_LINK_LIBS})
-
     # IMDb/JOB benchmark runner
     add_executable(imdb_benchmark benchmark/imdb/imdb_benchmark.cpp)
     target_link_libraries(imdb_benchmark ${PRIVACY_LINK_LIBS})
-
-    # SQLStorm benchmark runner
-    add_executable(pac_sqlstorm_benchmark benchmark/sqlstorm/pac_sqlstorm_benchmark.cpp)
-    target_link_libraries(pac_sqlstorm_benchmark ${PRIVACY_LINK_LIBS})
 endif()

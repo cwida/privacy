@@ -20,11 +20,6 @@ benchmark/**/*.log
 benchmark/**/__pycache__/
 benchmark/results/
 benchmark/dp/tmp/
-benchmark/dp/skew_sweep/
-benchmark/dp/ec2_backup_*/
-benchmark/dp/full_utility_runtime/
-benchmark/dp/unskewed_utility_views/
-benchmark/dp/saaavg_target_views/
 benchmark/tpch/dp_elastic_*.csv
 benchmark/tpch/dp_sass_*.csv
 benchmark/tpch/as_tpch_*.csv
@@ -38,10 +33,6 @@ benchmark/dp/sqlstorm_stackoverflow_*stability*.csv
 benchmark/sqlstorm/sqlstorm_degradation_*.csv
 benchmark/sqlstorm/data/
 benchmark/tpch/*_paper_summary.csv
-
-# Generated query sets (produced by the stability/scan scripts)
-benchmark/dp/sqlstorm_stackoverflow_stable_queries/
-benchmark/dp/sqlstorm_stackoverflow_stable_aggregate_queries/
 
 # Serialized privacy-metadata dumps
 pac_metadata_*.json

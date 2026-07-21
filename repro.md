@@ -302,6 +302,6 @@ Rscript --vanilla benchmark/dp/plot_q01_stability.R \
   benchmark/results/figures/q01_stability_m64_m512_rescaled_sumcount_paper.png
 ```
 
-The remaining files in `benchmark/configs/sanity/` are focused smoke, beta, support-threshold, bounds, Reddit, and
-SQLStorm checks. Validate one with `dp_benchmark_runner --dry-run` before use. They are diagnostics, not part of the
-paper result matrix.
+The remaining files in `benchmark/configs/sanity/` are focused AS, beta, support-threshold, bounds, and SQLStorm
+checks. Validate one with the corresponding runner's `--dry-run` option before use. They are diagnostics, not part of
+the paper result matrix.

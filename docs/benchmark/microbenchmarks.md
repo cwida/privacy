@@ -1,6 +1,6 @@
-# SIMD-ASA Microbenchmark Suite
+# SIMD-AS Microbenchmark Suite
 
-Performance benchmarks for the SIMD-ASA aggregate functions (`as_count`, `as_sum`, `as_avg`, `as_min`, and `as_max`)
+Performance benchmarks for the SIMD-AS aggregate functions (`as_count`, `as_sum`, `as_avg`, `as_min`, and `as_max`)
 under several optimization configurations. Compile the extension with Clang.
 
 ## Quick Start

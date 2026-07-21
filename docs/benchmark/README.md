@@ -1,120 +1,42 @@
-# PAC Benchmarks
+# Benchmarks
 
-This document provides an overview of the benchmark suite for the PAC extension. To clone the repository, do the following:
+The repository contains standalone performance and utility benchmarks for stochastic aggregation and differential
+privacy. The exact paper environment, experiment matrix, bounds, result columns, and plotting commands are documented
+in [repro.md](../../repro.md).
+
+Run commands from the repository root. Build the paper executables with:
+
 ```bash
-git clone --recurse-submodules https://github.com/cwida/privacy.git
+cmake --build build/release --target \
+  as_tpch_benchmark as_clickbench_benchmark \
+  dp_benchmark_runner dp_target_metric_runner
 ```
 
-## Why Benchmarks?
+## Paper Benchmarks
 
-PAC provides privacy guarantees by transforming SQL aggregates into privacy-preserving versions. This transformation introduces computational overhead that we need to measure and optimize. The benchmarks help us answer key questions:
+| Workload | Executable | Configuration |
+|---|---|---|
+| TPC-H AS | `as_tpch_benchmark` | `benchmark/configs/utility/as_tpch_sf30.json` |
+| TPC-H variable `m` | `as_tpch_benchmark` | `benchmark/configs/utility/as_tpch_sf30_m_sweep.json` |
+| ClickBench AS | `as_clickbench_benchmark` | `benchmark/configs/utility/as_clickbench_graviton.json` |
+| TPC-H DP utility | `dp_benchmark_runner` | `benchmark/configs/utility/dp_tpch_sf30_utility.json` |
+| TPC-H Q01 AVG | `dp_benchmark_runner` | `benchmark/configs/utility/dp_tpch_sf30_q01_avg_*.json` |
 
-1. **PAC Overhead**: How much slower are PAC queries compared to standard DuckDB queries? The bitslice compilation algorithm adds per-row hashing and probabilistic counting overhead.
+The runners accept `--config <path> --dry-run` to validate a JSON configuration without opening a database. Generated
+databases and results are ignored by Git and written below `benchmark/results/` unless a config selects another path.
 
-2. **Join Overhead**: PAC requires joining through the privacy unit chain (e.g., `lineitem → orders → customer`) to obtain the privacy key hash. This adds join costs even when the original query doesn't need those joins.
+## Additional Benchmarks
 
-## Benchmark Executables
+- [Aggregation microbenchmarks](microbenchmarks.md) compare aggregate kernel implementations.
+- [IMDb/JOB](imdb.md) exercises person-level privacy over a multi-table workload.
+- [SQLStorm](sqlstorm.md) provides optional query-coverage smoke tests.
+- [Utility evaluation](utility.md) documents DP bounds, metrics, and diagnostic tools.
 
-PAC benchmarks are compiled as **separate standalone executables** (not run through DuckDB's extension loading). They are built using CMake targets:
+## Workload Guides
 
-| Executable | CMake Target | Description |
-|------------|--------------|-------------|
-| `pac_tpch_benchmark` | `pac_tpch_benchmark` | TPC-H benchmark comparing PAC vs baseline |
-| `pac_tpch_compiler_benchmark` | `pac_tpch_compiler_benchmark` | Compiler benchmark comparing auto-compiled vs manual PAC queries |
-| `pac_clickhouse_benchmark` | `pac_clickhouse_benchmark` | ClickBench benchmark for web analytics workloads |
-| `pac_sqlstorm_benchmark` | `pac_sqlstorm_benchmark` | SQLStorm benchmark (TPC-H + StackOverflow) |
-
-### Reproducibility
-All the benchmarks have been executed on Ubuntu 24.04. Further, the latest version of `clang` should be compiled and installed, to then compile our extension with it.
-```bash
-for the microbenchmarks, get the following instances on EC2:
-- i8gd.4xlarge 16xGraviton4 2.7GHz, 32GB RAm, 950GB SSD
-- c8i.4xlarge 16xGranite Rapids 3.9GHz,32GB RAM, EBS: choose 90GB io2
-- c8a.4xlarge 16xEPYC 9R45 4.5GHz, 32GB RAM, EBS: choose 90GB io2
-
-choose Ubuntu 24 as the OS (ssh ubuntu@public-ip -i yourkey.pem into it)
-
-# only for graviton i8gd instance -- install a filesystem on its ssd
-sudo parted /dev/nvme0n1 -- mklabel gpt
-sudo parted /dev/nvme0n1 -- mkpart primary ext4 0% 200GB
-sudo mkfs.ext4 /dev/nvme0n1p1
-sudo mkdir -p /mnt/instance-store
-sudo mount /dev/nvme0n1p1 /mnt/instance-store
-cd /mnt/instance-store/
-chmod 777 .
-
-# for all instances:
-sudo apt update && sudo apt upgrade
-sudo apt install -y \
-  build-essential \
-  cmake ninja-build git python3 \
-  libffi-dev zlib1g-dev \
-  libncurses-dev libxml2-dev \
-  libedit-dev libssl-dev ccache
-git clone https://github.com/llvm/llvm-project.git
-cd llvm-project 
-mkdir build && cd build
-cmake -G Ninja ../llvm \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX=/opt/llvm-main \
-  -DLLVM_ENABLE_PROJECTS="clang;lld" \
-  -DLLVM_ENABLE_RTTI=ON
-ninja -j$(nproc)
-sudo ninja install  
-echo 'export PATH=/opt/llvm-main/bin:$PATH' | sudo tee /etc/profile.d/llvm-main.sh
-source /etc/profile.d/llvm-main.sh
-sudo update-alternatives --install /usr/bin/cc cc /opt/llvm-main/bin/clang 100
-sudo update-alternatives --install /usr/bin/c++ c++ /opt/llvm-main/bin/clang++ 100
-```
-After these steps, `which c++` should point to `/opt/llvm-main/bin/clang++`, and `clang++ --version` should show the latest Clang version. This ensures that the benchmarks are compiled with the latest optimizations and features from Clang.
-
-Then, build DuckDB and the PAC extension in Release mode (assuming the `duckdb` submodule is present):
-```bash
-cd /path/to/pac
-GEN=ninja make
-```
-For instructions on how to run the individual benchmarks, please refer to the respective sections below.
-
-### Folder Structure
-```
-benchmark/
-├── tpch/                              # TPC-H benchmark
-│   ├── pac_tpch_benchmark.cpp
-│   ├── pac_tpch_compiler_benchmark.cpp
-│   ├── tpch_pac_queries/              # Hand-written optimized PAC queries
-│   ├── tpch_pac_naive_queries/        # Naive PAC query variants
-│   ├── tpch_pac_simple_hash_queries/  # Simple hash PAC query variants
-│   ├── utility_tpch.sql               # Utility script for DuckDB CLI
-│   ├── run_utility_tpch_100.sql       # Runs utility 100 times
-│   └── plot_tpch_results.R            # R plotting script
-├── clickbench/                        # ClickBench benchmark
-│   ├── pac_clickhouse_benchmark.cpp
-│   ├── clickbench_queries/            # Query suite (create, load, queries, utility)
-│   └── plot_clickbench_results.R      # R plotting script
-├── imdb/                              # IMDb/JOB benchmark
-│   ├── imdb_benchmark.cpp
-│   ├── schema.sql
-│   ├── load.sql
-│   ├── setup.sql
-│   └── queries.sql
-├── sqlstorm/                          # SQLStorm benchmark
-│   ├── pac_sqlstorm_benchmark.cpp
-│   ├── pac_stackoverflow_schema.sql
-│   └── SQLStorm/                      # SQLStorm submodule
-└── microbench/                        # Aggregation microbenchmark suite
-```
-
-## Output
-
-- CSV result files are written to the respective benchmark directories
-- PNG plots are generated automatically if R and required packages are installed
-
-## See Also
-
-- [TPC-H Benchmark](tpch.md)
-- [TPC-H Compiler Benchmark](tpch_compiler.md)
-- [ClickBench Benchmark](clickbench.md)
-- [IMDb/JOB Benchmark](imdb.md)
-- [SQLStorm Benchmark](sqlstorm.md)
-- [Utility Scripts](utility.md)
+- [TPC-H](tpch.md)
+- [ClickBench](clickbench.md)
+- [IMDb/JOB](imdb.md)
+- [SQLStorm](sqlstorm.md)
 - [Microbenchmarks](microbenchmarks.md)
+- [Utility evaluation](utility.md)

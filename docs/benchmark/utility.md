@@ -1,194 +1,64 @@
-# DuckDB CLI Utility Scripts
+# DP Utility Evaluation
 
-Lightweight SQL scripts for quick PAC testing directly through the DuckDB CLI, without compiling or running the standalone benchmark executables.
+`dp_benchmark_runner` measures runtime and utility for `dp_standard`, `dp_elastic`, and `dp_sass`. Paper configs live
+in `benchmark/configs/utility/`; focused checks live in `benchmark/configs/sanity/`.
 
-## Overview
-
-The utility scripts provide a fast way to exercise the privacy query compiler against TPC-H and ClickBench workloads and measure utility. Each script sets the `privacy_diffcols` configuration before every query, enabling privacy differential column tracking for the query's output.
-
-### What is `privacy_diffcols`?
-
-The `privacy_diffcols` setting tells DuckDB which columns to use for privacy utility diffs. The utility diff operator compares the original query result with the privatized result and measures error percentage, precision and recall. Error percentage is 100*(noised/exact-1). Precision and recall count which fraction of the keys in the noised result are in the exact, resp. the fraction of exact keys in the noised result. The utility difference mode is active if `privacy_diffcols` is defined (non-null), and modifies queries to return the precision in each non-key numeric cell instead of its actual value, and it shows overall precision (the average of the column precisions, where each column precision is the average of precisions in the column), recall and precision in a single line printed on (stderr) console output, or appended to a file. It computes these values by performing a full outer join between the original and noised query. The assumption is that the X leading columns of the results form a key to perform this comparison join on. The format is:
-
-```
-'N:filename.csv'
-```
-
-Where `N` is the number of `GROUP BY` columns in the query and `filename.csv` is the (optional) output file for differential results. For example, `'2:q01.csv'` indicates the query has two group-by columns and results are written to `q01.csv`. If there is such a colon and filename, the new line with utility information is appended to the file (it is created if it did not exist). This allows to execute a query 100 times and create a csv file with 100 results.
-
-## Prerequisites
-
-- A PAC-enabled DuckDB build with the TPC-H extension compiled in:
-  ```bash
-  BUILD_TPCH=1 make release
-  ```
-- A pre-existing database file with the appropriate schema and data loaded (e.g., `tpch_sf30.db`, `clickbench.db`).
-
-## TPC-H Utility
-
-**Script:** `benchmark/tpch/utility_tpch.sql`
-
-Runs 17 TPC-H queries via `PRAGMA tpch(N)` with `privacy_diffcols` set before each query. The covered queries are: Q1, Q4, Q5, Q6, Q7, Q8, Q9, Q11, Q12, Q13, Q14, Q15, Q17, Q19, Q20, Q21, Q22.
-
-Each entry in the script follows this pattern:
-
-```sql
-set privacy_diffcols = '2:q01.csv';
-pragma tpch(1);
-```
-
-### Running
-
-From the project root:
+## Run the Main Experiment
 
 ```bash
-# Single run (requires tpch extension to be loaded)
-echo "INSTALL tpch; LOAD tpch;" | cat - benchmark/tpch/utility_tpch.sql | ./duckdb/build/release/duckdb tpch_sf30.db
+build/release/extension/privacy/dp_benchmark_runner \
+  --config benchmark/configs/utility/dp_tpch_sf30_utility.json
 ```
 
-Or interactively:
-```sql
--- Inside the DuckDB CLI
-INSTALL tpch;
-LOAD tpch;
-.read benchmark/tpch/utility_tpch.sql
-```
+The runner uses two passes. The first pass times private queries and checkpoints the CSV. The second pass computes
+exact answers, non-private SAA estimators, errors, recall, precision, and noise diagnostics. Diagnostic work is not
+included in `time_ms`.
 
-### Repeated Stability Testing
+## Bounds
 
-**Script:** `benchmark/tpch/run_utility_tpch_100.sh`
+The mechanisms consume different public bounds:
 
-Runs the full TPC-H utility script 100 times in sequence with progress display. Each iteration appends results to the per-query CSV files (e.g., `q01.csv`, `q04.csv`, ...), so after 100 runs each CSV will contain 100 rows per query.
+| Setting | Bounded DP | Elastic DP | SAA |
+|---|---|---|---|
+| `dp_count_bound` | Per-PU COUNT contribution | Not used for elastic sensitivity | Per-PU sample contribution |
+| `dp_sum_bound(s)` | Per-PU SUM contribution | Input clipping before FLEX analysis | Per-PU sample contribution |
+| `dp_max_groups_contributed` | Groups per privacy unit | Not used | Groups per privacy unit |
+| `dp_sass_*_output_*bounds` | Not used | Not used | Public lane-output domain |
+| `dp_avg_lower_bounds`, `dp_avg_upper_bounds` | Public AVG domain | Public AVG domain | Public AVG domain |
+
+Each mechanism's multiplier is applied around its own base bound. The paper's SAA base output domains cover the
+central 75% of non-private lane outputs. Bound derivation is offline and excluded from runtime.
+
+## Result Columns
+
+A result row is identified by its dataset, query, mode, release, run, bound multiplier, `m`, rescaling choice, and
+seed. Important metric families are:
+
+| Columns | Meaning |
+|---|---|
+| `time_ms`, `runtime_success`, `runtime_error` | Timed private query |
+| `metrics_success`, `metrics_error` | Untimed diagnostics |
+| `median_error_pct`, `recall`, `precision` | Private result against the exact full-data answer |
+| `saa_estimator_*` | Private SAA result against its non-private estimator |
+| `saa_sampling_*` | Non-private SAA estimator against the full-data answer |
+| `saa_noise_scale_*` | SAA noise diagnostics |
+| `q1_*`, `saa_*_q1_*` | Separate Q01 SUM, AVG, and COUNT metrics |
+
+`median_error_pct` is the median absolute relative error across matched numeric output cells, multiplied by 100.
+
+## Sanity Checks
+
+Inspect non-private lane values and central-75 output domains with:
 
 ```bash
-# 100 repeated runs (with progress display)
-bash benchmark/tpch/run_utility_tpch_100.sh [database] [duckdb_binary]
-
-# Using defaults (tpch_sf30.db, ./build/release/duckdb)
-bash benchmark/tpch/run_utility_tpch_100.sh
-
-# With explicit arguments
-bash benchmark/tpch/run_utility_tpch_100.sh tpch_sf30.db ./build/release/duckdb
+python3 benchmark/dp/verify_tpch_saa_bounds.py \
+  --duckdb build/release/duckdb \
+  --db tpch_sf30_graviton.db \
+  --config benchmark/configs/utility/dp_tpch_sf30_utility.json \
+  --out-dir benchmark/results/sanity/bounds
 ```
 
-### `privacy_diffcols` Settings
+Measure lane stability with `benchmark/dp/run_tpch_sass_stability.py`. Stability is the population standard deviation
+of non-private lane outputs divided by the absolute mean. These checks do not contribute to reported runtime.
 
-| Query | `privacy_diffcols` | Group-by columns |
-|-------|----------------|------------------|
-| Q1    | `'2:q01.csv'`  | 2                |
-| Q4    | `'1:q04.csv'`  | 1                |
-| Q5    | `'1:q05.csv'`  | 1                |
-| Q6    | `'0:q06.csv'`  | 0                |
-| Q7    | `'3:q07.csv'`  | 3                |
-| Q8    | `'1:q08.csv'`  | 1                |
-| Q9    | `'2:q09.csv'`  | 2                |
-| Q11   | `'1:q11.csv'`  | 1                |
-| Q12   | `'1:q12.csv'`  | 1                |
-| Q13   | `'1:q13.csv'`  | 1                |
-| Q14   | `'0:q14.csv'`  | 0                |
-| Q15   | `'1:q15.csv'`  | 1                |
-| Q17   | `'0:q17.csv'`  | 0                |
-| Q19   | `'0:q19.csv'`  | 0                |
-| Q20   | `'1:q20.csv'`  | 1                |
-| Q21   | `'1:q21.csv'`  | 1                |
-| Q22   | `'1:q22.csv'`  | 1                |
-
-## ClickBench Utility
-
-**Script:** `benchmark/clickbench/clickbench_queries/utility.sql`
-
-Runs all 43 ClickBench queries (Q1--Q43) with `privacy_diffcols` set before each query. Unlike the TPC-H utility, these are full SQL queries executed directly against the `hits` table rather than pragmas.
-
-Each entry follows this pattern:
-
-```sql
-set privacy_diffcols='0:q01.csv';
-SELECT COUNT(*) FROM hits;
-```
-
-### Running
-
-From the project root:
-
-```bash
-./duckdb/build/release/duckdb clickbench.db < benchmark/clickbench/clickbench_queries/utility.sql
-```
-
-### Query Coverage
-
-The 43 queries cover a range of aggregate patterns:
-
-| Pattern | Examples |
-|---------|----------|
-| Simple aggregates (`COUNT(*)`, `SUM`, `AVG`) | Q1, Q2, Q3, Q4 |
-| `COUNT(DISTINCT ...)` | Q5, Q6, Q9, Q11, Q14 |
-| `GROUP BY` with `ORDER BY` / `LIMIT` | Q8--Q19, Q28--Q43 |
-| Filtered aggregates (`WHERE`, `HAVING`) | Q2, Q21, Q28, Q37--Q43 |
-| Wide aggregates (many `SUM` columns) | Q30 |
-| String matching (`LIKE`, `REGEXP_REPLACE`) | Q21--Q27, Q29 |
-
-## List Transform Utility
-
-**Directory:** `benchmark/utility_listtransform/`
-
-Compares two approaches for computing multiple ratio expressions (numerator/denominator pairs) under PAC:
-
-- **Naive**: N independent `priv_sum()` calls — applies noise N times
-- **Optimized**: Single noise application via `priv_sum()` (counters variant) + `list_transform()` + `pac_noised()`
-
-The benchmark runs queries Q1–Q20, where Q_N computes the sum of N ratio expressions of the form `100 * SUM(l_extendedprice * f(l_discount, l_tax)) / SUM(l_extendedprice)`.
-
-### Ungrouped (original)
-
-**Script:** `benchmark/utility_listtransform/run.sh`
-
-```bash
-bash benchmark/utility_listtransform/run.sh [database] [duckdb] [runs]
-
-# Example
-bash benchmark/utility_listtransform/run.sh tpch_sf1.db ./build/release/duckdb 100
-```
-
-### Grouped (with skew support)
-
-**Script:** `benchmark/utility_listtransform/run_grouped.sh`
-
-Adds `GROUP BY o_orderkey % ngroups` to amplify the noise effect (smaller groups = fewer rows per group = more noise relative to signal). Optionally applies Zipf skew to `l_extendedprice` to simulate real-world heavy-tailed value distributions.
-
-```bash
-bash benchmark/utility_listtransform/run_grouped.sh [database] [duckdb] [runs] [ngroups] [skew_alpha]
-```
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| database | `tpch_sf1.db` | TPC-H database file (must have tables loaded) |
-| duckdb | `./build/release/duckdb` | Path to DuckDB binary |
-| runs | `1` | Number of experiment runs |
-| ngroups | `100` | Number of GROUP BY buckets (`o_orderkey % N`) |
-| skew_alpha | `0` | Zipf skew for `l_extendedprice`. `0` = no skew. When > 0, copies the database and applies `l_extendedprice = 900 + 104100 * pow(random(), alpha)`. Recommended: `20` |
-
-```bash
-# 100 runs, 100 groups, Zipf alpha=20 (copies db to tpch_sf1_skew20.db)
-bash benchmark/utility_listtransform/run_grouped.sh tpch_sf1.db ./build/release/duckdb 100 100 20
-
-# No skew, just grouped
-bash benchmark/utility_listtransform/run_grouped.sh tpch_sf1.db ./build/release/duckdb 100 100
-```
-
-### Plotting
-
-**Script:** `benchmark/utility_listtransform/plot.R`
-
-Reads `results.csv` (or `results_grouped.csv`) and produces boxplots of relative error by num_ratios and variant.
-
-```bash
-Rscript benchmark/utility_listtransform/plot.R [results.csv]
-```
-
-## See Also
-
-- [Benchmark Overview](README.md)
-- [TPC-H Benchmark](tpch.md) - Full TPC-H benchmark executable
-- [TPC-H Compiler Benchmark](tpch_compiler.md) - Compiler correctness testing
-- [ClickBench Benchmark](clickbench.md) - Full ClickBench benchmark executable
-- [Microbenchmarks](microbenchmarks.md) - Individual aggregate function tests
+See [repro.md](../../repro.md) for complete commands and plotting inputs.
