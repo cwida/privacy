@@ -15,9 +15,7 @@ namespace duckdb {
 
 namespace {
 
-const vector<string> STABILITY_FIELD_NAMES = {
-    "lane_count", "valid_count", "null_count", "mean",        "stddev_pop",      "cv",          "min", "median",
-    "max",        "range",       "mad",        "max_abs_dev", "stable_stddev_1", "stable_mad_1"};
+static constexpr idx_t STABILITY_FIELD_COUNT = 14;
 
 struct DpSassStabilityQueryRow {
 	vector<Value> values;
@@ -258,7 +256,7 @@ static vector<DpSassStabilityQueryRow> ExecuteStabilityQuery(ClientContext &cont
 		string group_key_json = group_row < group_keys.size() ? group_keys[group_row] : "{}";
 
 		vector<Value> values;
-		values.reserve(4 + STABILITY_FIELD_NAMES.size());
+		values.reserve(4 + STABILITY_FIELD_COUNT);
 		values.push_back(Value::BIGINT(static_cast<int64_t>(group_row)));
 		values.push_back(Value::INTEGER(record.aggregate_index));
 		idx_t result_name_idx = group_cols + aggregate_index;

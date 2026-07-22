@@ -496,7 +496,7 @@ static bool SmoothMedianStatsRow(const list_entry_t &entry, const UnifiedVectorF
 		if (valid_count < min_valid) {
 			return false;
 		}
-		std::sort(values.begin(), values.begin() + valid_count);
+		std::sort(values.begin(), values.begin() + static_cast<vector<double>::difference_type>(valid_count));
 		for (idx_t j = valid_count; j < values.size(); j++) {
 			values[j] = values[valid_count - 1];
 		}
