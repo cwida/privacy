@@ -846,3 +846,145 @@ SET dp_sass_sum_output_lower_bounds = NULL;
 
 statement ok
 SET dp_sass_sum_output_upper_bounds = NULL;
+
+# Group contribution bounding for grouped COUNT(DISTINCT) must rank exact group
+# tuples. Hash-based DENSE_RANK can merge colliding groups and exceed C_u.
+statement ok
+SET explain_output = 'optimized_only';
+
+statement ok
+SET dp_count_bound = 10;
+
+statement ok
+SET dp_max_groups_contributed = 2;
+
+statement ok
+SET dp_sass_count_output_bound = 10000;
+
+query II
+EXPLAIN SELECT category AS g1, length(category) AS g2, COUNT(DISTINCT v)
+FROM sass_m_events
+GROUP BY g1, g2;
+----
+logical_opt	<REGEX>:[\s\S]*RANK_DENSE[\s\S]*ORDER BY[\s\S]*#0 ASC[\s\S]*#1 ASC[\s\S]*
+
+# Noisy aggregate cells must use independent random streams even when their lane
+# lists and public domains are identical. Cover both the optimized m=64 path and
+# the variable-m average and median terminals.
+statement ok
+CREATE PU TABLE sass_m_noise_users(uid INTEGER, a DOUBLE, b DOUBLE, PRIVACY_KEY(uid));
+
+statement ok
+INSERT INTO sass_m_noise_users
+SELECT i, (i % 10)::DOUBLE, (i % 10)::DOUBLE FROM range(4096) t(i);
+
+statement ok
+SET privacy_noise = true;
+
+statement ok
+SET privacy_seed = 123;
+
+statement ok
+SET dp_epsilon = 1.0;
+
+statement ok
+SET dp_delta = 1e-6;
+
+statement ok
+SET dp_sum_bounds = '10,10';
+
+statement ok
+SET dp_sass_sum_output_lower_bounds = '0,0';
+
+statement ok
+SET dp_sass_sum_output_upper_bounds = '50000,50000';
+
+statement ok
+SET dp_sass_release = 'average';
+
+statement ok
+SET dp_sass_m = 64;
+
+query I
+SELECT SUM(a) <> SUM(b) FROM sass_m_noise_users;
+----
+true
+
+statement ok
+SET dp_sass_m = 128;
+
+query I
+SELECT SUM(a) <> SUM(b) FROM sass_m_noise_users;
+----
+true
+
+statement ok
+SET dp_sass_release = 'median';
+
+query I
+SELECT SUM(a) <> SUM(b) FROM sass_m_noise_users;
+----
+true
+
+# Bound lists are scoped to the aggregate kind that consumes them. Settings left
+# by a previous SUM query must not make a COUNT-only query fail, and vice versa.
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET dp_sass_release = 'average';
+
+statement ok
+SET dp_sass_sum_output_bounds = '50000';
+
+statement ok
+SET dp_sass_sum_output_lower_bounds = '0';
+
+statement ok
+SET dp_sass_sum_output_upper_bounds = '50000';
+
+statement ok
+SET dp_sum_bounds = '10';
+
+statement ok
+SET dp_sass_count_output_bound = 10000;
+
+query I
+SELECT COUNT(*)::INTEGER FROM sass_m_noise_users;
+----
+4096
+
+statement ok
+SET dp_sass_count_output_bounds = '10000';
+
+statement ok
+SET dp_sass_count_output_lower_bounds = '0';
+
+statement ok
+SET dp_sass_count_output_upper_bounds = '10000';
+
+query I
+SELECT SUM(a)::INTEGER FROM sass_m_noise_users;
+----
+18420
+
+statement ok
+SET dp_sum_bounds = NULL;
+
+statement ok
+SET dp_sass_count_output_bounds = NULL;
+
+statement ok
+SET dp_sass_count_output_lower_bounds = NULL;
+
+statement ok
+SET dp_sass_count_output_upper_bounds = NULL;
+
+statement ok
+SET dp_sass_sum_output_bounds = NULL;
+
+statement ok
+SET dp_sass_sum_output_lower_bounds = NULL;
+
+statement ok
+SET dp_sass_sum_output_upper_bounds = NULL;

@@ -625,3 +625,21 @@ SELECT g, COUNT(*) FROM dp_standard_tiny_delta_events GROUP BY g;
 
 statement ok
 SET privacy_noise = true;
+
+# A SUM-only list setting left in the session is irrelevant to a COUNT-only query.
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET dp_sum_bounds = '10';
+
+query I
+SELECT COUNT(*)::INTEGER FROM dp_standard_tiny_delta_users;
+----
+600
+
+statement ok
+SET dp_sum_bounds = NULL;
+
+statement ok
+SET privacy_noise = true;

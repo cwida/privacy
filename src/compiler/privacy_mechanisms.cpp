@@ -671,7 +671,10 @@ static vector<double> GetDpSumContributionBounds(ClientContext &context, const s
 	}
 
 	bool has_sum_list = false;
-	auto sum_list = ParseFiniteSettingList(context, "dp_sum_bounds", has_sum_list);
+	vector<double> sum_list;
+	if (explicit_sum_count > 0) {
+		sum_list = ParseFiniteSettingList(context, "dp_sum_bounds", has_sum_list);
+	}
 	if (has_sum_list) {
 		if (sum_list.size() != explicit_sum_count) {
 			throw InvalidInputException(mechanism_name + ": expected " + std::to_string(explicit_sum_count) +
@@ -914,6 +917,9 @@ static AvgBounds GetAvgBounds(ClientContext &context, const string &mechanism_na
 
 static vector<double> GetDpSassOutputBounds(ClientContext &context, idx_t output_count, const string &list_setting,
                                             const string &scalar_setting, const string &aggregate_name) {
+	if (output_count == 0) {
+		return {};
+	}
 	bool has_list = false;
 	auto bounds = ParseFiniteSettingList(context, list_setting, has_list);
 	if (has_list) {
@@ -929,9 +935,6 @@ static vector<double> GetDpSassOutputBounds(ClientContext &context, idx_t output
 		}
 		return bounds;
 	}
-	if (output_count == 0) {
-		return {};
-	}
 	double scalar = GetRequiredDpBound(context, scalar_setting, "dp_sass");
 	return vector<double>(output_count, scalar);
 }
@@ -941,6 +944,9 @@ static vector<AvgDomain> GetDpSassOutputDomains(ClientContext &context, idx_t ou
                                                 const string &legacy_list_setting, const string &legacy_scalar_setting,
                                                 double legacy_lower_default, bool symmetric_legacy,
                                                 const string &aggregate_name) {
+	if (output_count == 0) {
+		return {};
+	}
 	bool has_lower_list = false;
 	bool has_upper_list = false;
 	auto lower_list = ParseFiniteSettingList(context, lower_list_setting, has_lower_list);
@@ -1156,10 +1162,10 @@ static unique_ptr<Expression> BuildIsNullPredicate(unique_ptr<Expression> expr) 
 	return is_null;
 }
 
-// One ranking cap: `rank_type` OVER (PARTITION BY partition_cols ORDER BY hash(order_cols)) <= cap.
-// WINDOW_ROW_NUMBER caps rows per partition (compiles to a per-partition top-K of capacity `cap`,
-// so keep `cap` small); WINDOW_RANK_DENSE caps distinct order-key groups per partition. Column
-// indices reference the group output of the source aggregate.
+// One ranking cap: `rank_type` OVER (PARTITION BY partition_cols ORDER BY order_cols) <= cap.
+// WINDOW_ROW_NUMBER uses a hash of the order columns to choose a bounded number of rows per partition.
+// WINDOW_RANK_DENSE orders by the exact columns because hash collisions could otherwise give distinct
+// groups the same rank and bypass the cap. Column indices reference the group output of the source aggregate.
 struct RankCapSpec {
 	ExpressionType rank_type;
 	vector<idx_t> partition_cols;
@@ -1191,13 +1197,20 @@ static unique_ptr<LogicalOperator> BuildRankCapFilter(OptimizerExtensionInput &i
 			rank->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST,
 			                          BuildIsNullPredicate(BuildLowerGroupRef(src, src_group_index, col)));
 		}
-		vector<unique_ptr<Expression>> hash_children;
-		hash_children.reserve(spec.order_cols.size());
-		for (auto col : spec.order_cols) {
-			hash_children.push_back(BuildLowerGroupRef(src, src_group_index, col));
+		if (spec.rank_type == ExpressionType::WINDOW_RANK_DENSE) {
+			for (auto col : spec.order_cols) {
+				rank->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST,
+				                          BuildLowerGroupRef(src, src_group_index, col));
+			}
+		} else {
+			vector<unique_ptr<Expression>> hash_children;
+			hash_children.reserve(spec.order_cols.size());
+			for (auto col : spec.order_cols) {
+				hash_children.push_back(BuildLowerGroupRef(src, src_group_index, col));
+			}
+			auto hash_expr = BindScalarLocal(input, "hash", std::move(hash_children));
+			rank->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST, std::move(hash_expr));
 		}
-		auto hash_expr = BindScalarLocal(input, "hash", std::move(hash_children));
-		rank->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST, std::move(hash_expr));
 		rank->start = WindowBoundary::UNBOUNDED_PRECEDING;
 		rank->end = WindowBoundary::CURRENT_ROW_ROWS;
 		window->expressions.push_back(std::move(rank));
@@ -1924,9 +1937,7 @@ static NoiseProjection WrapSampleMedianProjection(
 	bool average_release = release_method == "average";
 	bool variable_m = GetDpSassM(input.context) > DP_SASS_DEFAULT_M;
 	optional_idx noise_identity_index;
-	if (!stability_query_mode && !noise_scale_query_mode &&
-	    std::any_of(nonempty_lane_releases.begin(), nonempty_lane_releases.end(),
-	                [](bool enabled) { return enabled; })) {
+	if (!stability_query_mode && !noise_scale_query_mode) {
 		if (n_aggs > static_cast<idx_t>(std::numeric_limits<int32_t>::max())) {
 			throw InvalidInputException("dp_sass: too many aggregate cells for independent noise assignment");
 		}
@@ -1992,6 +2003,11 @@ static NoiseProjection WrapSampleMedianProjection(
 		} else {
 			terminal = average_release ? (variable_m ? "dp_gupt_mean_m_noise" : "dp_gupt_mean_noise")
 			                           : "dp_smooth_median_noise";
+			D_ASSERT(noise_identity_index.IsValid());
+			children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(static_cast<int32_t>(ai))));
+			children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(static_cast<int32_t>(n_aggs))));
+			children.push_back(make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT,
+			                                                       ColumnBinding(noise_identity_index.GetIndex(), 0)));
 		}
 		unique_ptr<Expression> noised = BindScalarLocal(input, terminal, std::move(children));
 		if (output_types[ai] != LogicalType::DOUBLE) {
@@ -2118,7 +2134,10 @@ static DpSassContributionBounds GetDpSassContributionBounds(ClientContext &conte
 		}
 	}
 	bool has_sum_list = false;
-	auto sum_list = ParseFiniteSettingList(context, "dp_sum_bounds", has_sum_list);
+	vector<double> sum_list;
+	if (explicit_sum_count > 0) {
+		sum_list = ParseFiniteSettingList(context, "dp_sum_bounds", has_sum_list);
+	}
 	if (has_sum_list) {
 		if (sum_list.size() != explicit_sum_count) {
 			throw InvalidInputException("dp_sass: expected " + std::to_string(explicit_sum_count) +

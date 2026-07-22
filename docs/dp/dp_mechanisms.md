@@ -94,7 +94,8 @@ loudly rather than releasing something unproven:
 | `dp_sum_bound` | per-contribution value clip for `SUM`/`AVG` | `L_i, Λ_i` (value range) |
 | `dp_count_bound` | per-PU row/contribution clip for `COUNT` over a join | contribution bound |
 | `dp_max_groups_contributed` | max output groups one PU may affect | **`C_u`** |
-| `dp_sample_lanes` | number of sample lanes a PU is hashed into (`m` is fixed at 64) | subsample assignment (`m`; see §11) |
+| `dp_sass_m` | number of SAA subsamples; one of `64`, `128`, `256`, or `512` | `m` |
+| `dp_sample_lanes` | number of subsamples a PU affects; `m > 64` requires the default `1` | per-PU subsample spread |
 | `dp_sass_release` | `'median'` (smooth-sensitivity, (ε,δ)) or `'average'` (GUPT mean, pure ε) | release rule |
 | `dp_sass_avg_method` | `dp_sass` AVG estimator: `'lane_average'` (default), `'nonempty_lane_average'`, or `'ratio'` (§13) | — |
 | `dp_sass_sum_method` | `dp_sass` SUM estimator under average release: `'lane_average'` (default) or `'nonempty_lane_average'` (§13) | — |
@@ -269,19 +270,21 @@ Song 2018) and its follow-up Chorus.
 **median** of the lane answers (smooth-sensitivity Laplace, (ε,δ)) or their **mean**
 (GUPT-style, pure ε).
 
-> **Two "lanes" to keep apart.** There are always **`m = 64` lanes** (fixed) — the
-> release is the median/mean over these 64. The setting **`dp_sample_lanes`** (default
-> `1`) is *not* this count; it is how many of the 64 lanes each **PU** is placed into
-> (its per-PU spread). The name is misleading: `dp_sample_lanes = 1` still means 64
-> lanes, each PU in one of them.
+> **Two "lanes" to keep apart.** **`dp_sass_m`** controls the number of subsamples
+> (`64`, `128`, `256`, or `512`). The release is the median or mean over those `m`
+> answers. **`dp_sample_lanes`** instead controls how many subsamples each PU affects.
+> Its default is `1`, which gives disjoint subsamples. Values above `1` are supported
+> only by the `m = 64` mask path.
 
 **Membership function (paper's `H(pu) mod m`).** With `dp_sample_lanes = 1` (the
-default) each PU is assigned to exactly one lane by a stable hash of its PU key —
-disjoint subsamples, as GUPT/the paper assume. The hash is computed after ordinary
-filters have been pushed to scans, and it is a pure function of the PU key, so
-adding/removing one PU does not renumber any other PU's sample lane.
+default), each PU is assigned to exactly one lane by a stable hash of its PU key.
+For `m = 64`, the lane is represented by one bit in a 64-bit mask. For larger `m`,
+the aggregate stores the lane identifier `H(pu) mod m` directly. Both paths form
+disjoint subsamples. The hash is computed after ordinary filters have been pushed
+to scans, and adding or removing one PU does not renumber any other PU's lane.
 
-> **Note — lanes are not disjoint when `dp_sample_lanes > 1`.** For `sample_lanes > 1`
+> **Note — lanes are not disjoint when `dp_sample_lanes > 1`.** This option applies
+> only to `m = 64`. For `sample_lanes > 1`
 > a PU is hashed into up to `sample_lanes` lanes by `DpSampleHash`
 > (`sample_hash |= 1 << ((key_hash >> 6i) & 63)`), so the subsamples **overlap** — a
 > PU appears in several lanes, and there is currently **no mechanism to force the
@@ -292,8 +295,8 @@ adding/removing one PU does not renumber any other PU's sample lane.
 > median — §12), but the disjoint-subsample assumption the SAA analysis relies on is
 > not enforced for `sample_lanes > 1`.
 
-**`ss_noised` (median release; paper's subroutine).** Sort the 64 clipped lane
-answers, take `z_p` with `p = ⌈m/2⌉ = 32` (`values[31]`), compute the smooth
+**`ss_noised` (median release; paper's subroutine).** Sort the `m` clipped lane
+answers, take the lower median `z_p` with `p = ⌈m/2⌉`, compute the smooth
 sensitivity `S*` of the median (§12), and add `Laplace(2·S*/ε')` with
 `β = ε'/(2·ln(2/δ'))`. Cross-checked against Nissim–Raskhodnikova–Smith (2007).
 
@@ -318,8 +321,8 @@ partition-selection count and give each aggregate cell
 
 **Median (`dp_sass`).** Two code paths, in `src/aggregates/dp_laplace_noise.cpp`:
 - **Exact** — `SmoothMedianSensitivityExact`: the Nissim–Raskhodnikova–Smith
-  divide-and-conquer (`JList`) over the 64 sorted values bracketed by `[L, Λ]`
-  sentinels, `O(m log m)`. Used on the bounded path (always, in practice).
+  exact interval scan over the `m` sorted values bracketed by `[L, Λ]` sentinels,
+  `O(m²)`. Used on the bounded path (always, in practice).
 - **Approximate** — `SmoothMedianSensitivity`: a capped scan, used only on the legacy
   unbounded path.
 
@@ -340,7 +343,7 @@ smooth sensitivity, same NRS `β`.
 
 | aggregate | `dp_standard` / `dp_elastic` | `dp_sass` |
 |---|---|---|
-| `COUNT(*)` | clip per-PU row count (join: `dp_count_bound`), Laplace | per-lane count, median/mean of 64 |
+| `COUNT(*)` | clip per-PU row count (join: `dp_count_bound`), Laplace | per-lane count, median/mean of `m` answers |
 | `COUNT(DISTINCT x)` | per-PU distinct count, clip, sum, Laplace | per-PU distinct count, clip, sample-sum, median/mean; single DISTINCT may use the lane-mask specialization |
 | `SUM(x)` | clip `x` to `dp_sum_bound`, sum, Laplace | per-lane sum; average release supports fixed-lane or privately-counted non-empty-lane estimators |
 | `AVG(x)` | decomposed → `SUM(clip x)` + `COUNT`; released as `noised_sum / max(noised_count, 1)` (Google bounded-mean shape) | **three estimators** (`dp_sass_avg_method`): `lane_average` (default) fills empty lanes before releasing the lane mean; `nonempty_lane_average` divides a noisy shifted sum of populated-lane averages by their noisy count; `ratio` releases independent row SUM and COUNT SAA cells and divides them |
@@ -378,7 +381,8 @@ distinct values per group, and the top aggregate releases an `as_sample_sum` ove
 bounded per-PU counts. Single `COUNT(DISTINCT)` queries may use the optimized
 `RewriteDistinctCountToSampleMedian` lane-mask path: it groups by `[groups..., PU,
 distinct value]`, computes `bit_or(dp_sample_mask(pu_hash))`, applies the same caps, then
-merges masks by `[groups..., distinct value]` before releasing 64 lane counts.
+merges masks by `[groups..., distinct value]` before releasing 64 lane counts. The
+variable-`m` path represents lane assignments directly instead of using a bit mask.
 
 ---
 
@@ -386,13 +390,13 @@ merges masks by `[groups..., distinct value]` before releasing 64 lane counts.
 
 ### Empty-lane filling (`dp_sass`)
 
-A `dp_sass` aggregate computes 64 lane answers and releases the median (or mean) of
-those 64. Some lanes can be **empty** — no PU was assigned to that lane, or everything
+A `dp_sass` aggregate computes `m` lane answers and releases their median or mean.
+Some lanes can be **empty** — no PU was assigned to that lane, or everything
 in it was filtered out. An empty lane has no natural answer: an empty `COUNT`/`SUM` is
 `0`, but an empty `AVG`/`MIN`/`MAX` is undefined (`NULL`, i.e. ±∞).
 
 The danger is that the *number* of non-empty lanes is **data-dependent** — a group with
-3 PUs populates far fewer of the 64 lanes than a group with 3000. If we released "the
+3 PUs populates far fewer lanes than a group with 3000. If we released "the
 median over just the non-empty lanes," that effective sample size would itself be a
 signal about the group's support, and it is not covered by the noise calibration — a
 leak.
@@ -417,7 +421,7 @@ Because the fill depends only on the public bounds (`dp_sass_count_output_bound`
 `dp_sass_minmax_lower/upper_bound`, …), swapping one PU in or out cannot change what an
 empty lane receives — it leaks nothing. Were the fill taken from the data (e.g. the
 observed minimum) it *would* leak, which is why §5 lists "empty-lane fill is public" as
-a load-bearing assumption. The effect: a 3-PU group and a 3000-PU group both yield 64
+a load-bearing assumption. The effect: a 3-PU group and a 3000-PU group both yield `m`
 fully-defined lanes, so the support signal never reaches the released median. This is
 the GUPT "fixed number of blocks, bounded block outputs" property.
 
@@ -480,6 +484,10 @@ releasing the raw value; `privacy_noise = false` zeroes noise for deterministic 
   query that never named the PU table; now the lanes are derived from the linked table's
   FK column and the result matches the
   explicit join (§13).
+- **Configurable `m`.** `dp_sass_m` supports `64`, `128`, `256`, and `512`. The
+  optimized `m = 64` path uses a machine-word membership mask. Larger values use
+  direct lane identifiers and variable-size aggregate states while preserving the
+  same disjoint assignment for `dp_sample_lanes = 1`.
 
 ### Still open
 
@@ -489,16 +497,13 @@ releasing the raw value; `privacy_noise = false` zeroes noise for deterministic 
    Bernoulli-`1/m` inclusion model, under which a PU appears in up to O(√m) subsamples
    (Nissim et al.) and that factor must enter the analysis. Confirm our hard-cap scaling is
    sound, or restrict `sample_lanes > 1`. An alternative derivation provides pseudocode for this case.
-2. **Configurable `m`.** `m` is fixed at 64 (SIMD/perf). SAA supports general `m`; `m ≤ 64`
-   is achievable by using a subset of the 64-bit mask, `m > 64` needs a wider multi-word
-   representation. Worth exposing `m` as a setting (64 the recommended default) — future work.
-3. **τ under very small δ.** A very small `δ_η` drives τ large enough to suppress all
+2. **τ under very small δ.** A very small `δ_η` drives τ large enough to suppress all
    groups. One possible mitigation is to give partition selection a relatively larger
    `δ_η` (an uneven δ split) so τ stays practical. Currently `δ_η = δ/(c+1)` (even split).
-4. **User-level FLEX.** Extending `dp_elastic` from row-level to user-level needs new
+3. **User-level FLEX.** Extending `dp_elastic` from row-level to user-level needs new
    per-user statistics + a sensitivity analysis and proof (future work).
-5. **`FILTER` on `COUNT(DISTINCT)`** (§3) — implementation gap, not a DP restriction: the
+4. **`FILTER` on `COUNT(DISTINCT)`** (§3) — implementation gap, not a DP restriction: the
    distinct rewrite already uses the aggregate's `FILTER` slot, so a user `FILTER` would
    have to be composed with it. Fails closed for now; plain aggregates support `FILTER`.
-6. **Fail-open side tables** — an unannotated private table is treated as public (§5.6);
+5. **Fail-open side tables** — an unannotated private table is treated as public (§5.6);
    this relies on analyst discipline.
