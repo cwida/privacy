@@ -392,6 +392,20 @@ static inline idx_t DpSassLaneIndex(uint64_t key_hash, int sample_count) {
 	return static_cast<idx_t>(key_hash & static_cast<uint64_t>(sample_count - 1));
 }
 
+static inline bool DpSampleMPredicateLaneIsTrue(UnifiedVectorFormat &list_data, UnifiedVectorFormat &child_data,
+                                                const bool *child_values, idx_t list_idx, idx_t lane) {
+	if (!list_data.validity.RowIsValid(list_idx)) {
+		return false;
+	}
+	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+	auto &entry = list_entries[list_idx];
+	if (lane >= entry.length) {
+		return false;
+	}
+	auto child_idx = child_data.sel->get_index(entry.offset + lane);
+	return child_data.validity.RowIsValid(child_idx) && child_values[child_idx];
+}
+
 // Shared bind for SASS sample-* aggregates: no mi/correction, just the active
 // dp_sample_lanes setting. Used by as_sample_sum, as_sample_count, etc.
 inline unique_ptr<FunctionData> MakeDpSampleBindData(ClientContext &ctx) {

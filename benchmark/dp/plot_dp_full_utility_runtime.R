@@ -46,19 +46,16 @@ if (!("dp_sass_m" %in% colnames(raw))) {
 scenario_levels <- c("terrible tight", "bad tight", "good", "bad loose", "terrible loose")
 query_levels <- c("Q01", "Q05", "Q06", "Q14", "Q19")
 mechanism_levels <- c(
-  "DuckDB", "Bounded DP", "DP-Elastic", "DP-SAA median", "DP-SAA average", "DP-SAA bounded ratio"
+  "DuckDB", "Bounded DP", "DP-Elastic", "DP-SAA median", "DP-SAA average"
 )
-mechanism_levels_grouped <- c("DuckDB", "Bounded DP", "DP-Elastic", "DP-SAA median", "DP-SAA average")
 mechanism_colors <- c(
   "DuckDB" = "#95a5a6",
   "Bounded DP" = "#d55e00",
   "DP-Elastic" = "#0072b2",
   "DP-SAA median" = "#4dff4d",
-  "DP-SAA average" = "#009900",
-  "DP-SAA bounded ratio" = "#005f2f"
+  "DP-SAA average" = "#009900"
 )
-mechanism_colors_grouped <- mechanism_colors[mechanism_levels_grouped]
-utility_mechanism_colors <- mechanism_colors_grouped[names(mechanism_colors_grouped) != "DuckDB"]
+utility_mechanism_colors <- mechanism_colors[names(mechanism_colors) != "DuckDB"]
 utility_mechanism_shapes <- c(
   "Bounded DP" = 16,
   "DP-Elastic" = 17,
@@ -95,7 +92,6 @@ normalized <- raw %>%
       mode == "dp_elastic" ~ "DP-Elastic",
       mode == "dp_sass" & release == "median" ~ "DP-SAA median",
       mode == "dp_sass" & release == "average" ~ "DP-SAA average",
-      mode == "dp_sass_bounded_ratio" ~ "DP-SAA bounded ratio",
       TRUE ~ mode
     ),
     scenario = case_when(
@@ -179,18 +175,8 @@ runtime_summary <- bind_rows(runtime_summary_mechanisms, runtime_duckdb) %>%
     plot_value = pmax(slowdown, 0.001)
   )
 
-group_bounded_ratio <- function(df) {
-  df %>%
-    filter(!(query == "Q14" & mechanism == "DP-SAA average")) %>%
-    mutate(
-      mechanism = ifelse(mechanism == "DP-SAA bounded ratio", "DP-SAA average", as.character(mechanism)),
-      mechanism = factor(mechanism, levels = mechanism_levels_grouped)
-    ) %>%
-    filter(mechanism %in% mechanism_levels_grouped)
-}
-
-utility_summary_grouped <- group_bounded_ratio(utility_summary)
-runtime_summary_grouped <- group_bounded_ratio(runtime_summary)
+utility_summary_grouped <- utility_summary
+runtime_summary_grouped <- runtime_summary
 
 runtime_delta_candidates <- normalized %>%
 	filter(
@@ -454,10 +440,10 @@ dev.off()
 message("Combined plot saved to: ", combined_plot)
 
 combined_grouped_data <- bind_rows(
-  group_bounded_ratio(utility_summary) %>%
+  utility_summary %>%
     mutate(metric = "median error (%)") %>%
     select(dataset, query, mechanism, scenario, plot_value, metric),
-  group_bounded_ratio(runtime_summary) %>%
+  runtime_summary %>%
     mutate(metric = "slowdown vs DuckDB (x)") %>%
     select(dataset, query, mechanism, scenario, plot_value, metric)
 ) %>%
@@ -489,7 +475,7 @@ combined_grouped <- ggplot(
   geom_line(linewidth = 0.95, na.rm = TRUE) +
   geom_point(size = 2.1, na.rm = TRUE) +
   facet_grid(metric ~ dataset_query, scales = "free_y") +
-  scale_color_manual(values = mechanism_colors_grouped, name = NULL, drop = FALSE) +
+  scale_color_manual(values = mechanism_colors, name = NULL, drop = FALSE) +
   scale_y_log10(
     breaks = c(0.01, 0.1, 1, 10, 100, 10000, 1000000),
     labels = c("0.01", "0.1", "1", "10", "100", "10K", "1M")

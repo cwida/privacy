@@ -5,6 +5,7 @@
 // Implement the TPCH benchmark runner.
 
 #include "as_tpch_benchmark.hpp"
+#include "as_query_rewriter.hpp"
 #include "benchmark_json.hpp"
 #include "benchmark_paths.hpp"
 
@@ -26,8 +27,6 @@
 #include <algorithm>
 #include <iomanip>
 #include <thread>
-#include <unistd.h>
-#include <limits.h>
 #include <dirent.h>
 #include <map>
 
@@ -38,68 +37,6 @@ static string Timestamp() {
 	char buf[64];
 	std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", std::localtime(&t));
 	return string(buf);
-}
-
-// forward declarations for helpers used below
-static bool FileExists(const string &path);
-static string ReadFileToString(const string &path);
-
-// new helper: try to discover the absolute path to the R plotting script
-static string FindPlotScriptAbsolute() {
-	// 1) try cwd/benchmark/tpch/plot_tpch_results.R
-	char cwd[PATH_MAX];
-	if (getcwd(cwd, sizeof(cwd))) {
-		string p = string(cwd) + "/benchmark/tpch/plot_tpch_results.R";
-		if (FileExists(p)) {
-			char rbuf[PATH_MAX];
-			if (realpath(p.c_str(), rbuf)) {
-				return string(rbuf);
-			}
-			return p;
-		}
-	}
-	// 2) try relative to the executable location (walk upward looking for benchmark dir)
-	char exe_path[PATH_MAX];
-	ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-	if (len != -1) {
-		exe_path[len] = '\0';
-		string dir = string(exe_path);
-		// strip filename
-		auto pos = dir.find_last_of('/');
-		if (pos != string::npos) {
-			dir = dir.substr(0, pos);
-		}
-		// walk up several levels searching for benchmark/tpch/plot_tpch_results.R
-		string try_dir = dir;
-		for (int i = 0; i < 6; ++i) {
-			string cand = try_dir + "/benchmark/tpch/plot_tpch_results.R";
-			if (FileExists(cand)) {
-				char rbuf[PATH_MAX];
-				if (realpath(cand.c_str(), rbuf)) {
-					return string(rbuf);
-				}
-				return cand;
-			}
-			auto p2 = try_dir.find_last_of('/');
-			if (p2 == string::npos) {
-				break;
-			}
-			try_dir = try_dir.substr(0, p2);
-		}
-	}
-	// 3) try some common relative locations
-	vector<string> rels = {"benchmark/tpch/plot_tpch_results.R", "./benchmark/tpch/plot_tpch_results.R",
-	                       "../benchmark/tpch/plot_tpch_results.R", "../../benchmark/tpch/plot_tpch_results.R"};
-	for (auto &r : rels) {
-		if (FileExists(r)) {
-			char rbuf[PATH_MAX];
-			if (realpath(r.c_str(), rbuf)) {
-				return string(rbuf);
-			}
-			return r;
-		}
-	}
-	return string();
 }
 
 // Format a double without trailing zeros (e.g. 0.100000 -> 0.1, 2.5000 -> 2.5)
@@ -232,7 +169,6 @@ struct ASTpchOptions {
 	string out_csv;
 	bool run_simple_hash = false;
 	bool skip_naive = false;
-	bool skip_plot = false;
 	int threads = 8;
 	vector<int> as_m_values = {64};
 };
@@ -249,188 +185,9 @@ static ASTpchOptions LoadASTpchOptions(const string &config_path) {
 	options.out_csv = JsonString(root, "out", options.out_csv);
 	options.run_simple_hash = JsonBool(root, "run_simple_hash", options.run_simple_hash);
 	options.skip_naive = JsonBool(root, "skip_naive", options.skip_naive);
-	options.skip_plot = !JsonBool(root, "plot", !options.skip_plot);
 	options.threads = static_cast<int>(JsonNumber(root, "threads", options.threads));
 	options.as_m_values = JsonIntList(root, "as_ms", "as_m", options.as_m_values);
 	return options;
-}
-
-static bool IsIdentifierChar(char c) {
-	return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
-}
-
-static idx_t FindMatchingParen(const string &sql, idx_t open_pos) {
-	int depth = 0;
-	bool in_single_quote = false;
-	bool in_double_quote = false;
-	for (idx_t i = open_pos; i < sql.size(); i++) {
-		char c = sql[i];
-		if (in_single_quote) {
-			if (c == '\'' && i + 1 < sql.size() && sql[i + 1] == '\'') {
-				i++;
-			} else if (c == '\'') {
-				in_single_quote = false;
-			}
-			continue;
-		}
-		if (in_double_quote) {
-			if (c == '"' && i + 1 < sql.size() && sql[i + 1] == '"') {
-				i++;
-			} else if (c == '"') {
-				in_double_quote = false;
-			}
-			continue;
-		}
-		if (c == '\'') {
-			in_single_quote = true;
-		} else if (c == '"') {
-			in_double_quote = true;
-		} else if (c == '(') {
-			depth++;
-		} else if (c == ')') {
-			depth--;
-			if (depth == 0) {
-				return i;
-			}
-		}
-	}
-	return string::npos;
-}
-
-static string TrimCopy(const string &value) {
-	auto begin = std::find_if(value.begin(), value.end(), [](unsigned char ch) { return !std::isspace(ch); });
-	auto end = std::find_if(value.rbegin(), value.rend(), [](unsigned char ch) { return !std::isspace(ch); }).base();
-	if (begin >= end) {
-		return string();
-	}
-	return string(begin, end);
-}
-
-static vector<string> SplitTopLevelArgs(const string &args) {
-	vector<string> result;
-	idx_t start = 0;
-	int depth = 0;
-	bool in_single_quote = false;
-	bool in_double_quote = false;
-	for (idx_t i = 0; i < args.size(); i++) {
-		char c = args[i];
-		if (in_single_quote) {
-			if (c == '\'' && i + 1 < args.size() && args[i + 1] == '\'') {
-				i++;
-			} else if (c == '\'') {
-				in_single_quote = false;
-			}
-			continue;
-		}
-		if (in_double_quote) {
-			if (c == '"' && i + 1 < args.size() && args[i + 1] == '"') {
-				i++;
-			} else if (c == '"') {
-				in_double_quote = false;
-			}
-			continue;
-		}
-		if (c == '\'') {
-			in_single_quote = true;
-		} else if (c == '"') {
-			in_double_quote = true;
-		} else if (c == '(') {
-			depth++;
-		} else if (c == ')') {
-			depth--;
-		} else if (c == ',' && depth == 0) {
-			result.push_back(TrimCopy(args.substr(start, i - start)));
-			start = i + 1;
-		}
-	}
-	result.push_back(TrimCopy(args.substr(start)));
-	return result;
-}
-
-static bool StartsWithFunctionCall(const string &sql, idx_t pos, const string &name, idx_t &open_pos) {
-	if (pos > 0 && IsIdentifierChar(sql[pos - 1])) {
-		return false;
-	}
-	if (sql.compare(pos, name.size(), name) != 0) {
-		return false;
-	}
-	idx_t next = pos + name.size();
-	if (next < sql.size() && IsIdentifierChar(sql[next])) {
-		return false;
-	}
-	while (next < sql.size() && std::isspace(static_cast<unsigned char>(sql[next]))) {
-		next++;
-	}
-	if (next >= sql.size() || sql[next] != '(') {
-		return false;
-	}
-	open_pos = next;
-	return true;
-}
-
-static string StripFunctionCalls(const string &sql, const string &name) {
-	string result;
-	idx_t pos = 0;
-	while (pos < sql.size()) {
-		idx_t open_pos;
-		if (StartsWithFunctionCall(sql, pos, name, open_pos)) {
-			idx_t close_pos = FindMatchingParen(sql, open_pos);
-			if (close_pos == string::npos) {
-				throw std::runtime_error("could not find closing parenthesis for " + name);
-			}
-			result += StripFunctionCalls(sql.substr(open_pos + 1, close_pos - open_pos - 1), name);
-			pos = close_pos + 1;
-			continue;
-		}
-		result.push_back(sql[pos++]);
-	}
-	return result;
-}
-
-static string StripSqlLineComments(const string &sql) {
-	string result;
-	bool in_single_quote = false;
-	for (idx_t i = 0; i < sql.size(); i++) {
-		char c = sql[i];
-		if (c == '\'' && (i + 1 >= sql.size() || sql[i + 1] != '\'')) {
-			in_single_quote = !in_single_quote;
-			result.push_back(c);
-			continue;
-		}
-		if (!in_single_quote && c == '-' && i + 1 < sql.size() && sql[i + 1] == '-') {
-			while (i < sql.size() && sql[i] != '\n') {
-				i++;
-			}
-			if (i < sql.size()) {
-				result.push_back(sql[i]);
-			}
-			continue;
-		}
-		result.push_back(c);
-		if (c == '\'' && i + 1 < sql.size() && sql[i + 1] == '\'') {
-			result.push_back(sql[++i]);
-		}
-	}
-	return result;
-}
-
-static bool ParseEntireFunctionCall(const string &expr, const string &name, vector<string> &args) {
-	string trimmed = TrimCopy(expr);
-	idx_t open_pos;
-	if (!StartsWithFunctionCall(trimmed, 0, name, open_pos)) {
-		return false;
-	}
-	idx_t close_pos = FindMatchingParen(trimmed, open_pos);
-	if (close_pos == string::npos) {
-		return false;
-	}
-	for (idx_t i = close_pos + 1; i < trimmed.size(); i++) {
-		if (!std::isspace(static_cast<unsigned char>(trimmed[i]))) {
-			return false;
-		}
-	}
-	args = SplitTopLevelArgs(trimmed.substr(open_pos + 1, close_pos - open_pos - 1));
-	return true;
 }
 
 static string RewriteAsFunctionCall(const string &name, const vector<string> &args, int sample_count) {
@@ -507,9 +264,9 @@ static string RewriteAsFunctionCall(const string &name, const vector<string> &ar
 		}
 		vector<string> sum_args;
 		vector<string> count_args;
-		if (!ParseEntireFunctionCall(args[0], "as_sum", sum_args) ||
-		    !ParseEntireFunctionCall(args[1], "as_count", count_args) || sum_args.size() != 2 ||
-		    count_args.size() < 1 || TrimCopy(sum_args[0]) != TrimCopy(count_args[0])) {
+		if (!benchmark::ParseEntireFunctionCall(args[0], "as_sum", sum_args) ||
+		    !benchmark::ParseEntireFunctionCall(args[1], "as_count", count_args) || sum_args.size() != 2 ||
+		    count_args.size() < 1 || benchmark::TrimSqlText(sum_args[0]) != benchmark::TrimSqlText(count_args[0])) {
 			throw std::runtime_error("variable-m AS rewrite only supports as_noised_div(as_sum(key, value), "
 			                         "as_count(key, value)) AVG patterns");
 		}
@@ -518,56 +275,13 @@ static string RewriteAsFunctionCall(const string &name, const vector<string> &ar
 	throw std::runtime_error("unsupported AS aggregate rewrite: " + name);
 }
 
-static bool ContainsFunctionCall(const string &sql, const vector<string> &names) {
-	for (idx_t pos = 0; pos < sql.size(); pos++) {
-		for (auto &name : names) {
-			idx_t open_pos;
-			if (StartsWithFunctionCall(sql, pos, name, open_pos)) {
-				return true;
-			}
-		}
-	}
-	return false;
-}
-
 static string RewriteAsQueryForSampleAggregation(const string &sql, int sample_count) {
 	static const vector<string> names = {"as_noised_count", "as_noised_sum", "as_noised_avg", "as_noised_min",
 	                                     "as_noised_max",   "as_noised_div", "as_noised",     "as_sum",
 	                                     "as_count",        "as_min",        "as_max"};
-	string raw_hash_sql = StripFunctionCalls(StripSqlLineComments(sql), "priv_hash");
-	string result;
-	idx_t pos = 0;
-	while (pos < raw_hash_sql.size()) {
-		bool rewritten = false;
-		for (auto &name : names) {
-			idx_t open_pos;
-			if (!StartsWithFunctionCall(raw_hash_sql, pos, name, open_pos)) {
-				continue;
-			}
-			idx_t close_pos = FindMatchingParen(raw_hash_sql, open_pos);
-			if (close_pos == string::npos) {
-				throw std::runtime_error("could not find closing parenthesis for " + name);
-			}
-			auto args = SplitTopLevelArgs(raw_hash_sql.substr(open_pos + 1, close_pos - open_pos - 1));
-			if (name != "as_noised_div") {
-				for (auto &arg : args) {
-					arg = RewriteAsQueryForSampleAggregation(arg, sample_count);
-				}
-			}
-			result += RewriteAsFunctionCall(name, args, sample_count);
-			pos = close_pos + 1;
-			rewritten = true;
-			break;
-		}
-		if (!rewritten) {
-			result.push_back(raw_hash_sql[pos++]);
-		}
-	}
 	static const vector<string> unsupported = {"as_noised", "as_sum", "as_count", "as_min", "as_max"};
-	if (ContainsFunctionCall(result, unsupported) || result.find("priv_select_") != string::npos) {
-		throw std::runtime_error("variable-m AS rewrite does not support remaining 64-world list expressions");
-	}
-	return result;
+	benchmark::AsQueryRewriteOptions options {names, unsupported, true, true, "as_noised_div", true};
+	return benchmark::RewriteAsQuery(sql, sample_count, options, RewriteAsFunctionCall);
 }
 
 static bool TryRewriteSelectedTpchQuery(const string &label, int sample_count, string &rewritten_sql) {
@@ -609,134 +323,6 @@ ORDER BY ALL)";
 		return true;
 	}
 	return false;
-}
-
-static string FindSchemaFile(const string &filename) {
-	// Try common relative locations
-	vector<string> candidates = {filename, "./tpch/" + filename, "benchmark/tpch/" + filename,
-	                             "../benchmark/tpch/" + filename, "../../benchmark/tpch/" + filename};
-
-	for (auto &cand : candidates) {
-		if (FileExists(cand)) {
-			return cand;
-		}
-	}
-
-	// Try relative to executable
-	char exe_path[PATH_MAX];
-	ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-	if (len != -1) {
-		exe_path[len] = '\0';
-		string dir = string(exe_path);
-		auto pos = dir.find_last_of('/');
-		if (pos != string::npos) {
-			dir = dir.substr(0, pos);
-		}
-
-		for (int i = 0; i < 6; ++i) {
-			string cand = dir + "/benchmark/tpch/" + filename;
-			if (FileExists(cand)) {
-				return cand;
-			}
-			auto p2 = dir.find_last_of('/');
-			if (p2 == string::npos)
-				break;
-			dir = dir.substr(0, p2);
-		}
-	}
-
-	return "";
-}
-
-// helper: find Rscript absolute path via 'which'
-static string FindRscriptAbsolute() {
-	FILE *pipe = popen("which Rscript 2>/dev/null", "r");
-	if (!pipe) {
-		return string();
-	}
-	char buf[PATH_MAX];
-	string out;
-	while (fgets(buf, sizeof(buf), pipe)) {
-		out += string(buf);
-	}
-	// trim newline/whitespace
-	while (!out.empty() && (out.back() == '\n' || out.back() == '\r' || out.back() == ' ')) {
-		out.pop_back();
-	}
-	if (out.empty()) {
-		return string();
-	}
-	return out;
-}
-
-// Invoke the plotting script
-// Returns true if a plot was successfully generated.
-static bool InvokePlotScript(const string &abs_actual_out, const string &out_dir) {
-	string script = FindPlotScriptAbsolute();
-	if (script.empty()) {
-		Log(string("Plot script not found (looked in several candidate locations). Skipping plotting."));
-		return false;
-	}
-
-	string rscript_path = FindRscriptAbsolute();
-	if (rscript_path.empty()) {
-		Log(string("Rscript executable not found on PATH. Plotting will likely fail. Please ensure R is installed and "
-		           "Rscript is available."));
-	}
-	// Call the discovered script exactly once. If Rscript is available, use it with --vanilla.
-	string rcmd = rscript_path.empty() ? string("Rscript --vanilla") : (rscript_path + string(" --vanilla"));
-	string cmd = rcmd + string(" \"") + script + "\" \"" + abs_actual_out + "\" \"" + out_dir + "\"";
-	Log(string("Calling plot script: ") + cmd);
-	string full_cmd = cmd + " 2>&1";
-	FILE *pipe = popen(full_cmd.c_str(), "r");
-	if (!pipe) {
-		Log(string("popen failed when starting plot script."));
-		Log(string("Plot script invocation failed; skipping plotting."));
-		return false;
-	}
-	char buffer[4096];
-	string output;
-	while (true) {
-		size_t n = fread(buffer, 1, sizeof(buffer), pipe);
-		if (n > 0) {
-			output.append(buffer, buffer + n);
-		}
-		if (n < sizeof(buffer)) {
-			break;
-		}
-	}
-	int rc = pclose(pipe);
-	int exit_code = rc;
-	if (rc != -1 && WIFEXITED(rc)) {
-		exit_code = WEXITSTATUS(rc);
-	}
-	string out_log = output;
-	if (out_log.size() > 4000) {
-		out_log = out_log.substr(0, 4000) + "\n...[truncated]...";
-	}
-	Log(string("Plot script output (truncated):\n") + out_log);
-	Log(string("Plot script returned exit code: ") + std::to_string(exit_code));
-	if (exit_code == 0) {
-		Log(string("Plot script completed successfully."));
-		return true;
-	}
-	if (output.find("libicu") != string::npos || output.find("stringi.so") != string::npos ||
-	    output.find("libicuuc") != string::npos) {
-		Log(string("Plot attempt reported missing ICU/shared library in R output. Suggest installing system ICU (for "
-		           "example 'libicu' or 'libicu-devel' depending on your Linux distribution) or ensuring R's native "
-		           "libraries are discoverable by LD_LIBRARY_PATH. You can also try running 'Rscript --vanilla "
-		           "<script>' in an environment where R is fully installed."));
-	}
-	Log(string("Plot script failed (non-zero exit). Skipping further attempts."));
-	return false;
-}
-
-// Drop all Naive-AS helper tables
-static void NaiveASDropTables(Connection &con) {
-	con.Query("DROP INDEX IF EXISTS idx_lineitem_enhanced_order_supp;");
-	con.Query("DROP TABLE IF EXISTS lineitem_enhanced;");
-	con.Query("DROP TABLE IF EXISTS random_samples;");
-	con.Query("DROP TABLE IF EXISTS random_samples_orders;");
 }
 
 // Create all Naive-AS sampling tables once (customer-based, orders-based, q21 extras)
@@ -842,8 +428,7 @@ static void NaiveASCreateTables(Connection &con) {
 }
 
 int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv,
-                       bool run_simple_hash, int threads, const vector<int> &as_m_values, bool skip_naive,
-                       bool skip_plot) {
+                       bool run_simple_hash, int threads, const vector<int> &as_m_values, bool skip_naive) {
 	try {
 		Log(string("run_simple_hash flag: ") + (run_simple_hash ? string("true") : string("false")));
 		Log(string("skip_naive flag: ") + (skip_naive ? string("true") : string("false")));
@@ -1175,33 +760,6 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 		csv.close();
 		Log(string("Benchmark finished. Results written to ") + actual_out);
 
-		// Automatically call the R plotting script with the generated CSV file (use absolute paths)
-		if (!skip_plot) {
-			if (as_m_values.size() > 1) {
-				Log("Skipping default plot because --as-ms produced an m-sweep CSV; use the m-aware plotting script.");
-				return 0;
-			}
-			// compute absolute path to actual_out
-			char out_real[PATH_MAX];
-			string abs_actual_out;
-			if (realpath(actual_out.c_str(), out_real)) {
-				abs_actual_out = string(out_real);
-			} else {
-				// fallback: if actual_out is relative, prefix cwd
-				char cwd2[PATH_MAX];
-				if (getcwd(cwd2, sizeof(cwd2))) {
-					abs_actual_out = string(cwd2) + "/" + actual_out;
-				} else {
-					abs_actual_out = actual_out; // last resort
-				}
-			}
-			// derive out_dir from abs_actual_out
-			size_t pos = abs_actual_out.find_last_of('/');
-			string out_dir = (pos == string::npos) ? string(".") : abs_actual_out.substr(0, pos);
-
-			InvokePlotScript(abs_actual_out, out_dir);
-		}
-
 		return 0;
 	} catch (std::exception &ex) {
 		Log(string("Error running benchmark: ") + ex.what());
@@ -1225,7 +783,6 @@ static void PrintUsageMain() {
 	          << "  --run-simple-hash: optional flag to run a simple hash AS variant as well\n"
 	          << "  --as-ms <csv>: AS sample counts to run, e.g. 64,512 (default 64)\n"
 	          << "  --skip-naive: skip Naive-AS setup and runs\n"
-	          << "  --no-plot: do not invoke the R plotting script\n"
 	          << "  --threads=N: number of DuckDB threads (default 8)\n";
 }
 
@@ -1256,8 +813,6 @@ int main(int argc, char **argv) {
 				options.run_simple_hash = true;
 			} else if (arg == "--skip-naive") {
 				options.skip_naive = true;
-			} else if (arg == "--no-plot") {
-				options.skip_plot = true;
 			} else if (arg == "--as-ms" && i + 1 < argc) {
 				options.as_m_values = duckdb::ParseIntListCSV(argv[++i]);
 			} else if (arg.rfind("--as-ms=", 0) == 0) {
@@ -1309,7 +864,7 @@ int main(int argc, char **argv) {
 		}
 		return duckdb::RunASTPCHBenchmark(options.db_path, options.queries_dir, options.scale_factor, options.out_csv,
 		                                  options.run_simple_hash, options.threads, options.as_m_values,
-		                                  options.skip_naive, options.skip_plot);
+		                                  options.skip_naive);
 	} catch (std::exception &ex) {
 		std::cerr << "error: " << ex.what() << "\n";
 		return 1;

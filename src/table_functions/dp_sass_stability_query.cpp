@@ -194,18 +194,22 @@ static string BuildGroupKeyJson(QueryResult &result, const vector<Value> &row, i
 	return json;
 }
 
-static vector<DpSassStabilityQueryRow> ExecuteStabilityQuery(ClientContext &context, const string &sql) {
+template <class CLEAR_RECORDS, class TAKE_RECORDS, class APPEND_FIELDS>
+static vector<DpSassStabilityQueryRow>
+ExecuteDiagnosticQuery(ClientContext &context, const string &sql, const string &function_name,
+                       const string &record_description, bool stability_query_mode, const CLEAR_RECORDS &clear_records,
+                       const TAKE_RECORDS &take_records, const APPEND_FIELDS &append_fields) {
 	auto &db = DatabaseInstance::GetDatabase(context);
 	Connection conn(db);
-	ConfigureNestedConnection(context, conn, true);
-	ClearDpSassStabilityQueryRecords();
+	ConfigureNestedConnection(context, conn, stability_query_mode);
+	clear_records();
 
 	auto result = conn.Query(sql);
 	if (result->HasError()) {
-		throw InvalidInputException("dp_sass_stability_query: " + result->GetError());
+		throw InvalidInputException(function_name + ": " + result->GetError());
 	}
 	if (result->ColumnCount() == 0) {
-		throw InvalidInputException("dp_sass_stability_query: query returned no columns");
+		throw InvalidInputException(function_name + ": query returned no columns");
 	}
 
 	vector<vector<Value>> result_rows;
@@ -224,21 +228,23 @@ static vector<DpSassStabilityQueryRow> ExecuteStabilityQuery(ClientContext &cont
 		}
 	}
 
-	auto records = TakeDpSassStabilityQueryRecords();
+	auto records = take_records();
 	if (records.empty()) {
-		throw InvalidInputException("dp_sass_stability_query: query produced no SASS aggregate stability records");
+		throw InvalidInputException(function_name + ": query produced no SASS aggregate " + record_description +
+		                            " records");
 	}
 
 	int32_t max_aggregate_index = -1;
 	for (auto &record : records) {
 		if (record.aggregate_index < 0) {
-			throw InternalException("dp_sass_stability_query: negative aggregate index recorded");
+			throw InternalException(function_name + ": negative aggregate index recorded");
 		}
 		max_aggregate_index = std::max(max_aggregate_index, record.aggregate_index);
 	}
 	idx_t aggregate_count = static_cast<idx_t>(max_aggregate_index + 1);
 	if (aggregate_count == 0) {
-		throw InvalidInputException("dp_sass_stability_query: query produced no SASS aggregate stability records");
+		throw InvalidInputException(function_name + ": query produced no SASS aggregate " + record_description +
+		                            " records");
 	}
 	bool result_columns_align = aggregate_count <= result->ColumnCount();
 	idx_t group_cols = result_columns_align ? result->ColumnCount() - aggregate_count : 0;
@@ -266,93 +272,33 @@ static vector<DpSassStabilityQueryRow> ExecuteStabilityQuery(ClientContext &cont
 			values.push_back(Value("agg_" + std::to_string(record.aggregate_index)));
 		}
 		values.push_back(Value(group_key_json));
-		for (auto &stat : record.stats) {
-			values.push_back(stat);
-		}
+		append_fields(record, values);
 		rows.push_back({std::move(values)});
 	}
 	return rows;
 }
 
+static vector<DpSassStabilityQueryRow> ExecuteStabilityQuery(ClientContext &context, const string &sql) {
+	return ExecuteDiagnosticQuery(
+	    context, sql, "dp_sass_stability_query", "stability", true, []() { ClearDpSassStabilityQueryRecords(); },
+	    []() { return TakeDpSassStabilityQueryRecords(); },
+	    [](const DpSassStabilityQueryRecord &record, vector<Value> &values) {
+		    for (auto &stat : record.stats) {
+			    values.push_back(stat);
+		    }
+	    });
+}
+
 static vector<DpSassStabilityQueryRow> ExecuteNoiseScaleQuery(ClientContext &context, const string &sql) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	Connection conn(db);
-	ConfigureNestedConnection(context, conn, false);
-	ClearDpSassNoiseScaleQueryRecords();
-
-	auto result = conn.Query(sql);
-	if (result->HasError()) {
-		throw InvalidInputException("dp_sass_noise_scale_query: " + result->GetError());
-	}
-	if (result->ColumnCount() == 0) {
-		throw InvalidInputException("dp_sass_noise_scale_query: query returned no columns");
-	}
-
-	vector<vector<Value>> result_rows;
-	while (true) {
-		auto chunk = result->Fetch();
-		if (!chunk || chunk->size() == 0) {
-			break;
-		}
-		for (idx_t row_idx = 0; row_idx < chunk->size(); row_idx++) {
-			vector<Value> row;
-			row.reserve(result->ColumnCount());
-			for (idx_t col = 0; col < result->ColumnCount(); col++) {
-				row.push_back(chunk->GetValue(col, row_idx));
-			}
-			result_rows.push_back(std::move(row));
-		}
-	}
-
-	auto records = TakeDpSassNoiseScaleQueryRecords();
-	if (records.empty()) {
-		throw InvalidInputException("dp_sass_noise_scale_query: query produced no SASS aggregate noise-scale records");
-	}
-
-	int32_t max_aggregate_index = -1;
-	for (auto &record : records) {
-		if (record.aggregate_index < 0) {
-			throw InternalException("dp_sass_noise_scale_query: negative aggregate index recorded");
-		}
-		max_aggregate_index = std::max(max_aggregate_index, record.aggregate_index);
-	}
-	idx_t aggregate_count = static_cast<idx_t>(max_aggregate_index + 1);
-	if (aggregate_count == 0) {
-		throw InvalidInputException("dp_sass_noise_scale_query: query produced no SASS aggregate noise-scale records");
-	}
-	bool result_columns_align = aggregate_count <= result->ColumnCount();
-	idx_t group_cols = result_columns_align ? result->ColumnCount() - aggregate_count : 0;
-
-	vector<string> group_keys;
-	group_keys.reserve(result_rows.size());
-	for (auto &row : result_rows) {
-		group_keys.push_back(BuildGroupKeyJson(*result, row, group_cols));
-	}
-	vector<idx_t> next_row_for_aggregate(aggregate_count, 0);
-	vector<DpSassStabilityQueryRow> rows;
-	for (auto &record : records) {
-		auto aggregate_index = static_cast<idx_t>(record.aggregate_index);
-		auto group_row = next_row_for_aggregate[aggregate_index]++;
-		string group_key_json = group_row < group_keys.size() ? group_keys[group_row] : "{}";
-
-		vector<Value> values;
-		values.reserve(8);
-		values.push_back(Value::BIGINT(static_cast<int64_t>(group_row)));
-		values.push_back(Value::INTEGER(record.aggregate_index));
-		idx_t result_name_idx = group_cols + aggregate_index;
-		if (result_columns_align && result_name_idx < result->names.size()) {
-			values.push_back(Value(result->names[result_name_idx]));
-		} else {
-			values.push_back(Value("agg_" + std::to_string(record.aggregate_index)));
-		}
-		values.push_back(Value(group_key_json));
-		values.push_back(record.noise_scale);
-		values.push_back(record.numerator_noise_scale);
-		values.push_back(record.denominator_noise_scale);
-		values.push_back(record.valid_lane_count);
-		rows.push_back({std::move(values)});
-	}
-	return rows;
+	return ExecuteDiagnosticQuery(
+	    context, sql, "dp_sass_noise_scale_query", "noise-scale", false, []() { ClearDpSassNoiseScaleQueryRecords(); },
+	    []() { return TakeDpSassNoiseScaleQueryRecords(); },
+	    [](const DpSassNoiseScaleQueryRecord &record, vector<Value> &values) {
+		    values.push_back(record.noise_scale);
+		    values.push_back(record.numerator_noise_scale);
+		    values.push_back(record.denominator_noise_scale);
+		    values.push_back(record.valid_lane_count);
+	    });
 }
 
 static unique_ptr<FunctionData> DpSassStabilityQueryBind(ClientContext &context, TableFunctionBindInput &input,

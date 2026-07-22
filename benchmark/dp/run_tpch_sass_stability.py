@@ -10,25 +10,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
+TPCH_QUERY_DIR = Path(__file__).resolve().parent / "tpch_queries"
+
+
+def read_tpch_query(name):
+    return (TPCH_QUERY_DIR / f"{name}.sql").read_text(encoding="utf-8")
 
 TPCH_STOCK_DP_QUERIES = {
-    "q01": """
-SELECT
-    l_returnflag,
-    l_linestatus,
-    sum(l_quantity) AS sum_qty,
-    sum(l_extendedprice) AS sum_base_price,
-    sum(l_extendedprice * (1 - l_discount)) AS sum_disc_price,
-    sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge,
-    avg(l_quantity) AS avg_qty,
-    avg(l_extendedprice) AS avg_price,
-    avg(l_discount) AS avg_disc,
-    count(*) AS count_order
-FROM lineitem
-WHERE l_shipdate <= CAST('1998-09-02' AS date)
-GROUP BY l_returnflag, l_linestatus
-ORDER BY l_returnflag, l_linestatus
-""",
+    "q01": read_tpch_query("q01"),
     "q01_avg_qty_all": """
 SELECT
     avg(l_quantity) AS avg_qty
@@ -139,72 +128,10 @@ WHERE l_shipdate <= CAST('1998-09-02' AS date)
 GROUP BY l_returnflag, l_linestatus
 ORDER BY l_returnflag, l_linestatus
 """,
-    "q05": """
-SELECT
-    n_name,
-    sum(l_extendedprice * (1 - l_discount)) AS revenue
-FROM customer, orders, lineitem, supplier, nation, region
-WHERE c_custkey = o_custkey
-  AND l_orderkey = o_orderkey
-  AND l_suppkey = s_suppkey
-  AND c_nationkey = s_nationkey
-  AND s_nationkey = n_nationkey
-  AND n_regionkey = r_regionkey
-  AND r_name = 'ASIA'
-  AND o_orderdate >= CAST('1994-01-01' AS date)
-  AND o_orderdate < CAST('1995-01-01' AS date)
-GROUP BY n_name
-ORDER BY revenue DESC
-""",
-    "q06": """
-SELECT
-    sum(l_extendedprice * l_discount) AS revenue
-FROM lineitem
-WHERE l_shipdate >= CAST('1994-01-01' AS date)
-  AND l_shipdate < CAST('1995-01-01' AS date)
-  AND l_discount BETWEEN 0.05 AND 0.07
-  AND l_quantity < 24
-""",
-    "q14": """
-SELECT
-    100.00 * sum(CASE
-        WHEN p_type LIKE 'PROMO%'
-        THEN l_extendedprice * (1 - l_discount)
-        ELSE 0
-    END) / sum(l_extendedprice * (1 - l_discount)) AS promo_revenue
-FROM lineitem, part
-WHERE l_partkey = p_partkey
-  AND l_shipdate >= CAST('1995-09-01' AS date)
-  AND l_shipdate < CAST('1995-10-01' AS date)
-""",
-    "q19": """
-SELECT
-    sum(l_extendedprice * (1 - l_discount)) AS revenue
-FROM lineitem, part
-WHERE p_partkey = l_partkey
-  AND l_shipmode IN ('AIR', 'AIR REG')
-  AND l_shipinstruct = 'DELIVER IN PERSON'
-  AND (
-    (
-      p_brand = 'Brand#12'
-      AND p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')
-      AND l_quantity >= 1 AND l_quantity <= 11
-      AND p_size BETWEEN 1 AND 5
-    )
-    OR (
-      p_brand = 'Brand#23'
-      AND p_container IN ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK')
-      AND l_quantity >= 10 AND l_quantity <= 20
-      AND p_size BETWEEN 1 AND 10
-    )
-    OR (
-      p_brand = 'Brand#34'
-      AND p_container IN ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')
-      AND l_quantity >= 20 AND l_quantity <= 30
-      AND p_size BETWEEN 1 AND 15
-    )
-  )
-""",
+    "q05": read_tpch_query("q05"),
+    "q06": read_tpch_query("q06"),
+    "q14": read_tpch_query("q14"),
+    "q19": read_tpch_query("q19"),
 }
 
 STABILITY_COLUMNS = [

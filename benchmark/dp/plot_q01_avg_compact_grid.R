@@ -24,10 +24,6 @@ cols_csv <- args[1]
 groups_csv <- args[2]
 output_png <- if (length(args) >= 3) args[3] else "benchmark/dp/q01_avg_compact_grid_paper.png"
 
-success_flag <- function(x) {
-  tolower(as.character(x)) %in% c("true", "t", "1")
-}
-
 mechanism_levels <- c("Bounded DP", "DP-Elastic", "SAA m=64", "SAA m=512")
 mechanism_colors <- c(
   "Bounded DP" = "#d55e00",
@@ -39,7 +35,7 @@ mechanism_colors <- c(
 normalize <- function(raw) {
   raw %>%
     mutate(
-      success = success_flag(success),
+      success = SuccessFlag(success),
       query = as.character(query),
       release = tolower(as.character(release)),
       bound_multiplier = suppressWarnings(as.numeric(bound_multiplier)),

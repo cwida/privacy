@@ -3,6 +3,7 @@
 //
 
 #include "as_clickbench_benchmark.hpp"
+#include "as_query_rewriter.hpp"
 #include "benchmark_json.hpp"
 #include "benchmark_paths.hpp"
 
@@ -171,131 +172,8 @@ static vector<int> ParseIntListCSV(const string &list) {
 	return values;
 }
 
-static bool IsIdentifierChar(char c) {
-	return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
-}
-
 static bool IsValidSampleCount(int m) {
 	return m >= 64 && m <= 512 && (m & (m - 1)) == 0;
-}
-
-static idx_t FindMatchingParen(const string &sql, idx_t open_pos) {
-	int depth = 0;
-	bool in_single_quote = false;
-	bool in_double_quote = false;
-	for (idx_t i = open_pos; i < sql.size(); i++) {
-		char c = sql[i];
-		if (in_single_quote) {
-			if (c == '\'' && i + 1 < sql.size() && sql[i + 1] == '\'') {
-				i++;
-			} else if (c == '\'') {
-				in_single_quote = false;
-			}
-			continue;
-		}
-		if (in_double_quote) {
-			if (c == '"' && i + 1 < sql.size() && sql[i + 1] == '"') {
-				i++;
-			} else if (c == '"') {
-				in_double_quote = false;
-			}
-			continue;
-		}
-		if (c == '\'') {
-			in_single_quote = true;
-		} else if (c == '"') {
-			in_double_quote = true;
-		} else if (c == '(') {
-			depth++;
-		} else if (c == ')') {
-			depth--;
-			if (depth == 0) {
-				return i;
-			}
-		}
-	}
-	return string::npos;
-}
-
-static vector<string> SplitTopLevelArgs(const string &args) {
-	vector<string> result;
-	idx_t start = 0;
-	int depth = 0;
-	bool in_single_quote = false;
-	bool in_double_quote = false;
-	for (idx_t i = 0; i < args.size(); i++) {
-		char c = args[i];
-		if (in_single_quote) {
-			if (c == '\'' && i + 1 < args.size() && args[i + 1] == '\'') {
-				i++;
-			} else if (c == '\'') {
-				in_single_quote = false;
-			}
-			continue;
-		}
-		if (in_double_quote) {
-			if (c == '"' && i + 1 < args.size() && args[i + 1] == '"') {
-				i++;
-			} else if (c == '"') {
-				in_double_quote = false;
-			}
-			continue;
-		}
-		if (c == '\'') {
-			in_single_quote = true;
-		} else if (c == '"') {
-			in_double_quote = true;
-		} else if (c == '(') {
-			depth++;
-		} else if (c == ')') {
-			depth--;
-		} else if (c == ',' && depth == 0) {
-			result.push_back(Trim(args.substr(start, i - start)));
-			start = i + 1;
-		}
-	}
-	result.push_back(Trim(args.substr(start)));
-	return result;
-}
-
-static bool StartsWithFunctionCall(const string &sql, idx_t pos, const string &name, idx_t &open_pos) {
-	if (pos > 0 && IsIdentifierChar(sql[pos - 1])) {
-		return false;
-	}
-	if (sql.compare(pos, name.size(), name) != 0) {
-		return false;
-	}
-	idx_t next = pos + name.size();
-	if (next < sql.size() && IsIdentifierChar(sql[next])) {
-		return false;
-	}
-	while (next < sql.size() && std::isspace(static_cast<unsigned char>(sql[next]))) {
-		next++;
-	}
-	if (next >= sql.size() || sql[next] != '(') {
-		return false;
-	}
-	open_pos = next;
-	return true;
-}
-
-static string StripFunctionCalls(const string &sql, const string &name) {
-	string result;
-	idx_t pos = 0;
-	while (pos < sql.size()) {
-		idx_t open_pos;
-		if (StartsWithFunctionCall(sql, pos, name, open_pos)) {
-			idx_t close_pos = FindMatchingParen(sql, open_pos);
-			if (close_pos == string::npos) {
-				throw std::runtime_error("could not find closing parenthesis for " + name);
-			}
-			result += StripFunctionCalls(sql.substr(open_pos + 1, close_pos - open_pos - 1), name);
-			pos = close_pos + 1;
-			continue;
-		}
-		result.push_back(sql[pos++]);
-	}
-	return result;
 }
 
 static string RewriteAsFunctionCall(const string &name, const vector<string> &args, int sample_count) {
@@ -343,31 +221,9 @@ static bool ContainsVariableMUnsupportedAggregate(const string &sql) {
 static string RewriteAsQueryForSampleAggregation(const string &sql, int sample_count) {
 	static const vector<string> names = {"as_noised_count", "as_noised_sum", "as_noised_avg", "as_noised_min",
 	                                     "as_noised_max"};
-	string raw_hash_sql = StripFunctionCalls(sql, "priv_hash");
-	string result;
-	idx_t pos = 0;
-	while (pos < raw_hash_sql.size()) {
-		bool rewritten = false;
-		for (auto &name : names) {
-			idx_t open_pos;
-			if (!StartsWithFunctionCall(raw_hash_sql, pos, name, open_pos)) {
-				continue;
-			}
-			idx_t close_pos = FindMatchingParen(raw_hash_sql, open_pos);
-			if (close_pos == string::npos) {
-				throw std::runtime_error("could not find closing parenthesis for " + name);
-			}
-			auto args = SplitTopLevelArgs(raw_hash_sql.substr(open_pos + 1, close_pos - open_pos - 1));
-			result += RewriteAsFunctionCall(name, args, sample_count);
-			pos = close_pos + 1;
-			rewritten = true;
-			break;
-		}
-		if (!rewritten) {
-			result.push_back(raw_hash_sql[pos++]);
-		}
-	}
-	return result;
+	static const vector<string> unsupported;
+	benchmark::AsQueryRewriteOptions options {names, unsupported, false, false, "", false};
+	return benchmark::RewriteAsQuery(sql, sample_count, options, RewriteAsFunctionCall);
 }
 
 static int ExecuteCommand(const string &cmd) {

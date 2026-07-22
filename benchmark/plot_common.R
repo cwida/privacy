@@ -17,3 +17,7 @@ PaperFont <- function() {
     if (any(grepl("Linux Libertine", families, fixed = TRUE))) "Linux Libertine" else "serif"
   }, error = function(e) "serif")
 }
+
+SuccessFlag <- function(x) {
+  tolower(as.character(x)) %in% c("true", "t", "1")
+}

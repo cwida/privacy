@@ -21,10 +21,6 @@ if (!(length(args) %in% c(2, 3))) {
 input_csvs <- if (length(args) == 2) args[1] else args[1:2]
 output_png <- args[length(args)]
 
-success_flag <- function(x) {
-	tolower(as.character(x)) %in% c("true", "t", "1")
-}
-
 query_labels <- c(
 	"q01_avg_qty_all" = "AVG(qty)",
 	"q01_avg_price_all" = "AVG(price)",
@@ -58,10 +54,10 @@ raw <- bind_rows(lapply(input_csvs, function(input_csv) {
 }))
 plot_data <- raw %>%
 	mutate(
-		success = success_flag(success),
+		success = SuccessFlag(success),
 		query = as.character(query),
 		sass_m = suppressWarnings(as.integer(sass_m)),
-		sass_rescale = success_flag(sass_rescale),
+		sass_rescale = SuccessFlag(sass_rescale),
 		median_cv = suppressWarnings(as.numeric(median_cv)),
 		cv_pct = 100.0 * median_cv,
 		m_label = factor(paste0("m=", sass_m), levels = m_levels),

@@ -10,6 +10,7 @@
 #include "duckdb/main/connection.hpp"
 #include "benchmark_json.hpp"
 #include "benchmark_paths.hpp"
+#include "tpch_stock_queries.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -400,8 +401,7 @@ static bool TableHasRows(Connection &con, const string &table_name) {
 }
 
 static bool IsValidMode(const string &mode) {
-	return mode == "duckdb" || mode == "dp_standard" || mode == "dp_elastic" || mode == "dp_sass" ||
-	       mode == "dp_sass_bounded_ratio";
+	return mode == "duckdb" || mode == "dp_standard" || mode == "dp_elastic" || mode == "dp_sass";
 }
 
 static vector<string> NormalizeModes(vector<string> modes) {
@@ -589,84 +589,18 @@ static vector<QuerySpec> ReadQueriesFromPaths(const vector<string> &paths, idx_t
 }
 
 static vector<QuerySpec> GetTpchStockDpQueries() {
-	return {{"q01", "TPC-H Q1 pricing summary report", 2, PrivacyProfile::CUSTOMER,
-	         R"(SELECT
-    l_returnflag,
-    l_linestatus,
-    sum(l_quantity) AS sum_qty,
-    sum(l_extendedprice) AS sum_base_price,
-    sum(l_extendedprice * (1 - l_discount)) AS sum_disc_price,
-    sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge,
-    avg(l_quantity) AS avg_qty,
-    avg(l_extendedprice) AS avg_price,
-    avg(l_discount) AS avg_disc,
-    count(*) AS count_order
-FROM lineitem
-WHERE l_shipdate <= CAST('1998-09-02' AS date)
-GROUP BY l_returnflag, l_linestatus
-ORDER BY l_returnflag, l_linestatus)"},
-	        {"q05", "TPC-H Q5 local supplier volume", 1, PrivacyProfile::CUSTOMER,
-	         R"(SELECT
-    n_name,
-    sum(l_extendedprice * (1 - l_discount)) AS revenue
-FROM customer, orders, lineitem, supplier, nation, region
-WHERE c_custkey = o_custkey
-  AND l_orderkey = o_orderkey
-  AND l_suppkey = s_suppkey
-  AND c_nationkey = s_nationkey
-  AND s_nationkey = n_nationkey
-  AND n_regionkey = r_regionkey
-  AND r_name = 'ASIA'
-  AND o_orderdate >= CAST('1994-01-01' AS date)
-  AND o_orderdate < CAST('1995-01-01' AS date)
-GROUP BY n_name
-ORDER BY revenue DESC)"},
-	        {"q06", "TPC-H Q6 forecast revenue change", 0, PrivacyProfile::CUSTOMER,
-	         R"(SELECT
-    sum(l_extendedprice * l_discount) AS revenue
-FROM lineitem
-WHERE l_shipdate >= CAST('1994-01-01' AS date)
-  AND l_shipdate < CAST('1995-01-01' AS date)
-  AND l_discount BETWEEN 0.05 AND 0.07
-  AND l_quantity < 24)"},
-	        {"q14", "TPC-H Q14 promotion effect", 0, PrivacyProfile::CUSTOMER,
-	         R"(SELECT
-    100.00 * sum(CASE
-        WHEN p_type LIKE 'PROMO%'
-        THEN l_extendedprice * (1 - l_discount)
-        ELSE 0
-    END) / sum(l_extendedprice * (1 - l_discount)) AS promo_revenue
-FROM lineitem, part
-WHERE l_partkey = p_partkey
-  AND l_shipdate >= CAST('1995-09-01' AS date)
-  AND l_shipdate < CAST('1995-10-01' AS date))"},
-	        {"q19", "TPC-H Q19 discount revenue", 0, PrivacyProfile::CUSTOMER,
-	         R"(SELECT
-    sum(l_extendedprice * (1 - l_discount)) AS revenue
-FROM lineitem, part
-WHERE p_partkey = l_partkey
-  AND l_shipmode IN ('AIR', 'AIR REG')
-  AND l_shipinstruct = 'DELIVER IN PERSON'
-  AND (
-    (
-      p_brand = 'Brand#12'
-      AND p_container IN ('SM CASE', 'SM BOX', 'SM PACK', 'SM PKG')
-      AND l_quantity >= 1 AND l_quantity <= 11
-      AND p_size BETWEEN 1 AND 5
-    )
-    OR (
-      p_brand = 'Brand#23'
-      AND p_container IN ('MED BAG', 'MED BOX', 'MED PKG', 'MED PACK')
-      AND l_quantity >= 10 AND l_quantity <= 20
-      AND p_size BETWEEN 1 AND 10
-    )
-    OR (
-      p_brand = 'Brand#34'
-      AND p_container IN ('LG CASE', 'LG BOX', 'LG PACK', 'LG PKG')
-      AND l_quantity >= 20 AND l_quantity <= 30
-      AND p_size BETWEEN 1 AND 15
-    )
-  ))"}};
+	static const string query_dir = "benchmark/dp/tpch_queries/";
+	vector<QuerySpec> queries = {
+	    {"q01", "TPC-H Q1 pricing summary report", 2, PrivacyProfile::CUSTOMER, benchmark::TPCH_Q01_SQL},
+	    {"q05", "TPC-H Q5 local supplier volume", 1, PrivacyProfile::CUSTOMER, benchmark::TPCH_Q05_SQL},
+	    {"q06", "TPC-H Q6 forecast revenue change", 0, PrivacyProfile::CUSTOMER, benchmark::TPCH_Q06_SQL},
+	    {"q14", "TPC-H Q14 promotion effect", 0, PrivacyProfile::CUSTOMER, benchmark::TPCH_Q14_SQL},
+	    {"q19", "TPC-H Q19 discount revenue", 0, PrivacyProfile::CUSTOMER, benchmark::TPCH_Q19_SQL},
+	};
+	for (auto &query : queries) {
+		query.path = query_dir + query.name + ".sql";
+	}
+	return queries;
 }
 
 static void LoadTpch(Connection &con) {
@@ -933,51 +867,13 @@ static double ReadGenericPrivacyUnitCount(Connection &con, const DatasetConfig &
 	return 0.0;
 }
 
-static vector<double> NonEmpty(const vector<double> &values, const vector<double> &fallback) {
-	return values.empty() ? fallback : values;
-}
-
-static vector<int> NonEmptyInt(const vector<int> &values, const vector<int> &fallback) {
-	return values.empty() ? fallback : values;
-}
-
-static vector<bool> NonEmptyBool(const vector<bool> &values, const vector<bool> &fallback) {
-	return values.empty() ? fallback : values;
-}
-
-static vector<string> NonEmptyString(const vector<string> &values, const vector<string> &fallback) {
+template <class T>
+static vector<T> NonEmpty(const vector<T> &values, const vector<T> &fallback) {
 	return values.empty() ? fallback : values;
 }
 
 static bool ContainsString(const vector<string> &values, const string &needle) {
 	return std::find(values.begin(), values.end(), needle) != values.end();
-}
-
-static string BuildQ14BoundedSampledRatioSql(double epsilon, int sample_lanes) {
-	return "WITH lanes AS ("
-	       "SELECT "
-	       "as_sample_sum(hash(o_custkey)::UBIGINT, "
-	       "CASE WHEN p_type LIKE 'PROMO%' THEN (l_extendedprice * (1 - l_discount))::DOUBLE ELSE 0.0 END) AS promo, "
-	       "as_sample_sum(hash(o_custkey)::UBIGINT, (l_extendedprice * (1 - l_discount))::DOUBLE) AS total "
-	       "FROM lineitem JOIN orders ON l_orderkey = o_orderkey JOIN part ON l_partkey = p_partkey "
-	       "WHERE l_shipdate >= CAST('1995-09-01' AS date) "
-	       "AND l_shipdate < CAST('1995-10-01' AS date)) "
-	       "SELECT dp_gupt_mean_noise("
-	       "list_transform(range(1, 65), lambda i: "
-	       "CASE WHEN list_extract(total, i) <= 0 THEN 0.0 "
-	       "ELSE least(100.0, greatest(0.0, 100.0 * list_extract(promo, i) / list_extract(total, i))) END), " +
-	       FormatNumber(epsilon) + ", " + std::to_string(sample_lanes) +
-	       ", 0.0, 100.0, 0.0) AS promo_revenue "
-	       "FROM lanes";
-}
-
-static void FillScalarUtility(double released_value, double reference_value, UtilityMetrics &metrics) {
-	double abs_ref = std::max(0.00001, std::fabs(reference_value));
-	double error_pct = 100.0 * std::fabs(released_value - reference_value) / abs_ref;
-	metrics.utility = FormatNumber(error_pct);
-	metrics.recall = "1";
-	metrics.precision = "1";
-	metrics.median_error_pct = FormatNumber(error_pct);
 }
 
 static bool TryCastDouble(const Value &value, double &out) {
@@ -1507,34 +1403,29 @@ static vector<RunPoint> BuildRunPoints(const DatasetConfig &dataset) {
 			points.push_back(std::move(point));
 			continue;
 		}
-		auto releases = mode == "dp_sass"
-		                    ? dataset.sass_releases
-		                    : (mode == "dp_sass_bounded_ratio" ? vector<string> {"average"} : vector<string> {"-"});
-		auto sum_bound_lists =
-		    mode == "dp_sass_bounded_ratio" ? vector<string> {""} : NonEmptyString(dataset.sum_bound_lists, {""});
+		auto releases = mode == "dp_sass" ? dataset.sass_releases : vector<string> {"-"};
+		auto sum_bound_lists = NonEmpty(dataset.sum_bound_lists, {""});
 		auto support_thresholds = mode == "duckdb" ? vector<double> {0.0} : NonEmpty(dataset.support_thresholds, {0.0});
 		auto sass_count_output_bounds =
 		    mode == "dp_sass" ? NonEmpty(dataset.sass_count_output_bounds, {0.0}) : vector<double> {0.0};
 		auto sass_count_output_bound_lists =
-		    mode == "dp_sass" ? NonEmptyString(dataset.sass_count_output_bound_lists, {""}) : vector<string> {""};
+		    mode == "dp_sass" ? NonEmpty(dataset.sass_count_output_bound_lists, {""}) : vector<string> {""};
 		auto sass_count_output_lower_bound_lists =
-		    mode == "dp_sass" ? NonEmptyString(dataset.sass_count_output_lower_bound_lists, {""}) : vector<string> {""};
+		    mode == "dp_sass" ? NonEmpty(dataset.sass_count_output_lower_bound_lists, {""}) : vector<string> {""};
 		auto sass_count_output_upper_bound_lists =
-		    mode == "dp_sass" ? NonEmptyString(dataset.sass_count_output_upper_bound_lists, {""}) : vector<string> {""};
+		    mode == "dp_sass" ? NonEmpty(dataset.sass_count_output_upper_bound_lists, {""}) : vector<string> {""};
 		auto sass_sum_output_bounds =
 		    mode == "dp_sass" ? NonEmpty(dataset.sass_sum_output_bounds, {0.0}) : vector<double> {0.0};
 		auto sass_sum_output_bound_lists =
-		    mode == "dp_sass" ? NonEmptyString(dataset.sass_sum_output_bound_lists, {""}) : vector<string> {""};
+		    mode == "dp_sass" ? NonEmpty(dataset.sass_sum_output_bound_lists, {""}) : vector<string> {""};
 		auto sass_sum_output_lower_bound_lists =
-		    mode == "dp_sass" ? NonEmptyString(dataset.sass_sum_output_lower_bound_lists, {""}) : vector<string> {""};
+		    mode == "dp_sass" ? NonEmpty(dataset.sass_sum_output_lower_bound_lists, {""}) : vector<string> {""};
 		auto sass_sum_output_upper_bound_lists =
-		    mode == "dp_sass" ? NonEmptyString(dataset.sass_sum_output_upper_bound_lists, {""}) : vector<string> {""};
-		auto lane_values = (mode == "dp_sass" || mode == "dp_sass_bounded_ratio")
-		                       ? NonEmptyInt(dataset.sample_lanes, {1})
-		                       : vector<int> {1};
-		auto sass_m_values = mode == "dp_sass" ? NonEmptyInt(dataset.sass_m_values, {64}) : vector<int> {64};
+		    mode == "dp_sass" ? NonEmpty(dataset.sass_sum_output_upper_bound_lists, {""}) : vector<string> {""};
+		auto lane_values = mode == "dp_sass" ? NonEmpty(dataset.sample_lanes, {1}) : vector<int> {1};
+		auto sass_m_values = mode == "dp_sass" ? NonEmpty(dataset.sass_m_values, {64}) : vector<int> {64};
 		auto sass_rescale_values =
-		    mode == "dp_sass" ? NonEmptyBool(dataset.sass_rescale_values, {true}) : vector<bool> {true};
+		    mode == "dp_sass" ? NonEmpty(dataset.sass_rescale_values, {true}) : vector<bool> {true};
 		for (double epsilon : dataset.epsilons) {
 			auto deltas = dataset.deltas.empty() ? vector<double> {0.0} : dataset.deltas;
 			for (double delta : deltas) {
@@ -1661,12 +1552,6 @@ static void ApplyDpSettings(Connection &con, const RunPoint &point, double delta
 		RunStatement(con, "SET priv_rewrite=false");
 		RunStatement(con, "SET privacy_diffcols=NULL");
 		RunStatement(con, "SET privacy_min_group_count=NULL");
-		return;
-	}
-	if (point.mode == "dp_sass_bounded_ratio") {
-		RunStatement(con, "SET priv_rewrite=false");
-		RunStatement(con, "SET privacy_diffcols=NULL");
-		RunStatement(con, "SET dp_sample_lanes=" + std::to_string(point.sample_lanes));
 		return;
 	}
 	RunStatement(con, "SET priv_rewrite=true");
@@ -1931,7 +1816,7 @@ static void ResolveRuntimeSettings(BenchmarkRow &row, double pu_count) {
 	row.delta = row.point.delta;
 	row.sass_count_output_bound = 0.0;
 	row.sass_sum_output_bound = 0.0;
-	if (row.point.mode == "duckdb" || row.point.mode == "dp_sass_bounded_ratio") {
+	if (row.point.mode == "duckdb") {
 		return;
 	}
 	if (row.delta <= 0.0) {
@@ -1975,12 +1860,8 @@ static void PrepareDatasetRun(const Config &config, DatasetRun &dataset_run,
 	PrepareDataset(*dataset_run.connection, dataset_run.config, false);
 }
 
-static void ExecuteBenchmarkQuery(Connection &con, const BenchmarkRow &row, const QuerySpec &query) {
-	if (row.point.mode == "dp_sass_bounded_ratio") {
-		ReadScalarDouble(con, BuildQ14BoundedSampledRatioSql(row.point.epsilon, row.point.sample_lanes));
-	} else {
-		MaterializeQuery(con, query.sql);
-	}
+static void ExecuteBenchmarkQuery(Connection &con, const QuerySpec &query) {
+	MaterializeQuery(con, query.sql);
 }
 
 static void RunTimingPass(const Config &config, DatasetRun &dataset_run) {
@@ -1990,10 +1871,7 @@ static void RunTimingPass(const Config &config, DatasetRun &dataset_run) {
 	for (auto &row : dataset_run.rows) {
 		auto &query = dataset_run.queries[row.query_index];
 		try {
-			if (row.point.mode == "dp_sass_bounded_ratio" && query.name != "q14") {
-				throw std::runtime_error("dp_sass_bounded_ratio is only implemented for built-in q14");
-			}
-			if (row.point.mode != "duckdb" && row.point.mode != "dp_sass_bounded_ratio") {
+			if (row.point.mode != "duckdb") {
 				ApplyDatasetPrivacy(con, dataset_run.config, query);
 				if (pu_counts[row.query_index] < 0.0) {
 					pu_counts[row.query_index] = ReadBenchmarkPrivacyUnitCount(con, dataset_run.config, query);
@@ -2005,11 +1883,11 @@ static void RunTimingPass(const Config &config, DatasetRun &dataset_run) {
 			RunStatement(con, "SET privacy_noise=true");
 			RunStatement(con, "SET privacy_seed=" + std::to_string(row.seed));
 
-			ExecuteBenchmarkQuery(con, row, query);
+			ExecuteBenchmarkQuery(con, query);
 			Log("warmup " + dataset_run.config.name + " " + row.point.mode + " " + query.name + " run " +
 			    std::to_string(row.run) + " complete");
 			auto start = std::chrono::steady_clock::now();
-			ExecuteBenchmarkQuery(con, row, query);
+			ExecuteBenchmarkQuery(con, query);
 			auto end = std::chrono::steady_clock::now();
 			row.time_ms = std::chrono::duration<double, std::milli>(end - start).count();
 			row.runtime_success = true;
@@ -2049,7 +1927,7 @@ static void RunMetricsPass(const Config &config, DatasetRun &dataset_run) {
 			continue;
 		}
 		try {
-			if (row.point.mode != "duckdb" && row.point.mode != "dp_sass_bounded_ratio") {
+			if (row.point.mode != "duckdb") {
 				ApplyDatasetPrivacy(con, dataset_run.config, query);
 			}
 			ApplyDpSettings(con, row.point, row.delta, row.sass_count_output_bound, row.sass_sum_output_bound);
@@ -2057,11 +1935,6 @@ static void RunMetricsPass(const Config &config, DatasetRun &dataset_run) {
 			RunStatement(con, "SET privacy_seed=" + std::to_string(row.seed));
 			if (row.point.mode == "duckdb") {
 				FillDuckDbMetrics(dataset_run.config, query, row.metrics);
-			} else if (row.point.mode == "dp_sass_bounded_ratio") {
-				double reference = ReadScalarDouble(con, query.sql);
-				double released =
-				    ReadScalarDouble(con, BuildQ14BoundedSampledRatioSql(row.point.epsilon, row.point.sample_lanes));
-				FillScalarUtility(released, reference, row.metrics);
 			} else {
 				FillUtilityMetrics(con, dataset_run.config, query, row.point, row.seed, row.metrics);
 				if (row.point.mode == "dp_sass") {

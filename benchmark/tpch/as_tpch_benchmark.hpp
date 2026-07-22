@@ -19,8 +19,7 @@ namespace duckdb {
 // Returns 0 on success, non-zero on error.
 int RunASTPCHBenchmark(const string &db_path = "tpch.db", const string &queries_dir = "benchmark", double sf = 10.0,
                        const string &out_csv = "", bool run_simple_hash = false, int threads = 8,
-                       const vector<int> &as_m_values = vector<int> {64}, bool skip_naive = false,
-                       bool skip_plot = false);
+                       const vector<int> &as_m_values = vector<int> {64}, bool skip_naive = false);
 
 } // namespace duckdb
 

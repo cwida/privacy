@@ -74,10 +74,6 @@ mechanism_shapes <- c(
 )
 metric_levels <- c("Full error (%)", "Target error (%)", "Noise scale")
 
-success_flag <- function(x) {
-  tolower(as.character(x)) %in% c("true", "t", "1")
-}
-
 delta_matches <- function(values, target) {
   if (all(is.na(values))) {
     return(rep(TRUE, length(values)))
@@ -101,7 +97,7 @@ normalized <- raw %>%
 	mutate(
     dataset = toupper(dataset),
     query = toupper(query),
-    success = success_flag(success),
+    success = SuccessFlag(success),
     run = suppressWarnings(as.integer(run)),
     bound_multiplier = suppressWarnings(as.numeric(bound_multiplier)),
     delta = suppressWarnings(as.numeric(delta)),

@@ -560,20 +560,6 @@ static void DpSampleMCountColumnScatterUpdate(Vector inputs[], AggregateInputDat
 	}
 }
 
-static bool DpSampleMPredicateLaneIsTrue(UnifiedVectorFormat &list_data, UnifiedVectorFormat &child_data,
-                                         const bool *child_values, idx_t list_idx, idx_t lane) {
-	if (!list_data.validity.RowIsValid(list_idx)) {
-		return false;
-	}
-	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
-	auto &entry = list_entries[list_idx];
-	if (lane >= entry.length) {
-		return false;
-	}
-	auto child_idx = child_data.sel->get_index(entry.offset + lane);
-	return child_data.validity.RowIsValid(child_idx) && child_values[child_idx];
-}
-
 static void DpSampleMCountIfUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr,
                                    idx_t count) {
 	auto &state = *reinterpret_cast<DpSampleMCountState *>(state_ptr);

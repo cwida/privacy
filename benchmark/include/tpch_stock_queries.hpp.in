@@ -1,0 +1,15 @@
+#pragma once
+
+#include "duckdb.hpp"
+
+namespace duckdb {
+namespace benchmark {
+
+static const string TPCH_Q01_SQL = R"TPCH(@TPCH_Q01_SQL@)TPCH";
+static const string TPCH_Q05_SQL = R"TPCH(@TPCH_Q05_SQL@)TPCH";
+static const string TPCH_Q06_SQL = R"TPCH(@TPCH_Q06_SQL@)TPCH";
+static const string TPCH_Q14_SQL = R"TPCH(@TPCH_Q14_SQL@)TPCH";
+static const string TPCH_Q19_SQL = R"TPCH(@TPCH_Q19_SQL@)TPCH";
+
+} // namespace benchmark
+} // namespace duckdb

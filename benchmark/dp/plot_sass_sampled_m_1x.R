@@ -45,10 +45,6 @@ if (length(missing) > 0) {
   stop("Missing expected columns: ", paste(missing, collapse = ", "))
 }
 
-success_flag <- function(x) {
-  tolower(as.character(x)) %in% c("true", "t", "1")
-}
-
 query_levels <- c("Q01", "Q05", "Q06", "Q14", "Q19")
 m_levels <- c(64L, 128L, 256L, 512L)
 
@@ -56,7 +52,7 @@ plot_data <- raw %>%
   mutate(
     dataset = tolower(as.character(dataset)),
     query = toupper(as.character(query)),
-    success = success_flag(success),
+    success = SuccessFlag(success),
     bound_multiplier = suppressWarnings(as.numeric(bound_multiplier)),
     dp_sass_m = suppressWarnings(as.integer(dp_sass_m)),
     delta = suppressWarnings(as.numeric(delta)),

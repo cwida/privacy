@@ -35,6 +35,20 @@ SELECT current_setting('dp_sample_lanes');
 ----
 1
 
+# The fixed 64-lane and variable-m JList paths match the exact NRS envelope values.
+query III
+SELECT (abs(dp_smooth_median_noise_scale(
+                  list_transform(range(0, 64), lambda i: ((i * i + 7 * i) % 97)::FLOAT),
+                  1.0, 1e-6, 1, 0.0, 100.0, 50.0) - 41.82490982255579) < 1e-12)::INTEGER,
+       (abs(dp_smooth_median_noise_scale(
+                  list_transform(range(0, 128), lambda i: ((i * i + 7 * i) % 97)::FLOAT),
+                  1.0, 1e-6, 1, 0.0, 100.0, 50.0) - 22.822139925530006) < 1e-12)::INTEGER,
+       (abs(dp_smooth_median_noise_scale(
+                  list_transform(range(0, 512), lambda i: ((i * i + 7 * i) % 97)::FLOAT),
+                  1.0, 1e-6, 1, 0.0, 100.0, 50.0) - 8.213857364744555) < 1e-12)::INTEGER;
+----
+1	1	1
+
 statement error
 SET dp_sample_lanes = 0;
 ----
