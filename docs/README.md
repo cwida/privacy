@@ -44,10 +44,10 @@ the PAC privacy layer (`pac/`); and the differential-privacy layer (`dp/`).
 | [benchmark/README.md](benchmark/README.md)           | Benchmark overview |
 | [benchmark/tpch.md](benchmark/tpch.md)               | TPC-H benchmark instructions |
 | [benchmark/imdb.md](benchmark/imdb.md)               | IMDB / JOB benchmark instructions |
-| [benchmark/tpch_compiler.md](benchmark/tpch_compiler.md) | TPC-H compiler benchmark |
 | [benchmark/microbenchmarks.md](benchmark/microbenchmarks.md) | Microbenchmark suite |
 | [benchmark/clickbench.md](benchmark/clickbench.md)   | ClickBench benchmark |
 | [benchmark/sqlstorm.md](benchmark/sqlstorm.md)       | SQLStorm benchmark |
-| [benchmark/utility.md](benchmark/utility.md)         | Benchmark utility |
+| [benchmark/utility.md](benchmark/utility.md)         | DP utility metrics and diagnostics |
+| [repro.md](../repro.md)                              | Paper reproduction instructions |
 
 For the main documentation (syntax, examples, configuration), see the [README.md](../README.md) in the repository root.

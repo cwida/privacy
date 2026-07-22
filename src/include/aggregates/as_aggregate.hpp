@@ -36,6 +36,8 @@
 
 constexpr int DP_SAMPLE_DEFAULT_LANES = 1;
 constexpr int DP_SAMPLE_MAX_LANES = 8;
+constexpr int DP_SASS_DEFAULT_M = 64;
+constexpr int DP_SASS_MAX_M = 512;
 
 static inline int ValidateDpSampleLanes(int64_t sample_lanes) {
 	if (sample_lanes < 1 || sample_lanes > DP_SAMPLE_MAX_LANES) {
@@ -52,6 +54,21 @@ static inline int GetDpSampleLanes(duckdb::ClientContext &ctx) {
 	return DP_SAMPLE_DEFAULT_LANES;
 }
 
+static inline int ValidateDpSassM(int64_t m) {
+	if (m < DP_SASS_DEFAULT_M || m > DP_SASS_MAX_M || (m & (m - 1)) != 0) {
+		throw duckdb::InvalidInputException("dp_sass_m must be a power of two between 64 and 512");
+	}
+	return static_cast<int>(m);
+}
+
+static inline int GetDpSassM(duckdb::ClientContext &ctx) {
+	duckdb::Value m_val;
+	if (ctx.TryGetCurrentSetting("dp_sass_m", m_val) && !m_val.IsNull()) {
+		return ValidateDpSassM(m_val.GetValue<int64_t>());
+	}
+	return DP_SASS_DEFAULT_M;
+}
+
 static inline uint64_t DpSampleHash(uint64_t key_hash, int sample_lanes) {
 	uint64_t sample_hash = 0;
 	for (int i = 0; i < sample_lanes; i++) {
@@ -66,6 +83,37 @@ static inline double DpSampleLaneProbability(int sample_lanes) {
 
 static inline double DpSampleRescale(int sample_lanes) {
 	return 1.0 / DpSampleLaneProbability(sample_lanes);
+}
+
+static inline bool GetDpSassRescale(duckdb::ClientContext &ctx) {
+	duckdb::Value rescale_val;
+	if (ctx.TryGetCurrentSetting("dp_sass_rescale", rescale_val) && !rescale_val.IsNull()) {
+		return rescale_val.GetValue<bool>();
+	}
+	return true;
+}
+
+static inline int ValidatePacM(int64_t m) {
+	if (m < DP_SASS_DEFAULT_M || m > DP_SASS_MAX_M || (m & (m - 1)) != 0) {
+		throw duckdb::InvalidInputException("pac_m must be a power of two between 64 and 512");
+	}
+	return static_cast<int>(m);
+}
+
+static inline int GetPacSampleM(duckdb::ClientContext &ctx) {
+	duckdb::Value m_val;
+	if (ctx.TryGetCurrentSetting("pac_m", m_val) && !m_val.IsNull()) {
+		return ValidatePacM(m_val.GetValue<int64_t>());
+	}
+	return DP_SASS_DEFAULT_M;
+}
+
+static inline bool GetPacHashRepair(duckdb::ClientContext &ctx) {
+	duckdb::Value hash_repair_val;
+	if (ctx.TryGetCurrentSetting("pac_hash_repair", hash_repair_val) && !hash_repair_val.IsNull()) {
+		return hash_repair_val.GetValue<bool>();
+	}
+	return true;
 }
 
 struct PacIdentityHash {
@@ -104,6 +152,22 @@ static inline int pac_clzll(uint64_t x) {
 #endif
 	return 64; // x == 0
 }
+static inline int pac_ctzll(uint64_t x) {
+	unsigned long index;
+#if defined(_M_X64) || defined(_M_AMD64)
+	if (_BitScanForward64(&index, x)) {
+		return static_cast<int>(index);
+	}
+#else
+	if (_BitScanForward(&index, static_cast<uint32_t>(x))) {
+		return static_cast<int>(index);
+	}
+	if (_BitScanForward(&index, static_cast<uint32_t>(x >> 32))) {
+		return 32 + static_cast<int>(index);
+	}
+#endif
+	return 64;
+}
 #else
 // GCC/Clang have __builtin_popcountll
 static inline int pac_popcount64(uint64_t x) {
@@ -112,6 +176,9 @@ static inline int pac_popcount64(uint64_t x) {
 // GCC/Clang have __builtin_clzll
 static inline int pac_clzll(uint64_t x) {
 	return x ? __builtin_clzll(x) : 64;
+}
+static inline int pac_ctzll(uint64_t x) {
+	return x ? __builtin_ctzll(x) : 64;
 }
 #endif
 
@@ -153,6 +220,9 @@ double ComputeDeltaFromValues(const vector<PAC_FLOAT> &values, double mi);
 
 // Register priv_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
 void RegisterPacHashFunction(ExtensionLoader &loader);
+
+// Repair a 64-bit hash to exactly 32 set bits. This is the same operation used by priv_hash().
+uint64_t PacRepairHash32(uint64_t num);
 
 // Register pac_aggregate scalar function (LIST vals, LIST cnts, DOUBLE mi, INTEGER k -> DOUBLE):
 // terminal for the naive PAC sample-and-aggregate path (collapses per-subsample answers + PAC noise)
@@ -233,6 +303,8 @@ struct PrivBindData : public FunctionData {
 	bool hash_repair;            // if true, priv_hash() repairs hash to exactly 32 bits set
 	bool sample_diversity_check; // if true, reject aggregates without sample diversity
 	int sample_lanes;            // SASS mode: number of sampled lanes per PU hash; 0 means identity hash
+	int sample_count;            // SASS mode: total number of sample lanes (m); 64 uses the SIMD bitmask path
+	bool sample_rescale;         // SASS mode: rescale SUM/COUNT samples to full-dataset-estimator scale
 	double utility_threshold;    // z-score threshold for utility NULLing (NaN = disabled, any value = enabled)
 
 	// Persistent secret p-tracking: shared across all aggregates in the same query (same query_hash).
@@ -248,11 +320,12 @@ struct PrivBindData : public FunctionData {
 	// Primary constructor - reads seed from privacy_seed setting, or uses query-id if not set.
 	// All aggregates in the same query get the same seed and query_hash.
 	explicit PrivBindData(ClientContext &ctx, double mi_val, double correction_val = 1.0, double scale_div = 1.0,
-	                      bool hash_repair_val = false, int sample_lanes_val = 0)
+	                      bool hash_repair_val = false, int sample_lanes_val = 0,
+	                      int sample_count_val = DP_SASS_DEFAULT_M, bool sample_rescale_val = true)
 	    : mi(mi_val), correction(correction_val), scale_divisor(scale_div), hash_repair(hash_repair_val),
-	      sample_diversity_check(true), sample_lanes(sample_lanes_val),
-	      utility_threshold(std::numeric_limits<double>::quiet_NaN()), total_update_count(0), suspicious_count(0),
-	      nonsuspicious_count(0) {
+	      sample_diversity_check(true), sample_lanes(sample_lanes_val), sample_count(sample_count_val),
+	      sample_rescale(sample_rescale_val), utility_threshold(std::numeric_limits<double>::quiet_NaN()),
+	      total_update_count(0), suspicious_count(0), nonsuspicious_count(0) {
 		Value sd_val;
 		if (ctx.TryGetCurrentSetting("pac_sample_diversity_check", sd_val) && !sd_val.IsNull()) {
 			sample_diversity_check = sd_val.GetValue<bool>();
@@ -297,6 +370,7 @@ struct PrivBindData : public FunctionData {
 		auto &o = other.Cast<PrivBindData>();
 		return mi == o.mi && correction == o.correction && seed == o.seed && query_hash == o.query_hash &&
 		       scale_divisor == o.scale_divisor && hash_repair == o.hash_repair && sample_lanes == o.sample_lanes &&
+		       sample_count == o.sample_count && sample_rescale == o.sample_rescale &&
 		       utility_threshold == o.utility_threshold;
 	}
 };
@@ -305,14 +379,71 @@ static inline int GetPrivSampleLanes(AggregateInputData &aggr) {
 	return aggr.bind_data ? aggr.bind_data->Cast<PrivBindData>().sample_lanes : 0;
 }
 
+static inline int GetPrivSampleCount(AggregateInputData &aggr) {
+	return aggr.bind_data ? aggr.bind_data->Cast<PrivBindData>().sample_count : DP_SASS_DEFAULT_M;
+}
+
 static inline uint64_t TransformPacUpdateHash(uint64_t key_hash, int sample_lanes) {
 	return sample_lanes > 0 ? DpSampleHash(key_hash, sample_lanes) : key_hash;
+}
+
+static inline idx_t DpSassLaneIndex(uint64_t key_hash, int sample_count) {
+	D_ASSERT(sample_count > 0);
+	return static_cast<idx_t>(key_hash & static_cast<uint64_t>(sample_count - 1));
+}
+
+static inline bool DpSampleMPredicateLaneIsTrue(UnifiedVectorFormat &list_data, UnifiedVectorFormat &child_data,
+                                                const bool *child_values, idx_t list_idx, idx_t lane) {
+	if (!list_data.validity.RowIsValid(list_idx)) {
+		return false;
+	}
+	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
+	auto &entry = list_entries[list_idx];
+	if (lane >= entry.length) {
+		return false;
+	}
+	auto child_idx = child_data.sel->get_index(entry.offset + lane);
+	return child_data.validity.RowIsValid(child_idx) && child_values[child_idx];
 }
 
 // Shared bind for SASS sample-* aggregates: no mi/correction, just the active
 // dp_sample_lanes setting. Used by as_sample_sum, as_sample_count, etc.
 inline unique_ptr<FunctionData> MakeDpSampleBindData(ClientContext &ctx) {
-	return make_uniq<PrivBindData>(ctx, 0.0, 1.0, 1.0, false, GetDpSampleLanes(ctx));
+	return make_uniq<PrivBindData>(ctx, 0.0, 1.0, 1.0, false, GetDpSampleLanes(ctx), DP_SASS_DEFAULT_M,
+	                               GetDpSassRescale(ctx));
+}
+
+inline unique_ptr<FunctionData> MakeDpSampleMBindData(ClientContext &ctx) {
+	return make_uniq<PrivBindData>(ctx, 0.0, 1.0, 1.0, false, GetDpSampleLanes(ctx), GetDpSassM(ctx),
+	                               GetDpSassRescale(ctx));
+}
+
+inline unique_ptr<FunctionData> MakePacSampleMBindData(ClientContext &ctx) {
+	return make_uniq<PrivBindData>(ctx, 0.0, 1.0, 1.0, GetPacHashRepair(ctx), 0, GetPacSampleM(ctx), true);
+}
+
+static inline uint64_t PacMBlockMask(uint64_t key_hash, const PrivBindData &bind, idx_t block_idx) {
+	uint64_t block_hash = key_hash ^ bind.query_hash;
+	if (block_idx != 0) {
+		block_hash ^= PAC_MAGIC_HASH * static_cast<uint64_t>(block_idx);
+	}
+	return bind.hash_repair ? PacRepairHash32(block_hash) : block_hash;
+}
+
+template <class FUNC>
+static inline void ForEachPacMSelectedLane(uint64_t key_hash, const PrivBindData &bind, FUNC &&func) {
+	int sample_count = bind.sample_count;
+	D_ASSERT(sample_count >= DP_SASS_DEFAULT_M);
+	D_ASSERT(sample_count <= DP_SASS_MAX_M);
+	for (idx_t block_idx = 0; block_idx < static_cast<idx_t>(sample_count / 64); block_idx++) {
+		uint64_t mask = PacMBlockMask(key_hash, bind, block_idx);
+		idx_t lane_base = block_idx * 64;
+		while (mask) {
+			int bit = pac_ctzll(mask);
+			func(lane_base + static_cast<idx_t>(bit));
+			mask &= mask - 1;
+		}
+	}
 }
 
 // Common bind helper: reads mi from setting, extracts correction from args[correction_arg_index],

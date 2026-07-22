@@ -1,0 +1,29 @@
+{
+  "threads": 16,
+  "epsilons": [1.0],
+  "deltas": [1e-6],
+  "bound_multipliers": [1.0],
+  "sample_lanes": [1],
+  "sass_ms": [64, 512],
+  "sass_rescales": [true],
+  "sass_releases": ["average"],
+  "datasets": [
+    {
+      "name": "tpch_q01_stability",
+      "workload": "tpch_q01_stability",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q01_sum_count_all",
+        "q01_sum_count_by_linestatus",
+        "q01_sum_count_by_returnflag",
+        "q01_sum_count_by_returnflag_linestatus"
+      ],
+      "count_bounds": [1000000000],
+      "sum_bounds": [1000000000000000],
+      "c_u": [4],
+      "sass_count_output_bounds": [1000000000000000],
+      "sass_sum_output_bounds": [1000000000000000]
+    }
+  ]
+}

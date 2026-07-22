@@ -1,0 +1,99 @@
+# name: test/sql/pac_m_sampling.test
+# description: Variable-m PAC sample aggregates use 50% world membership
+# group: [sql]
+
+require privacy
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET privacy_seed = 42;
+
+statement ok
+SET privacy_mode = 'pac';
+
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET pac_hash_repair = true;
+
+statement ok
+SET pac_m = 128;
+
+query III
+SELECT len(l),
+       list_sum(list_transform(l, lambda x: CASE WHEN x > 0 THEN 1 ELSE 0 END))::INTEGER,
+       list_avg(l)::INTEGER
+FROM (SELECT as_pac_m_count(hash(1)::UBIGINT) AS l);
+----
+128	64	1
+
+query III
+SELECT len(l),
+       list_sum(list_transform(l, lambda x: CASE WHEN x > 0 THEN 1 ELSE 0 END))::INTEGER,
+       list_avg(l)::INTEGER
+FROM (SELECT as_pac_m_sum(hash(1)::UBIGINT, 5.0) AS l);
+----
+128	64	5
+
+query III
+SELECT len(l),
+       list_sum(list_transform(l, lambda x: CASE WHEN x IS NULL THEN 0 ELSE 1 END))::INTEGER,
+       list_avg(l)::INTEGER
+FROM (SELECT as_pac_m_avg(hash(1)::UBIGINT, 10.0, 2.0) AS l);
+----
+128	64	5
+
+query II
+SELECT list_avg(as_pac_m_count(hash(i)::UBIGINT))::INTEGER,
+       list_avg(as_pac_m_sum(hash(i)::UBIGINT, 5.0))::INTEGER
+FROM range(128) t(i);
+----
+128	640
+
+query II
+SELECT list_avg(as_pac_m_count_if(hash(i)::UBIGINT, list_transform(range(128), lambda x: true)))::INTEGER,
+       list_avg(as_pac_m_sum_if(hash(i)::UBIGINT, 5.0,
+                                list_transform(range(128), lambda x: true)))::INTEGER
+FROM range(128) t(i);
+----
+128	640
+
+query II
+SELECT list_avg(as_pac_m_count_if(hash(i)::UBIGINT, list_transform(range(128), lambda x: false)))::INTEGER,
+       list_avg(as_pac_m_sum_if(hash(i)::UBIGINT, 5.0,
+                                list_transform(range(128), lambda x: false)))::INTEGER
+FROM range(128) t(i);
+----
+0	0
+
+statement ok
+SET pac_m = 512;
+
+query III
+SELECT len(l),
+       list_sum(list_transform(l, lambda x: CASE WHEN x > 0 THEN 1 ELSE 0 END))::INTEGER,
+       list_avg(l)::INTEGER
+FROM (SELECT as_pac_m_count(hash(1)::UBIGINT) AS l);
+----
+512	256	1
+
+query II
+SELECT list_avg(as_pac_m_count(hash(i)::UBIGINT))::INTEGER,
+       list_avg(as_pac_m_sum(hash(i)::UBIGINT, 5.0))::INTEGER
+FROM range(128) t(i);
+----
+128	640
+
+statement ok
+SET pac_m = 96;
+
+statement error
+SELECT as_pac_m_count(hash(1)::UBIGINT);
+----
+pac_m

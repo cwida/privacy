@@ -655,7 +655,7 @@ static void PacClipSumFinalizeCounters(Vector &states, AggregateInputData &input
 	double float_scale = bind.float_scale;
 	bool clip_scale = bind.clip_scale;
 	bool dp_sample = MODE == ClipCountersFinalizeMode::DP_SAMPLE;
-	double dp_sample_rescale = dp_sample ? DpSampleRescale(bind.sample_lanes) : 1.0;
+	double dp_sample_rescale = dp_sample && bind.sample_rescale ? DpSampleRescale(bind.sample_lanes) : 1.0;
 
 	auto list_entries = FlatVector::GetData<list_entry_t>(result);
 	auto &child_vec = ListVector::GetEntry(result);
@@ -848,7 +848,8 @@ static unique_ptr<FunctionData> DpSampleClipSumBind(ClientContext &ctx, Aggregat
 	if (clip_support <= 0) {
 		throw InvalidInputException("as_sample_clip_sum: priv_clip_support must be set to a positive value");
 	}
-	return make_uniq<PacClipBindData>(ctx, 0.0, 1.0, clip_support, CLIP_DOUBLE_SCALE, false, GetDpSampleLanes(ctx));
+	return make_uniq<PacClipBindData>(ctx, 0.0, 1.0, clip_support, CLIP_DOUBLE_SCALE, false, GetDpSampleLanes(ctx),
+	                                  DP_SASS_DEFAULT_M, GetDpSassRescale(ctx));
 }
 
 // ============================================================================

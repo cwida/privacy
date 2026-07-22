@@ -106,23 +106,30 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
     add_executable(as_clickbench_benchmark benchmark/clickbench/as_clickbench_benchmark.cpp)
     target_link_libraries(as_clickbench_benchmark ${PRIVACY_LINK_LIBS})
 
-    # TPCH Compiler benchmark runner (compares PAC vs regular TPC-H)
-    add_executable(pac_tpch_compiler_benchmark benchmark/tpch/pac_tpch_compiler_benchmark.cpp)
-    target_link_libraries(pac_tpch_compiler_benchmark ${PRIVACY_LINK_LIBS})
-
     # Unified DP utility benchmark runner
+    set(TPCH_STOCK_DP_QUERY_NAMES q01 q05 q06 q14 q19)
+    set(TPCH_STOCK_DP_QUERY_FILES)
+    foreach(QUERY_NAME IN LISTS TPCH_STOCK_DP_QUERY_NAMES)
+        string(TOUPPER ${QUERY_NAME} QUERY_NAME_UPPER)
+        set(QUERY_FILE "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/dp/tpch_queries/${QUERY_NAME}.sql")
+        list(APPEND TPCH_STOCK_DP_QUERY_FILES "${QUERY_FILE}")
+        file(READ
+            "${QUERY_FILE}"
+            "TPCH_${QUERY_NAME_UPPER}_SQL")
+    endforeach()
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        ${TPCH_STOCK_DP_QUERY_FILES})
+    set(TPCH_QUERY_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    file(MAKE_DIRECTORY "${TPCH_QUERY_GENERATED_DIR}")
+    configure_file(
+        benchmark/include/tpch_stock_queries.hpp.in
+        "${TPCH_QUERY_GENERATED_DIR}/tpch_stock_queries.hpp"
+        @ONLY)
     add_executable(dp_benchmark_runner benchmark/dp/dp_benchmark_runner.cpp)
+    target_include_directories(dp_benchmark_runner PRIVATE "${TPCH_QUERY_GENERATED_DIR}")
     target_link_libraries(dp_benchmark_runner ${PRIVACY_LINK_LIBS})
-
-    # ClickHouse/ClickBench benchmark runner
-    add_executable(pac_clickhouse_benchmark benchmark/clickbench/pac_clickhouse_benchmark.cpp)
-    target_link_libraries(pac_clickhouse_benchmark ${PRIVACY_LINK_LIBS})
 
     # IMDb/JOB benchmark runner
     add_executable(imdb_benchmark benchmark/imdb/imdb_benchmark.cpp)
     target_link_libraries(imdb_benchmark ${PRIVACY_LINK_LIBS})
-
-    # SQLStorm benchmark runner
-    add_executable(pac_sqlstorm_benchmark benchmark/sqlstorm/pac_sqlstorm_benchmark.cpp)
-    target_link_libraries(pac_sqlstorm_benchmark ${PRIVACY_LINK_LIBS})
 endif()

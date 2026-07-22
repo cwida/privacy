@@ -1,0 +1,8 @@
+{
+  "db": "clickbench.db",
+  "queries_dir": "benchmark/clickbench/clickbench_queries",
+  "out": "benchmark/results/sanity/as_clickbench_m64_m512.csv",
+  "threads": 16,
+  "memory_limit": "25GB",
+  "as_ms": [64, 512]
+}

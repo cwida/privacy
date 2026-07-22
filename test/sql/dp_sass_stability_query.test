@@ -84,6 +84,17 @@ ORDER BY aggregate_index, group_key_json;
 1	s	{"category":"even"}	64	64	2304
 1	s	{"category":"odd"}	64	64	2432
 
+query ITTII
+SELECT aggregate_index, aggregate_name, group_key_json, lane_count, valid_count
+FROM dp_sass_stability_query($$
+    SELECT SUM(amount)::DOUBLE / SUM(amount + 1)::DOUBLE AS ratio
+    FROM events
+$$)
+ORDER BY aggregate_index;
+----
+0	agg_0	{}	64	64
+1	agg_1	{}	64	64
+
 statement error
 SELECT *
 FROM dp_sass_stability_query($$SELECT uid FROM users$$);
@@ -95,6 +106,42 @@ SELECT COUNT(*)::INTEGER
 FROM dp_sass_stability_query($$SELECT COUNT(*) AS c FROM users$$);
 ----
 1
+
+statement ok
+SET dp_sass_m = 128;
+
+query II
+SELECT lane_count, valid_count
+FROM dp_sass_stability_query($$SELECT COUNT(*) AS c FROM users$$);
+----
+128	128
+
+statement ok
+SET dp_sass_m = 64;
+
+statement ok
+SET dp_sass_avg_lower_bound = NULL;
+
+statement ok
+SET dp_sass_avg_upper_bound = NULL;
+
+statement ok
+SET dp_avg_lower_bounds = '0';
+
+statement ok
+SET dp_avg_upper_bounds = '200';
+
+query TI
+SELECT aggregate_name, lane_count
+FROM dp_sass_stability_query($$SELECT AVG(amount) AS a FROM events$$);
+----
+a	64
+
+statement ok
+SET dp_avg_lower_bounds = NULL;
+
+statement ok
+SET dp_avg_upper_bounds = NULL;
 
 statement ok
 PRAGMA clear_privacy_metadata;

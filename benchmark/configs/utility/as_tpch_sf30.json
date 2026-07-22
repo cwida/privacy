@@ -1,0 +1,10 @@
+{
+  "sf": 30,
+  "db": "tpch_sf30_graviton.db",
+  "queries_dir": "benchmark",
+  "out": "benchmark/results/utility/as_tpch_sf30.csv",
+  "threads": 16,
+  "as_ms": [64],
+  "run_simple_hash": true,
+  "skip_naive": false
+}

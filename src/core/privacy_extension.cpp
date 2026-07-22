@@ -105,6 +105,10 @@ static void ValidateDpSampleLanesSetting(ClientContext &, SetScope, Value &param
 	ValidateDpSampleLanes(parameter.GetValue<int64_t>());
 }
 
+static void ValidateDpSassMSetting(ClientContext &, SetScope, Value &parameter) {
+	ValidateDpSassM(parameter.GetValue<int64_t>());
+}
+
 static double ComputePrivacyUnitCardinality(ClientContext &context) {
 	auto table_names = PrivacyMetadataManager::Get().GetAllTableNames();
 	vector<std::pair<string, PrivacyTableMetadata>> pu_tables;
@@ -318,6 +322,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption(
 	    "dp_sample_lanes", "Number of sample lanes a privacy unit contributes in privacy_mode='dp_sass'",
 	    LogicalType::INTEGER, Value::INTEGER(DP_SAMPLE_DEFAULT_LANES), ValidateDpSampleLanesSetting);
+	db.config.AddExtensionOption("dp_sass_m",
+	                             "Total number of SAA subsamples for privacy_mode='dp_sass'. The default 64 uses the "
+	                             "SIMD bitmask path; larger powers of two use the experimental variable-m path.",
+	                             LogicalType::INTEGER, Value::INTEGER(DP_SASS_DEFAULT_M), ValidateDpSassMSetting);
+	db.config.AddExtensionOption("dp_sass_rescale",
+	                             "When true, dp_sass SUM/COUNT sample answers are rescaled to full-dataset-estimator "
+	                             "scale before release. When false, they remain on raw subsample-answer scale.",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	// Differential privacy budget (ε), used by the dp_standard / dp_elastic / dp_sass modes.
 	db.config.AddExtensionOption("dp_epsilon",
 	                             "Differential privacy budget ε (used by dp_standard, dp_elastic, and dp_sass)",
@@ -328,6 +340,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "Clipping bound for SUM/AVG in DP modes, required when such an aggregate is present "
 	                             "(per-PU total for dp_standard/dp_sass; per-tuple for dp_elastic)",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sum_bounds",
+	                             "Comma-separated clipping bounds for explicit SUM aggregates in query order. "
+	                             "Overrides dp_sum_bound for those SUMs when set; AVG uses AVG bounds.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 	db.config.AddExtensionOption("dp_count_bound",
 	                             "Per-PU row-count bound: max rows one privacy unit contributes to a COUNT over a join "
 	                             "(required for dp_standard/dp_sass COUNT-over-join; also bounds AVG components)",
@@ -344,12 +360,52 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "dp_minmax_upper_bound",
 	    "Public domain upper bound U for MIN/MAX under dp_standard (see dp_minmax_lower_bound).", LogicalType::DOUBLE,
 	    Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_avg_lower_bound",
+	                             "Public value-domain lower bound for AVG under DP modes. Used for bounded AVG "
+	                             "releases and as the dp_sass sample-mean output domain when set.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_avg_upper_bound",
+	                             "Public value-domain upper bound for AVG under DP modes. Used with "
+	                             "dp_avg_lower_bound.",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_avg_lower_bounds",
+	                             "Comma-separated public lower bounds for AVG aggregates in query order. Overrides "
+	                             "dp_avg_lower_bound when set.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
+	db.config.AddExtensionOption("dp_avg_upper_bounds",
+	                             "Comma-separated public upper bounds for AVG aggregates in query order. Overrides "
+	                             "dp_avg_upper_bound when set.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 	db.config.AddExtensionOption("dp_sass_count_output_bound",
 	                             "Public output-domain upper bound for dp_sass COUNT/COUNT(DISTINCT) sample answers.",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sass_count_output_bounds",
+	                             "Comma-separated public output-domain upper bounds for dp_sass COUNT aggregates in "
+	                             "query order. Overrides dp_sass_count_output_bound when set.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
+	db.config.AddExtensionOption("dp_sass_count_output_lower_bounds",
+	                             "Comma-separated public output-domain lower bounds for dp_sass COUNT aggregates in "
+	                             "query order. Used with dp_sass_count_output_upper_bounds when set.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
+	db.config.AddExtensionOption("dp_sass_count_output_upper_bounds",
+	                             "Comma-separated public output-domain upper bounds for dp_sass COUNT aggregates in "
+	                             "query order. Used with dp_sass_count_output_lower_bounds when set.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 	db.config.AddExtensionOption("dp_sass_sum_output_bound",
 	                             "Public symmetric output-domain bound for dp_sass SUM sample answers.",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
+	db.config.AddExtensionOption("dp_sass_sum_output_bounds",
+	                             "Comma-separated public symmetric output-domain bounds for dp_sass SUM aggregates in "
+	                             "query order. Overrides dp_sass_sum_output_bound when set.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
+	db.config.AddExtensionOption("dp_sass_sum_output_lower_bounds",
+	                             "Comma-separated public output-domain lower bounds for dp_sass SUM aggregates in "
+	                             "query order. Used with dp_sass_sum_output_upper_bounds when set.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
+	db.config.AddExtensionOption("dp_sass_sum_output_upper_bounds",
+	                             "Comma-separated public output-domain upper bounds for dp_sass SUM aggregates in "
+	                             "query order. Used with dp_sass_sum_output_lower_bounds when set.",
+	                             LogicalType::VARCHAR, Value(LogicalType::VARCHAR));
 	db.config.AddExtensionOption("dp_sass_avg_lower_bound",
 	                             "Public output-domain lower bound for dp_sass AVG sample answers.",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
@@ -368,9 +424,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             LogicalType::VARCHAR, Value("median"));
 	db.config.AddExtensionOption("dp_sass_avg_method",
 	                             "dp_sass AVG estimator: 'lane_average' (sample-and-aggregate of the mean, "
-	                             "NRS/GUPT-native; default) or 'ratio' (two independent SAA mechanisms for SUM and "
-	                             "COUNT, released as their ratio; Google-DP-style).",
+	                             "NRS/GUPT-native; default), 'nonempty_lane_average' (noisy shifted SUM divided by "
+	                             "noisy populated-lane COUNT), or 'ratio' (two independent SAA mechanisms for the "
+	                             "original row SUM and COUNT).",
 	                             LogicalType::VARCHAR, Value("lane_average"));
+	db.config.AddExtensionOption(
+	    "dp_sass_sum_method",
+	    "dp_sass SUM estimator under average release: 'lane_average' (fixed lane count; default) or "
+	    "'nonempty_lane_average' (noisy SUM of populated lane answers divided by noisy populated-lane COUNT).",
+	    LogicalType::VARCHAR, Value("lane_average"));
 	db.config.AddExtensionOption(
 	    "dp_sass_fast_count_star",
 	    "[INTERNAL] Enable a fast Laplace COUNT(*) path for ungrouped dp_sass single-table PU queries. "
@@ -427,6 +489,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "[INTERNAL] Record dp_sass aggregate-list stability for "
 	                             "dp_sass_stability_query",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	db.config.AddExtensionOption("dp_sass_noise_scale_query_mode",
+	                             "[INTERNAL] Record dp_sass aggregate noise scales for dp_sass_noise_scale_query",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	// When false, unsupported operators skip privacy compilation instead of throwing
 	db.config.AddExtensionOption(
 	    "pac_conservative_mode",
@@ -477,6 +542,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacSumCountersFunctions(loader);
 	RegisterDpSampleSumFunctions(loader);
 	RegisterDpSampleAvgFunctions(loader);
+	RegisterDpSampleMSumFunctions(loader);
+	RegisterDpSampleMAvgFunctions(loader);
+	RegisterDpSampleMSumIfFunctions(loader);
+	RegisterPacSampleMSumFunctions(loader);
+	RegisterPacSampleMAvgFunctions(loader);
+	RegisterPacSampleMSumIfFunctions(loader);
 	RegisterPacClipSumFunctions(loader);
 	RegisterPacNoisedClipSumFunctions(loader);
 	RegisterPacNoisedClipSumCountFunctions(loader);
@@ -484,6 +555,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacCountFunctions(loader);
 	RegisterPacCountCountersFunctions(loader);
 	RegisterDpSampleCountFunctions(loader);
+	RegisterDpSampleMCountFunctions(loader);
+	RegisterDpSampleMCountDistinctFunctions(loader);
+	RegisterDpSampleMCountDistinctValuesFunctions(loader);
+	RegisterDpSampleMCountIfFunctions(loader);
+	RegisterPacSampleMCountFunctions(loader);
+	RegisterPacSampleMCountIfFunctions(loader);
 	RegisterPacClipCountFunctions(loader);
 	RegisterPacNoisedClipCountFunctions(loader);
 	// Register as_min/as_max aggregate functions
@@ -494,6 +571,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPacMaxCountersFunctions(loader);
 	RegisterDpSampleMinFunctions(loader);
 	RegisterDpSampleMaxFunctions(loader);
+	RegisterDpSampleMMinFunctions(loader);
+	RegisterDpSampleMMaxFunctions(loader);
 	// Register clip synonyms for min/max
 	RegisterPacClipMinFunctions(loader);
 	RegisterPacClipMaxFunctions(loader);

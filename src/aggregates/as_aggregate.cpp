@@ -309,7 +309,7 @@ double ComputeDeltaFromValues(const vector<PAC_FLOAT> &values, double mi) {
 // 64-bit prime with exactly 32 bits set (irregular pattern), used for hashing in hash32_32
 #define PAC_HASH_PRIME 0xB2833106536E95DFULL
 
-static uint64_t hash32_32(uint64_t num) {
+uint64_t PacRepairHash32(uint64_t num) {
 	for (int round = 0; round < 16; ++round) {
 		uint64_t next = PAC_HASH_PRIME * (num ^ PAC_HASH_PRIME);
 		uint64_t flip = static_cast<uint64_t>(static_cast<int64_t>(32 - pac_popcount64(num)) >> 63);
@@ -592,7 +592,7 @@ static void PacHashFunction(DataChunk &args, ExpressionState &state, Vector &res
 	}
 	UnaryExecutor::Execute<uint64_t, uint64_t>(input, result, count, [query_hash, hash_repair](uint64_t val) {
 		uint64_t xored = val ^ query_hash;
-		return hash_repair ? hash32_32(xored) : xored;
+		return hash_repair ? PacRepairHash32(xored) : xored;
 	});
 }
 

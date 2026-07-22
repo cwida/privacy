@@ -217,6 +217,36 @@ SELECT SUM(amount) FROM orders;
 ----
 2250.000000
 
+statement ok
+SET dp_sum_bounds = '1000';
+
+statement error
+SELECT SUM(amount), SUM(amount * 1000.0) FROM orders;
+----
+dp_sum_bounds
+
+statement ok
+SET dp_sum_bounds = '1000,45000';
+
+query II
+SELECT SUM(amount)::BIGINT, SUM(amount * 1000.0)::BIGINT FROM orders;
+----
+2250	2250000
+
+statement ok
+SET dp_sum_bound = NULL;
+
+query II
+SELECT SUM(amount)::BIGINT, SUM(amount * 1000.0)::BIGINT FROM orders;
+----
+2250	2250000
+
+statement ok
+SET dp_sum_bound = 1000.0;
+
+statement ok
+SET dp_sum_bounds = NULL;
+
 # FILTER (WHERE ...) on a join must be applied to the per-PU partial, not dropped. Each user's 5
 # orders all carry amount = uid % 10, so amount > 5 keeps only the 40 users with uid % 10 in
 # {6,7,8,9}: SUM = 5 * (6+7+8+9) * 10 = 1500 (vs 2250 unfiltered).
@@ -291,6 +321,13 @@ query II
 SELECT COUNT(*), SUM(amount) FROM orders;
 ----
 500	2250.000000
+
+# Mixed explicit SUM + AVG must still use dp_sum_bound for the explicit SUM even
+# when AVG can derive its internal centered-SUM bound from the AVG domain.
+query II
+SELECT SUM(amount)::BIGINT, (AVG(amount) * 10)::BIGINT FROM orders;
+----
+2250	45
 
 # ---------------------------------------------------------------------------
 # Partition selection. The released set of group keys is data-dependent, so grouped dp_standard
@@ -585,6 +622,24 @@ query II
 SELECT g, COUNT(*) FROM dp_standard_tiny_delta_events GROUP BY g;
 ----
 0	600
+
+statement ok
+SET privacy_noise = true;
+
+# A SUM-only list setting left in the session is irrelevant to a COUNT-only query.
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET dp_sum_bounds = '10';
+
+query I
+SELECT COUNT(*)::INTEGER FROM dp_standard_tiny_delta_users;
+----
+600
+
+statement ok
+SET dp_sum_bounds = NULL;
 
 statement ok
 SET privacy_noise = true;

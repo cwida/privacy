@@ -1,24 +1,9 @@
 #!/usr/bin/env Rscript
 # Full DP benchmark plotter: utility and runtime for the five supported queries.
 
-user_lib <- Sys.getenv("R_LIBS_USER")
-if (user_lib == "") {
-  user_lib <- file.path(Sys.getenv("HOME"), "R", "libs")
-}
-if (!dir.exists(user_lib)) {
-  dir.create(user_lib, recursive = TRUE, showWarnings = FALSE)
-}
-.libPaths(c(user_lib, .libPaths()))
-
-required_packages <- c("ggplot2", "dplyr", "readr", "scales", "tidyr", "systemfonts")
-options(repos = c(CRAN = "https://cloud.r-project.org"))
-installed <- rownames(installed.packages())
-for (pkg in required_packages) {
-  if (!(pkg %in% installed)) {
-    message("Installing package: ", pkg)
-    install.packages(pkg, dependencies = TRUE, lib = user_lib)
-  }
-}
+script_file <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)[1])
+source(file.path(dirname(dirname(normalizePath(script_file))), "plot_common.R"))
+RequirePlotPackages(c("ggplot2", "dplyr", "readr", "scales", "tidyr", "systemfonts"))
 
 suppressPackageStartupMessages({
   library(ggplot2)
@@ -28,9 +13,7 @@ suppressPackageStartupMessages({
   library(tidyr)
 })
 
-base_font <- tryCatch({
-  if (any(grepl("Linux Libertine", systemfonts::system_fonts()$family, fixed = TRUE))) "Linux Libertine" else "serif"
-}, error = function(e) "serif")
+base_font <- PaperFont()
 
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 1) {
@@ -46,42 +29,46 @@ if (!dir.exists(output_dir)) {
 raw <- suppressWarnings(readr::read_csv(input_csv, show_col_types = FALSE))
 
 expected_cols <- c(
-  "dataset", "query", "mode", "release", "success", "time_ms",
-  "median_error_pct", "recall", "bound_multiplier", "run"
+	"dataset", "query", "mode", "release", "success", "time_ms",
+	"median_error_pct", "recall", "bound_multiplier", "run"
 )
 missing_cols <- setdiff(expected_cols, colnames(raw))
 if (length(missing_cols) > 0) {
-  stop("Missing expected columns in CSV: ", paste(missing_cols, collapse = ", "))
+	stop("Missing expected columns in CSV: ", paste(missing_cols, collapse = ", "))
+}
+if (!("delta" %in% colnames(raw))) {
+	raw$delta <- NA_real_
+}
+if (!("dp_sass_m" %in% colnames(raw))) {
+	raw$dp_sass_m <- NA_integer_
 }
 
 scenario_levels <- c("terrible tight", "bad tight", "good", "bad loose", "terrible loose")
 query_levels <- c("Q01", "Q05", "Q06", "Q14", "Q19")
 mechanism_levels <- c(
-  "DuckDB", "Bounded DP", "DP-Elastic", "DP-SAA median", "DP-SAA average", "DP-SAA bounded ratio"
+  "DuckDB", "Bounded DP", "DP-Elastic", "DP-SAA median", "DP-SAA average"
 )
-mechanism_levels_grouped <- c("DuckDB", "Bounded DP", "DP-Elastic", "DP-SAA median", "DP-SAA average")
 mechanism_colors <- c(
   "DuckDB" = "#95a5a6",
   "Bounded DP" = "#d55e00",
   "DP-Elastic" = "#0072b2",
   "DP-SAA median" = "#4dff4d",
-  "DP-SAA average" = "#009900",
-  "DP-SAA bounded ratio" = "#005f2f"
+  "DP-SAA average" = "#009900"
 )
-mechanism_colors_grouped <- mechanism_colors[mechanism_levels_grouped]
-utility_mechanism_colors <- mechanism_colors_grouped[names(mechanism_colors_grouped) != "DuckDB"]
+utility_mechanism_colors <- mechanism_colors[names(mechanism_colors) != "DuckDB"]
 utility_mechanism_shapes <- c(
   "Bounded DP" = 16,
   "DP-Elastic" = 17,
   "DP-SAA median" = 15,
   "DP-SAA average" = 18
 )
-runtime_mechanism_levels <- c("DuckDB", "Bounded DP", "DP-Elastic", "DP-SAA")
+runtime_mechanism_levels <- c("DuckDB", "Bounded DP", "DP-Elastic", "DP-SAA m=64", "DP-SAA m=512")
 runtime_mechanism_colors <- c(
-  "DuckDB" = "#95a5a6",
-  "Bounded DP" = "#d55e00",
-  "DP-Elastic" = "#0072b2",
-  "DP-SAA" = "#4dff4d"
+	"DuckDB" = "#95a5a6",
+	"Bounded DP" = "#d55e00",
+	"DP-Elastic" = "#0072b2",
+	"DP-SAA m=64" = "#4dff4d",
+	"DP-SAA m=512" = "#009900"
 )
 runtime_query_spacing <- 0.82
 
@@ -89,13 +76,14 @@ normalized <- raw %>%
   mutate(
     dataset = case_when(
       tolower(dataset) == "tpch" ~ "TPC-H",
-      tolower(dataset) == "jcch" ~ "JCC-H",
       TRUE ~ toupper(dataset)
     ),
     query = toupper(query),
-    run = as.integer(run),
-    bound_multiplier = as.numeric(bound_multiplier),
-    time_ms = as.numeric(time_ms),
+		run = as.integer(run),
+		bound_multiplier = as.numeric(bound_multiplier),
+		delta = as.numeric(delta),
+		dp_sass_m = as.integer(dp_sass_m),
+		time_ms = as.numeric(time_ms),
     median_error_pct = as.numeric(median_error_pct),
     recall = as.numeric(recall),
     mechanism = case_when(
@@ -104,7 +92,6 @@ normalized <- raw %>%
       mode == "dp_elastic" ~ "DP-Elastic",
       mode == "dp_sass" & release == "median" ~ "DP-SAA median",
       mode == "dp_sass" & release == "average" ~ "DP-SAA average",
-      mode == "dp_sass_bounded_ratio" ~ "DP-SAA bounded ratio",
       TRUE ~ mode
     ),
     scenario = case_when(
@@ -188,57 +175,87 @@ runtime_summary <- bind_rows(runtime_summary_mechanisms, runtime_duckdb) %>%
     plot_value = pmax(slowdown, 0.001)
   )
 
-group_bounded_ratio <- function(df) {
-  df %>%
-    filter(!(query == "Q14" & mechanism == "DP-SAA average")) %>%
-    mutate(
-      mechanism = ifelse(mechanism == "DP-SAA bounded ratio", "DP-SAA average", as.character(mechanism)),
-      mechanism = factor(mechanism, levels = mechanism_levels_grouped)
-    ) %>%
-    filter(mechanism %in% mechanism_levels_grouped)
+utility_summary_grouped <- utility_summary
+runtime_summary_grouped <- runtime_summary
+
+runtime_delta_candidates <- normalized %>%
+	filter(
+		dataset == "TPC-H",
+		usable,
+		abs(bound_multiplier - 1.0) <= 1e-12,
+		mode %in% c("dp_standard", "dp_elastic", "dp_sass"),
+		!is.na(delta)
+	) %>%
+	pull(delta) %>%
+	unique() %>%
+	sort()
+runtime_delta <- if (length(runtime_delta_candidates) == 0) {
+	NA_real_
+} else if (any(abs(runtime_delta_candidates - 1e-6) <= 1e-12)) {
+	1e-6
+} else {
+	runtime_delta_candidates[1]
 }
-
-utility_summary_grouped <- group_bounded_ratio(utility_summary)
-runtime_summary_grouped <- group_bounded_ratio(runtime_summary)
-
-runtime_compact <- runtime_summary_grouped %>%
-  mutate(
-    mechanism = as.character(mechanism),
-    mechanism = ifelse(mechanism == "DP-SAA average", "DP-SAA", mechanism),
-    mechanism = factor(mechanism, levels = runtime_mechanism_levels)
-  ) %>%
-  filter(mechanism %in% runtime_mechanism_levels) %>%
-  group_by(query, mechanism) %>%
-  summarize(
-    avg_time_ms = mean(median_time_ms, na.rm = TRUE),
-    median_time_ms = median(median_time_ms, na.rm = TRUE),
-    avg_slowdown = mean(slowdown, na.rm = TRUE),
-    median_slowdown = median(slowdown, na.rm = TRUE),
-    min_slowdown = min(slowdown, na.rm = TRUE),
+runtime_compact <- normalized %>%
+	filter(dataset == "TPC-H", usable) %>%
+	filter(
+		mode == "duckdb" |
+			(
+				abs(bound_multiplier - 1.0) <= 1e-12 &
+					(is.na(runtime_delta) | is.na(delta) |
+						abs(delta - runtime_delta) <= max(1e-12, runtime_delta * 1e-8)) &
+					(
+						mode %in% c("dp_standard", "dp_elastic") |
+							(mode == "dp_sass" & release == "average" & dp_sass_m %in% c(64L, 512L))
+					)
+			)
+	) %>%
+	mutate(
+		mechanism = case_when(
+			mode == "duckdb" ~ "DuckDB",
+			mode == "dp_standard" ~ "Bounded DP",
+			mode == "dp_elastic" ~ "DP-Elastic",
+			mode == "dp_sass" & release == "average" & dp_sass_m == 64L ~ "DP-SAA m=64",
+			mode == "dp_sass" & release == "average" & dp_sass_m == 512L ~ "DP-SAA m=512",
+			TRUE ~ NA_character_
+		),
+		mechanism = factor(mechanism, levels = runtime_mechanism_levels)
+	) %>%
+	filter(mechanism %in% runtime_mechanism_levels) %>%
+	left_join(duckdb_baseline, by = c("dataset", "query")) %>%
+	mutate(slowdown = time_ms / duckdb_time_ms) %>%
+	group_by(query, mechanism) %>%
+	summarize(
+		avg_time_ms = mean(time_ms, na.rm = TRUE),
+		median_time_ms = median(time_ms, na.rm = TRUE),
+		avg_slowdown = mean(slowdown, na.rm = TRUE),
+		median_slowdown = median(slowdown, na.rm = TRUE),
+		min_slowdown = min(slowdown, na.rm = TRUE),
     max_slowdown = max(slowdown, na.rm = TRUE),
     .groups = "drop"
   ) %>%
   mutate(
     query = factor(query, levels = query_levels),
     mechanism = factor(mechanism, levels = runtime_mechanism_levels),
-    qidx = match(as.character(query), query_levels),
-    x_base = qidx * runtime_query_spacing,
-    x_pos = x_base + case_when(
-      mechanism == "DuckDB" ~ -0.24,
-      mechanism == "Bounded DP" ~ -0.08,
-      mechanism == "DP-Elastic" ~ 0.08,
-      mechanism == "DP-SAA" ~ 0.24,
-      TRUE ~ 0.0
-    ),
+		qidx = match(as.character(query), query_levels),
+		x_base = qidx * runtime_query_spacing,
+		x_pos = x_base + case_when(
+			mechanism == "DuckDB" ~ -0.28,
+			mechanism == "Bounded DP" ~ -0.14,
+			mechanism == "DP-Elastic" ~ 0.0,
+			mechanism == "DP-SAA m=64" ~ 0.14,
+			mechanism == "DP-SAA m=512" ~ 0.28,
+			TRUE ~ 0.0
+		),
     label_y = avg_time_ms * 1.15,
     slowdown_label = ifelse(mechanism == "DuckDB", "",
                             ifelse(avg_slowdown >= 10, sprintf("%.0fx", avg_slowdown),
                                    sprintf("%.1fx", avg_slowdown)))
   )
 
-utility_csv <- file.path(output_dir, "tpch_jcch_sf30_all5_utility_summary.csv")
-runtime_csv <- file.path(output_dir, "tpch_jcch_sf30_all5_runtime_summary.csv")
-runtime_compact_csv <- file.path(output_dir, "tpch_jcch_sf30_all5_runtime_compact_summary.csv")
+utility_csv <- file.path(output_dir, "tpch_sf30_all5_utility_summary.csv")
+runtime_csv <- file.path(output_dir, "tpch_sf30_all5_runtime_summary.csv")
+runtime_compact_csv <- file.path(output_dir, "tpch_sf30_all5_runtime_compact_summary.csv")
 readr::write_csv(utility_summary, utility_csv)
 readr::write_csv(runtime_summary, runtime_csv)
 readr::write_csv(runtime_compact, runtime_compact_csv)
@@ -280,12 +297,12 @@ make_metric_plot <- function(df, y_label, out_file, breaks, labels) {
   message("Plot saved to: ", out_file)
 }
 
-utility_plot <- file.path(output_dir, "tpch_jcch_sf30_all5_utility_paper.png")
-runtime_plot <- file.path(output_dir, "tpch_jcch_sf30_all5_runtime_paper.png")
-utility_grouped_plot <- file.path(output_dir, "tpch_jcch_sf30_all5_utility_grouped_paper.png")
-runtime_compact_plot <- file.path(output_dir, "tpch_jcch_sf30_all5_runtime_compact_paper.png")
-combined_plot <- file.path(output_dir, "tpch_jcch_sf30_all5_utility_runtime_paper.png")
-combined_grouped_plot <- file.path(output_dir, "tpch_jcch_sf30_all5_utility_runtime_grouped_paper.png")
+utility_plot <- file.path(output_dir, "tpch_sf30_all5_utility_paper.png")
+runtime_plot <- file.path(output_dir, "tpch_sf30_all5_runtime_paper.png")
+utility_grouped_plot <- file.path(output_dir, "tpch_sf30_all5_utility_grouped_paper.png")
+runtime_compact_plot <- file.path(output_dir, "tpch_sf30_all5_runtime_compact_paper.png")
+combined_plot <- file.path(output_dir, "tpch_sf30_all5_utility_runtime_paper.png")
+combined_grouped_plot <- file.path(output_dir, "tpch_sf30_all5_utility_runtime_grouped_paper.png")
 
 make_metric_plot(
   utility_summary,
@@ -344,11 +361,11 @@ runtime_compact_plot_obj <- ggplot(
   aes(x = x_pos, y = avg_time_ms, fill = mechanism)
 ) +
   geom_col(width = 0.14, color = "black", linewidth = 0.25, na.rm = TRUE) +
-  geom_text(
-    data = runtime_compact %>% filter(mechanism != "DuckDB"),
-    aes(x = x_pos, y = label_y, label = slowdown_label),
-    inherit.aes = FALSE,
-    size = 5,
+	geom_text(
+		data = runtime_compact %>% filter(mechanism != "DuckDB"),
+		aes(x = x_pos, y = label_y, label = slowdown_label),
+		inherit.aes = FALSE,
+		size = 4.5,
     vjust = 0,
     fontface = "bold",
     family = base_font,
@@ -369,10 +386,13 @@ runtime_compact_plot_obj <- ggplot(
     panel.border = element_rect(linewidth = 1.0),
     panel.grid.major = element_line(linewidth = 1.0),
     panel.grid.minor = element_blank(),
-    legend.position = "top",
-    legend.title = element_blank(),
-    legend.text = element_text(size = 26),
-    legend.key.size = unit(0.6, "cm"),
+		legend.position = "top",
+		legend.justification = "right",
+		legend.box.just = "right",
+		legend.direction = "horizontal",
+		legend.title = element_blank(),
+		legend.text = element_text(size = 22),
+		legend.key.size = unit(0.5, "cm"),
     legend.margin = margin(0, 0, -5, 0),
     legend.box.margin = margin(0, 0, -20, 0),
     axis.text.x = element_text(angle = 0, hjust = 0.5, size = 24),
@@ -420,10 +440,10 @@ dev.off()
 message("Combined plot saved to: ", combined_plot)
 
 combined_grouped_data <- bind_rows(
-  group_bounded_ratio(utility_summary) %>%
+  utility_summary %>%
     mutate(metric = "median error (%)") %>%
     select(dataset, query, mechanism, scenario, plot_value, metric),
-  group_bounded_ratio(runtime_summary) %>%
+  runtime_summary %>%
     mutate(metric = "slowdown vs DuckDB (x)") %>%
     select(dataset, query, mechanism, scenario, plot_value, metric)
 ) %>%
@@ -455,7 +475,7 @@ combined_grouped <- ggplot(
   geom_line(linewidth = 0.95, na.rm = TRUE) +
   geom_point(size = 2.1, na.rm = TRUE) +
   facet_grid(metric ~ dataset_query, scales = "free_y") +
-  scale_color_manual(values = mechanism_colors_grouped, name = NULL, drop = FALSE) +
+  scale_color_manual(values = mechanism_colors, name = NULL, drop = FALSE) +
   scale_y_log10(
     breaks = c(0.01, 0.1, 1, 10, 100, 10000, 1000000),
     labels = c("0.01", "0.1", "1", "10", "100", "10K", "1M")

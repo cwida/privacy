@@ -13,8 +13,9 @@ The main change is to stop assigning SASS lanes with a global rank:
 ROW_NUMBER() OVER (ORDER BY hash(pu_key)) % 64
 ```
 
-`dp_sass` now builds the sample key from a stable hash of the privacy-unit key. For
-`dp_sample_lanes = 1`, each privacy unit maps to exactly one of the 64 lanes:
+`dp_sass` now builds the sample key from a stable hash of the privacy-unit key. In
+the optimized `m = 64` path with `dp_sample_lanes = 1`, each privacy unit maps to
+exactly one lane:
 
 ```text
 lane = hash(pu_key) mod 64
@@ -49,6 +50,10 @@ dp_sass_lane_key = hash(propagated_pu_key)
 The existing aggregate update path still calls `DpSampleHash(dp_sass_lane_key,
 dp_sample_lanes)`. For `dp_sample_lanes = 1`, `DpSampleHash` reads only one 6-bit lane
 index and sets exactly one bit. Therefore each PU contributes to exactly one lane.
+
+When `dp_sass_m` is `128`, `256`, or `512`, the variable-size aggregate path uses
+`hash(PU) mod m` as a direct lane identifier. It does not construct a wider mask.
+These values require `dp_sample_lanes = 1`, so their subsamples remain disjoint.
 
 For `dp_sample_lanes > 1`, the existing semantics remain overlapping: one PU can set up
 to `dp_sample_lanes` lane bits. The smooth-sensitivity and GUPT mean noise paths already

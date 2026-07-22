@@ -1,0 +1,442 @@
+{
+  "out": "benchmark/results/utility/dp_tpch_sf30_q01_avg_groups.csv",
+  "runs": 3,
+  "threads": 16,
+  "seed_base": 626262,
+  "epsilons": [
+    1
+  ],
+  "deltas": [
+    0.000001
+  ],
+  "bound_multipliers": [
+    1
+  ],
+  "count_bounds": [
+    1000
+  ],
+  "sum_bounds": [
+    105000000
+  ],
+  "avg_lower_bounds": [
+    0,
+    0,
+    0
+  ],
+  "avg_upper_bounds": [
+    50,
+    105000,
+    0.1
+  ],
+  "sample_lanes": [
+    1
+  ],
+  "sass_rescales": [
+    false
+  ],
+  "sass_releases": [
+    "average"
+  ],
+  "datasets": [
+    {
+      "name": "tpch_q01_avg_all",
+      "workload": "tpch_q01_avg_groups",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_all.sql"
+      ],
+      "query_names": [
+        "q01_avg_all"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 0,
+      "c_u": [
+        1
+      ],
+      "modes": [
+        "duckdb",
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_all",
+      "workload": "tpch_q01_avg_groups",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_all.sql"
+      ],
+      "query_names": [
+        "q01_avg_all"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 0,
+      "c_u": [
+        1
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "avg_lower_bounds": [
+        25.4912884235382,
+        38222.72265625,
+        0.0499789048917592
+      ],
+      "avg_upper_bounds": [
+        25.5093855857849,
+        38252.3940429688,
+        0.0500222709961236
+      ],
+      "sass_count_output_bounds": [
+        10000000000
+      ],
+      "sass_sum_output_bounds": [
+        1000000000000
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_all",
+      "workload": "tpch_q01_avg_groups",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_all.sql"
+      ],
+      "query_names": [
+        "q01_avg_all"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 0,
+      "c_u": [
+        1
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "avg_lower_bounds": [
+        25.4738159179688,
+        38193.1787109375,
+        0.0499330391176045
+      ],
+      "avg_upper_bounds": [
+        25.527923822403,
+        38283.4575195312,
+        0.0500573283061385
+      ],
+      "sass_count_output_bounds": [
+        10000000000
+      ],
+      "sass_sum_output_bounds": [
+        1000000000000
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_by_linestatus",
+      "workload": "tpch_q01_avg_groups",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_by_linestatus.sql"
+      ],
+      "query_names": [
+        "q01_avg_by_linestatus"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 1,
+      "c_u": [
+        2
+      ],
+      "modes": [
+        "duckdb",
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_by_linestatus",
+      "workload": "tpch_q01_avg_groups",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_by_linestatus.sql"
+      ],
+      "query_names": [
+        "q01_avg_by_linestatus"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 1,
+      "c_u": [
+        2
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "avg_lower_bounds": [
+        25.4889101982117,
+        38216.9169921875,
+        0.0499669630080462
+      ],
+      "avg_upper_bounds": [
+        25.5155689716339,
+        38264.0205078125,
+        0.0500325914472342
+      ],
+      "sass_count_output_bounds": [
+        10000000000
+      ],
+      "sass_sum_output_bounds": [
+        1000000000000
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_by_linestatus",
+      "workload": "tpch_q01_avg_groups",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_by_linestatus.sql"
+      ],
+      "query_names": [
+        "q01_avg_by_linestatus"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 1,
+      "c_u": [
+        2
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "avg_lower_bounds": [
+        25.461005449295,
+        38171.6547851562,
+        0.0499065322801471
+      ],
+      "avg_upper_bounds": [
+        25.5395815372467,
+        38302.9077148438,
+        0.0500824749469757
+      ],
+      "sass_count_output_bounds": [
+        10000000000
+      ],
+      "sass_sum_output_bounds": [
+        1000000000000
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_by_returnflag",
+      "workload": "tpch_q01_avg_groups",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_by_returnflag.sql"
+      ],
+      "query_names": [
+        "q01_avg_by_returnflag"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 1,
+      "c_u": [
+        3
+      ],
+      "modes": [
+        "duckdb",
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_by_returnflag",
+      "workload": "tpch_q01_avg_groups",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_by_returnflag.sql"
+      ],
+      "query_names": [
+        "q01_avg_by_returnflag"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 1,
+      "c_u": [
+        3
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "avg_lower_bounds": [
+        25.4847841262817,
+        38210.291015625,
+        0.0499650440178812
+      ],
+      "avg_upper_bounds": [
+        25.5188665390015,
+        38266.3212890625,
+        0.0500362785533071
+      ],
+      "sass_count_output_bounds": [
+        10000000000
+      ],
+      "sass_sum_output_bounds": [
+        1000000000000
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_by_returnflag",
+      "workload": "tpch_q01_avg_groups",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_by_returnflag.sql"
+      ],
+      "query_names": [
+        "q01_avg_by_returnflag"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 1,
+      "c_u": [
+        3
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "avg_lower_bounds": [
+        25.4522039890289,
+        38154.15625,
+        0.049892954993993
+      ],
+      "avg_upper_bounds": [
+        25.5505125522614,
+        38316.6723632812,
+        0.0501080136746168
+      ],
+      "sass_count_output_bounds": [
+        10000000000
+      ],
+      "sass_sum_output_bounds": [
+        1000000000000
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_by_returnflag_linestatus",
+      "workload": "tpch_q01_avg_groups",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_by_returnflag_linestatus.sql"
+      ],
+      "query_names": [
+        "q01_avg_by_returnflag_linestatus"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 2,
+      "c_u": [
+        5
+      ],
+      "modes": [
+        "duckdb",
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_by_returnflag_linestatus",
+      "workload": "tpch_q01_avg_groups",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_by_returnflag_linestatus.sql"
+      ],
+      "query_names": [
+        "q01_avg_by_returnflag_linestatus"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 2,
+      "c_u": [
+        5
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "avg_lower_bounds": [
+        25.4748499393463,
+        38195.1728515625,
+        0.0499392906203866
+      ],
+      "avg_upper_bounds": [
+        25.5374989509583,
+        38291.9467773438,
+        0.0500576072372496
+      ],
+      "sass_count_output_bounds": [
+        10000000000
+      ],
+      "sass_sum_output_bounds": [
+        1000000000000
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_by_returnflag_linestatus",
+      "workload": "tpch_q01_avg_groups",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_by_returnflag_linestatus.sql"
+      ],
+      "query_names": [
+        "q01_avg_by_returnflag_linestatus"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 2,
+      "c_u": [
+        5
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "avg_lower_bounds": [
+        25.4245617389679,
+        38115.6298828125,
+        0.0498263388872147
+      ],
+      "avg_upper_bounds": [
+        25.586665391922,
+        38381.556640625,
+        0.0501811858266592
+      ],
+      "sass_count_output_bounds": [
+        10000000000
+      ],
+      "sass_sum_output_bounds": [
+        1000000000000
+      ]
+    }
+  ]
+}

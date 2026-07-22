@@ -123,9 +123,9 @@ threshold. Only the outlier level (1 contributor) is affected.
 
 ---
 
-## Attack 6: Clip-after-filter vs clip-full-table (Dandan's hypothesis)
+## Attack 6: Clip-after-filter vs clip-full-table
 
-Dandan's concern: clipping applied after filtering may leak more than clipping
+The concern is that clipping applied after filtering may leak more than clipping
 applied to the entire dataset, because the filter changes which users contribute
 to the bitmap, affecting which levels appear "supported."
 
@@ -137,7 +137,7 @@ to the bitmap, affecting which levels appear "supported."
 | clip-after-filter (pac_clip_support=2) | **72.5%** | 613,511 | 122,026 | 5.0x |
 | clip-full-table (pre-clip to mu+3sigma) | **56.9%** | 180,457 | 124,641 | 1.4x |
 
-**Finding: Dandan is correct.** Pre-clipping the full table then filtering gives
+**Finding: the concern is valid.** Pre-clipping the full table then filtering gives
 significantly better protection (56.9% vs 72.5%). The reasons:
 
 1. **Full-table pre-clipping** clamps the billionaire to 13,661 BEFORE PAC sees it.
@@ -149,7 +149,7 @@ significantly better protection (56.9% vs 72.5%). The reasons:
    The attenuation is only ~16x (one level), leaving a 5x variance gap.
 
 However, clip-after-filter is still much better than no clipping (72.5% vs 96%),
-confirming Dandan's second point: "this approach is still significantly better
+confirming the second point: "this approach is still significantly better
 than not applying clipping at all."
 
 ---
@@ -266,7 +266,7 @@ Best threshold accuracy: **100.0%**. Attack fully succeeds.
 "supported." The clipping mechanism assumes outlier levels have few contributors.
 Collusion (or any scenario with 2+ users at the same extreme level) defeats it.
 
-### TEST 5: Dandan's filter probing
+### TEST 5: Filter probing
 
 Attacker uses two queries with different filters to probe clipping behavior.
 
@@ -276,7 +276,7 @@ Attacker uses two queries with different filters to probe clipping behavior.
 | Filter<=999 (wide) | 51.7% |
 | Cross-filter differential | **51.0%** |
 
-**Dandan's concern is NOT exploitable with hard-zero.** The narrow query zeroes the
+**The filter-probing concern is NOT exploitable with hard-zero.** The narrow query zeroes the
 outlier level, giving identical counter distributions for in/out. The wide query
 has the outlier's level zeroed too (1 contributor < threshold). The cross-filter
 differential reveals nothing.
@@ -307,7 +307,7 @@ Even the minimum level-3 value is zeroed when it's the sole contributor.
 3. **Two colluding outliers defeat the clipping** by making their level "supported"
    (2 contributors >= threshold 2). Attack accuracy: 100%.
 
-4. **Dandan's filter-probing concern does not apply with hard-zero.** The zeroed level
+4. **Filter probing does not apply with hard-zero.** The zeroed level
    contributes nothing regardless of filter, so different filters reveal no info.
 
 5. **The pre-aggregation step remains essential** — 20K small items are correctly

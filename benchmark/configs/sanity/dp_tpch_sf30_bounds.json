@@ -1,0 +1,551 @@
+{
+  "out": "benchmark/results/sanity/dp_tpch_sf30_bounds.csv",
+  "runs": 1,
+  "threads": 16,
+  "modes": [
+    "dp_standard",
+    "dp_elastic",
+    "dp_sass"
+  ],
+  "epsilons": [
+    1.0
+  ],
+  "deltas": [
+    1e-06
+  ],
+  "bound_multipliers": [
+    1.0
+  ],
+  "sample_lanes": [
+    1
+  ],
+  "sass_rescales": [
+    false
+  ],
+  "sass_releases": [
+    "average"
+  ],
+  "datasets": [
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        25.474824464496375,
+        38195.128308739746,
+        0.0499382868950963
+      ],
+      "avg_upper_bounds": [
+        25.5375244884572,
+        38291.98555757227,
+        0.05005861608481407
+      ],
+      "c_u": [
+        4.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "462704.03729549999,693592938.40636802,658946733.05260801,685342282.65703201"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "34841980.841945998,52234147338.0951,49619396051.346436,51604204436.152832"
+      ],
+      "sass_count_output_lower_bound_lists": [
+        "18119.106880874999"
+      ],
+      "sass_count_output_upper_bound_lists": [
+        "1366270.4912691249"
+      ],
+      "deltas": [
+        1e-06
+      ],
+      "sass_releases": [
+        "average"
+      ],
+      "bound_multipliers": [
+        0.01,
+        0.1,
+        1.0,
+        10.0,
+        100.0
+      ],
+      "sass_sum_method": "nonempty_lane_average"
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q01"
+      ],
+      "count_bounds": [
+        1000.0
+      ],
+      "sum_bounds": [
+        105000000.0
+      ],
+      "sum_bound_lists": [
+        "50000,105000000,105000000,113400000"
+      ],
+      "avg_lower_bounds": [
+        25.424536314406158,
+        38115.594696867185,
+        0.04982534587213397
+      ],
+      "avg_upper_bounds": [
+        25.586690978587388,
+        38381.598928435546,
+        0.05018218442967534
+      ],
+      "c_u": [
+        4.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "57799.69220025,86672290.327622995,82326423.673493996,85580307.419606999"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "4353711.6037072502,6530521538.515008,6203470139.4639359,6451653811.6473598"
+      ],
+      "sass_count_output_lower_bound_lists": [
+        "2263.9977359999998"
+      ],
+      "sass_count_output_upper_bound_lists": [
+        "170729.54572937501"
+      ],
+      "deltas": [
+        1e-06
+      ],
+      "sass_releases": [
+        "average"
+      ],
+      "bound_multipliers": [
+        0.01,
+        0.1,
+        1.0,
+        10.0,
+        100.0
+      ],
+      "sass_sum_method": "nonempty_lane_average"
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q05"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "23166368.583608251"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "26523207.0231805"
+      ],
+      "deltas": [
+        1e-06
+      ],
+      "sass_releases": [
+        "average"
+      ],
+      "bound_multipliers": [
+        0.01,
+        0.1,
+        1.0,
+        10.0,
+        100.0
+      ],
+      "sass_sum_method": "nonempty_lane_average"
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q05"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "2591797.876949531"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "3663115.6318619689"
+      ],
+      "deltas": [
+        1e-06
+      ],
+      "sass_releases": [
+        "average"
+      ],
+      "bound_multipliers": [
+        0.01,
+        0.1,
+        1.0,
+        10.0,
+        100.0
+      ],
+      "sass_sum_method": "nonempty_lane_average"
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q06"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        100000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "57323776.176166497"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "58185300.685242496"
+      ],
+      "deltas": [
+        1e-06
+      ],
+      "sass_releases": [
+        "average"
+      ],
+      "bound_multipliers": [
+        0.01,
+        0.1,
+        1.0,
+        10.0,
+        100.0
+      ],
+      "sass_sum_method": "nonempty_lane_average"
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q06"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        100000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "7039740.2727526873"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "7388924.0139166247"
+      ],
+      "deltas": [
+        1e-06
+      ],
+      "sass_releases": [
+        "average"
+      ],
+      "bound_multipliers": [
+        0.01,
+        0.1,
+        1.0,
+        10.0,
+        100.0
+      ],
+      "sass_sum_method": "nonempty_lane_average"
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q14"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "sum_bound_lists": [
+        "1000000,1000000"
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "207598190.401602,1263112512.886224"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "215659209.65899399,1285476149.474864"
+      ],
+      "deltas": [
+        1e-06
+      ],
+      "sass_releases": [
+        "average"
+      ],
+      "bound_multipliers": [
+        0.01,
+        0.1,
+        1.0,
+        10.0,
+        100.0
+      ],
+      "sass_sum_method": "nonempty_lane_average"
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q14"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        1000000.0
+      ],
+      "sum_bound_lists": [
+        "1000000,1000000"
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "24998689.751285251,154501935.49790999"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "27980963.230935249,164268060.267896"
+      ],
+      "deltas": [
+        1e-06
+      ],
+      "sass_releases": [
+        "average"
+      ],
+      "bound_multipliers": [
+        0.01,
+        0.1,
+        1.0,
+        10.0,
+        100.0
+      ],
+      "sass_sum_method": "nonempty_lane_average"
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q19"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        100000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        64
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "1147185.3371885156"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "1666718.9635922969"
+      ],
+      "deltas": [
+        1e-06
+      ],
+      "sass_releases": [
+        "average"
+      ],
+      "bound_multipliers": [
+        0.01,
+        0.1,
+        1.0,
+        10.0,
+        100.0
+      ],
+      "sass_sum_method": "nonempty_lane_average"
+    },
+    {
+      "name": "tpch",
+      "workload": "tpch_stock_dp",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "query_names": [
+        "q19"
+      ],
+      "count_bounds": [
+        1.0
+      ],
+      "sum_bounds": [
+        100000.0
+      ],
+      "c_u": [
+        1.0
+      ],
+      "modes": [
+        "dp_sass"
+      ],
+      "sass_ms": [
+        512
+      ],
+      "sass_rescales": [
+        false
+      ],
+      "sass_sum_output_lower_bound_lists": [
+        "93525.23752935644"
+      ],
+      "sass_sum_output_upper_bound_lists": [
+        "264118.49458698049"
+      ],
+      "deltas": [
+        1e-06
+      ],
+      "sass_releases": [
+        "average"
+      ],
+      "bound_multipliers": [
+        0.01,
+        0.1,
+        1.0,
+        10.0,
+        100.0
+      ],
+      "sass_sum_method": "nonempty_lane_average"
+    }
+  ],
+  "sass_ms": [
+    64,
+    128,
+    256,
+    512
+  ],
+  "sass_sum_method": "nonempty_lane_average"
+}

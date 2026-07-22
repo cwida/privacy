@@ -1,0 +1,350 @@
+{
+  "out": "benchmark/results/utility/dp_tpch_sf30_q01_avg_columns.csv",
+  "runs": 3,
+  "threads": 16,
+  "seed_base": 717171,
+  "epsilons": [
+    1
+  ],
+  "deltas": [
+    0.000001
+  ],
+  "bound_multipliers": [
+    1
+  ],
+  "count_bounds": [
+    1000
+  ],
+  "sample_lanes": [
+    1
+  ],
+  "sass_rescales": [
+    false
+  ],
+  "sass_releases": [
+    "average"
+  ],
+  "datasets": [
+    {
+      "name": "tpch_q01_avg_qty_all",
+      "workload": "tpch_q01_avg_cols",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_qty_all.sql"
+      ],
+      "query_names": [
+        "q01_avg_qty_all"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 0,
+      "c_u": [
+        1
+      ],
+      "sum_bounds": [
+        50000
+      ],
+      "avg_lower_bounds": [
+        0
+      ],
+      "avg_upper_bounds": [
+        50
+      ],
+      "modes": [
+        "duckdb",
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_qty_all",
+      "workload": "tpch_q01_avg_cols",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_qty_all.sql"
+      ],
+      "query_names": [
+        "q01_avg_qty_all"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 0,
+      "c_u": [
+        1
+      ],
+      "sum_bounds": [
+        50000
+      ],
+      "avg_lower_bounds": [
+        25.4912884235382
+      ],
+      "avg_upper_bounds": [
+        25.5093855857849
+      ],
+      "sass_count_output_bounds": [
+        10000000000
+      ],
+      "sass_sum_output_bounds": [
+        1000000000000
+      ],
+      "sass_ms": [
+        64
+      ],
+      "modes": [
+        "dp_sass"
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_qty_all",
+      "workload": "tpch_q01_avg_cols",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_qty_all.sql"
+      ],
+      "query_names": [
+        "q01_avg_qty_all"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 0,
+      "c_u": [
+        1
+      ],
+      "sum_bounds": [
+        50000
+      ],
+      "avg_lower_bounds": [
+        25.4738159179688
+      ],
+      "avg_upper_bounds": [
+        25.527923822403
+      ],
+      "sass_count_output_bounds": [
+        10000000000
+      ],
+      "sass_sum_output_bounds": [
+        1000000000000
+      ],
+      "sass_ms": [
+        512
+      ],
+      "modes": [
+        "dp_sass"
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_price_all",
+      "workload": "tpch_q01_avg_cols",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_price_all.sql"
+      ],
+      "query_names": [
+        "q01_avg_price_all"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 0,
+      "c_u": [
+        1
+      ],
+      "sum_bounds": [
+        105000000
+      ],
+      "avg_lower_bounds": [
+        0
+      ],
+      "avg_upper_bounds": [
+        105000
+      ],
+      "modes": [
+        "duckdb",
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_price_all",
+      "workload": "tpch_q01_avg_cols",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_price_all.sql"
+      ],
+      "query_names": [
+        "q01_avg_price_all"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 0,
+      "c_u": [
+        1
+      ],
+      "sum_bounds": [
+        105000000
+      ],
+      "avg_lower_bounds": [
+        38222.72265625
+      ],
+      "avg_upper_bounds": [
+        38252.3940429688
+      ],
+      "sass_count_output_bounds": [
+        10000000000
+      ],
+      "sass_sum_output_bounds": [
+        1000000000000
+      ],
+      "sass_ms": [
+        64
+      ],
+      "modes": [
+        "dp_sass"
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_price_all",
+      "workload": "tpch_q01_avg_cols",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_price_all.sql"
+      ],
+      "query_names": [
+        "q01_avg_price_all"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 0,
+      "c_u": [
+        1
+      ],
+      "sum_bounds": [
+        105000000
+      ],
+      "avg_lower_bounds": [
+        38193.1787109375
+      ],
+      "avg_upper_bounds": [
+        38283.4575195312
+      ],
+      "sass_count_output_bounds": [
+        10000000000
+      ],
+      "sass_sum_output_bounds": [
+        1000000000000
+      ],
+      "sass_ms": [
+        512
+      ],
+      "modes": [
+        "dp_sass"
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_disc_all",
+      "workload": "tpch_q01_avg_cols",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_disc_all.sql"
+      ],
+      "query_names": [
+        "q01_avg_disc_all"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 0,
+      "c_u": [
+        1
+      ],
+      "sum_bounds": [
+        100
+      ],
+      "avg_lower_bounds": [
+        0
+      ],
+      "avg_upper_bounds": [
+        0.1
+      ],
+      "modes": [
+        "duckdb",
+        "dp_standard",
+        "dp_elastic"
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_disc_all",
+      "workload": "tpch_q01_avg_cols",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_disc_all.sql"
+      ],
+      "query_names": [
+        "q01_avg_disc_all"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 0,
+      "c_u": [
+        1
+      ],
+      "sum_bounds": [
+        100
+      ],
+      "avg_lower_bounds": [
+        0.0499789048917592
+      ],
+      "avg_upper_bounds": [
+        0.0500222709961236
+      ],
+      "sass_count_output_bounds": [
+        10000000000
+      ],
+      "sass_sum_output_bounds": [
+        1000000000000
+      ],
+      "sass_ms": [
+        64
+      ],
+      "modes": [
+        "dp_sass"
+      ]
+    },
+    {
+      "name": "tpch_q01_avg_disc_all",
+      "workload": "tpch_q01_avg_cols",
+      "sf": 30,
+      "db": "tpch_sf30_graviton.db",
+      "queries": [
+        "benchmark/queries/q01_avg/q01_avg_disc_all.sql"
+      ],
+      "query_names": [
+        "q01_avg_disc_all"
+      ],
+      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "key_cols": 0,
+      "c_u": [
+        1
+      ],
+      "sum_bounds": [
+        100
+      ],
+      "avg_lower_bounds": [
+        0.0499330391176045
+      ],
+      "avg_upper_bounds": [
+        0.0500573283061385
+      ],
+      "sass_count_output_bounds": [
+        10000000000
+      ],
+      "sass_sum_output_bounds": [
+        1000000000000
+      ],
+      "sass_ms": [
+        512
+      ],
+      "modes": [
+        "dp_sass"
+      ]
+    }
+  ]
+}

@@ -1,231 +1,345 @@
-# Reproducibility Guide
+# Reproducing the Experiments
 
-Instructions to reproduce all experiments from:
-**SIMD-PAC-DB: Pretty Performant PAC Privacy** (PVLDB)
+This guide reproduces the experiments for **SIMD-Accelerated Stochastic Aggregation**. The paper configurations are
+versioned under `benchmark/configs/utility/`; optional validation configurations live under
+`benchmark/configs/sanity/`. Generated data and results are written below `benchmark/results/` and are not source
+files.
 
-All experiments use DuckDB v1.4.2 with the PAC extension, compiled with Clang 22.1.0.
+Run all commands from the repository root.
 
-## Hardware
+## Environment
 
-| Machine | CPU | RAM | Storage |
-|---------|-----|-----|---------|
-| MacBook Pro | 12-core ARM M2 Max | 32GB | SSD |
-| c8gd.4xlarge | 16-core ARM Graviton4 | 32GB | 950GB instance SSD |
-| c8i.4xlarge | 16-core x86 Intel Granite Rapids | 32GB | EBS io2 |
-| c8a.4xlarge | 16-core x86 AMD EPYC 9R45 | 32GB | EBS io2 |
-
-### EC2 instance setup
-
-Use Ubuntu 24 (`ssh ubuntu@<ip> -i yourkey.pem`).
-
-**Graviton SSD setup (c8gd only)**:
-```bash
-sudo parted /dev/nvme0n1 -- mklabel gpt
-sudo parted /dev/nvme0n1 -- mkpart primary ext4 0% 200GB
-sudo mkfs.ext4 /dev/nvme0n1p1
-sudo mkdir -p /mnt/instance-store
-sudo mount /dev/nvme0n1p1 /mnt/instance-store
-cd /mnt/instance-store/ && chmod 777 .
-```
-
-### Build toolchain (all machines)
+The reported experiments use DuckDB v1.5.4 and Clang 22.1.0. Build the repository with its submodules, but do not
+modify the `duckdb/` submodule.
 
 ```bash
-sudo apt update
-sudo apt install -y clang cmake ninja-build python3
-export CC=clang
-export CXX=clang++
-
-# Build Clang 22.1.0 from source
-git clone --depth 1 https://github.com/llvm/llvm-project.git
-cd llvm-project
-cmake -S llvm -B build -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DLLVM_ENABLE_PROJECTS="clang;lld" \
-    -DLLVM_TARGETS_TO_BUILD="AArch64"  # or "X86" for Intel/AMD
-ninja -C build clang lld
-cd ..
-```
-
-### Build PAC
-
-```bash
-git clone --recurse-submodules https://github.com/cwida/pac.git
-cd pac
+git clone --recurse-submodules git@github.com:cwida/privacy.git
+cd privacy
+export CC=clang-22
+export CXX=clang++-22
+$CC --version  # must report Clang 22.1.0 for the paper build
 GEN=ninja make
 ```
 
----
-
-## RQ1: Aggregation Optimizations (Figures 3–6, Table 1)
-
-Microbenchmarks on synthetic data with N ∈ {10M, 100M, 1G} rows. Value distributions: uniform random, monotonically increasing, monotonically decreasing. Domain sizes: tiny (0–100), small (0–10⁴), medium (0–10⁵), large (0–10⁶). Grouped ungrouped, and with K ∈ {10, 1K, 10K, 100K, 10M} distinct GROUP BY keys (scattered and consecutive).
-
-### Build DuckDB variants
-
-Seven variants with different optimization flags:
-
-| Variant | Description |
-|---------|-------------|
-| `default` | All optimizations (approx sum, cascading, buffering, SWAR, pruning) |
-| `nobuffering` | Disable input buffering |
-| `noboundopt` | Disable bound pruning (affects MIN/MAX) |
-| `signedsum` | Disable two-sided SUM (single signed counters) |
-| `exactsum` | Disable approximate sum, use exact cascading |
-| `nocascading` | Disable cascading (implies exact sum) |
-| `nosimd` | SIMD-unfriendly: no cascading, no auto-vectorization |
+To rebuild only the paper benchmark executables:
 
 ```bash
-cd benchmark/pac_microbench
-./build_variants.sh          # builds all 7 variants (~30 min each)
-./create_test_db.sh          # creates test_data.duckdb with views data1/data10/data100
+cmake --build build/release --target \
+  as_tpch_benchmark as_clickbench_benchmark \
+  dp_benchmark_runner
 ```
 
-### Run all microbenchmarks
+The paper uses the following machines:
+
+| Machine | CPU | RAM | Storage |
+|---|---|---:|---|
+| MacBook Pro | 12-core Apple M2 Max | 32 GB | SSD |
+| `c8gd.4xlarge` | 16-core AWS Graviton4 | 32 GB | instance SSD |
+| `c8i.4xlarge` | 16-core Intel Granite Rapids | 32 GB | EBS io2 |
+| `c8a.4xlarge` | 16-core AMD EPYC 9R45 | 32 GB | EBS io2 |
+
+The full TPC-H and DP configurations use 16 DuckDB threads. Keep the database and DuckDB temporary directory on the
+same storage class used for the reported machine.
+
+## Aggregation Microbenchmarks
+
+The aggregation microbenchmarks under `benchmark/microbench/` compare seven implementations over synthetic data.
+They cover 10M, 100M, and 1B rows; several value distributions and domains; and grouped and ungrouped execution.
 
 ```bash
-nohup ./run_all.sh &         # runs COUNT, SUM/AVG, MIN/MAX (~6 hours)
-# Results in benchmark/pac_microbench/results/
+cd benchmark/microbench
+./build_variants.sh
+./create_test_db.sh
+./run_all.sh
+Rscript --vanilla plot_microbenchmark.R
 ```
 
-### Figure 3: COUNT optimization impact (Granite Rapids, 1G rows, scattered groups)
+The seven variants are `default`, `nobuffering`, `noboundopt`, `signedsum`, `exactsum`, `nocascading`, and `nosimd`.
+Results and the R plotting program remain self-contained in that directory.
+
+## Standalone Benchmarks
+
+Each paper benchmark is a standalone C++ executable. JSON files contain the complete run setup and can be checked
+without opening a database:
 
 ```bash
-# Run on c8i.4xlarge
-./bench_count.sh
-python3 plot_count_optimizations.py    # edit filenames inside to point to result CSVs
+build/release/extension/privacy/as_tpch_benchmark \
+  --config benchmark/configs/utility/as_tpch_sf30.json --dry-run
+
+build/release/extension/privacy/as_clickbench_benchmark \
+  --config benchmark/configs/utility/as_clickbench_graviton.json --dry-run
+
+build/release/extension/privacy/dp_benchmark_runner \
+  --config benchmark/configs/utility/dp_tpch_sf30_utility.json --dry-run
 ```
 
-### Figure 4: SUM optimization impact (MacBook, 1G rows, scattered groups)
+The runners create the configured output parent directories. Existing result files are replaced only after input
+discovery and database initialization succeed.
+
+### TPC-H AS performance
+
+The main SF30 benchmark measures DuckDB, SIMD-AS with `m=64`, the naive sampling implementation, and a simple-hash
+control used to isolate sampling-key join overhead. It creates `tpch_sf30_graviton.db` with DuckDB's TPC-H generator
+when the database is absent. Each reported runtime is the median of five hot executions after one warm execution.
 
 ```bash
-# Run on MacBook Pro
-./bench_sum_avg.sh
-python3 plot_sum_optimizations.py
+build/release/extension/privacy/as_tpch_benchmark \
+  --config benchmark/configs/utility/as_tpch_sf30.json
 ```
 
-### Figure 5: MAX optimization impact (Graviton4, 1G rows, ungrouped)
+Each AS query/mode is executed once without timing before its five measured executions. The CSV reports their median.
+
+The variable-`m` configuration measures the separate aggregate path for `m=128,256,512`. It reuses the same database
+and skips the naive implementation.
 
 ```bash
-# Run on c8gd.4xlarge
-./bench_min_max.sh
-python3 plot_minmax_optimizations.py
+build/release/extension/privacy/as_tpch_benchmark \
+  --config benchmark/configs/utility/as_tpch_sf30_m_sweep.json
 ```
 
-### Figure 6: SIMD improvements cross-platform (100M rows, ungrouped)
+Outputs:
+
+- `benchmark/results/utility/as_tpch_sf30.csv`
+- `benchmark/results/utility/as_tpch_sf30_m_sweep.csv`
+
+### ClickBench AS performance
+
+This benchmark runs the handwritten AS forms of all aggregate ClickBench queries. Queries without an aggregate are
+skipped. If `clickbench.db` is absent, the runner downloads `hits.parquet` and builds the database. The reported setup
+uses 16 threads and a 16 GB DuckDB memory limit.
 
 ```bash
-# Run microbenchmarks on all 4 machines, then combine results
-python3 plot_simd_improvements.py      # edit filenames to point to per-machine CSVs
+build/release/extension/privacy/as_clickbench_benchmark \
+  --config benchmark/configs/utility/as_clickbench_graviton.json
 ```
 
-### Table 1: Approximate SUM accuracy (10 distributions, 1M values)
+Each AS query/mode is executed once without timing before its five measured executions. The CSV reports their median.
 
-```bash
-# Compare default (approximate two-sided) vs signedsum (single-sided) counters
-cd benchmark/pac_microbench
-./binaries/duckdb_default < approx_sum_stability.sql
-./binaries/duckdb_signedsum < approx_sum_stability.sql
+Output: `benchmark/results/utility/as_clickbench_graviton.csv`.
+
+### DP utility and runtime
+
+The DP benchmark runs TPC-H SF30 queries Q01, Q05, Q06, Q14, and Q19 with the same customer privacy unit and FK chain:
+
+```text
+lineitem.l_orderkey -> orders.o_orderkey
+orders.o_custkey    -> customer.c_custkey (privacy unit)
 ```
 
-### Figure 2: Hash distribution
+All mechanisms use `epsilon=1` and `delta=1e-6`. The benchmark performs three runs. At `m=64`, it evaluates bound
+multipliers `0.01,0.1,1,10,100` for user-level bounded DP, row-level elastic DP, and SAA-average. The SAA `m` sweep
+uses `m=64,128,256,512` at the `1x` bound; DuckDB supplies the exact runtime and utility reference.
+`sample_lanes=1`, so SAA lanes are disjoint. SUM and COUNT outputs are rescaled to the full-data scale; AVG, MIN, and
+MAX are not rescaled. Relative SAA-target error is unchanged by this common rescaling of the private release and its
+non-private estimator, so the same run supplies the paper's estimator-relative `m` sweep.
 
 ```bash
-./binaries/duckdb_default < benchmark/pac_microbench/binomial.sql
-python3 benchmark/pac_microbench/plot_hash_distribution.py
+build/release/extension/privacy/dp_benchmark_runner \
+  --config benchmark/configs/utility/dp_tpch_sf30_utility.json
 ```
 
----
+The runner executes one untimed warmup immediately before every measured private-query execution. Utility and diagnostic
+queries run separately and are not included in `time_ms`.
 
-## RQ2: Performance Impact (Figures 1, 7)
+Output: `benchmark/results/utility/dp_tpch_sf30_utility.csv`.
 
-### Figure 1: TPC-H at SF30 (MacBook M2 Max)
+The runner deliberately uses two passes. It first times every private query and checkpoints the CSV after each
+dataset entry. It then computes exact references, SAA estimators, error decompositions, and noise diagnostics without
+including those diagnostics in `time_ms`. Timings include extension rewriting and execution. For elastic DP they also
+include auxiliary max-frequency queries; for example, the maximum number of `lineitem` rows per `l_orderkey` used in
+the FLEX sensitivity calculation is part of the measured query.
 
-PAC schema: customer as PU with five protected columns (c_custkey, c_name, c_address, c_acctbal, c_comment). PAC links propagate the PU hash from lineitem → orders → customer.
+### Q01 AVG study
+
+Two configurations isolate the three Q01 AVG columns and then vary the grouping keys. Both use three runs,
+`epsilon=1`, `delta=1e-6`, and the mechanism-specific `1x` oracle bounds shown in the paper. They compare bounded DP,
+elastic DP, and SAA-average at `m=64` and `m=512`, without rescaling AVG outputs.
 
 ```bash
-# Build the benchmark executable
-cmake --build build/release --target pac_tpch_benchmark
+build/release/extension/privacy/dp_benchmark_runner \
+  --config benchmark/configs/utility/dp_tpch_sf30_q01_avg_columns.json
 
-# Run TPC-H SF30 (creates database if needed, 8 threads default)
-./build/release/extension/pac/pac_tpch_benchmark 30 tpch_sf30.db benchmark
+build/release/extension/privacy/dp_benchmark_runner \
+  --config benchmark/configs/utility/dp_tpch_sf30_q01_avg_groups.json
+```
 
-# Plot
+Outputs:
+
+- `benchmark/results/utility/dp_tpch_sf30_q01_avg_columns.csv`
+- `benchmark/results/utility/dp_tpch_sf30_q01_avg_groups.csv`
+
+## DP Setup
+
+The modes require different public bounds:
+
+| Setting | Bounded DP | Elastic DP | SAA |
+|---|---|---|---|
+| `dp_count_bound` | per-PU COUNT and AVG-count contribution | not used for elastic sensitivity | per-PU sample contribution |
+| `dp_sum_bound(s)` | per-PU SUM and AVG-sum contribution | input clipping before FLEX analysis | per-PU sample contribution |
+| `dp_max_groups_contributed` (`C_u`) | maximum groups per privacy unit | not used | maximum groups per privacy unit |
+| `dp_sass_*_output_*bounds` | not used | not used | public lane-output domains |
+| `dp_avg_lower_bounds`, `dp_avg_upper_bounds` | public AVG domains | public AVG domains | public AVG domains |
+
+Each mechanism is multiplied around its own base bound. The `1` point is the mechanism-specific oracle-like bound;
+smaller and larger multipliers intentionally test under- and over-estimation. Bound derivation is offline and is not
+included in runtime.
+
+SAA output domains are selected independently from bounded-DP contribution bounds. For every query, aggregate, and
+`m`, the base interval covers the central 75% of non-private lane outputs, following the approximate-range strategy
+used by GUPT. The interval is then widened across output cells of the same aggregate. These are evaluation bounds:
+they show mechanism behavior under comparable mechanism-specific tuning, not a private production range estimator.
+
+For grouped bounded DP and SAA, the runner reserves privacy budget for private partition selection. AVG implemented as
+a noisy SUM divided by a noisy COUNT splits its value budget equally between the two components. `C_u` is the maximum
+number of output groups one privacy unit may affect.
+
+## Result Columns
+
+A DP result row is identified by `dataset`, `workload`, `query`, `mode`, `release`, `run`, `bound_multiplier`,
+`dp_sass_m`, `dp_sass_rescale`, and `seed`. The query's result-key columns only match grouped private and exact rows;
+they are not privacy keys.
+
+Important result families are:
+
+| Columns | Meaning |
+|---|---|
+| `time_ms`, `runtime_success`, `runtime_error` | private-query timing pass |
+| `metrics_success`, `metrics_error`, `success` | untimed diagnostic status and combined status |
+| `median_error_pct`, `recall`, `precision` | private result versus the exact full-data answer |
+| `saa_estimator_*` | private SAA result versus the same non-private SAA estimator |
+| `saa_sampling_*` | non-private SAA estimator versus the exact full-data answer |
+| `saa_noise_scale_*` | released SAA noise-scale diagnostics |
+| `q1_*`, `saa_*_q1_*` | Q01 SUM, AVG, and COUNT metrics reported separately |
+
+`median_error_pct` is the median absolute relative error over matched numeric output cells, multiplied by 100. Recall
+and precision describe released group keys. A missing metric is distinct from a failed timing: inspect both status
+families rather than filtering only on `success`.
+
+## Plotting
+
+Install R 4.x and these packages once: `ggplot2`, `dplyr`, `readr`, `scales`, `stringr`, `systemfonts`, `tidyr`,
+`patchwork`, and `ggpattern`. Linux Libertine is used when installed; otherwise the scripts use a serif fallback.
+
+```bash
+mkdir -p benchmark/results/figures
+
 Rscript --vanilla benchmark/tpch/plot_tpch_results.R \
-    benchmark/tpch/tpch_benchmark_results_sf30.csv benchmark/tpch/
+  benchmark/results/utility/as_tpch_sf30.csv benchmark/results/figures
+
+Rscript --vanilla benchmark/tpch/plot_tpch_as_m_sweep.R \
+  benchmark/results/utility/as_tpch_sf30.csv \
+  benchmark/results/utility/as_tpch_sf30_m_sweep.csv \
+  benchmark/results/figures
+
+Rscript --vanilla benchmark/clickbench/plot_clickbench_as_slowdown.R \
+  benchmark/results/utility/as_clickbench_graviton.csv benchmark/results/figures 64
+
+Rscript --vanilla benchmark/dp/plot_unskewed_sass_utility_views.R \
+  benchmark/results/utility/dp_tpch_sf30_utility.csv benchmark/results/figures 1e-6 64 true
+
+Rscript --vanilla benchmark/dp/plot_sass_sampled_m_1x.R \
+  benchmark/results/utility/dp_tpch_sf30_utility.csv \
+  benchmark/results/figures/tpch_sass_sampled_m_1x_paper.png tpch 1e-6 median mean
+
+Rscript --vanilla benchmark/dp/plot_dp_full_utility_runtime.R \
+  benchmark/results/utility/dp_tpch_sf30_utility.csv benchmark/results/figures
+
+Rscript --vanilla benchmark/dp/plot_q01_avg_compact_grid.R \
+  benchmark/results/utility/dp_tpch_sf30_q01_avg_columns.csv \
+  benchmark/results/utility/dp_tpch_sf30_q01_avg_groups.csv \
+  benchmark/results/figures/q01_avg_compact_grid_paper.png
 ```
 
-See [docs/benchmark/tpch.md](docs/benchmark/tpch.md) for full options.
+Plot scripts fail with a direct dependency or schema error; they do not install packages or modify benchmark inputs.
 
-### Figure 7: ClickBench (Graviton4)
+The exact CSV inputs retained for the paper figures are versioned in `benchmark/results/paper/`. Fresh benchmark runs
+write to `benchmark/results/utility/`; they do not overwrite the archived submission data.
 
-ClickBench declares `hits` as the PU table with `UserID` and `ClientIP` as protected columns. No PU-join needed (PU is the scanned table).
+To regenerate the submitted figures directly from the archived inputs:
 
 ```bash
-# Build the benchmark executable
-cmake --build build/release --target pac_clickhouse_benchmark
+mkdir -p benchmark/results/figures
 
-# Download ClickBench data (https://benchmark.clickhouse.com/)
-# Create database and load data using benchmark/clickbench/clickbench_queries/create.sql and load.sql
+Rscript --vanilla benchmark/tpch/plot_tpch_results.R \
+  benchmark/results/paper/as_tpch_m64.csv benchmark/results/figures
 
-# Run on c8gd.4xlarge
-./build/release/extension/pac/pac_clickhouse_benchmark
+DROP_M=64 Rscript --vanilla benchmark/tpch/plot_tpch_as_m_sweep.R \
+  benchmark/results/paper/as_tpch_m_sweep.csv benchmark/results/figures
 
-# Plot
-Rscript --vanilla benchmark/clickbench/plot_clickbench_results.R
+Rscript --vanilla benchmark/clickbench/plot_clickbench_as_slowdown.R \
+  benchmark/results/paper/as_clickbench_m64_m512.csv benchmark/results/figures 64
+
+Rscript --vanilla benchmark/dp/plot_unskewed_sass_utility_views.R \
+  benchmark/results/paper/dp_tpch_utility_raw.csv benchmark/results/figures 1e-6 64 true
+
+Rscript --vanilla benchmark/dp/plot_sass_sampled_m_1x.R \
+  benchmark/results/paper/dp_tpch_utility_raw.csv \
+  benchmark/results/figures/tpch_sass_sampled_m_1x_paper.png tpch 1e-6 median mean
+
+Rscript --vanilla benchmark/dp/plot_dp_full_utility_runtime.R \
+  benchmark/results/paper/dp_tpch_runtime_raw.csv benchmark/results/figures
+
+Rscript --vanilla benchmark/dp/plot_q01_avg_compact_grid.R \
+  benchmark/results/paper/q01_avg_columns_raw.csv \
+  benchmark/results/paper/q01_avg_groups_raw.csv \
+  benchmark/results/figures/q01_avg_compact_grid_paper.png
+
+Rscript --vanilla benchmark/dp/plot_q01_stability.R \
+  benchmark/results/paper/q01_stability_avg_summary_raw.csv \
+  benchmark/results/paper/q01_stability_sum_count_summary_raw.csv \
+  benchmark/results/figures/q01_stability_m64_m512_rescaled_sumcount_paper.png
 ```
 
----
+## Optional Sanity Checks
 
-## RQ3: Quality (Figures 8–10)
+These checks are not mandatory benchmark stages and are excluded from reported runtime.
 
-### Figure 8: Utility — TPC-H and ClickBench (SF30, 100 runs)
+### Inspect SAA bounds and lane outputs
 
-Runs each non-rejected query 100 times with `privacy_diffcols` and compares PAC-privatized output against the non-private reference. Reports MAPE (Mean Absolute Percentage Error), recall, and precision per query.
+The verifier prints non-private lane values and central-75 intervals without changing the canonical config:
 
 ```bash
-# TPC-H utility (requires tpch_sf30.db from RQ2)
-bash benchmark/tpch/run_utility_tpch_100.sh tpch_sf30.db ./build/release/duckdb
-
-# ClickBench utility (requires clickbench database from RQ2)
-bash benchmark/clickbench/run_utility_clickbench_100.sh clickbench.db ./build/release/duckdb 100
-
-# Plot both
-Rscript --vanilla benchmark/tpch/plot_utility.R
+python3 benchmark/dp/verify_tpch_saa_bounds.py \
+  --duckdb build/release/duckdb \
+  --db tpch_sf30_graviton.db \
+  --config benchmark/configs/utility/dp_tpch_sf30_utility.json \
+  --out-dir benchmark/results/sanity/bounds
 ```
 
-### Figure 9: Runtime overhead distribution (TPC-H SF30)
+Do not pass `--update-config` when reproducing the paper; that option is only for deliberately regenerating bound
+files.
 
-Generated from the same TPC-H benchmark results as Figure 1. The plot shows the CDF of per-query overhead (PAC time / DuckDB time).
+### Measure lane stability
 
-### Figure 10: Naive vs lambda approach — list_transform utility (TPC-H SF1, 10 runs)
-
-Compares naive (N independent `pac_sum_noised` calls, noised N times) vs optimized (`pac_sum_counters` + `list_transform` + single `pac_noised`) on 20 queries with increasing numbers of ratio expressions.
+For each output cell, stability is the coefficient of variation of its non-private lane outputs,
+`stddev_pop(lanes) / abs(mean(lanes))`. The summary reports the median across output cells. AVG and rescaled SUM/COUNT
+are collected separately because only the latter change scale.
 
 ```bash
-# Create SF1 database
-./build/release/extension/pac/pac_tpch_benchmark 1 tpch_sf1.db benchmark
+python3 benchmark/dp/run_tpch_sass_stability.py \
+  --config benchmark/configs/utility/dp_tpch_sf30_q01_stability_avg.json \
+  --duckdb build/release/duckdb \
+  --out benchmark/results/utility/q01_stability_avg.csv \
+  --summary-out benchmark/results/utility/q01_stability_avg_summary.csv \
+  --strict
 
-# Run 10 iterations
-bash benchmark/utility_listtransform/run.sh tpch_sf1.db ./build/release/duckdb 10
-
-# Results in benchmark/utility_listtransform/results.csv
-Rscript --vanilla benchmark/utility_listtransform/plot.R
+python3 benchmark/dp/run_tpch_sass_stability.py \
+  --config benchmark/configs/utility/dp_tpch_sf30_q01_stability_sum_count.json \
+  --duckdb build/release/duckdb \
+  --out benchmark/results/utility/q01_stability_sum_count.csv \
+  --summary-out benchmark/results/utility/q01_stability_sum_count_summary.csv \
+  --strict
 ```
 
----
-
-## RQ4: SQL Coverage (Section 6.4)
-
-SQLStorm generates thousands of diverse SQL queries over the TPC-H schema (SF1, timeout 5s) to stress-test PAC rewriter coverage.
+Plot the AVG rows from the first summary together with the rescaled SUM/COUNT rows from the second:
 
 ```bash
-# Build the SQLStorm benchmark executable
-cmake --build build/release --target pac_sqlstorm_benchmark
-
-# Run
-./build/release/extension/pac/pac_sqlstorm_benchmark
-
-# Plot runtime slowdown distribution
-Rscript --vanilla benchmark/sqlstorm/plot_sqlstorm_degradation.R
+Rscript --vanilla benchmark/dp/plot_q01_stability.R \
+  benchmark/results/utility/q01_stability_avg_summary.csv \
+  benchmark/results/utility/q01_stability_sum_count_summary.csv \
+  benchmark/results/figures/q01_stability_m64_m512_rescaled_sumcount_paper.png
 ```
+
+The remaining files in `benchmark/configs/sanity/` are focused AS, beta, support-threshold, bounds, and SQLStorm
+checks. Validate one with the corresponding runner's `--dry-run` option before use. They are diagnostics, not part of
+the paper result matrix.

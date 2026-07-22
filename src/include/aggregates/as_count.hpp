@@ -25,6 +25,12 @@ namespace duckdb {
 void RegisterPacCountFunctions(ExtensionLoader &);
 void RegisterPacCountCountersFunctions(ExtensionLoader &);
 void RegisterDpSampleCountFunctions(ExtensionLoader &);
+void RegisterDpSampleMCountFunctions(ExtensionLoader &);
+void RegisterDpSampleMCountDistinctFunctions(ExtensionLoader &);
+void RegisterDpSampleMCountDistinctValuesFunctions(ExtensionLoader &);
+void RegisterDpSampleMCountIfFunctions(ExtensionLoader &);
+void RegisterPacSampleMCountFunctions(ExtensionLoader &);
+void RegisterPacSampleMCountIfFunctions(ExtensionLoader &);
 void RegisterPacAvgFunctions(ExtensionLoader &);
 void RegisterPacNoisedClipCountFunctions(ExtensionLoader &);
 void RegisterPacClipCountFunctions(ExtensionLoader &);

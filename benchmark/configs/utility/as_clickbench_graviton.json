@@ -1,0 +1,8 @@
+{
+  "db": "clickbench.db",
+  "queries_dir": "benchmark/clickbench/clickbench_queries",
+  "out": "benchmark/results/utility/as_clickbench_graviton.csv",
+  "threads": 16,
+  "memory_limit": "16GB",
+  "as_ms": [64]
+}

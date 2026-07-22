@@ -15,19 +15,27 @@ test/python/__pycache__/
 *.parquet
 
 # Generated benchmark result outputs
+benchmark/**/*.png
+benchmark/**/*.log
+benchmark/**/__pycache__/
+benchmark/results/*
+!benchmark/results/paper/
+!benchmark/results/paper/*.csv
+!benchmark/results/paper/README.md
+benchmark/dp/tmp/
 benchmark/tpch/dp_elastic_*.csv
 benchmark/tpch/dp_sass_*.csv
+benchmark/tpch/as_tpch_*.csv
 benchmark/clickbench/clickbench_*.csv
+benchmark/clickbench/as_clickbench_*_results.csv
 benchmark/clickbench/*.png
+benchmark/dp/*_results.csv
+benchmark/dp/*_summary.csv
+benchmark/dp/tpch_sf30_runtime_perfect_*.csv
 benchmark/dp/sqlstorm_stackoverflow_*stability*.csv
-benchmark/dp/jcch_*_results.csv
 benchmark/sqlstorm/sqlstorm_degradation_*.csv
 benchmark/sqlstorm/data/
-
-# Generated query sets (produced by the stability/scan scripts)
-benchmark/dp/sqlstorm_stackoverflow_stable_queries/
-benchmark/dp/sqlstorm_stackoverflow_stable_aggregate_queries/
-benchmark/dp/uber_like_jcch/
+benchmark/tpch/*_paper_summary.csv
 
 # Serialized privacy-metadata dumps
 pac_metadata_*.json

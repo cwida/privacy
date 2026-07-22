@@ -209,9 +209,9 @@ analyze "Two outliers (0 and -1), filt<=3" "$IN_F" "$OUT_F" "$FBG" 999999
 rm -f "$IN_F" "$OUT_F"
 
 # ---------------------------------------------------------------
-# TEST 5: Dandan's filter probing attack
+# TEST 5: Filter probing attack
 # ---------------------------------------------------------------
-echo "## TEST 5: Dandan's filter probing"
+echo "## TEST 5: Filter probing"
 echo "Attacker tries different filters to see if clipping behavior changes."
 echo "If the outlier is present, the bitmap at level 3 has a bit set."
 echo "Query 1: filter<=3 (includes user 0 if present)"
