@@ -566,8 +566,10 @@ static bool SmoothMedianStatsRow(const list_entry_t &entry, const UnifiedVectorF
 	if (!bounded) {
 		smooth = SmoothMedianSensitivity(values, beta, sample_lanes);
 	} else if (entry.length == SMOOTH_MEDIAN_64_N) {
+		// Preserve the allocation-free fixed-width implementation for m=64.
 		smooth = SmoothMedianSensitivityExact64(values, beta, sample_lanes, lower_bound, upper_bound);
 	} else {
+		// Larger m uses the same exact envelope over dynamically sized lane arrays.
 		smooth = SmoothMedianSensitivityExactM(values, beta, sample_lanes, lower_bound, upper_bound);
 	}
 	scale = (2.0 * smooth) / epsilon;
@@ -989,6 +991,8 @@ static bool GuptMeanMStatsRow(const list_entry_t &entry, const UnifiedVectorForm
 		return false;
 	}
 
+	// With one disjoint lane per PU, changing one PU changes one bounded lane answer.
+	// Averaging m lanes therefore has sensitivity (upper-lower)/m.
 	double fill = std::max(lower_bound, std::min(upper_bound, empty_default));
 	double sum = 0.0;
 	for (idx_t j = 0; j < entry.length; j++) {

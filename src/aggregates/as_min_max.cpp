@@ -400,7 +400,9 @@ static unique_ptr<FunctionData> DpSampleMinMaxBind(ClientContext &ctx, Aggregate
 }
 
 // ============================================================================
-// Variable-m SASS MIN/MAX counters: Returns m sample values as LIST<DOUBLE>
+// Variable-m SASS MIN/MAX counters. The raw PU hash selects one entry in an
+// explicitly allocated m-lane state; empty lanes remain NULL for the release terminal
+// to fill from the public output domain. MIN/MAX are never rescaled by m.
 // ============================================================================
 template <typename T, bool IS_MAX>
 struct DpSampleMMinMaxState {

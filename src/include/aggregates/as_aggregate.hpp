@@ -387,6 +387,10 @@ static inline uint64_t TransformPacUpdateHash(uint64_t key_hash, int sample_lane
 	return sample_lanes > 0 ? DpSampleHash(key_hash, sample_lanes) : key_hash;
 }
 
+// Variable-m SASS receives the raw, stable PU hash and assigns the PU to exactly one
+// disjoint lane. Requiring m to be a power of two makes this equivalent to H(pu) mod m.
+// The m=64 path instead expands the raw hash to a 64-bit membership mask inside
+// the aggregate update.
 static inline idx_t DpSassLaneIndex(uint64_t key_hash, int sample_count) {
 	D_ASSERT(sample_count > 0);
 	return static_cast<idx_t>(key_hash & static_cast<uint64_t>(sample_count - 1));
@@ -406,13 +410,15 @@ static inline bool DpSampleMPredicateLaneIsTrue(UnifiedVectorFormat &list_data, 
 	return child_data.validity.RowIsValid(child_idx) && child_values[child_idx];
 }
 
-// Shared bind for SASS sample-* aggregates: no mi/correction, just the active
-// dp_sample_lanes setting. Used by as_sample_sum, as_sample_count, etc.
+// Fixed-width SASS binding. These aggregates turn their raw hash argument into a
+// 64-bit membership mask and retain the SWAR-optimized execution path.
 inline unique_ptr<FunctionData> MakeDpSampleBindData(ClientContext &ctx) {
 	return make_uniq<PrivBindData>(ctx, 0.0, 1.0, 1.0, false, GetDpSampleLanes(ctx), DP_SASS_DEFAULT_M,
 	                               GetDpSassRescale(ctx));
 }
 
+// Variable-m binding. The as_sample_m_* aggregates interpret their hash argument as
+// a raw PU hash and materialize m counters because m no longer fits in one mask.
 inline unique_ptr<FunctionData> MakeDpSampleMBindData(ClientContext &ctx) {
 	return make_uniq<PrivBindData>(ctx, 0.0, 1.0, 1.0, false, GetDpSampleLanes(ctx), GetDpSassM(ctx),
 	                               GetDpSassRescale(ctx));

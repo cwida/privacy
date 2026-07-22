@@ -1118,6 +1118,9 @@ void RegisterDpSampleAvgFunctions(ExtensionLoader &loader) {
 	loader.RegisterFunction(std::move(info));
 }
 
+// Shared storage for variable-m SUM/AVG aggregates. DP-SASS feeds contribution-bounded
+// per-PU values and updates only H(pu) mod m; the PAC variable-m routines below reuse
+// these arrays with their own multi-lane selection. The fixed m=64 path stays separate.
 struct DpSampleMSumState {
 	PAC_FLOAT *values;
 };
@@ -1356,6 +1359,8 @@ static void DpSampleMSumFinalize(Vector &states, AggregateInputData &input, Vect
 
 	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
 	bool sample_rescale = input.bind_data ? input.bind_data->Cast<PrivBindData>().sample_rescale : true;
+	// SUM is extensive: multiply disjoint 1/m-sample totals by m only when the caller
+	// wants a full-data estimator. AVG and MIN/MAX are not rescaled.
 	PAC_FLOAT rescale = sample_rescale ? static_cast<PAC_FLOAT>(sample_count) : PAC_FLOAT(1.0);
 	for (idx_t i = 0; i < count; i++) {
 		idx_t base = (offset + i) * static_cast<idx_t>(sample_count);
@@ -1548,6 +1553,8 @@ static void DpSampleMAvgFinalize(Vector &states, AggregateInputData &input, Vect
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
 
+	// Form each lane's ratio before the SAA terminal combines lanes. The common m factor
+	// would cancel between numerator and denominator, so AVG deliberately ignores rescaling.
 	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
 	auto &child_validity = FlatVector::Validity(child_vec);
 	child_validity.SetAllValid(total_elements);

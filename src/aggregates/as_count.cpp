@@ -468,6 +468,9 @@ void RegisterDpSampleCountFunctions(ExtensionLoader &loader) {
 	loader.RegisterFunction(std::move(mask_info));
 }
 
+// Shared storage for variable-m count aggregates. It lazily allocates one counter per
+// lane because m no longer fits in one word. DP-SASS updates one H(pu) mod m entry;
+// the PAC variable-m routines below reuse the storage but may select multiple lanes.
 struct DpSampleMCountState {
 	PAC_FLOAT *counts;
 };
@@ -644,6 +647,8 @@ static void DpSampleMCountFinalize(Vector &states, AggregateInputData &input, Ve
 
 	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
 	bool sample_rescale = input.bind_data ? input.bind_data->Cast<PrivBindData>().sample_rescale : true;
+	// A disjoint lane contains about 1/m of the PUs. Scaling COUNT by m turns each lane
+	// answer into an estimator of the full-data answer; disabling it preserves subsample scale.
 	PAC_FLOAT rescale = sample_rescale ? static_cast<PAC_FLOAT>(sample_count) : PAC_FLOAT(1.0);
 	for (idx_t i = 0; i < count; i++) {
 		idx_t base = (offset + i) * static_cast<idx_t>(sample_count);
@@ -671,6 +676,9 @@ static void DpSampleMCountDistinctFinalize(Vector &states, AggregateInputData &i
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
 
+	// The compiler has already produced one row per (group, lane, distinct value).
+	// Keep these as lane-level DISTINCT answers. Generic COUNT rescaling would instead
+	// change the target to a full-data cardinality extrapolation.
 	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
 	for (idx_t i = 0; i < count; i++) {
 		idx_t base = (offset + i) * static_cast<idx_t>(sample_count);
@@ -783,6 +791,9 @@ void RegisterDpSampleMCountDistinctFunctions(ExtensionLoader &loader) {
 	loader.RegisterFunction(std::move(if_info));
 }
 
+// Mixed aggregate queries cannot use the dedicated three-stage DISTINCT plan. Their
+// lower per-PU aggregate emits bounded LIST(DISTINCT value) inputs, and these sets merge
+// repeated values from different PUs in the same lane before the lane cardinality is released.
 struct DpSampleMCountDistinctValuesState {
 	value_set_t *sets;
 };

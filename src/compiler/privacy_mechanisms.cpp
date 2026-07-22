@@ -2001,6 +2001,9 @@ static NoiseProjection WrapSampleMedianProjection(
 			               ? (variable_m ? "dp_gupt_mean_m_record_noise_scale" : "dp_gupt_mean_record_noise_scale")
 			               : "dp_smooth_median_record_noise_scale";
 		} else {
+			// The fixed GUPT terminal understands the 64-lane membership-mask path and its
+			// sample_lanes probability. The variable-m terminal consumes m explicit,
+			// disjoint lane answers and therefore requires sample_lanes=1.
 			terminal = average_release ? (variable_m ? "dp_gupt_mean_m_noise" : "dp_gupt_mean_noise")
 			                           : "dp_smooth_median_noise";
 			D_ASSERT(noise_identity_index.IsValid());
@@ -2271,6 +2274,9 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 	}
 
 	if (variable_m) {
+		// A per-PU COUNT(DISTINCT) cannot be summed directly: two PUs in the same lane
+		// may carry the same value. Regroup by (query group, lane, value) to produce one
+		// row per lane-level distinct value, then count those rows into the m-lane list.
 		idx_t lane_group_index = binder.GenerateTableIndex();
 		idx_t lane_agg_index = binder.GenerateTableIndex();
 		vector<unique_ptr<Expression>> lane_expressions;
@@ -2405,6 +2411,8 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 
 static void RewritePuDistinctCountToSampleMedian(OptimizerExtensionInput &input, LogicalAggregate *agg,
                                                  unique_ptr<Expression> pu_hash_expr, bool variable_m) {
+	// COUNT(DISTINCT PU) is simpler than general DISTINCT: after grouping away duplicate
+	// PU rows, every remaining row contributes exactly one count to its own PU lane.
 	auto &binder = input.optimizer.binder;
 	auto &old_aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
 	auto distinct_value = old_aggr.children[0]->Copy();
@@ -2604,6 +2612,11 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 		return;
 	}
 
+	// Generic SASS rewrite has two aggregation levels:
+	//   1. group by (query keys, PU) and contribution-bound each PU's aggregate;
+	//   2. route that bounded value to one of m lanes and build LIST<answer>[m].
+	// WrapSampleMedianProjection subsequently clips the lane answers to their public
+	// domains and applies the selected median/average release mechanism.
 	vector<unique_ptr<Expression>> lower_expressions;
 	lower_expressions.reserve(agg->expressions.size());
 	vector<SampleAggregateRewrite> rewrites;
@@ -2619,6 +2632,8 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 		}
 	}
 	if (variable_m && has_variable_m_distinct) {
+		// Mixed COUNT(DISTINCT) queries retain bounded per-PU value lists at the lower
+		// level; as_sample_m_count_distinct_values merges those lists by lane above.
 		D_ASSERT(bounds.has_integer_count_bound);
 		variable_m_distinct_filters =
 		    PrepareVariableMDistinctListFilters(input, agg, *pu_hash_expr, bounds.count_bound_integer);
@@ -2933,6 +2948,9 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 		if (GetDpSampleLanes(input.context) != 1) {
 			throw InvalidInputException("dp_sass: dp_sass_m > 64 currently requires dp_sample_lanes = 1");
 		}
+		// Keep m>64 on a separate execution path: aggregates map raw PU hashes directly
+		// into explicit m-entry states. The m=64 fast path continues to derive one-word
+		// membership masks and use its specialized aggregate implementations.
 		PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] using experimental variable-m SAA path m=" + std::to_string(sass_m));
 	}
 
