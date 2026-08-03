@@ -109,17 +109,10 @@ the same shape but milder (5.1% / 18.1% / 57.3% at the last three rows vs Wilson
 0.2% / 0.8% / 0.5%), and it holds across measures — `COUNT(*)` gives
 0.2% → 105.1% and `SUM(l_quantity)` 0.2% → 576.1% over the same ladder.
 
-This is not a bug and there is no clever fix inside the design: a bound that may not
-depend on the filter cannot track the filter. Wilson pays privacy budget to get a
-query-specific bound and that purchase is exactly what buys selective-query utility. Two
-honest ways forward:
-
-- restrict the claim to broad, high-support workloads (whole-domain dashboards), where the
-  numbers above are genuinely better than Wilson's; or
-- hybrid: take `min(frozen bound, DP-estimated query-specific bound)`, paying budget for
-  the second term as Wilson does, with the frozen bound as a cap on how far an analyst can
-  steer. That recovers selective-query utility and keeps a bounded steering range, but it
-  gives up "no additional privacy budget", which was much of the appeal.
+A bound that may not depend on the filter cannot track the filter, so no purely frozen
+variant escapes this. Wilson pays privacy budget for a query-specific bound and that
+purchase is exactly what buys selective-query utility. **§9 below resolves it** for 10% of
+ε, by choosing a rung of the frozen ladder instead of a fresh bound.
 
 ## 5. Single-cell outliers are fully absorbed — good
 
@@ -177,6 +170,81 @@ The bin factor is the price of the CROWD rule: `D_s` overshoots the true norm by
 the noise. At `f = 2`, `D_s = 8.4M` (17% overshoot) and it costs almost nothing (0.9% vs
 1.0% on `month`). Doubling the bin count is free.
 
+## 9. Bucketed rung selection resolves the selectivity problem for 10% of ε
+
+The frozen bounds already sit on an exponential ladder (§6: `b*` = highest bin with
+support ≥ s). Nothing forces the mechanism to *clip* at the top rung. Clip the **norm**
+bound at `D_s / f^n` instead — leaving the per-group bounds `B_g` frozen, since the norm
+bound alone is the sensitivity once the ℓ1 clip is enforced — and a selective query can
+pick a large `n`.
+
+How the rung is chosen matters more than the idea:
+
+| rule | how | result at 0.11% selectivity |
+|---|---|---|
+| oracle | best rung, full knowledge, whole ε on the value noise | 1.9% |
+| `dp-mass` | exponential mechanism scored on clipped mass | 56.1% |
+| `dp-hist` | noisy norm histogram + tradeoff optimisation | **2.9%** |
+
+`dp-mass` fails because the clipped-mass score has per-PU sensitivity `D_s`, the same
+order as the score differences, so the mechanism picks close to at random. `dp-hist`
+works:
+
+1. Pay `ε_select` once for a Laplace-noised histogram of the per-PU **filtered** norms
+   over the frozen ladder. Each PU falls in exactly one bin → ℓ1 sensitivity 1, so
+   Laplace(1/`ε_select`) is a tiny perturbation.
+2. Optimise on that noisy histogram — free, it is post-processing. Estimate the mass a
+   rung clips (PUs in bin `b` treated as sitting at the geometric midpoint `f^(b+0.5)`)
+   and trade it against the noise the rung saves:
+   `argmin_n [ Σ_b noisy_b · max(0, f^(b+0.5) − D_s/f^n) + groups · (D_s/f^n) / ε_value ]`
+3. Release at the chosen rung with Laplace(`(D_s/f^n) / ε_value`).
+
+Composition is ordinary adaptive composition: for every fixed rung the release is
+`ε_value`-DP, and the rung is a function of an `ε_select`-DP output, so the total is ε.
+Same shape as Wilson's `APPROX_BOUNDS` + Laplace, confined to a frozen public ladder.
+
+sf1, `month`, `ε = 1`, `ε_select = 0.1ε`:
+
+| filter | selectivity | `fl_l1crowd` | oracle | `dp-hist` | rung | `google` |
+|---|---|---|---|---|---|---|
+| no filter | 100% | 0.4% | 0.4% | **0.5%** | 0 | 0.9% |
+| shipmode AIR/REG AIR | 28.6% | 1.0% | 0.3% | **0.3%** | 2 | 1.2% |
+| + returnflag=R | 7.0% | 2.1% | 0.3% | **0.3%** | 3 | 0.7% |
+| + quantity<10 | 1.3% | 59.3% | 0.5% | **0.5%** | 7 | 0.9% |
+| + discount<0.03 | 0.34% | 212.2% | 0.8% | **0.9%** | 8 | 2.0% |
+| + tax<0.03 | 0.11% | 645.9% | 1.9% | **2.9%** | 8 | 2.6% |
+
+`dp-hist` is within a fraction of a percent of the oracle and matches or beats Wilson at
+every selectivity.
+
+## 10. The rung does not leak membership
+
+The histogram is computed on filtered data, so the bound is query-dependent again and
+Rem. 3.1 no longer holds by construction. Tested directly: let the analyst restrict the
+query to a PU set S of their choosing and shrink S around one target; run the rung
+selection with the target in S and with it removed, and classify from the released rung
+alone. Frozen metadata built once from the full domain and reused for every population
+size. sf1, `ε_select = 0.1`, 3000 trials:
+
+| \|S\| | mean rung, target in | mean rung, target out | attack accuracy |
+|---|---|---|---|
+| 100,000 | 0.00 | 0.00 | 50.0% |
+| 10,000 | 0.00 | 0.00 | 50.0% |
+| 1,000 | 1.00 | 1.00 | 50.0% |
+| 100 | 4.88 | 5.05 | 50.8% |
+| 10 | 14.97 | 14.97 | 50.0% |
+| 2 | 14.99 | 15.00 | 50.0% |
+
+No signal (50.8% is within the upward bias of maximising over 17 candidate thresholds at
+this trial count). Sensitivity-1 counts are why: one PU moves one count by 1 against
+Laplace(1/`ε_select`) = Laplace(10). Note also the failure mode at tiny \|S\| — the rung
+saturates at the bottom of the ladder and the release is clipped to nothing. That is
+utility collapse, the same safe failure Wilson's bound has when support runs out.
+
+So the query-dependence the hybrid reintroduces is confined to a coarse, capped, and
+empirically silent channel: the rung can never exceed the frozen bound, moves in factor-f
+steps, and is selected from noised counts rather than from mass.
+
 ---
 
 ## Caveats
@@ -194,13 +262,25 @@ the noise. At `f = 2`, `D_s = 8.4M` (17% overshoot) and it costs almost nothing 
 
 ## Bottom line
 
-Two of the three moves hold up. The universal bound is self-limiting under wider
-groupings, single-cell outliers cannot touch it, and once the norm is crowd-protected the
-mechanism beats Wilson on broad queries while being far more stable. The third move —
-freezing the bound against the filter — costs selective-query utility catastrophically,
-and that cost is structural rather than a defect in the construction. The decision to make
-is whether to scope the claim to broad workloads or to accept a hybrid that pays budget for
-a query-specific bound under a frozen cap.
+The design holds up, with two changes to the note.
+
+1. **Crowd-protect the norm** (§2). eq. (25)'s `max_u` is the one real hole; applying
+   `priv_max` to the per-PU totals and ℓ1-clipping to the result closes it and removes the
+   random-truncation error at the same time.
+2. **Select a rung of the frozen ladder per query** (§9), from a noised sensitivity-1
+   histogram, for ~10% of ε. Without this the mechanism is unusable below ~7% selectivity;
+   with it, it matches or beats Wilson across the whole selectivity range and stays within
+   a fraction of a percent of the oracle.
+
+What survives unchanged: the sensitivity is self-limiting under wider groupings (§1),
+single-cell outliers cannot touch either bound (§5), coalitions are held to `s−1` members
+(§6), and the frozen bound caps how far any query-specific selection can be steered (§7,
+§10). The rung channel shows no membership signal at any population size down to \|S\| = 2.
+
+What is still open, and is where a reviewer will aim: the frozen metadata is computed from
+the data and never noised (Assumption 8.1). Every result here is DP *relative to* that
+metadata. Nothing in the note or in these experiments addresses it, and the update story
+(Rem. 10.1) inherits the same gap.
 
 ## Reproduce
 
@@ -211,5 +291,7 @@ python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --spike 1000000
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --groupby month_priority \
         --skew 1000 --skew-spread
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 -s 20 --attack
+python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --sweep --bucketed
+python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --rung-attack --trials 3000
 python3 attacks/filterless_sim.py --db tpch_sass_sf10.db --sweep
 ```
