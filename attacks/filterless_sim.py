@@ -688,6 +688,142 @@ def run_rung_attack(con, args):
     print()
 
 
+def _released_ladder(con, args, tcol, d_s):
+    """Rung ladder + norm histogram for whatever is currently in `contrib`, using the
+    metadata tables as they currently stand."""
+    true, releases = rung_releases(con, args, tcol, d_s)
+    hist = norm_histogram(con, args, tcol)
+    return true, releases, hist
+
+
+def _sample_release(releases, hist, args, d_s, n_groups, rng, trials):
+    """Run the full fixed mechanism `trials` times: noisy histogram -> rung -> Laplace.
+    Returns the released total per trial and the rungs chosen."""
+    eps_sel = args.eps_select_frac * args.epsilon
+    eps_val = args.epsilon - eps_sel
+    levels = np.array([d_s / float(args.f) ** n for n in range(len(releases))])
+    est_noise = n_groups * levels / eps_val
+    bins = sorted(hist)
+    counts = np.array([hist[b] for b in bins])
+    mids = np.array([float(args.f) ** (b + 0.5) for b in bins])
+    totals, rungs = [], []
+    for _ in range(trials):
+        noisy = np.maximum(counts + rng.laplace(0.0, 1.0 / eps_sel, size=counts.size), 0.0)
+        n = choose_rung(noisy, mids, levels, est_noise)
+        scale = levels[n] / eps_val
+        totals.append(float(np.sum(releases[n] + rng.laplace(0.0, scale, size=releases[n].size))))
+        rungs.append(n)
+    return np.array(totals), np.array(rungs)
+
+
+def _best_threshold_accuracy(a, b, n_steps=200):
+    """Best-threshold classifier accuracy for telling sample `a` from sample `b`."""
+    lo, hi = min(a.min(), b.min()), max(a.max(), b.max())
+    if hi <= lo:
+        return 0.5
+    best = 0.5
+    for t in np.linspace(lo, hi, n_steps):
+        best = max(best, (np.mean(a >= t) + np.mean(b < t)) / 2.0,
+                   (np.mean(a < t) + np.mean(b >= t)) / 2.0)
+    return float(best)
+
+
+def run_suite(con, args):
+    """Attacks against the *fixed* mechanism (CROWD norm + l1 clip + dp-hist rung)."""
+    rng = np.random.default_rng(args.seed)
+    build_contributions(con, args, [("query", args.filter)])
+    con.execute("CREATE OR REPLACE TABLE contrib_full AS SELECT * FROM contrib")
+    d1_in, ds_in, nk_in = build_metadata(con, args)
+    target, target_na = con.execute("SELECT pu, na FROM norms ORDER BY na DESC LIMIT 1").fetchone()
+
+    # ---- A. does the frozen metadata itself leak the PU that defines it? -------------
+    # Assumption 8.1 treats the metadata as fixed and public. If it is public, then any
+    # metadata value that MOVES when one PU is removed reveals that PU's membership
+    # outright, with no noise in the way. This is the test eq. (25) has to pass.
+    true_in, rel_in, hist_in = _released_ladder(con, args, "t0", ds_in)
+    con.execute(f"DELETE FROM contrib WHERE pu = {target}")
+    d1_out, ds_out, nk_out = build_metadata(con, args)
+    true_out, rel_out, hist_out = _released_ladder(con, args, "t0", ds_in)
+
+    print()
+    print(f"target = PU {target} (full-domain norm {target_na:,.0f})")
+    print(f"filter = {args.filter}   group-by = {args.groupby}   eps = {args.epsilon}")
+    print()
+    print("A. metadata channel: does removing the target move a published bound?")
+    print(f"{'quantity':<28}{'target in':>18}{'target out':>18}{'leaks?':>9}")
+    print("-" * 73)
+    for name, vin, vout in [
+        ("Delta1 (eq.25, max_u)", d1_in, d1_out),
+        ("D_s (CROWD norm, fix)", ds_in, ds_out),
+        ("groups in G*", float(nk_in), float(nk_out)),
+    ]:
+        leaks = "YES" if vin != vout else "no"
+        print(f"{name:<28}{vin:>18,.0f}{vout:>18,.0f}{leaks:>9}")
+    print()
+
+    # ---- B. end-to-end MIA on the released answer, metadata frozen -------------------
+    n_groups = min(true_in.size, true_out.size)
+    tot_in, rung_in = _sample_release(rel_in, hist_in, args, ds_in, n_groups, rng, args.trials)
+    tot_out, rung_out = _sample_release(rel_out, hist_out, args, ds_in, n_groups, rng, args.trials)
+    acc_val = _best_threshold_accuracy(tot_in, tot_out)
+    acc_rung = _best_threshold_accuracy(rung_in.astype(float), rung_out.astype(float))
+    print("B. end-to-end MIA on the released answer (metadata frozen, per Assumption 8.1)")
+    print(f"{'statistic':<28}{'accuracy':>12}")
+    print("-" * 40)
+    print(f"{'released total':<28}{acc_val:>11.1%}")
+    print(f"{'chosen rung':<28}{acc_rung:>11.1%}")
+    print()
+
+    # ---- C. repeated queries: the rung is re-sampled every time ---------------------
+    # Each repetition draws a fresh noisy histogram, so an analyst who reruns the query
+    # can average the channel down. Under honest accounting each repeat costs another
+    # eps_select; this measures what an implementation that forgets to cache the rung
+    # would give away.
+    print("C. repeated queries, averaging the rung channel (each repeat re-samples it)")
+    print(f"{'repeats':>10}{'accuracy':>12}{'eps_select spent':>20}")
+    print("-" * 42)
+    eps_sel = args.eps_select_frac * args.epsilon
+    for r in args.repeat_ladder:
+        r = int(r)
+        m_in = np.array([rung_in[i:i + r].mean() for i in range(0, len(rung_in) - r + 1, max(r, 1))])
+        m_out = np.array([rung_out[i:i + r].mean() for i in range(0, len(rung_out) - r + 1, max(r, 1))])
+        if m_in.size < 8 or m_out.size < 8:
+            print(f"{r:>10}{'(too few trials)':>12}")
+            continue
+        print(f"{r:>10}{_best_threshold_accuracy(m_in, m_out):>11.1%}{r * eps_sel:>20.1f}")
+    print()
+
+    # ---- D. can a small coalition force the rung back to the top? ------------------
+    # The rung objective is count-weighted-by-mass, and the counts have sensitivity 1,
+    # so they are cheap to move: k injected fat+wide PUs add k * (their mass) to the
+    # estimated clipping cost of every low rung and push the choice back to rung 0 --
+    # i.e. back to the pre-fix noise. This needs far fewer than s colluders.
+    print("D. rung DoS: k injected fat+wide PUs (no s-sized coalition needed)")
+    print(f"{'k':>8}{'rung chosen':>14}{'noise scale':>16}{'median rel err':>17}")
+    print("-" * 55)
+    for k in args.rung_dos_ladder:
+        k = int(k)
+        con.execute("CREATE OR REPLACE TABLE contrib AS SELECT * FROM contrib_full")
+        if k > 0:
+            con.execute(
+                f"""
+                INSERT INTO contrib
+                SELECT -c.i, m.g, m.a * {args.rung_dos_scale}, m.t0 * {args.rung_dos_scale}
+                FROM (SELECT unnest(range(1, {k} + 1)) AS i) c
+                CROSS JOIN (SELECT g, median(a) AS a, median(t0) AS t0 FROM contrib GROUP BY g) m
+                """
+            )
+        _, ds_k, nk_k = build_metadata(con, args)
+        true_k, rel_k, hist_k = _released_ladder(con, args, "t0", ds_k)
+        # score only the honest groups' error, against the honest truth
+        tots, rungs = _sample_release(rel_k, hist_k, args, ds_k, true_k.size, rng, 50)
+        mode = int(np.bincount(rungs, minlength=len(rel_k)).argmax())
+        scale = (ds_k / float(args.f) ** mode) / (args.epsilon - eps_sel)
+        err = score(rel_k[mode], true_k, scale, 50, rng)
+        print(f"{k:>8}{mode:>14}{scale:>16,.0f}{err['total']:>16.1%}")
+    print()
+
+
 def run_attack(con, args):
     """Narrow the filter around one target PU and watch both bounds (Rem. 3.1)."""
     gexpr = GROUPBYS[args.groupby]
@@ -749,6 +885,10 @@ def main():
     p.add_argument("--coalition", action="store_true", help="coalition-size ladder")
     p.add_argument("--attack", action="store_true", help="filter-construction attack")
     p.add_argument("--rung-attack", action="store_true", help="membership inference on the chosen rung")
+    p.add_argument("--suite", action="store_true", help="attack suite against the fixed mechanism")
+    p.add_argument("--repeat-ladder", type=float, nargs="+", default=[1, 10, 50, 200])
+    p.add_argument("--rung-dos-ladder", type=float, nargs="+", default=[0, 10, 30, 100, 300, 1000])
+    p.add_argument("--rung-dos-scale", type=float, default=1000.0)
     p.add_argument("--rung-attack-pops", type=float, nargs="+",
                    default=[100000, 10000, 1000, 100, 10, 2])
     p.add_argument("--coalition-ladder", type=float, nargs="+", default=[0, 1, 10, 100, 349, 350, 700])
@@ -757,7 +897,9 @@ def main():
     )
     args = p.parse_args()
     con = open_db(args.db, args.sf)
-    if args.rung_attack:
+    if args.suite:
+        run_suite(con, args)
+    elif args.rung_attack:
         run_rung_attack(con, args)
     elif args.attack:
         run_attack(con, args)

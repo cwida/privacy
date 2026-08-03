@@ -245,6 +245,67 @@ So the query-dependence the hybrid reintroduces is confined to a coarse, capped,
 empirically silent channel: the rung can never exceed the frozen bound, moves in factor-f
 steps, and is selected from noised counts rather than from mass.
 
+## 11. Attacks against the fixed mechanism
+
+Four attacks aimed at the surface the two fixes create (CROWD norm + ℓ1 clip + `dp-hist`
+rung selection). sf1, `month`, filter at 1.3% selectivity, target = the PU with the
+largest full-domain norm, 2000 trials.
+
+**A. The metadata channel — the strongest argument for the norm fix.** Assumption 8.1
+treats the frozen metadata as fixed *and public*. So any published bound that **moves**
+when one PU is removed reveals that PU's membership outright, with no noise in the way:
+
+| quantity | target in | target out | leaks |
+|---|---|---|---|
+| Δ̄₁ (eq. 25, `max_u`) | 7,154,829 | 6,481,821 | **YES** |
+| `D_s` (CROWD norm, the fix) | 8,388,608 | 8,388,608 | no |
+| groups in G* | 80 | 80 | no |
+
+Under the note's own assumption, eq. (25) gives a *deterministic* membership test for the
+norm-defining PU. The CROWD norm does not move. This is not a utility argument — it is a
+correctness argument for the fix.
+
+Residual channel, by construction rather than measured: `D_s` only moves if the deciding
+bin holds exactly `s` members, in which case losing one PU drops it by a factor `f`. No
+bin is near the threshold in this data (counts 902 / 9,012 / 37,629 / 48,415 / 3,922
+against `s = 350`), but it is the same knife-edge as §6 and an adversary who can place PUs
+near a bin boundary could engineer it.
+
+**B. End-to-end MIA on the released answer**, metadata frozen:
+
+| statistic | accuracy |
+|---|---|
+| released total | 51.6% |
+| chosen rung | 50.0% |
+
+51.6% is at the edge of the best-threshold-maximisation bias at this trial count; worth
+rerunning with more trials before quoting it as clean.
+
+**C. Repeated queries.** Each repetition draws a fresh noisy histogram, so an analyst who
+reruns the query could in principle average the rung channel down. Measured accuracy stays
+at 50.0% for 1, 10, 50 and 200 repeats — the rung is a discrete argmin that both worlds
+saturate at the same value, so there is nothing to average. Note the accounting rather than
+the leak: 200 repeats spend 20.0 in `ε_select` alone, so an implementation must cache the
+rung per (query, session) or charge for it.
+
+**D. Rung DoS.** I expected the rung to be cheap to manipulate, since its objective is
+built from sensitivity-1 counts. It is not:
+
+| injected fat+wide PUs | rung | noise scale | median rel err |
+|---|---|---|---|
+| 0 | 7 | 72,818 | 0.5% |
+| 10 | 7 | 72,818 | 0.5% |
+| 30 | 7 | 72,818 | 0.5% |
+| 100 | 7 | 72,818 | 0.5% |
+| 300 | 7 | 72,818 | 0.5% |
+| 1000 | 15 | 582,542 | 4.1% |
+
+Nothing moves below `s = 350`: the mass-weighted objective is dominated by the bulk of the
+population, so a few hundred injected PUs cannot shift the argmin. The damage at k = 1000
+is the **already-known** `s`-coalition effect on `D_s` from §6 (`D_s` itself rises), not a
+new rung-specific vulnerability. So the fixes add no attack surface below `s`; the
+`s`-sized coalition remains the only lever.
+
 ---
 
 ## Caveats
@@ -277,10 +338,16 @@ single-cell outliers cannot touch either bound (§5), coalitions are held to `s�
 (§6), and the frozen bound caps how far any query-specific selection can be steered (§7,
 §10). The rung channel shows no membership signal at any population size down to \|S\| = 2.
 
+Both fixes were then attacked directly (§11) and held: the CROWD norm does not move when
+the target PU is removed (eq. 25 does, which under Assumption 8.1 is a deterministic
+membership test), the released answer and the rung show no membership signal, repeated
+queries add nothing to average, and the rung cannot be shifted by fewer than `s` injected
+PUs. The fixes add no attack surface below `s`.
+
 What is still open, and is where a reviewer will aim: the frozen metadata is computed from
 the data and never noised (Assumption 8.1). Every result here is DP *relative to* that
-metadata. Nothing in the note or in these experiments addresses it, and the update story
-(Rem. 10.1) inherits the same gap.
+metadata. §11A shows the fix closes the single-PU case of that gap, but the assumption
+itself is untouched, and the update story (Rem. 10.1) inherits it.
 
 ## Reproduce
 
@@ -293,5 +360,7 @@ python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --groupby month_priori
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 -s 20 --attack
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --sweep --bucketed
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --rung-attack --trials 3000
+python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --suite --trials 2000 \
+        --filter "l_shipmode in ('AIR','REG AIR') and l_returnflag = 'R' and l_quantity < 10"
 python3 attacks/filterless_sim.py --db tpch_sass_sf10.db --sweep
 ```
