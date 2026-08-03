@@ -546,6 +546,63 @@ release is ε_value-DP given the bound, adaptive composition. Sound as far as I 
 it needs checking — and at *row* level one tuple moves a unit between adjacent bins, so the
 count sensitivity is 2 rather than 1.
 
+## 20. Rank-based bound selection (Dandan, 21:23): right axis matters
+
+Proposal: publish a coarse quantile table of full-domain PU contributions once; per query,
+rewrite to filterless with a per-PU flag `P` = "this PU passes the filter", sort PUs by
+contribution descending, and privately release the **minimum rank with `P = 1`** (via smooth
+sensitivity). That rank gives the percentile of the largest passing PU, and the published
+bound at that percentile becomes the clipping bound.
+
+Architecturally this is §9: a public ladder frozen from the full domain plus a small
+per-query DP statistic saying where on the ladder to clip. The difference is the **axis** —
+her ladder is indexed by *full-domain* contribution, §9's histogram by *filtered*
+contribution — and that turns out to decide everything.
+
+**Fact filters (predicates on the joined rows — nearly all of TPC-H):**
+
+| filter | selectivity | R_1 | bound@R_1 | R_s | bound@R_s | oracle max |
+|---|---|---|---|---|---|---|
+| no filter | 100% | 1 | 7,154,829 | 350 | 5,187,291 | 7,154,829 |
+| shipmode AIR/REG AIR | 28.6% | 1 | 7,154,829 | 350 | 5,187,291 | 2,403,585 |
+| + returnflag=R | 7.0% | 1 | 7,154,829 | 350 | 5,187,291 | 938,461 |
+| + quantity<10 | 1.3% | 1 | 7,154,829 | 457 | 5,071,703 | 70,470 |
+| + discount<0.03 | 0.34% | 2 | 6,481,821 | 1,087 | 4,742,580 | 43,718 |
+| + tax<0.03 | 0.11% | 2 | 6,481,821 | 3,084 | 4,304,966 | 40,507 |
+
+`R_1` is 1 or 2 at **every** selectivity, so the bound never moves off the frozen full-domain
+max while the oracle falls 176×. The reason: a whale passes any fact predicate — it owns
+enough rows that some of them satisfy anything — and the bound then applied is that PU's
+*full-domain* contribution, not the part surviving the filter. The rank identifies **which**
+PU is the top passer, not **how much** of it passes. `R_s` barely helps (5.19M vs 40,507).
+
+**Entity filters (predicates on the PU itself):**
+
+| filter | R_1 | bound@R_1 | oracle max |
+|---|---|---|---|
+| `c_acctbal >= -1000` | 1 | 7,154,829 | 7,154,829 |
+| `c_acctbal >= 2000` | 1 | 7,154,829 | 7,154,829 |
+| `c_acctbal >= 8000` | 5 | 6,370,456 | 6,370,456 |
+| `c_acctbal >= 9500` | 8 | 6,197,487 | 6,197,487 |
+
+Here `bound@R_1` **equals the oracle exactly, every row** — necessarily so, because a passing
+PU's whole full-domain contribution is in scope and the sort key is precisely that quantity.
+The adaptivity is modest only because `c_acctbal` is uncorrelated with contribution in TPC-H;
+a filter correlated with contribution would move the rank much further.
+
+So the two rules are complementary, separated by whether the filter cuts *between* PUs or
+*inside* one PU's rows. `dp_standard`-style entity predicates favour the rank rule; fact
+predicates need the filtered-norm histogram.
+
+**Separate objection to `R_1` regardless of axis.** Its local sensitivity is roughly its own
+value: one added or modified PU that both contributes at the top and passes the filter forces
+`R_1` to 1, so `LS(R_1) ≈ R_1 − 1`. Smooth sensitivity cannot rescue a statistic whose local
+sensitivity scales with the magnitude it is reporting, and the coupling is backwards — the
+sensitivity is worst exactly when `R_1` is large, which is when the statistic is doing useful
+work. `R_s` (rank of the *s-th* highest passing PU) does not have this: one PU shifts it by
+one position in the passing order. Same rule 1 as everywhere — never a bare max/min over
+units.
+
 ---
 
 ## Caveats
@@ -626,6 +683,8 @@ python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --knife --trials 2000
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --suite2 --trials 1000
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --partition --trials 4000
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --elastic --trials 3000
+python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --rank
+python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --rank --entity-filters
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --sweep --bucketed --no-group-bound
 python3 attacks/filterless_sim.py --db tpch_sass_sf10.db --sweep
 ```
