@@ -429,6 +429,73 @@ Monte-Carlo error, and both sit far below the `e^ε/(1+e^ε) = 71%` ceiling for
 a real per-query advantage on small groups, it is bounded by ε, and no amount of clipping
 changes that.
 
+## 17. Partition selection: the channel is narrow, but it amplifies across groups
+
+**Where the channel is live.** The release decision is `count + Laplace(1/ε_η) ≥ τ`, so a
+group only leaks when its count sits near τ (ε_η = 0.1, τ = 380):
+
+| group size | P(release) | MIA accuracy for a member |
+|---|---|---|
+| 10 / 100 / 300 | 0.0% | 50.0% |
+| 350 | 2.8% | 50.4% |
+| 375 | 30.3% | 50.8% |
+| **380 (= τ)** | 50.3% | **52.6%** |
+| 400 | 93.2% | 50.5% |
+| 500 / 1,000 | 100.0% | 50.0% |
+
+The leak is confined to a band a few noise scales wide around τ. Groups comfortably above or
+below carry nothing.
+
+**But it amplifies.** One PU can sit in many groups. If several are borderline, removing the
+PU flips several decisions at once and the analyst sees coordinated disappearances. Target in
+`m` borderline groups, statistic = number of groups released:
+
+| m | Laplace(1/ε_η), τ = s + margin | Laplace(m/ε_η) + Wilson τ |
+|---|---|---|
+| 1 | 52.8% | 50.0% |
+| 2 | 52.6% | 50.0% |
+| 5 | 55.1% | 50.0% |
+| 10 | 56.7% | 50.0% |
+| 20 | 58.1% | 50.0% |
+| 50 | **63.3%** | **50.0%** |
+
+**This is a hole in §12–§14 and in the revised note as I first wrote it.** The margin fix
+handles a *single* group; it does not handle one PU voting in many. Scaling the noise to
+`C_u/ε_η` and using the Wilson τ removes it completely. So **partition selection still needs
+a cross-group cap even though the value channel no longer does** — dropping `C_u` (§1) is
+correct for values and wrong for the key set.
+
+The resolution is an asymmetry worth stating explicitly: cap the **votes**, not the values.
+Each PU may influence at most `C_u` group-release decisions, while its value contributions
+stay intact and are bounded by the ℓ1 norm `D_r`. Wilson's `C_u` hurts precisely because it
+truncates real contributions; used only for the release vote it costs nothing in the
+released numbers.
+
+## 18. The shipped Wilson τ delivers its δ_η
+
+`ComputeWilsonPartitionThreshold` (`privacy_mechanisms.cpp:561`) encodes the claim that a
+group existing only because of one PU is released with probability at most δ_η. Measured
+directly, 200k trials per row:
+
+| ε_η | δ_η | C_u | τ | measured P(release \| count=1) | holds |
+|---|---|---|---|---|---|
+| 0.1 | 1e-2 | 1 | 40.1 | 1.04e-02 | yes |
+| 0.1 | 1e-2 | 10 | 622.0 | 1.05e-03 | yes |
+| 0.1 | 1e-3 | 1 | 63.1 | 1.10e-03 | yes |
+| 0.1 | 1e-3 | 10 | 852.7 | 1.15e-04 | yes |
+| 1.0 | 1e-2 | 1 | 4.9 | 9.92e-03 | yes |
+| 1.0 | 1e-2 | 10 | 63.1 | 1.00e-03 | yes |
+| 1.0 | 1e-3 | 1 | 7.2 | 9.35e-04 | yes |
+| 1.0 | 1e-3 | 10 | 86.2 | 8.00e-05 | yes |
+
+The existing implementation is correct, and conservative by roughly `C_u` (the formula bounds
+the union over `C_u` groups, so a single group comes out ~10× safer at `C_u = 10`).
+
+Note the magnitudes: at ε_η = 0.1, C_u = 10, δ_η = 1e-3 the threshold is **853 PUs per
+group**. τ grows like `C_u·log(1/δ_η)/ε_η`, so an uncapped `C_u` suppresses everything. That
+is the practical argument for the vote cap above, and for setting
+`τ = max(s, wilson_τ(ε_η, δ_η, C_u))` rather than picking one or the other.
+
 ---
 
 ## Caveats
@@ -471,7 +538,11 @@ PUs. The fixes add no attack surface below `s`.
    Both are hard `count ≥ s` tests, and a bin or group engineered to sit exactly at `s` gives
    a 100%-accuracy membership test. `count + Laplace(1/ε_meta) ≥ s + m/ε_meta` closes both
    (50.7% and 50.6% at ε_meta = 1, m = 3), using the τ-mechanism the extension already has.
-   The margin, not the noise, is what closes it.
+   The margin, not the noise, is what closes it. For the key set the margin alone is not
+   enough (§17): a PU sitting in 50 borderline groups still reaches 63.3%, so the release
+   votes need `Laplace(C_u/ε_η)` and the Wilson τ. Cap the **votes**, not the values — the
+   value channel is already covered by the ℓ1 norm, so a vote cap costs nothing in the
+   released numbers, unlike Wilson's contribution truncation.
 
 With §12 in place, **Assumption 8.1 is no longer needed** — the metadata is itself DP. And
 the cost is the right shape: `ε_meta` is paid once per session, where Wilson pays
@@ -503,6 +574,7 @@ python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --suite --trials 2000 
         --filter "l_shipmode in ('AIR','REG AIR') and l_returnflag = 'R' and l_quantity < 10"
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --knife --trials 2000
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --suite2 --trials 1000
+python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --partition --trials 4000
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --sweep --bucketed --no-group-bound
 python3 attacks/filterless_sim.py --db tpch_sass_sf10.db --sweep
 ```

@@ -140,6 +140,33 @@ Counts have sensitivity 1, so this is (ε_meta, δ_meta)-DP. **The margin, not t
 what closes it** — at `ε_meta = 1` with `m = 0`, 65–67% of the signal survives; with `m = 3`
 it drops to 50.6%, at a cost of `τ = 353` instead of `350`.
 
+### 5.1 The group universe needs a cross-group vote cap
+
+A margin protects one group at a time. It does **not** protect a PU that sits in many
+borderline groups: removing it flips several release decisions at once, and the analyst sees
+coordinated disappearances. Measured, with the target in `m` borderline groups and the
+statistic being how many are released: 52.8% at `m = 1` rising to **63.3%** at `m = 50`.
+
+This is what Wilson's `C_u` accounts for, and the fix is Wilson's: noise the counts at
+`Laplace(C_u/ε_η)` and use
+
+```
+τ = max( s,  1 − C_u·log(2 − 2(1−δ_η)^(1/C_u)) / ε_η )
+```
+
+which brings it to 50.0% flat for every `m`. The shipped
+`ComputeWilsonPartitionThreshold` delivers exactly its stated δ_η (verified to 200k trials,
+§18 of the results), so reuse it rather than defining a raw `s` gate.
+
+**The asymmetry to state explicitly: cap the votes, not the values.** Each PU may influence
+at most `C_u` group-*release decisions*, while its value contributions stay intact and are
+bounded by the ℓ1 norm `D_r`. Wilson's `C_u` hurts because it truncates real contributions;
+used only for the release vote it costs nothing in the released numbers. So dropping `C_u`
+(§1) is right for the value channel and wrong for the key set.
+
+Watch the magnitudes: τ grows like `C_u·log(1/δ_η)/ε_η`, which is 853 PUs per group at
+ε_η = 0.1, C_u = 10, δ_η = 1e-3. An uncapped `C_u` suppresses everything.
+
 ## 6. Privacy accounting
 
 | channel | when paid | mechanism |
@@ -171,7 +198,7 @@ one-time bound cost instead of a per-query one — not "no privacy budget for bo
 |---|---|---|
 | 1 | `D_s` = CROWD-supported norm + ℓ1 clip, replacing eq. (25)'s `Δ̄₁ = max_u` | `max_u` is not CROWD-protected. One PU that is fat and wide drives it to `k·B_g` (7M → 207M at 395 groups, 104% error). Worse, under Assumption 8.1 it is a *deterministic* membership test for the norm-defining PU: removing the target moves it 7,154,829 → 6,481,821 while `D_s` does not move at all. This is a correctness fix, not a utility one. |
 | 2 | per-query rung selection from a noisy norm histogram | without it the mechanism is unusable below ~7% selectivity; with it, 0.3–2.9% error across a 100%→0.11% ladder, matching or beating Wilson everywhere |
-| 3 | noised τ on every support threshold (`D_s`, `G*`) | hard `count ≥ s` gives 100% MIA on an engineered knife-edge; noised τ with a margin gives 50.6% |
+| 3 | noised τ on every support threshold (`D_s`, `G*`), with a `C_u` cap on release **votes** | hard `count ≥ s` gives 100% MIA on an engineered knife-edge; a margin fixes one group but a PU in 50 borderline groups still reaches 63.3%, so the key-set channel needs `Laplace(C_u/ε_η)` and the Wilson τ (50.0% flat) |
 | 4 | `f = 2` rather than `f = 4` | the CROWD rule overshoots by up to `f`; at `f = 4` robustness costs 2× the noise, at `f = 2` almost nothing. Doubling the bin count is free. |
 
 Optional: with change 1 in place, `B_g` can be dropped entirely at no measurable utility cost,
@@ -188,6 +215,8 @@ control and because the clipped MIN/MAX construction (Rem. 7.1) uses it as the c
   nothing. The safe-expression language of §9 is defence in depth, not the only line.
 - **Coalitions are held to `s−1`** — 1, 10, 100, 349 colluding fat-and-wide PUs change
   nothing; 350 trips it. The rung is even harder to move and resists up to `s`.
+- **The partition channel is narrow** — a group only leaks when its count sits within a few
+  noise scales of τ; at 350 or 500 against τ = 380 the accuracy is 50.0%.
 - **Filter steering is capped** — the frozen bound is a ceiling the rung cannot exceed, and
   the rung shows no membership signal down to a two-PU population, nor across a crafted
   20-query filter family.

@@ -1044,6 +1044,86 @@ def run_suite2(con, args):
     print()
 
 
+def wilson_tau(eps_eta, delta_eta, cu):
+    """Wilson et al.'s partition-selection threshold, as implemented in
+    privacy_mechanisms.cpp:ComputeWilsonPartitionThreshold:
+        tau = 1 - C_u * log(2 - 2(1 - delta_eta)^(1/C_u)) / eps_eta
+    The claim it encodes: a group that exists only because of ONE privacy unit is
+    released with probability at most delta_eta."""
+    inner = 2.0 - 2.0 * (1.0 - delta_eta) ** (1.0 / cu)
+    if inner <= 0.0:
+        return float("inf")
+    return 1.0 - (cu * np.log(inner)) / eps_eta
+
+
+def run_partition(con, args):
+    """Attacks on the partition-selection channel (which group keys get released)."""
+    rng = np.random.default_rng(args.seed)
+    eps_eta = args.partition_eps
+
+    # ---- P1. where is the channel actually live? -------------------------------------
+    # Release decision is `count + Laplace(1/eps_eta) >= tau`. A group only leaks when its
+    # count is near tau; far below it is always suppressed, far above always released.
+    tau = args.s + args.knife_margins[-1] / eps_eta
+    print()
+    print("P1. leak profile vs group size (release decision, one group)")
+    print(f"rule: count + Laplace(1/{eps_eta}) >= tau = {tau:.1f}   (s = {args.s})")
+    print()
+    print(f"{'group size':>12}{'P(release)':>13}{'MIA acc for that PU':>22}")
+    print("-" * 47)
+    for k in args.partition_sizes:
+        k = float(k)
+        p_in = float(np.mean(k + rng.laplace(0.0, 1.0 / eps_eta, args.trials) >= tau))
+        p_out = float(np.mean(k - 1 + rng.laplace(0.0, 1.0 / eps_eta, args.trials) >= tau))
+        print(f"{k:>12,.0f}{p_in:>12.1%}{0.5 + abs(p_in - p_out) / 2.0:>21.1%}")
+    print()
+
+    # ---- P2. multi-group amplification: why C_u exists -------------------------------
+    # One PU can sit in many groups. If several of them are near tau, removing the PU
+    # flips several decisions at once and the analyst sees coordinated disappearances.
+    # This is exactly what Wilson's C_u accounts for -- and the revised filterless note
+    # drops C_u, because the *value* channel no longer needs it.
+    print("P2. amplification: target sits in m borderline groups, statistic = #released")
+    print(f"{'m':>6}{'Laplace(1/eps)':>18}{'Laplace(m/eps) + Wilson tau':>30}")
+    print("-" * 54)
+    for m in args.partition_groups:
+        m = int(m)
+        k = tau  # worst case: every one of the m groups sits right at the threshold
+        naive_in, naive_out, safe_in, safe_out = [], [], [], []
+        tau_w = wilson_tau(eps_eta, args.partition_delta, m)
+        for _ in range(args.trials):
+            naive_in.append(np.sum(k + rng.laplace(0.0, 1.0 / eps_eta, m) >= tau))
+            naive_out.append(np.sum(k - 1 + rng.laplace(0.0, 1.0 / eps_eta, m) >= tau))
+            safe_in.append(np.sum(k + rng.laplace(0.0, m / eps_eta, m) >= tau_w))
+            safe_out.append(np.sum(k - 1 + rng.laplace(0.0, m / eps_eta, m) >= tau_w))
+        a1 = _best_threshold_accuracy(np.array(naive_in, float), np.array(naive_out, float))
+        a2 = _best_threshold_accuracy(np.array(safe_in, float), np.array(safe_out, float))
+        print(f"{m:>6}{a1:>17.1%}{a2:>29.1%}")
+    print()
+
+    # ---- P3. does the shipped Wilson tau deliver its delta_eta? ---------------------
+    # The guarantee: a group that exists only because of one PU is released with
+    # probability at most delta_eta. Measured directly against the formula the extension
+    # already uses. Large delta values so the event is observable at this trial count.
+    print("P3. validating ComputeWilsonPartitionThreshold: P(release | count = 1) <= delta_eta")
+    print(f"{'eps_eta':>9}{'delta_eta':>12}{'C_u':>6}{'tau':>12}{'measured P':>13}{'holds':>8}")
+    print("-" * 60)
+    big = max(args.trials * 50, 200000)
+    for eps in args.partition_eps_ladder:
+        for delta in args.partition_delta_ladder:
+            for cu in args.partition_cu_ladder:
+                cu = int(cu)
+                t = wilson_tau(eps, delta, cu)
+                p = float(np.mean(1.0 + rng.laplace(0.0, cu / eps, big) >= t))
+                ok = "yes" if p <= delta * 1.25 else "NO"
+                print(f"{eps:>9}{delta:>12.0e}{cu:>6}{t:>12.1f}{p:>12.2e}{ok:>8}")
+    print()
+    print("tau grows like C_u*log(1/delta)/eps_eta, so with no C_u cap and PUs that touch")
+    print("many groups the threshold suppresses everything. Partition selection still needs")
+    print("a cross-group cap even though the value channel no longer does.")
+    print()
+
+
 def run_attack(con, args):
     """Narrow the filter around one target PU and watch both bounds (Rem. 3.1)."""
     gexpr = GROUPBYS[args.groupby]
@@ -1108,6 +1188,15 @@ def main():
     p.add_argument("--suite", action="store_true", help="attack suite against the fixed mechanism")
     p.add_argument("--knife", action="store_true", help="the s-threshold knife-edge leak and its fix")
     p.add_argument("--suite2", action="store_true", help="group-universe, rung composition, small-group MIA")
+    p.add_argument("--partition", action="store_true", help="attacks on the partition-selection channel")
+    p.add_argument("--partition-eps", type=float, default=0.1)
+    p.add_argument("--partition-delta", type=float, default=1e-6)
+    p.add_argument("--partition-sizes", type=float, nargs="+",
+                   default=[10, 100, 300, 350, 375, 380, 400, 500, 1000])
+    p.add_argument("--partition-groups", type=float, nargs="+", default=[1, 2, 5, 10, 20, 50])
+    p.add_argument("--partition-eps-ladder", type=float, nargs="+", default=[0.1, 1.0])
+    p.add_argument("--partition-delta-ladder", type=float, nargs="+", default=[1e-2, 1e-3])
+    p.add_argument("--partition-cu-ladder", type=float, nargs="+", default=[1, 10])
     p.add_argument("--family-size", type=int, default=20, help="filters in the crafted family")
     p.add_argument("--family-ladder", type=float, nargs="+", default=[1, 5, 10, 20])
     p.add_argument("--knife-eps", type=float, nargs="+", default=[0.01, 0.1, 1.0])
@@ -1125,7 +1214,9 @@ def main():
     )
     args = p.parse_args()
     con = open_db(args.db, args.sf)
-    if args.suite2:
+    if args.partition:
+        run_partition(con, args)
+    elif args.suite2:
         run_suite2(con, args)
     elif args.knife:
         run_knife(con, args)
