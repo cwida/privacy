@@ -265,11 +265,11 @@ Under the note's own assumption, eq. (25) gives a *deterministic* membership tes
 norm-defining PU. The CROWD norm does not move. This is not a utility argument — it is a
 correctness argument for the fix.
 
-Residual channel, by construction rather than measured: `D_s` only moves if the deciding
-bin holds exactly `s` members, in which case losing one PU drops it by a factor `f`. No
-bin is near the threshold in this data (counts 902 / 9,012 / 37,629 / 48,415 / 3,922
-against `s = 350`), but it is the same knife-edge as §6 and an adversary who can place PUs
-near a bin boundary could engineer it.
+Residual channel: `D_s` only moves if the deciding bin holds exactly `s` members, in which
+case losing one PU drops it by a factor `f`. No bin is near the threshold in this data
+(counts 902 / 9,012 / 37,629 / 48,415 / 3,922 against `s = 350`), but an adversary who can
+place PUs near a bin boundary could engineer it — see **§12**, which builds that knife-edge
+and closes it.
 
 **B. End-to-end MIA on the released answer**, metadata frozen:
 
@@ -305,6 +305,72 @@ population, so a few hundred injected PUs cannot shift the argmin. The damage at
 is the **already-known** `s`-coalition effect on `D_s` from §6 (`D_s` itself rises), not a
 new rung-specific vulnerability. So the fixes add no attack surface below `s`; the
 `s`-sized coalition remains the only lever.
+
+## 12. Fixing the knife-edge: noise the threshold, and pay for it once
+
+`D_s` is the top of the highest bin whose distinct-PU count reaches `s` — a **hard
+threshold on a count**. If the deciding bin holds exactly `s` members, removing one PU
+drops `D_s` by a factor `f`, and since `D_s` is public under Assumption 8.1 that is a
+deterministic membership test. The fix is not more clipping: it is to decide the bin from
+**noised** counts, i.e. the same τ-thresholding the extension already implements for
+partition selection (`privacy_mechanisms.cpp:ComputeWilsonPartitionThreshold`). Counts have
+sensitivity 1, so `count + Laplace(1/ε_meta) ≥ τ` with `τ = s + m/ε_meta` is
+(ε_meta, δ_meta)-DP.
+
+Knife-edge built deliberately: the real norm histogram plus an engineered bin holding
+exactly `s = 350` members, then one member removed. sf1, 2000 trials:
+
+| rule | `D_s` in | `D_s` out | MIA accuracy |
+|---|---|---|---|
+| hard `count ≥ s` (the note) | 16,777,216 | 2,097,152 | **100.0%** |
+| noisy τ, ε_meta=0.01, m=0 | 9,769,583 | 9,344,909 | 51.4% |
+| noisy τ, ε_meta=0.1, m=0 | 9,415,164 | 8,783,921 | 52.1% |
+| noisy τ, ε_meta=1.0, m=0 | 9,283,043 | 4,908,384 | 64.9% |
+| noisy τ, ε_meta=0.01, m=3 | 2,449,474 | 2,399,142 | 50.2% |
+| noisy τ, ε_meta=0.1, m=3 | 2,522,874 | 2,420,113 | 50.3% |
+| **noisy τ, ε_meta=1.0, m=3** | 2,420,113 | 2,199,912 | **50.7%** |
+
+Noise alone is not enough — at ε_meta = 1.0 the Laplace(1) perturbation is too small
+against a one-count difference and 64.9% of the signal survives. The **margin** is what
+closes it, and it costs almost nothing at ε_meta = 1.0 (τ = 353 instead of 350). That is
+the same `s + log(1/δ)/ε` shape as the Wilson threshold.
+
+**Why this is affordable, and why it is the actual argument for filterlessness.** `ε_meta`
+is spent **once for the whole session**, because the metadata is frozen and shared by every
+query in the family. Wilson pays for its bounds on *every query*. So:
+
+| | bound cost for N queries |
+|---|---|
+| Wilson | `N · ε_bounds` |
+| filterless with DP metadata | `ε_meta + N · ε_value` |
+
+As N grows the bound cost vanishes. The pitch is not "no privacy budget for bounds" — §4
+shows that cannot work — it is "**a one-time bound cost instead of a per-query one**", and
+that removes the need for Assumption 8.1 rather than merely documenting it.
+
+## 13. Per-group bounds become optional once the norm is CROWD-protected
+
+With the CROWD norm and ℓ1 clipping in place, dropping `B_g` entirely (clip only the norm)
+costs nothing measurable — sf1, `dp-hist` column across the selectivity ladder:
+
+| | 100% | 28.6% | 7.0% | 1.3% | 0.34% |
+|---|---|---|---|---|---|
+| with `B_g` (the note) | 0.5% | 0.3% | 0.3% | 0.5% | 0.9% |
+| ℓ1 clip only | **0.3%** | 0.3% | 0.3% | 0.5% | 0.9% |
+
+And the single-cell spike of §5 is still absorbed — but only by the *norm*, not by `B_g`:
+
+| spike 10⁶× in one group | Δ̄₁ | `D_s` | `filterless` err | `fl_l1crowd` err |
+|---|---|---|---|---|
+| with `B_g` | 7,154,829 | 8,388,608 | 0.9% | 1.0% |
+| ℓ1 clip only | 1,382,428,045,303 | 8,388,608 | **164,041%** | **1.0%** |
+
+So per-group clipping is what protects eq. (25) from expression attacks; the CROWD norm
+does not need it. That matters because it shrinks the frozen metadata from *one bound per
+group* to **one scalar**, whose histogram has sensitivity 1 — exactly the quantity §12 can
+make DP cheaply. Two reasons to keep `B_g` anyway: it caps how much a single PU can pollute
+one group's value (with ℓ1 clipping alone the cap is `D_s`, not `B_g`), and the note's
+clipped MIN/MAX (Rem. 7.1, eqs. 21/23) uses it as the clip cap.
 
 ---
 
@@ -344,10 +410,24 @@ membership test), the released answer and the rung show no membership signal, re
 queries add nothing to average, and the rung cannot be shifted by fewer than `s` injected
 PUs. The fixes add no attack surface below `s`.
 
-What is still open, and is where a reviewer will aim: the frozen metadata is computed from
-the data and never noised (Assumption 8.1). Every result here is DP *relative to* that
-metadata. §11A shows the fix closes the single-PU case of that gap, but the assumption
-itself is untouched, and the update story (Rem. 10.1) inherits it.
+3. **Noise the support threshold** (§12). The `count ≥ s` rule is a hard threshold, so an
+   engineered bin sitting exactly at `s` gives a 100%-accuracy membership test on a public
+   bound. `count + Laplace(1/ε_meta) ≥ s + m/ε_meta` closes it (50.7% at ε_meta = 1, m = 3),
+   using the τ-mechanism the extension already has. The margin, not the noise, is what
+   closes it.
+
+With §12 in place, **Assumption 8.1 is no longer needed** — the metadata is itself DP. And
+the cost is the right shape: `ε_meta` is paid once per session, where Wilson pays
+`ε_bounds` per query, so the bound cost per query tends to zero. That, rather than "no
+budget for bounds", is the defensible pitch.
+
+Optional simplification (§13): once the norm is CROWD-protected, per-group bounds cost
+nothing to drop, which shrinks the frozen metadata to a single sensitivity-1 scalar. Keep
+them only for per-group pollution control and for the clipped MIN/MAX construction.
+
+What remains open: everything here is single-aggregate, sums and counts, static data. The
+update story (Rem. 10.1) still needs an accounting — re-deriving metadata after writes
+means re-paying `ε_meta`, and the note does not say how often.
 
 ## Reproduce
 
@@ -362,5 +442,7 @@ python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --sweep --bucketed
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --rung-attack --trials 3000
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --suite --trials 2000 \
         --filter "l_shipmode in ('AIR','REG AIR') and l_returnflag = 'R' and l_quantity < 10"
+python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --knife --trials 2000
+python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --sweep --bucketed --no-group-bound
 python3 attacks/filterless_sim.py --db tpch_sass_sf10.db --sweep
 ```
