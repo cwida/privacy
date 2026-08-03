@@ -1224,6 +1224,86 @@ def run_elastic(con, args):
     print()
 
 
+def run_rank(con, args):
+    """Dandan's rank-based bound selection (21:23), measured against the histogram rule.
+
+    Her proposal: publish a coarse quantile table of full-domain PU contributions once.
+    Per query, rewrite to filterless with a per-PU flag P = "this PU passes the filter",
+    sort PUs by contribution descending, and privately release the minimum rank with
+    P = 1. That rank gives the percentile of the largest passing PU, and the published
+    bound at that percentile becomes the clipping bound. Release the rank with smooth
+    sensitivity rather than global.
+
+    Same shape as §9's rung selection -- a public ladder frozen from the full domain, plus
+    a small per-query DP statistic saying where on the ladder to clip -- but with a rank
+    instead of a histogram, and a quantile ladder instead of exponential bins.
+
+    The concern this measures: R_1 (the MINIMUM passing rank) has local sensitivity
+    comparable to its own value, because one added or modified PU that both contributes
+    heavily and passes the filter forces R_1 to 1. Smooth sensitivity cannot rescue a
+    statistic whose local sensitivity is its own magnitude. R_s -- the rank of the s-th
+    highest passing PU -- does not have that problem, because one PU shifts it by one
+    position in the passing order.
+    """
+    ladder = FILTER_LADDER
+    if args.entity_filters:
+        # Filters on the PU entity itself, not on fact rows. Here "which PUs pass" is the
+        # natural notion and a passing PU's WHOLE full-domain contribution is in scope.
+        ladder = [(f"c_acctbal>={t:g}", f"o_custkey IN (SELECT c_custkey FROM tpch.customer "
+                                        f"WHERE c_acctbal >= {t})")
+                  for t in [-1000, 0, 2000, 5000, 8000, 9500]]
+    build_contributions(con, args, ladder)
+    _, d_s, n_kept = build_metadata(con, args)
+    con.execute(
+        """
+        CREATE OR REPLACE TABLE ranked AS
+        SELECT pu, na, row_number() OVER (ORDER BY na DESC) AS rk
+        FROM norms WHERE na > 0
+        """
+    )
+    n_pu = con.execute("SELECT count(*) FROM ranked").fetchone()[0]
+    print()
+    print("rank-based bound selection vs the histogram rule")
+    print(f"{n_pu:,} PUs ranked by full-domain contribution, s = {args.s}, D_s = {d_s:,.0f}")
+    print()
+    print(f"{'filter':<22}{'R_1':>9}{'bound@R_1':>13}{'R_s':>9}{'bound@R_s':>13}"
+          f"{'oracle max':>13}{'LS(R_1)':>10}")
+    print("-" * 89)
+    for i, (label, _) in enumerate(ladder):
+        row = con.execute(
+            f"""
+            WITH passing AS (
+                SELECT r.pu, r.na, r.rk
+                FROM ranked r
+                JOIN (SELECT pu, sum(least(t{i}, B)) AS nt FROM contrib JOIN bg USING (g)
+                      WHERE t{i} > 0 AND g IN (SELECT g FROM gstar) GROUP BY pu) f
+                  ON f.pu = r.pu AND f.nt > 0
+            )
+            SELECT (SELECT min(rk) FROM passing),
+                   (SELECT na FROM passing ORDER BY rk ASC LIMIT 1),
+                   (SELECT rk FROM passing ORDER BY rk ASC LIMIT 1 OFFSET {args.s - 1}),
+                   (SELECT na FROM passing ORDER BY rk ASC LIMIT 1 OFFSET {args.s - 1}),
+                   (SELECT max(nt) FROM (
+                        SELECT sum(least(t{i}, B)) AS nt FROM contrib JOIN bg USING (g)
+                        WHERE t{i} > 0 AND g IN (SELECT g FROM gstar) GROUP BY pu))
+            """
+        ).fetchone()
+        r1, b1, rs, bs, omax = row
+        if r1 is None:
+            print(f"{label:<22}{'(no passing PUs)':>60}")
+            continue
+        # LS(R_1): one added PU that contributes at the top and passes drives R_1 to 1.
+        ls_r1 = float(r1) - 1.0
+        print(f"{label:<22}{r1:>9,}{b1:>13,.0f}{(rs or 0):>9,}{(bs or 0):>13,.0f}"
+              f"{omax:>13,.0f}{ls_r1:>10,.0f}")
+    print()
+    print("bound@R_1 must upper-bound every passing PU, so it tracks the single largest")
+    print("passer. bound@R_s clips the top s-1 passers instead -- a crowd bound in rank")
+    print("space rather than bin space. LS(R_1) is the noise smooth sensitivity must at")
+    print("least cover, since one PU can force R_1 to 1.")
+    print()
+
+
 def run_attack(con, args):
     """Narrow the filter around one target PU and watch both bounds (Rem. 3.1)."""
     gexpr = GROUPBYS[args.groupby]
@@ -1290,6 +1370,8 @@ def main():
     p.add_argument("--suite2", action="store_true", help="group-universe, rung composition, small-group MIA")
     p.add_argument("--partition", action="store_true", help="attacks on the partition-selection channel")
     p.add_argument("--elastic", action="store_true", help="CROWD ladder vs smoothing for dp_elastic mf")
+    p.add_argument("--rank", action="store_true", help="Dandan's rank-based bound selection")
+    p.add_argument("--entity-filters", action="store_true", help="filter on the PU entity, not fact rows")
     p.add_argument("--elastic-delta", type=float, default=1e-6)
     p.add_argument("--partition-eps", type=float, default=0.1)
     p.add_argument("--partition-delta", type=float, default=1e-6)
@@ -1316,7 +1398,9 @@ def main():
     )
     args = p.parse_args()
     con = open_db(args.db, args.sf)
-    if args.elastic:
+    if args.rank:
+        run_rank(con, args)
+    elif args.elastic:
         args.elastic_outliers = [("benign", 1), ("one unit x2", 2), ("one unit x10", 10),
                                  ("one unit x100", 100), ("one unit x1000", 1000)]
         run_elastic(con, args)
