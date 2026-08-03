@@ -372,6 +372,63 @@ make DP cheaply. Two reasons to keep `B_g` anyway: it caps how much a single PU 
 one group's value (with ℓ1 clipping alone the cap is `D_s`, not `B_g`), and the note's
 clipped MIN/MAX (Rem. 7.1, eqs. 21/23) uses it as the clip cap.
 
+## 14. The group universe has the same threshold bug
+
+`G* = {g : distinct PUs ≥ s}` (§5 of the note) is the *same* hard count threshold as `D_s`.
+If a group sits exactly at `s`, removing one PU makes the whole group vanish from the
+output — and group presence is directly observable, so this is a deterministic membership
+test with no noise anywhere near it:
+
+| rule | P(released \| target in) | P(released \| out) | MIA accuracy |
+|---|---|---|---|
+| hard `count ≥ s` (the note) | 100.0% | 0.0% | **100.0%** |
+| noisy τ, ε_meta=1.0, m=0 | 51.7% | 17.8% | 67.0% |
+| noisy τ, ε_meta=0.1, m=0 | 47.8% | 45.6% | 51.1% |
+| **noisy τ, ε_meta=1.0, m=3** | 2.4% | 1.2% | **50.6%** |
+
+Identical shape to §12, identical fix, and the margin is again what closes it. This is
+exactly the partition-selection mechanism `dp_standard` and `dp_sass` already run, so the
+note should reuse it rather than define a raw `s` gate. In this data the gate never binds
+(real per-group PU counts run 1,192–17,717 against `s = 350`), so it is a latent bug rather
+than an observed one — but it is engineerable.
+
+## 15. Rung composition across a crafted filter family — no leak
+
+The rung is chosen per query, so an analyst issuing Q queries reads Q rungs. Family of 20
+nested filters (`l_quantity < k`), statistic = the sum of the observed rungs:
+
+| Q | MIA accuracy | ε_select spent |
+|---|---|---|
+| 1 | 50.0% | 0.1 |
+| 5 | 50.0% | 0.5 |
+| 10 | 50.0% | 1.0 |
+| 20 | 50.2% | 2.0 |
+
+Nothing accumulates. The binding constraint is budget, not leakage: 20 queries spend 2.0 in
+`ε_select` alone, which is the accounting argument for caching the rung per (query,
+session).
+
+## 16. Small-group MIA: within the ε guarantee, as it should be
+
+Every other table reports the **median** over groups, which hides small groups. Adversarial
+version: the smallest released group, with the target being its largest contributor.
+
+| quantity | value |
+|---|---|
+| group value, target in | 50,989,932 |
+| group value, target out | 50,727,788 |
+| target contribution | 262,144 |
+| noise scale | 2,330,169 |
+| MIA accuracy | **53.5%** |
+
+This is not a flaw — it is the DP guarantee behaving exactly as specified. The contribution
+is 0.11 noise scales, so the Laplace total-variation distance is `1 − e^(−0.11/2) = 0.055`
+and the optimal attack accuracy is 52.7%; the measured 53.5% matches that within
+Monte-Carlo error, and both sit far below the `e^ε/(1+e^ε) = 71%` ceiling for
+`ε_value = 0.9`. Worth reporting precisely because the median metric conceals it: there is
+a real per-query advantage on small groups, it is bounded by ε, and no amount of clipping
+changes that.
+
 ---
 
 ## Caveats
@@ -410,11 +467,11 @@ membership test), the released answer and the rung show no membership signal, re
 queries add nothing to average, and the rung cannot be shifted by fewer than `s` injected
 PUs. The fixes add no attack surface below `s`.
 
-3. **Noise the support threshold** (§12). The `count ≥ s` rule is a hard threshold, so an
-   engineered bin sitting exactly at `s` gives a 100%-accuracy membership test on a public
-   bound. `count + Laplace(1/ε_meta) ≥ s + m/ε_meta` closes it (50.7% at ε_meta = 1, m = 3),
-   using the τ-mechanism the extension already has. The margin, not the noise, is what
-   closes it.
+3. **Noise every support threshold** (§12, §14) — `D_s` *and* the group universe `G*`. The `count ≥ s` rule is a hard threshold, so an
+   Both are hard `count ≥ s` tests, and a bin or group engineered to sit exactly at `s` gives
+   a 100%-accuracy membership test. `count + Laplace(1/ε_meta) ≥ s + m/ε_meta` closes both
+   (50.7% and 50.6% at ε_meta = 1, m = 3), using the τ-mechanism the extension already has.
+   The margin, not the noise, is what closes it.
 
 With §12 in place, **Assumption 8.1 is no longer needed** — the metadata is itself DP. And
 the cost is the right shape: `ε_meta` is paid once per session, where Wilson pays
@@ -424,6 +481,8 @@ budget for bounds", is the defensible pitch.
 Optional simplification (§13): once the norm is CROWD-protected, per-group bounds cost
 nothing to drop, which shrinks the frozen metadata to a single sensitivity-1 scalar. Keep
 them only for per-group pollution control and for the clipped MIN/MAX construction.
+
+The revised design is written up in [`docs/dp/filterless_crowd.md`](../docs/dp/filterless_crowd.md).
 
 What remains open: everything here is single-aggregate, sums and counts, static data. The
 update story (Rem. 10.1) still needs an accounting — re-deriving metadata after writes
@@ -443,6 +502,7 @@ python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --rung-attack --trials
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --suite --trials 2000 \
         --filter "l_shipmode in ('AIR','REG AIR') and l_returnflag = 'R' and l_quantity < 10"
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --knife --trials 2000
+python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --suite2 --trials 1000
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --sweep --bucketed --no-group-bound
 python3 attacks/filterless_sim.py --db tpch_sass_sf10.db --sweep
 ```
