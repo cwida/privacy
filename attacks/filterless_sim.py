@@ -304,6 +304,183 @@ def evaluate_filter(con, args, tcol, delta1, d_s, rng):
     }
 
 
+def rung_releases(con, args, tcol, d_s, max_shift=16):
+    """Bucketed bound selection.
+
+    The frozen per-group bounds and the frozen norm already sit on an exponential
+    ladder (note §6: b* = the highest bin with support >= s). Nothing forces the
+    mechanism to *clip* at the top rung. Clipping at rung `b* - n` and scaling the
+    frozen norm by the same f^n gives a family of releases: a broad query wants n = 0,
+    a selective query wants a large n.
+
+    Returns the true per-group sums and one released vector per rung, so both the
+    oracle and the DP selection rule below can be scored from the same data.
+    """
+    # The per-group bound B_g stays at its frozen value for every rung. Only the norm
+    # bound moves, because the norm bound alone is the sensitivity — per-group clipping
+    # affects bias but not sensitivity once the l1 clip is enforced. Keeping B_g fixed
+    # also means the only bias a lower rung introduces is l1 scaling loss, which the
+    # noisy norm histogram below can predict.
+    con.execute(
+        f"""
+        CREATE OR REPLACE TABLE kb AS
+        SELECT pu, sum(least({tcol}, B)) AS nt
+        FROM contrib JOIN bg USING (g)
+        WHERE {tcol} > 0 AND g IN (SELECT g FROM gstar)
+        GROUP BY pu
+        """
+    )
+    true = None
+    releases = []
+    for n in range(max_shift):
+        div = float(args.f) ** n
+        rows = con.execute(
+            f"""
+            SELECT c.g,
+                   sum(c.{tcol}) AS true_sum,
+                   sum(least(c.{tcol}, bg.B) * least(1.0, ({d_s} / {div}) / kb.nt)) AS rel
+            FROM contrib c JOIN bg USING (g) JOIN kb ON kb.pu = c.pu
+            WHERE c.g IN (SELECT g FROM gstar) AND c.{tcol} > 0 AND kb.nt > 0
+            GROUP BY c.g ORDER BY c.g
+            """
+        ).fetchall()
+        if not rows:
+            break
+        arr = np.array([[r[1], r[2]] for r in rows], dtype=float)
+        if true is None:
+            true = arr[:, 0]
+        elif arr.shape[0] != true.size:
+            break
+        releases.append(arr[:, 1])
+    return true, releases
+
+
+def bucketed_oracle(true, releases, args, d_s, rng):
+    """Best rung chosen with full knowledge of the answer, and the whole budget spent
+    on the value noise. An upper bound on any real selection rule, not a mechanism."""
+    best = None
+    for n, rel in enumerate(releases):
+        r = score(rel, true, (d_s / float(args.f) ** n) / args.epsilon, args.trials, rng)
+        r["rung"] = n
+        if best is None or r["total"] < best["total"]:
+            best = r
+    return best
+
+
+def bucketed_dp(true, releases, args, d_s, rng):
+    """Deployable version: pick the rung with an exponential mechanism over the public
+    ladder, then add Laplace noise with the rest of the budget.
+
+    eps = eps_select + eps_value. The score of rung n trades the mass clipped away
+    against the noise it saves:
+
+        score(n) = -( clipped_away(n) + groups * D_s / (f^n * eps_value) )
+
+    where clipped_away(n) = sum_g (release_0(g) - release_n(g)). One PU's influence on
+    that term is at most its l1-clipped norm, i.e. at most D_s, and the noise term is
+    data-independent (D_s, f, n and the group count are all frozen metadata). So the
+    score sensitivity is D_s and the exponential mechanism is eps_select-DP:
+
+        P(n) ~ exp( eps_select * score(n) / (2 * D_s) )
+
+    The rung can never exceed the frozen top, and it moves in factor-f steps, so an
+    analyst can steer only downward within a capped, coarse range — unlike Wilson's
+    freshly derived bound. Like everything else here, this is DP relative to the frozen
+    metadata (Assumption 8.1), not on top of it.
+    """
+    eps_sel = args.eps_select_frac * args.epsilon
+    eps_val = args.epsilon - eps_sel
+    n_groups = true.size
+    scales = [(d_s / float(args.f) ** n) / eps_val for n in range(len(releases))]
+    clipped_away = np.array([float(np.sum(releases[0] - r)) for r in releases])
+    noise_total = np.array([n_groups * s for s in scales])
+    utility = -(clipped_away + noise_total)
+
+    logits = eps_sel * utility / (2.0 * d_s)
+    logits -= logits.max()
+    probs = np.exp(logits)
+    probs /= probs.sum()
+
+    picks = rng.choice(len(releases), size=args.trials, p=probs)
+    acc = np.zeros(n_groups)
+    for n in picks:
+        noise = rng.laplace(0.0, scales[n], size=n_groups)
+        acc += np.abs(releases[n] + noise - true) / true
+    acc /= args.trials
+    return {
+        "total": float(np.median(acc)),
+        "rung": int(np.argmax(np.bincount(picks, minlength=len(releases)))),
+        "rung_prob": float(probs.max()),
+        "eps_sel": eps_sel,
+    }
+
+
+def norm_histogram(con, args, tcol):
+    """Histogram of the per-PU filtered norms over the frozen ladder. Each PU falls in
+    exactly one bin, so one PU changes one count by one: L1 sensitivity 1."""
+    rows = con.execute(
+        f"""
+        WITH n AS (
+            SELECT pu, sum(least({tcol}, B)) AS nt
+            FROM contrib JOIN bg USING (g)
+            WHERE {tcol} > 0 AND g IN (SELECT g FROM gstar)
+            GROUP BY pu
+        )
+        SELECT cast(floor(ln(nt) / ln({args.f})) AS INTEGER) AS bin, count(*) AS c
+        FROM n WHERE nt > 0 GROUP BY 1
+        """
+    ).fetchall()
+    return {int(b): float(c) for b, c in rows}
+
+
+def bucketed_dp_hist(true, releases, hist, args, d_s, rng):
+    """Rung selection from a noisy histogram of the per-PU norms — the rule that works.
+
+    Two problems with the mass-scored exponential mechanism above: its per-PU
+    sensitivity is D_s, the same order as the score differences, so it picks close to at
+    random. Scoring on a raw count quantile instead has sensitivity 1 but ignores the
+    noise/bias tradeoff and over-clips.
+
+    This rule gets both. Pay eps_select ONCE for a Laplace-noised histogram of the
+    per-PU filtered norms over the frozen ladder (each PU in exactly one bin →
+    sensitivity 1, so the noise is tiny). Then do the whole optimisation on that noisy
+    histogram, which costs nothing further: estimate the mass a candidate rung would
+    clip away by treating the PUs in bin b as sitting at the geometric midpoint of the
+    bin, and trade it against the noise the rung saves.
+
+        est_clipped(n) = sum_b  noisy_count_b * max(0, f^(b+0.5) - D_s/f^n)
+        est_noise(n)   = groups * (D_s / f^n) / eps_value
+        pick n minimising est_clipped(n) + est_noise(n)
+
+    This is Wilson's APPROX_BOUNDS objective confined to the frozen public ladder and
+    capped by the frozen rung: the analyst can steer only downward, in factor-f steps,
+    inside a range fixed before the query was written.
+    """
+    eps_sel = args.eps_select_frac * args.epsilon
+    eps_val = args.epsilon - eps_sel
+    n_groups = true.size
+    levels = np.array([d_s / float(args.f) ** n for n in range(len(releases))])
+    bins = sorted(hist)
+    counts = np.array([hist[b] for b in bins])
+    mids = np.array([float(args.f) ** (b + 0.5) for b in bins])
+    est_noise = n_groups * levels / eps_val
+
+    acc = np.zeros(n_groups)
+    picks = []
+    for _ in range(args.trials):
+        noisy = np.maximum(counts + rng.laplace(0.0, 1.0 / eps_sel, size=counts.size), 0.0)
+        est_clipped = np.array([float(np.sum(noisy * np.maximum(mids - lvl, 0.0))) for lvl in levels])
+        chosen = int(np.argmin(est_clipped + est_noise))
+        picks.append(chosen)
+        scale = (d_s / float(args.f) ** chosen) / eps_val
+        acc += np.abs(releases[chosen] + rng.laplace(0.0, scale, size=n_groups) - true) / true
+    acc /= args.trials
+    return {
+        "total": float(np.median(acc)),
+        "rung": int(np.bincount(picks, minlength=len(releases)).argmax()),
+    }
+
+
 def score(released, true, scale, trials, rng):
     live = true > 0
     released, true = released[live], true[live]
@@ -362,23 +539,43 @@ def run_sweep(con, args):
     header(args, delta1, d_s, n_kept, n_groups)
     print()
     print(
-        f"{'filter':<24}{'sel.':>8}{'groups':>8}{'B_G':>14}"
-        f"{'filterless':>13}{'fl_l1crowd':>13}{'google':>10}"
+        f"{'filter':<22}{'sel.':>7}{'grp':>5}{'fless':>8}{'l1crowd':>9}"
+        f"{'oracle':>8}{'rung':>5}{'dp-mass':>9}{"dp-hist":>9}{'rung':>5}{'google':>8}"
     )
-    print("-" * 90)
+    print("-" * 93)
     for i, (label, filt) in enumerate(FILTER_LADDER):
         sel = selectivity(con, filt)
         res = evaluate_filter(con, args, f"t{i}", delta1, d_s, rng)
         if res is None:
-            print(f"{label:<24}{sel:>7.2%}{'0':>8}{'—':>14}{'(no groups released)':>36}")
+            print(f"{label:<22}{sel:>6.2%}{'0':>5}{'(no groups released)':>45}")
             continue
         m = res["mechs"]
+        cols = f"{'—':>8}{'—':>5}{'—':>9}{'—':>8}{'—':>5}"
+        if args.bucketed:
+            true, releases = rung_releases(con, args, f"t{i}", d_s)
+            orc = bucketed_oracle(true, releases, args, d_s, rng)
+            dpm = bucketed_dp(true, releases, args, d_s, rng)
+            hist = norm_histogram(con, args, f"t{i}")
+            dpc = bucketed_dp_hist(true, releases, hist, args, d_s, rng)
+            cols = (f"{orc['total']:>7.1%}{orc['rung']:>5}{dpm['total']:>8.1%}"
+                    f"{dpc['total']:>8.1%}{dpc['rung']:>5}")
         print(
-            f"{label:<24}{sel:>7.2%}{res['n_groups']:>8}{res['bg_scalar']:>14,.0f}"
-            f"{m['filterless']['total']:>12.1%}{m['fl_l1crowd']['total']:>13.1%}"
-            f"{m['google']['total']:>10.1%}"
+            f"{label:<22}{sel:>6.2%}{res['n_groups']:>5}"
+            f"{m['filterless']['total']:>7.1%}{m['l1' if False else 'fl_l1crowd']['total']:>8.1%}"
+            f"{cols}{m['google']['total']:>7.1%}"
         )
     print()
+    if args.bucketed:
+        print("oracle = best rung chosen with full knowledge, whole budget on the value")
+        print("         noise. an upper bound, not a mechanism.")
+        print("dp-mass = exponential mechanism scored on clipped mass (sensitivity D_s)")
+        print("dp-hist = noisy norm histogram (sensitivity 1) + tradeoff optimisation, "
+              f"{args.clip_tolerance:.1%} of PUs clipped")
+        print(f"both spend eps_select = "
+              f"{args.eps_select_frac:.0%} of eps,")
+        print("         remainder on the value noise. rung 0 = the frozen top bound;")
+        print("         rung n = that bound divided by f^n.")
+        print()
     print("filterless/fl_l1crowd reuse ONE frozen metadata set for every row above;")
     print("google re-derives B_G per filter (and would pay budget for it).")
     print()
@@ -405,6 +602,89 @@ def run_coalition(con, args):
         print(f"{int(n):>8}{delta1:>18,.0f}{d_s:>16,.0f}{moved:>13}")
     print()
     print(f"s = {args.s}: the coalition must reach s members before its bin is supported.")
+    print()
+
+
+def choose_rung(noisy, mids, levels, est_noise):
+    est_clipped = np.array([float(np.sum(noisy * np.maximum(mids - lvl, 0.0))) for lvl in levels])
+    return int(np.argmin(est_clipped + est_noise))
+
+
+def run_rung_attack(con, args):
+    """Membership inference on the *rung*.
+
+    The bucketed hybrid picks the clipping rung from a noisy histogram of the filtered
+    per-PU norms, so the bound is query-dependent again and Rem. 3.1 no longer applies
+    by construction. This tests whether that channel actually leaks.
+
+    Sharpest form of the filter-construction attack: let the analyst restrict the query
+    to a PU set S of their choosing, shrinking S around one target. Run the rung
+    selection with the target in S and with it removed, and try to tell the two apart
+    from the released rung alone. 50% = no signal.
+
+    The frozen metadata (B_g, D_s) is built once from the full domain and reused for
+    every population size, as the design requires.
+    """
+    build_contributions(con, args, [("full", "true")])
+    delta1, d_s, n_kept = build_metadata(con, args)
+    target, target_na = con.execute(
+        "SELECT pu, na FROM norms ORDER BY na DESC LIMIT 1"
+    ).fetchone()
+    eps_sel = args.eps_select_frac * args.epsilon
+    eps_val = args.epsilon - eps_sel
+    n_rungs = 16
+    levels = np.array([d_s / float(args.f) ** n for n in range(n_rungs)])
+    est_noise = n_kept * levels / eps_val
+    rng = np.random.default_rng(args.seed)
+
+    print()
+    print("membership inference on the chosen rung")
+    print(f"target = PU {target} (full-domain norm {target_na:,.0f}), D_s = {d_s:,.0f}")
+    print(f"eps_select = {eps_sel} (histogram sensitivity 1), s = {args.s}, f = {args.f}")
+    print()
+    print(f"{'|S|':>10}{'mean rung in':>15}{'mean rung out':>15}{'attack acc':>13}")
+    print("-" * 53)
+    for pop in args.rung_attack_pops:
+        pop = int(pop)
+        con.execute(
+            f"""
+            CREATE OR REPLACE TABLE sel AS
+            SELECT pu, na FROM norms WHERE pu <> {target} ORDER BY hash(pu) LIMIT {max(pop - 1, 0)}
+            """
+        )
+        con.execute(f"INSERT INTO sel SELECT pu, na FROM norms WHERE pu = {target}")
+        rows = con.execute(
+            f"""
+            SELECT cast(floor(ln(na) / ln({args.f})) AS INTEGER) AS bin, count(*) AS c
+            FROM sel WHERE na > 0 GROUP BY 1 ORDER BY 1
+            """
+        ).fetchall()
+        bins = [int(b) for b, _ in rows]
+        counts_in = np.array([float(c) for _, c in rows])
+        mids = np.array([float(args.f) ** (b + 0.5) for b in bins])
+        tbin = int(np.floor(np.log(target_na) / np.log(args.f)))
+        counts_out = counts_in.copy()
+        if tbin in bins:
+            counts_out[bins.index(tbin)] -= 1.0
+
+        r_in, r_out = [], []
+        for _ in range(args.trials):
+            noisy = np.maximum(counts_in + rng.laplace(0.0, 1.0 / eps_sel, size=counts_in.size), 0.0)
+            r_in.append(choose_rung(noisy, mids, levels, est_noise))
+            noisy = np.maximum(counts_out + rng.laplace(0.0, 1.0 / eps_sel, size=counts_out.size), 0.0)
+            r_out.append(choose_rung(noisy, mids, levels, est_noise))
+        r_in, r_out = np.array(r_in), np.array(r_out)
+        acc = max(
+            max(
+                (np.mean(r_in >= t) + np.mean(r_out < t)) / 2.0,
+                (np.mean(r_in < t) + np.mean(r_out >= t)) / 2.0,
+            )
+            for t in range(n_rungs + 1)
+        )
+        print(f"{pop:>10,}{r_in.mean():>15.2f}{r_out.mean():>15.2f}{acc:>12.1%}")
+    print()
+    print("50% = the rung carries no membership signal. The histogram counts have")
+    print("sensitivity 1, so one PU moves a count by 1 against Laplace(1/eps_select).")
     print()
 
 
@@ -463,15 +743,23 @@ def main():
     p.add_argument("--trials", type=int, default=200)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--sweep", action="store_true", help="selectivity ladder")
+    p.add_argument("--bucketed", action="store_true", help="add the bucketed-rung columns")
+    p.add_argument("--eps-select-frac", type=float, default=0.1, help="fraction of eps spent picking the rung")
+    p.add_argument("--clip-tolerance", type=float, default=0.01, help="fraction of PUs the chosen rung may clip")
     p.add_argument("--coalition", action="store_true", help="coalition-size ladder")
     p.add_argument("--attack", action="store_true", help="filter-construction attack")
+    p.add_argument("--rung-attack", action="store_true", help="membership inference on the chosen rung")
+    p.add_argument("--rung-attack-pops", type=float, nargs="+",
+                   default=[100000, 10000, 1000, 100, 10, 2])
     p.add_argument("--coalition-ladder", type=float, nargs="+", default=[0, 1, 10, 100, 349, 350, 700])
     p.add_argument(
         "--attack-thresholds", type=float, nargs="+", default=[-1000, 0, 5000, 9000, 9800, 9990, 9998]
     )
     args = p.parse_args()
     con = open_db(args.db, args.sf)
-    if args.attack:
+    if args.rung_attack:
+        run_rung_attack(con, args)
+    elif args.attack:
         run_attack(con, args)
     elif args.coalition:
         run_coalition(con, args)
