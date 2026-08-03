@@ -221,7 +221,44 @@ control and because the clipped MIN/MAX construction (Rem. 7.1) uses it as the c
   the rung shows no membership signal down to a two-PU population, nor across a crafted
   20-query filter family.
 
-## 9. Open items
+## 9. The generalisation
+
+Every mode in this extension answers one question: **how do you use a data-dependent noise
+parameter without leaking it?** They differ only in the repair.
+
+| mode | data-derived parameter | repair | cost |
+|---|---|---|---|
+| `pac` | empirical variance across counters | none | the known attack |
+| `dp_elastic` | `MAX(count)` per FK hop (`ComputeMfK`) | smoothing, `2·SES_β` | multiplicative, needs δ |
+| `dp_sass` | subsample spread | subsample median + smooth sensitivity | needs δ and Λ |
+| this note | per-PU contribution bound | CROWD count over a ladder + noised τ | additive `1/ε` on a **count** |
+
+The reason the last one is cheap: **reduce the parameter to a count query over a public
+exponential ladder.** Counts have sensitivity 1 regardless of the magnitude of the quantity
+being bounded, so the cost is paid in the count domain rather than the value domain. That is
+why rung selection costs ~10% of ε instead of a multiplicative factor.
+
+Three rules follow, and each one predicted a defect that the simulation then found:
+
+1. **Never take a bare `max` over units** — replace it with a crowd/quantile statistic over a
+   ladder, i.e. reduce it to a count. (Found: eq. 25; also `ComputeMfK`.)
+2. **Never hard-threshold a data-dependent count** — noise it and add a margin; the margin,
+   not the noise, is what closes it. (Found: `D_s`, `G*`.)
+3. **Whichever channel is uncapped across cells needs a cross-cell cap, applied to the
+   cheapest channel** — votes, not values. (Found: partition amplification, §5.1.)
+
+Rule 2 also predicts a gap in the shipped code rather than in this note: `dp_elastic`'s
+`privacy_min_group_count` is a raw un-noised gate, already documented as such in `CLAUDE.md`
+and deferred. The deferred fix (noised τ with `C_u = 1`) is right for row level; a user-level
+version would need the vote cap of §5.1.
+
+Rule 1 applied to `dp_elastic`'s `mf` gives 3.7× less noise than the shipped smoothing on
+benign data, and is flat rather than linear under an injected outlier (§19 of the results).
+But it is not a drop-in: the crowd level is below the true max, so the join fan-out has to be
+clipped to match, which turns `dp_elastic` into a global-sensitivity mechanism with a derived
+bound and moves the cost into clipping bias. Worth pursuing, needs its own proof.
+
+## 10. Open items
 
 1. **Updates.** Rem. 10.1 argues the update surface is coarse; with §5 it also has a cost —
    re-deriving metadata after writes means re-paying `ε_meta`. The refresh policy needs an

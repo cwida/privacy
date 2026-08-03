@@ -496,6 +496,56 @@ group**. τ grows like `C_u·log(1/δ_η)/ε_η`, so an uncapped `C_u` suppresse
 is the practical argument for the vote cap above, and for setting
 `τ = max(s, wilson_τ(ε_η, δ_η, C_u))` rather than picking one or the other.
 
+## 19. The recipe generalises to `dp_elastic` — with a catch
+
+`dp_elastic` derives its noise from `mf_K = MAX(count)` per FK hop (`ComputeMfK`,
+`privacy_mechanisms.cpp:463`) — a bare max over units, structurally identical to eq. (25).
+It is repaired by smoothing (`2·SES_β`, β = ε/(2 ln(2/δ))), which has its own theorem. Does
+the CROWD ladder do better? Noise multiplier for COUNT over `lineitem → orders → customer`,
+sf1, ε = 1, δ = 1e-6, f = 2, s = 350:
+
+| scenario | mf hop1 | raw ∏mf | `2·SES_β` (shipped) | crowd ∏ | crowd/smoothed |
+|---|---|---|---|---|---|
+| benign | 41 | 287 | 1,919 | **512** | 0.27× |
+| one unit ×2 | 82 | 574 | 2,952 | **512** | 0.17× |
+| one unit ×10 | 410 | 2,870 | 11,767 | **512** | 0.04× |
+| one unit ×100 | 4,100 | 28,700 | 112,013 | **512** | 0.00× |
+| one unit ×1000 | 41,000 | 287,000 | 1,114,748 | **512** | 0.00× |
+
+Two things. On benign data the crowd level is **3.7× less noise** than what ships today, and
+only 1.8× above the leaky raw optimum where smoothing is 6.7× above it. And **smoothing does
+not protect against one fat unit setting the level** — it tracks the outlier linearly
+(×1000 unit → 580× the noise) because β-smoothness protects the *neighbourhood* of the
+dataset, not against a single unit defining `mf`. The crowd level is flat at 512 throughout.
+That is the eq. (25) lesson again, in shipped code.
+
+Leak on the parameter, removing the single busiest customer:
+
+| variant | in | out | MIA |
+|---|---|---|---|
+| raw max | 41 | 41 | 50.0% |
+| `2·SES_β` | 1,919 | 1,919 | (has a proof) |
+| crowd + noisy τ | 64 | 64 | 50.0% |
+
+The raw max happens not to move in sf1 because several customers tie at 41, so the
+deterministic leak does not fire in *this* data — it is latent, not absent.
+
+**The catch, and it is not small.** The crowd level is *not* an upper bound on the true `mf`
+— 64 against a true max of 41,000 in the last row. That is the point, but it means the crowd
+level is not a valid sensitivity unless the data is **clipped to match**: each PU's join
+fan-out must be capped at the crowd level. So this is not a drop-in replacement for the
+smoothed `mf`. It converts `dp_elastic` from a smooth-sensitivity mechanism into a
+global-sensitivity one with a DP-derived bound — the `dp_standard` pattern, except the bound
+is derived rather than guessed. The 3.7× is a noise-multiplier comparison only; it does not
+include the clipping bias that the fat units would then absorb, which this experiment does
+not measure.
+
+Also note the privacy route differs. Smoothing carries the Nissim–Raskhodnikova–Smith
+theorem. The crowd version composes instead: the bound selection is (ε_meta, δ_meta)-DP, the
+release is ε_value-DP given the bound, adaptive composition. Sound as far as I can tell, but
+it needs checking — and at *row* level one tuple moves a unit between adjacent bins, so the
+count sensitivity is 2 rather than 1.
+
 ---
 
 ## Caveats
@@ -575,6 +625,7 @@ python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --suite --trials 2000 
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --knife --trials 2000
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --suite2 --trials 1000
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --partition --trials 4000
+python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --elastic --trials 3000
 python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --sweep --bucketed --no-group-bound
 python3 attacks/filterless_sim.py --db tpch_sass_sf10.db --sweep
 ```
