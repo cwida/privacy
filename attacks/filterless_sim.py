@@ -1124,6 +1124,106 @@ def run_partition(con, args):
     print()
 
 
+def smooth_es(mf, beta):
+    """FLEX smooth elastic sensitivity, mirroring
+    privacy_mechanisms.cpp:ComputeSmoothElasticSensitivity:
+        SES_beta = max_{k>=0} prod_i(mf_i + k) * exp(-beta*k)"""
+    mf = np.asarray(mf, dtype=float)
+    best = float(np.prod(mf))
+    k_max = int(len(mf) / beta + 200.0)
+    for k in range(1, k_max + 1):
+        decay = np.exp(-beta * k)
+        if decay < 1e-15:
+            break
+        best = max(best, float(np.prod(mf + k) * decay))
+    return best
+
+
+def crowd_level(freqs, f, s, eps_meta, margin, rng, trials=1):
+    """The CROWD rule applied to a frequency distribution: top of the highest power-of-f
+    bin whose (noised) count clears tau. Returns one draw, or an array of `trials`."""
+    freqs = np.asarray(freqs, dtype=float)
+    pos = freqs[freqs > 0]
+    bins = np.floor(np.log(pos) / np.log(f)).astype(int)
+    uniq, counts = np.unique(bins, return_counts=True)
+    tau = s + margin / eps_meta if eps_meta else s
+    out = []
+    for _ in range(trials):
+        noisy = counts + (rng.laplace(0.0, 1.0 / eps_meta, counts.size) if eps_meta else 0.0)
+        ok = uniq[noisy >= tau]
+        out.append(float(f) ** (ok.max() + 1) if ok.size else 0.0)
+    return np.array(out)
+
+
+def run_elastic(con, args):
+    """Does the CROWD-ladder recipe generalise to dp_elastic's join max-frequencies?
+
+    dp_elastic derives its noise from mf_K = MAX(count) per FK hop (ComputeMfK,
+    privacy_mechanisms.cpp:463) — a bare max over units, structurally the same shape as the
+    note's eq. (25). It is repaired by smoothing (2*SES_beta), which is a sanctioned
+    repair with its own theorem. The question here is whether the ladder recipe is a
+    better repair on utility, and whether smoothing is actually robust to one fat unit
+    setting the level.
+
+    Three variants of the noise multiplier for COUNT over the FK chain:
+      raw        prod(mf)          data-dependent, no repair
+      smoothed   2 * SES_beta      as shipped, beta = eps/(2 ln(2/delta))
+      crowd      prod(mf_crowd)    highest supported power-of-f bin per hop, noised tau
+    """
+    rng = np.random.default_rng(args.seed)
+    hop1 = np.array(
+        [r[0] for r in con.execute(
+            "SELECT count(*) FROM tpch.orders GROUP BY o_custkey").fetchall()],
+        dtype=float)
+    hop2 = np.array(
+        [r[0] for r in con.execute(
+            "SELECT count(*) FROM tpch.lineitem GROUP BY l_orderkey").fetchall()],
+        dtype=float)
+    beta = args.epsilon / (2.0 * np.log(2.0 / args.elastic_delta))
+    print()
+    print("dp_elastic join max-frequencies: three repairs for the same parameter")
+    print(f"chain lineitem -> orders -> customer, eps = {args.epsilon}, "
+          f"delta = {args.elastic_delta:g}, beta = {beta:.4f}")
+    print(f"CROWD: f = {args.f}, s = {args.s}, eps_meta = {args.knife_eps[-1]}, margin = 3")
+    print()
+    print(f"{'scenario':<26}{'mf hop1':>10}{'raw prod':>11}{'2*SES_b':>12}"
+          f"{'crowd prod':>12}{'crowd/smooth':>14}")
+    print("-" * 85)
+    eps_meta = args.knife_eps[-1]
+    for label, mult in args.elastic_outliers:
+        h1 = hop1.copy()
+        if mult > 1:
+            h1 = np.append(h1, h1.max() * mult)  # one injected fat unit
+        mf = [h1.max(), hop2.max()]
+        raw = float(np.prod(mf))
+        sm = 2.0 * smooth_es(mf, beta)
+        cr = float(
+            crowd_level(h1, args.f, args.s, eps_meta, 3.0, rng)[0]
+            * crowd_level(hop2, args.f, args.s, eps_meta, 3.0, rng)[0]
+        )
+        ratio = cr / sm if sm else float("nan")
+        print(f"{label:<26}{mf[0]:>10,.0f}{raw:>11,.0f}{sm:>12,.0f}{cr:>12,.0f}{ratio:>13.2f}x")
+    print()
+
+    # leak on the parameter itself: remove the single argmax unit
+    top = hop1.max()
+    without = hop1[hop1 < top] if (hop1 == top).sum() == 1 else hop1
+    print("leak on the parameter (remove the single busiest customer)")
+    print(f"{'variant':<22}{'value in':>14}{'value out':>14}{'MIA acc':>10}")
+    print("-" * 60)
+    print(f"{'raw max':<22}{top:>14,.0f}{without.max():>14,.0f}"
+          f"{(1.0 if without.max() != top else 0.5):>9.1%}")
+    sm_in = 2.0 * smooth_es([top, hop2.max()], beta)
+    sm_out = 2.0 * smooth_es([without.max(), hop2.max()], beta)
+    print(f"{'2*SES_beta (shipped)':<22}{sm_in:>14,.0f}{sm_out:>14,.0f}"
+          f"{'(proof)':>10}")
+    a = crowd_level(hop1, args.f, args.s, eps_meta, 3.0, rng, args.trials)
+    b = crowd_level(without, args.f, args.s, eps_meta, 3.0, rng, args.trials)
+    print(f"{'crowd + noisy tau':<22}{a.mean():>14,.0f}{b.mean():>14,.0f}"
+          f"{_best_threshold_accuracy(a, b):>9.1%}")
+    print()
+
+
 def run_attack(con, args):
     """Narrow the filter around one target PU and watch both bounds (Rem. 3.1)."""
     gexpr = GROUPBYS[args.groupby]
@@ -1189,6 +1289,8 @@ def main():
     p.add_argument("--knife", action="store_true", help="the s-threshold knife-edge leak and its fix")
     p.add_argument("--suite2", action="store_true", help="group-universe, rung composition, small-group MIA")
     p.add_argument("--partition", action="store_true", help="attacks on the partition-selection channel")
+    p.add_argument("--elastic", action="store_true", help="CROWD ladder vs smoothing for dp_elastic mf")
+    p.add_argument("--elastic-delta", type=float, default=1e-6)
     p.add_argument("--partition-eps", type=float, default=0.1)
     p.add_argument("--partition-delta", type=float, default=1e-6)
     p.add_argument("--partition-sizes", type=float, nargs="+",
@@ -1214,7 +1316,11 @@ def main():
     )
     args = p.parse_args()
     con = open_db(args.db, args.sf)
-    if args.partition:
+    if args.elastic:
+        args.elastic_outliers = [("benign", 1), ("one unit x2", 2), ("one unit x10", 10),
+                                 ("one unit x100", 100), ("one unit x1000", 1000)]
+        run_elastic(con, args)
+    elif args.partition:
         run_partition(con, args)
     elif args.suite2:
         run_suite2(con, args)
