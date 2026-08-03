@@ -232,6 +232,11 @@ def build_metadata(con, args):
     """The frozen half: per-group bounds, released group universe, per-PU norms, and
     the two candidate sensitivities. None of this reads a filtered column."""
     crowd(con, "a", "contrib", args.f, args.s, group_key="g")
+    if args.no_group_bound:
+        # Per-group clipping affects bias only; the l1 norm bound alone is the
+        # sensitivity. Dropping it reduces the frozen metadata to a single scalar whose
+        # histogram has sensitivity 1 -- much cheaper to make DP.
+        con.execute("UPDATE bg SET B = 1e30")
     con.execute(
         f"""
         CREATE OR REPLACE TABLE gstar AS
@@ -824,6 +829,70 @@ def run_suite(con, args):
     print()
 
 
+def run_knife(con, args):
+    """The residual leak, and whether a noised threshold closes it.
+
+    D_s = top of the highest bin whose distinct-PU count reaches s. That is a HARD
+    threshold on a count, so if the deciding bin holds exactly s members, removing one PU
+    drops D_s by a factor f. D_s is public under Assumption 8.1, so that is a
+    deterministic membership test — accuracy 1.0, no noise in the way.
+
+    Fix: decide the bin from NOISED counts, exactly the tau-thresholding the extension
+    already does for partition selection (privacy_mechanisms.cpp:ComputeWilsonPartitionThreshold).
+    Counts have sensitivity 1, so Laplace(1/eps_meta) plus a margin on tau makes the
+    decision (eps_meta, delta_meta)-DP. Crucially this is paid ONCE for the whole session,
+    not per query, because the metadata is frozen and shared by every query in the family.
+
+    This builds the knife-edge deliberately: take the real norm histogram and add an edge
+    bin holding exactly s members, then remove one of them.
+    """
+    build_contributions(con, args, [("query", args.filter)])
+    _, d_s, _ = build_metadata(con, args)
+    hist = norm_histogram(con, args, "t0")
+    bins = sorted(hist)
+    top = max(b for b in bins if hist[b] >= args.s)
+    edge = top + 3  # an engineered bin well above the honest top
+    rng = np.random.default_rng(args.seed)
+
+    def hard_rule(counts):
+        ok = [b for b, c in counts.items() if c >= args.s]
+        return float(args.f) ** (max(ok) + 1) if ok else 0.0
+
+    def noisy_rule(counts, eps_meta, tau):
+        ok = [b for b, c in counts.items() if c + rng.laplace(0.0, 1.0 / eps_meta) >= tau]
+        return float(args.f) ** (max(ok) + 1) if ok else 0.0
+
+    c_in = dict(hist)
+    c_in[edge] = float(args.s)          # edge bin exactly at the threshold
+    c_out = dict(c_in)
+    c_out[edge] = float(args.s - 1)     # one PU removed
+
+    print()
+    print("residual leak: the deciding bin sits exactly at s")
+    print(f"honest top bin = {top} (D_s = {d_s:,.0f}), engineered edge bin = {edge} "
+          f"(D_s would be {float(args.f) ** (edge + 1):,.0f})")
+    print(f"s = {args.s}, f = {args.f}")
+    print()
+    print(f"{'rule':<34}{'D_s in':>16}{'D_s out':>16}{'MIA acc':>10}")
+    print("-" * 76)
+    hi, ho = hard_rule(c_in), hard_rule(c_out)
+    print(f"{'hard count >= s (the note)':<34}{hi:>16,.0f}{ho:>16,.0f}"
+          f"{(1.0 if hi != ho else 0.5):>9.1%}")
+    for eps_meta in args.knife_eps:
+        for margin in args.knife_margins:
+            tau = args.s + margin / eps_meta
+            a = np.array([noisy_rule(c_in, eps_meta, tau) for _ in range(args.trials)])
+            b = np.array([noisy_rule(c_out, eps_meta, tau) for _ in range(args.trials)])
+            acc = _best_threshold_accuracy(a, b)
+            label = f"noisy tau, eps_meta={eps_meta}, m={margin}"
+            print(f"{label:<34}{a.mean():>16,.0f}{b.mean():>16,.0f}{acc:>9.1%}")
+    print()
+    print("eps_meta is spent ONCE for the whole session, not per query: the metadata is")
+    print("frozen and shared by every query in the family. Wilson pays for its bounds on")
+    print("every query instead.")
+    print()
+
+
 def run_attack(con, args):
     """Narrow the filter around one target PU and watch both bounds (Rem. 3.1)."""
     gexpr = GROUPBYS[args.groupby]
@@ -886,6 +955,11 @@ def main():
     p.add_argument("--attack", action="store_true", help="filter-construction attack")
     p.add_argument("--rung-attack", action="store_true", help="membership inference on the chosen rung")
     p.add_argument("--suite", action="store_true", help="attack suite against the fixed mechanism")
+    p.add_argument("--knife", action="store_true", help="the s-threshold knife-edge leak and its fix")
+    p.add_argument("--knife-eps", type=float, nargs="+", default=[0.01, 0.1, 1.0])
+    p.add_argument("--knife-margins", type=float, nargs="+", default=[0.0, 3.0])
+    p.add_argument("--no-group-bound", action="store_true",
+                   help="drop per-group clipping; l1-clip only (metadata = one scalar)")
     p.add_argument("--repeat-ladder", type=float, nargs="+", default=[1, 10, 50, 200])
     p.add_argument("--rung-dos-ladder", type=float, nargs="+", default=[0, 10, 30, 100, 300, 1000])
     p.add_argument("--rung-dos-scale", type=float, default=1000.0)
@@ -897,7 +971,9 @@ def main():
     )
     args = p.parse_args()
     con = open_db(args.db, args.sf)
-    if args.suite:
+    if args.knife:
+        run_knife(con, args)
+    elif args.suite:
         run_suite(con, args)
     elif args.rung_attack:
         run_rung_attack(con, args)
