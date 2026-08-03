@@ -893,6 +893,157 @@ def run_knife(con, args):
     print()
 
 
+def run_suite2(con, args):
+    """Three further attacks: the group universe's threshold, rung composition across a
+    crafted filter family, and MIA on a single small group (which the median-over-groups
+    metric used everywhere else would hide)."""
+    rng = np.random.default_rng(args.seed)
+    eps_sel = args.eps_select_frac * args.epsilon
+    eps_val = args.epsilon - eps_sel
+
+    # ---- E. the group universe is the SAME hard threshold as D_s --------------------
+    # G* = {g : distinct PUs >= s}. If a group sits exactly at s, removing one PU makes
+    # the whole group vanish from the output. Group presence is directly observable, so
+    # that is a deterministic membership test -- the same bug as §12 in a second place.
+    build_contributions(con, args, [("query", args.filter)])
+    counts = [
+        float(c)
+        for (c,) in con.execute(
+            "SELECT count(*) FROM contrib WHERE a > 0 GROUP BY g ORDER BY 1"
+        ).fetchall()
+    ]
+    print()
+    print("E. group universe: engineered group sitting exactly at s")
+    print(f"real per-group PU counts range {min(counts):,.0f}–{max(counts):,.0f}, s = {args.s}")
+    print()
+    print(f"{'rule':<38}{'P(released | in)':>18}{'P(rel | out)':>15}{'MIA acc':>10}")
+    print("-" * 81)
+    p_in, p_out = 1.0, 0.0  # hard rule: s >= s is released, s-1 is not
+    print(f"{'hard count >= s (the note, §5)':<38}{p_in:>17.1%}{p_out:>14.1%}{1.0:>9.1%}")
+    for eps_meta in args.knife_eps:
+        for margin in args.knife_margins:
+            tau = args.s + margin / eps_meta
+            a = np.mean(args.s + rng.laplace(0.0, 1.0 / eps_meta, args.trials) >= tau)
+            b = np.mean(args.s - 1 + rng.laplace(0.0, 1.0 / eps_meta, args.trials) >= tau)
+            acc = 0.5 + abs(a - b) / 2.0
+            label = f"noisy tau, eps_meta={eps_meta}, m={margin}"
+            print(f"{label:<38}{a:>17.1%}{b:>14.1%}{acc:>9.1%}")
+    print()
+
+    # ---- F. rung composition across a crafted filter family ------------------------
+    # The rung is chosen per query, so an analyst issuing Q filters observes Q rungs.
+    # Each carries almost nothing, but they compose. Statistic = sum of the rungs.
+    fam = [(f"q<{k}", f"{BASE} and l_quantity < {k}") for k in range(2, args.family_size + 2)]
+    build_contributions(con, args, fam)
+    _, d_s, n_kept = build_metadata(con, args)
+    target = con.execute("SELECT pu FROM norms ORDER BY na DESC LIMIT 1").fetchone()[0]
+    levels = np.array([d_s / float(args.f) ** n for n in range(16)])
+    est_noise = n_kept * levels / eps_val
+
+    hists_in, hists_out = [], []
+    for i in range(len(fam)):
+        h = norm_histogram(con, args, f"t{i}")
+        if not h:
+            continue
+        tna = con.execute(
+            f"""
+            SELECT sum(least(t{i}, B)) FROM contrib JOIN bg USING (g)
+            WHERE pu = {target} AND g IN (SELECT g FROM gstar)
+            """
+        ).fetchone()[0]
+        bins = sorted(h)
+        cin = np.array([h[b] for b in bins])
+        cout = cin.copy()
+        if tna and tna > 0:
+            tb = int(np.floor(np.log(tna) / np.log(args.f)))
+            if tb in bins:
+                cout[bins.index(tb)] -= 1.0
+        mids = np.array([float(args.f) ** (b + 0.5) for b in bins])
+        hists_in.append((cin, mids))
+        hists_out.append((cout, mids))
+
+    print("F. rung composition: analyst issues Q queries and reads Q rungs")
+    print(f"{'Q':>6}{'MIA acc':>12}{'eps_select spent':>20}")
+    print("-" * 38)
+    for q in args.family_ladder:
+        q = int(min(q, len(hists_in)))
+        if q < 1:
+            continue
+        s_in, s_out = [], []
+        for _ in range(args.trials):
+            tot_i = tot_o = 0
+            for j in range(q):
+                cin, mids = hists_in[j]
+                cout, _ = hists_out[j]
+                tot_i += choose_rung(
+                    np.maximum(cin + rng.laplace(0.0, 1.0 / eps_sel, cin.size), 0.0),
+                    mids, levels, est_noise)
+                tot_o += choose_rung(
+                    np.maximum(cout + rng.laplace(0.0, 1.0 / eps_sel, cout.size), 0.0),
+                    mids, levels, est_noise)
+            s_in.append(tot_i)
+            s_out.append(tot_o)
+        acc = _best_threshold_accuracy(np.array(s_in, float), np.array(s_out, float))
+        print(f"{q:>6}{acc:>11.1%}{q * eps_sel:>20.1f}")
+    print()
+
+    # ---- G. MIA on the smallest released group -------------------------------------
+    # Every other table reports the MEDIAN over groups, which hides small groups. Here
+    # the target is the largest contributor to the smallest released group, and the
+    # statistic is that one group's released value.
+    build_contributions(con, args, [("query", args.filter)])
+    _, d_s, n_kept = build_metadata(con, args)
+    small_g = con.execute(
+        """
+        SELECT g FROM contrib WHERE t0 > 0 AND g IN (SELECT g FROM gstar)
+        GROUP BY g ORDER BY sum(t0) ASC LIMIT 1
+        """
+    ).fetchone()[0]
+    tgt = con.execute(
+        f"SELECT pu FROM contrib WHERE g = '{small_g}' AND t0 > 0 ORDER BY t0 DESC LIMIT 1"
+    ).fetchone()[0]
+    rung = 0
+    hist = norm_histogram(con, args, "t0")
+    bins = sorted(hist)
+    counts_h = np.array([hist[b] for b in bins])
+    mids = np.array([float(args.f) ** (b + 0.5) for b in bins])
+    levels = np.array([d_s / float(args.f) ** n for n in range(16)])
+    est_noise = n_kept * levels / eps_val
+    rung = choose_rung(counts_h, mids, levels, est_noise)
+    scale = levels[rung] / eps_val
+
+    def group_value(exclude):
+        where = f" AND c.pu <> {exclude}" if exclude else ""
+        return float(
+            con.execute(
+                f"""
+                WITH kb AS (
+                    SELECT pu, sum(least(t0, B)) AS nt FROM contrib JOIN bg USING (g)
+                    WHERE t0 > 0 AND g IN (SELECT g FROM gstar) GROUP BY pu
+                )
+                SELECT sum(least(c.t0, bg.B) * least(1.0, {levels[rung]} / kb.nt))
+                FROM contrib c JOIN bg USING (g) JOIN kb ON kb.pu = c.pu
+                WHERE c.g = '{small_g}' AND c.t0 > 0{where}
+                """
+            ).fetchone()[0]
+            or 0.0
+        )
+
+    v_in, v_out = group_value(None), group_value(tgt)
+    a = v_in + rng.laplace(0.0, scale, args.trials)
+    b = v_out + rng.laplace(0.0, scale, args.trials)
+    print("G. MIA on the smallest released group (not the median)")
+    print(f"group {small_g}, target PU {tgt} = its largest contributor, rung {rung}")
+    print(f"{'quantity':<34}{'value':>18}")
+    print("-" * 52)
+    print(f"{'group value, target in':<34}{v_in:>18,.0f}")
+    print(f"{'group value, target out':<34}{v_out:>18,.0f}")
+    print(f"{'target contribution':<34}{v_in - v_out:>18,.0f}")
+    print(f"{'noise scale':<34}{scale:>18,.0f}")
+    print(f"{'MIA accuracy':<34}{_best_threshold_accuracy(a, b):>17.1%}")
+    print()
+
+
 def run_attack(con, args):
     """Narrow the filter around one target PU and watch both bounds (Rem. 3.1)."""
     gexpr = GROUPBYS[args.groupby]
@@ -956,6 +1107,9 @@ def main():
     p.add_argument("--rung-attack", action="store_true", help="membership inference on the chosen rung")
     p.add_argument("--suite", action="store_true", help="attack suite against the fixed mechanism")
     p.add_argument("--knife", action="store_true", help="the s-threshold knife-edge leak and its fix")
+    p.add_argument("--suite2", action="store_true", help="group-universe, rung composition, small-group MIA")
+    p.add_argument("--family-size", type=int, default=20, help="filters in the crafted family")
+    p.add_argument("--family-ladder", type=float, nargs="+", default=[1, 5, 10, 20])
     p.add_argument("--knife-eps", type=float, nargs="+", default=[0.01, 0.1, 1.0])
     p.add_argument("--knife-margins", type=float, nargs="+", default=[0.0, 3.0])
     p.add_argument("--no-group-bound", action="store_true",
@@ -971,7 +1125,9 @@ def main():
     )
     args = p.parse_args()
     con = open_db(args.db, args.sf)
-    if args.knife:
+    if args.suite2:
+        run_suite2(con, args)
+    elif args.knife:
         run_knife(con, args)
     elif args.suite:
         run_suite(con, args)
