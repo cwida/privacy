@@ -1436,6 +1436,8 @@ def main():
     p.add_argument("--bounds", action="store_true", help="APPROX_BOUNDS vs Dandan vs ours")
     p.add_argument("--pareto", type=float, default=0.0, help="heavy-tail the contributions, Pareto alpha")
     p.add_argument("--dataset", default="tpch", choices=sorted(DATASETS))
+    p.add_argument("--sass", action="store_true", help="SASS smooth-median vs Laplace")
+    p.add_argument("--sass-m", type=float, nargs="+", default=[64, 256, 1024, 4096, 16384])
     p.add_argument("--entity-filters", action="store_true", help="filter on the PU entity, not fact rows")
     p.add_argument("--elastic-delta", type=float, default=1e-6)
     p.add_argument("--partition-eps", type=float, default=0.1)
@@ -1465,7 +1467,10 @@ def main():
     con = open_db(args.db, args.sf)
     if args.dataset == "so":
         con.execute("DETACH tpch"); con.execute(f"ATTACH '{args.db}' AS so (READ_ONLY)")
-    if args.bounds:
+    if args.sass:
+        args.elastic_delta = 1e-6
+        run_sass(con, args)
+    elif args.bounds:
         args.elastic_delta = 1e-6
         run_bounds(con, args)
     elif args.rank:
@@ -1506,6 +1511,13 @@ def run_bounds(con, args):
     eps_val = args.epsilon - eps_sel
     _, _, _, full_ladder = dsconf(args)
     ladder = full_ladder[:5]
+    if args.entity_filters:
+        # Predicates on the PU entity: these shrink the POPULATION rather than the rows
+        # per person. APPROX_BOUNDS histograms only the survivors, so its bins lose
+        # support; Dandan's ladder is built on the full domain and keeps it.
+        ladder = [(f"c_acctbal>={t:g}",
+                   f"o_custkey IN (SELECT c_custkey FROM tpch.customer WHERE c_acctbal >= {t})")
+                  for t in [-1000, 5000, 8000, 9000, 9500]]
     build_contributions(con, args, ladder)
     _, d_s, n_kept = build_metadata(con, args)
     n_pu = con.execute("SELECT count(*) FROM norms WHERE na > 0").fetchone()[0]
@@ -1619,6 +1631,91 @@ def run_bounds(con, args):
               f"{dph['total']:>11.1%}{np.mean(d1):>11.1%}{out_rs:>11}")
     print()
     print("dandan Rs is OPTIMISTIC: scaled by the local gap, not a smoothed sensitivity.")
+    print()
+
+
+def smooth_sens_median(x, lam, beta):
+    """Exact smooth sensitivity of the median (Nissim-Raskhodnikova-Smith; the O(n log n)
+    form Dandan sent on 9 June, evaluated directly since m is small).
+        S*_beta = max_{k>=0} e^{-beta k} * max_{t=0..k+1} (x_{p+t} - x_{p+t-k-1})
+    with x sorted, x_0 = 0 and x_{n+1} = lam (the public output domain)."""
+    n = len(x)
+    xs = np.concatenate(([0.0], np.sort(x), [lam]))
+    p = int(np.ceil(n / 2.0))
+    best = 0.0
+    for k in range(0, n + 1):
+        decay = np.exp(-beta * k)
+        if decay * lam < best:
+            break
+        for t in range(0, k + 2):
+            hi, lo = p + t, p + t - k - 1
+            if 0 <= lo and hi <= n + 1:
+                best = max(best, (xs[hi] - xs[lo]) * decay)
+    return best
+
+
+def run_sass(con, args):
+    """SASS smooth-median release vs Google-DP-style Laplace, with the domain bound Lambda
+    derived rather than supplied. Sweeps m to find where Lambda stops dominating."""
+    rng = np.random.default_rng(args.seed)
+    _, _, _, full_ladder = dsconf(args)
+    ladder = [full_ladder[1]]
+    build_contributions(con, args, ladder)
+    _, d_s, n_kept = build_metadata(con, args)
+    n_pu = con.execute("SELECT count(*) FROM norms WHERE na > 0").fetchone()[0]
+    beta = args.epsilon / (2.0 * np.log(2.0 / args.elastic_delta))
+    lam = d_s * n_pu                     # lane estimates are scaled to the full population
+    con.execute(
+        """
+        CREATE OR REPLACE TABLE pt AS
+        WITH nt AS (SELECT pu, sum(least(t0, B)) AS nt FROM contrib JOIN bg USING (g)
+                    WHERE t0 > 0 AND g IN (SELECT g FROM gstar) GROUP BY pu)
+        SELECT c.pu, c.g, c.t0 AS t,
+               least(c.t0, bg.B) * least(1.0, CAST(? AS DOUBLE) / nt.nt) AS c
+        FROM contrib c JOIN bg USING (g) JOIN nt ON nt.pu = c.pu
+        WHERE c.t0 > 0 AND c.g IN (SELECT g FROM gstar) AND nt.nt > 0
+        """, [d_s]
+    )
+    truth = {g: float(v) for g, v in con.execute("SELECT g, sum(t) FROM pt GROUP BY g").fetchall()}
+    print()
+    print(f"SASS smooth-median vs Laplace.  filter = {ladder[0][0]}, group-by = {args.groupby}")
+    print(f"eps={args.epsilon}, delta={args.elastic_delta:g}, beta={beta:.4f}")
+    print(f"D_s={d_s:,.0f}, N_PU={n_pu:,}, Lambda = D_s*N_PU = {lam:.3g}")
+    print(f"typical true group value = {np.median(list(truth.values())):.3g}")
+    print()
+    print(f"{'release':<34}{'noise scale':>14}{'median rel err':>16}")
+    print("-" * 64)
+    lap = d_s / args.epsilon
+    errs = [abs(rng.laplace(0.0, lap)) / v for g, v in truth.items() for _ in range(20)]
+    print(f"{'Laplace, l1 crowd bound':<34}{lap:>14,.0f}{np.median(errs):>15.1%}")
+    for m in args.sass_m:
+        m = int(m)
+        rows = con.execute(
+            f"SELECT g, abs(hash(pu)) % {m} AS lane, sum(c) FROM pt GROUP BY 1, 2"
+        ).fetchall()
+        by_g = {}
+        for g, lane, v in rows:
+            by_g.setdefault(g, np.zeros(m))[int(lane)] = float(v)
+        # Two settings of the public output domain: the derived one (per-PU bound scaled to
+        # the population, the relation currently used for dp_sass_*_output_bound), and an
+        # ORACLE one taken from the actual lane spread -- not releasable, but it separates
+        # "SASS is weak here" from "our Lambda is far too loose".
+        oracle_lam = max(float((lanes * m).max()) for lanes in by_g.values())
+        for tag, L in (("Lambda=D_s*N_PU", lam), ("Lambda=oracle", oracle_lam)):
+            rel, scales = [], []
+            for g, lanes in by_g.items():
+                est = np.clip(lanes * m, 0.0, L)
+                ss = smooth_sens_median(est, L, beta)
+                scale = 2.0 * ss / args.epsilon
+                med = float(np.median(est))
+                scales.append(scale)
+                rel += [abs(med + rng.laplace(0.0, scale) - truth[g]) / truth[g] for _ in range(20)]
+            print(f"{'SASS median m=' + str(m) + ', ' + tag:<34}{np.median(scales):>14,.0f}"
+                  f"{np.median(rel):>15.1%}")
+    print()
+    print("Lambda enters the smooth sensitivity as the endpoint x_{m+1}, so the endpoint term")
+    print("is ~exp(-beta*m/2)*Lambda. Until that falls below the spread of the lane estimates,")
+    print("the noise is set by Lambda and the bound-derivation question is moot.")
     print()
 
 
