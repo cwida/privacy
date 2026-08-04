@@ -235,6 +235,96 @@ shape: Wilson pays `N · ε_bounds` over N queries, this pays `ε_meta + N · ε
 the defensible pitch — a one-time bound cost instead of a per-query one — not "no budget for
 bounds", which the selectivity table shows cannot work.**
 
+## Which one to use
+
+**One mechanism, not both.** They share an architecture, so they do not compose usefully, and
+the histogram statistic dominates the rank statistic:
+
+- It strictly contains the rank's information — the coarse filtered contribution distribution
+  versus one point of it.
+- It costs the **same ε as a single count**: each PU falls in exactly one bin, so the bins are
+  disjoint and Laplace(1/`ε_select`) per bin is `ε_select`-DP for the whole histogram by
+  parallel composition. There is no budget saving in using a scalar.
+- Sensitivity 1 against `LS(R_1) ≈ R_1`.
+- Works for filters that cut inside a PU's rows as well as filters that select whole PUs.
+
+Running both and taking the tighter bound would split ε, and the histogram at half budget beats
+the rank at full budget. **What to take from Dandan's proposal is the ladder construction** —
+equal support per rung — as the bin-coalescing rule below.
+
+Neither works when the filter passes ≲10 PUs: the ladder saturates and the release clips to
+nothing. That is the DP floor, not a defect.
+
+## Procedure
+
+### Once per dataset, per (measure, grouping) template
+
+"Universal" means universal across **filters**, not across measures or groupings, so this runs
+per template. Parameters: `s` (crowd size), `f` (1.5–2), `C_u`, `ε_meta`, `δ_meta`.
+
+1. **Materialise the full-domain per-PU contribution relation** `a(u,g)`: pre-aggregate the
+   join by (PU, grouping key) with **no analyst filters** — PK–FK join predicates do not count
+   as filters. This is the IVM-maintained view. Optionally apply §4 sampled filter retention
+   (keep all active PUs, hash-sample inactive ones on `r` bits, requiring support `s/2^r`);
+   that costs utility only, never privacy.
+2. **Group universe `G*`**: per-group distinct-PU counts, released through
+   `count + Laplace(C_u/ε_G) ≥ τ`, with `τ = max(s, wilson_τ(ε_G, δ_G, C_u))`. Enforce the
+   `C_u` **vote** cap here (the existing rank cap, `ApplyMaxGroupsContributed`) — one PU
+   touches up to `k_u` groups, so this table's sensitivity is `k_u` without a cap.
+3. **Per-group bound `B_g`**: bin `a(u,g)` by powers of `f` within each group; count distinct
+   PUs per (group, bin); take the top bin whose noised count clears τ, **coalescing bins upward
+   until each clears τ** rather than discarding unsupported ones. Same `C_u` cap and the same
+   sensitivity argument as step 2. Optional — see §13: with the crowd norm in place this can be
+   dropped, which removes the only `C_u`-costing value metadata and leaves one scalar.
+4. **Crowd norm `D_s`**: roll up per-PU totals `n_u = Σ_{g∈G*} min(a(u,g), B_g)`, bin those the
+   same way, take the top bin clearing τ. **Sensitivity 1** — each PU lands in exactly one bin —
+   so this is the cheap one.
+5. Publish `(G*, {B_g}, D_s)` and the ladder definition (`f`, `s`, bin edges). Charge
+   `ε_meta = ε_G + ε_B + ε_D` and `δ_meta` **once**, not per query. Re-derivation after writes
+   re-charges it.
+
+The structural asymmetry worth remembering: `D_s` has sensitivity 1; `G*` and `B_g` are
+per-group and cost `C_u`.
+
+### Per query
+
+1. **Compatibility check** (`privacy_compatibility_check.cpp`) plus the safe-value-expression
+   rules: no Boolean→numeric path, no partial or error-generating functions, totalised
+   division, equality-only column-vs-column joins on released tables.
+2. **Resolve the template** (measure expression + grouping keys) and load its frozen metadata.
+   No template, no query.
+3. **Pre-aggregate per PU with the filter** → `t(u,g)`, restricted to `g ∈ G*`. Note there is
+   **no filterless rewrite in the query path** — freezing per template moves Peter's §3/§4
+   machinery (Boolean predicates, active bit, hash sampling) into the metadata build.
+4. **Clip to `B_g`** (if kept).
+5. **Rung selection**: histogram `n_u^t = Σ_g min(t(u,g), B_g)` over the frozen ladder, add
+   Laplace(1/`ε_select`) per bin, and choose `r` by
+   `argmin_r [ Σ_b noisy_b · max(0, f^(b+0.5) − D_s/f^r) + |G*| · (D_s/f^r) / ε_value ]`.
+   Everything after the noised histogram is post-processing. **Cache `r` per (query, session)**
+   so a rerun does not re-charge `ε_select`.
+6. **ℓ1-clip** each PU's vector to `D_r = D_s / f^r`, via the window scale factor
+   `min(1, D_r / n_u^t)` inside the per-PU pre-aggregation.
+7. **Sum per group over all of `G*`** — including groups with no passing rows. Do **not** omit
+   empty groups the "usual SQL way" as §5 of the note suggests: `G*` is public and frozen, so
+   omitting a group because its filtered value is zero reveals that no PU in it passed the
+   filter, which reintroduces a per-query data-dependent key set. Empty groups must come out as
+   noise around zero.
+8. **Add Laplace(`D_r / ε_value`)** per group, splitting `ε_value` across the `c` aggregates
+   (`FinalizeDPLaplace` already does this), then the AVG ratio projection if needed.
+
+Budget: `ε_select + ε_value` per query, `ε_meta` once for the session.
+
+### Where this plugs into smooth-sensitivity SASS
+
+Steps 1–6 are a **`Λ`-derivation**, and that is the whole point of the exercise. To use it with
+the smooth-median release rather than a Laplace sum, replace steps 7–8 with the existing SASS
+path and set the public output domain from `D_r` instead of from an analyst constant — via the
+relation already used for the current bounds,
+`Λ = D_r × ceil(N_PU / m)`, so `D_r` substitutes for `dp_count_bound` / `dp_sum_bound`. That
+removes the query-dependence of `Λ` that Peter's 6 June objection targets, and it generalises
+`dp_sass_private_range` (currently exponential-mechanism quantiles for the average release
+only) to the median release. **Untested — see below.**
+
 ## Untested
 
 - Everything here is a **single nonnegative additive aggregate**, sums and counts, static data.
