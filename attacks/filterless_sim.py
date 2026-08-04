@@ -1654,6 +1654,35 @@ def smooth_sens_median(x, lam, beta):
     return best
 
 
+def private_range_intervals(est, hi, eps, q, rng):
+    """GUPT-style DP quantile: exponential mechanism over the intervals between sorted
+    lane estimates, weighted by interval width, on the public domain [0, hi]."""
+    xs = np.concatenate(([0.0], np.sort(est), [hi]))
+    widths = np.diff(xs)
+    target = q * len(est)
+    ranks = np.arange(len(widths))
+    logits = eps * (-np.abs(ranks - target)) / 2.0
+    logits -= logits.max()
+    w = widths * np.exp(logits)
+    if w.sum() <= 0:
+        return hi
+    i = rng.choice(len(w), p=w / w.sum())
+    return float(rng.uniform(xs[i], xs[i + 1]))
+
+
+def private_range_ladder(est, hi, f, eps, q, rng):
+    """Same goal, but the exponential mechanism runs over a PUBLIC ladder of powers of f
+    instead of over data intervals, so it cannot be dragged into the huge empty interval
+    above the data. Utility = -|#{lanes above rung} - (1-q)*m|, sensitivity 1."""
+    rungs = np.array([f ** k for k in range(1, int(np.ceil(np.log(hi) / np.log(f))) + 1)])
+    want = (1.0 - q) * len(est)
+    above = np.array([float((est > r).sum()) for r in rungs])
+    logits = eps * (-np.abs(above - want)) / 2.0
+    logits -= logits.max()
+    w = np.exp(logits)
+    return float(rungs[rng.choice(len(rungs), p=w / w.sum())])
+
+
 def run_sass(con, args):
     """SASS smooth-median release vs Google-DP-style Laplace, with the domain bound Lambda
     derived rather than supplied. Sweeps m to find where Lambda stops dominating."""
@@ -1701,7 +1730,14 @@ def run_sass(con, args):
         # ORACLE one taken from the actual lane spread -- not releasable, but it separates
         # "SASS is weak here" from "our Lambda is far too loose".
         oracle_lam = max(float((lanes * m).max()) for lanes in by_g.values())
-        for tag, L in (("Lambda=D_s*N_PU", lam), ("Lambda=oracle", oracle_lam)):
+        all_est = np.concatenate([lanes * m for lanes in by_g.values()])
+        eps_range = 0.1 * args.epsilon
+        piv = float(np.median([private_range_intervals(all_est, lam, eps_range, 0.99, rng)
+                               for _ in range(9)]))
+        plad = float(np.median([private_range_ladder(all_est, lam, args.f, eps_range, 0.99, rng)
+                                for _ in range(9)]))
+        for tag, L in (("Lambda=D_s*N_PU", lam), ("Lambda=private/intervals", piv),
+                       ("Lambda=private/ladder", plad), ("Lambda=oracle", oracle_lam)):
             rel, scales = [], []
             for g, lanes in by_g.items():
                 est = np.clip(lanes * m, 0.0, L)
