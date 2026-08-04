@@ -1371,6 +1371,7 @@ def main():
     p.add_argument("--partition", action="store_true", help="attacks on the partition-selection channel")
     p.add_argument("--elastic", action="store_true", help="CROWD ladder vs smoothing for dp_elastic mf")
     p.add_argument("--rank", action="store_true", help="Dandan's rank-based bound selection")
+    p.add_argument("--bounds", action="store_true", help="APPROX_BOUNDS vs Dandan vs ours")
     p.add_argument("--entity-filters", action="store_true", help="filter on the PU entity, not fact rows")
     p.add_argument("--elastic-delta", type=float, default=1e-6)
     p.add_argument("--partition-eps", type=float, default=0.1)
@@ -1398,7 +1399,10 @@ def main():
     )
     args = p.parse_args()
     con = open_db(args.db, args.sf)
-    if args.rank:
+    if args.bounds:
+        args.elastic_delta = 1e-6
+        run_bounds(con, args)
+    elif args.rank:
         run_rank(con, args)
     elif args.elastic:
         args.elastic_outliers = [("benign", 1), ("one unit x2", 2), ("one unit x10", 10),
@@ -1422,6 +1426,120 @@ def main():
         run_sweep(con, args)
     else:
         run_single(con, args)
+
+
+# ---------------------------------------------------------------------------
+# APPROX_BOUNDS vs Dandan's rank rule, head to head as bound selectors.
+# Every mechanism picks ONE l1 norm bound; the release is then identical
+# (l1-clip to it, sum per group, Laplace(bound/eps_value)), so the only thing
+# being compared is the bound choice.
+# ---------------------------------------------------------------------------
+def run_bounds(con, args):
+    rng = np.random.default_rng(args.seed)
+    eps_sel = args.eps_select_frac * args.epsilon
+    eps_val = args.epsilon - eps_sel
+    ladder = FILTER_LADDER[:5]
+    build_contributions(con, args, ladder)
+    _, d_s, n_kept = build_metadata(con, args)
+    n_pu = con.execute("SELECT count(*) FROM norms WHERE na > 0").fetchone()[0]
+
+    # Dandan's published ladder: coarse upper-tail quantiles of the full-domain totals.
+    pcts = [0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99]
+    qs = con.execute(
+        "SELECT " + ", ".join(f"quantile_cont(na, {p})" for p in pcts) + " FROM norms WHERE na > 0"
+    ).fetchone()
+    published = sorted(zip(pcts, [float(q) for q in qs]))
+
+    def ladder_lookup(rank):
+        """rank from the top -> percentile -> smallest published U that still bounds it."""
+        need = 1.0 - float(rank) / n_pu
+        for p, u in published:
+            if p >= need:
+                return u
+        return d_s  # above the top published rung
+
+    # candidate bounds: our exponential rungs + her published rungs
+    cands = sorted({d_s / float(args.f) ** r for r in range(16)} | {u for _, u in published})
+    print()
+    print(f"bound selectors, {n_pu:,} PUs, eps={args.epsilon} "
+          f"(eps_select={eps_sel:g}), s={args.s}, f={args.f}")
+    print(f"APPROX_BOUNDS threshold = ln(B/2P)/eps_select with B=40 bins, P=1e-6")
+    print()
+    hdr = (f"{'filter':<22}{'oracle':>11}{'approx_b':>11}{'dp-hist':>11}"
+           f"{'dandan R1':>11}{'dandan Rs':>11}")
+    for i, (label, _) in enumerate(ladder):
+        tcol = f"t{i}"
+        con.execute(
+            f"""
+            CREATE OR REPLACE TABLE pt AS
+            WITH nt AS (SELECT pu, sum(least({tcol}, B)) AS nt FROM contrib JOIN bg USING (g)
+                        WHERE {tcol} > 0 AND g IN (SELECT g FROM gstar) GROUP BY pu)
+            SELECT c.pu, c.g, c.{tcol} AS t, least(c.{tcol}, bg.B) AS c, nt.nt
+            FROM contrib c JOIN bg USING (g) JOIN nt ON nt.pu = c.pu
+            WHERE c.{tcol} > 0 AND c.g IN (SELECT g FROM gstar) AND nt.nt > 0
+            """
+        )
+        # release + error for every candidate bound, precomputed once
+        err = {}
+        for X in cands:
+            rows = con.execute(
+                f"SELECT sum(t), sum(c * least(1.0, {X}/nt)) FROM pt GROUP BY g"
+            ).fetchall()
+            if not rows:
+                continue
+            a = np.array(rows, dtype=float)
+            err[X] = score(a[:, 1], a[:, 0], X / eps_val, args.trials, rng)["total"]
+        if not err:
+            print(f"{label:<22}  (no groups released)")
+            continue
+
+        # --- APPROX_BOUNDS: noised log2 histogram of the filtered totals, highest bin
+        #     whose noisy count clears the false-positive threshold.
+        h = con.execute(
+            f"SELECT cast(floor(log2(nt)) AS INTEGER), count(*) FROM "
+            f"(SELECT DISTINCT pu, nt FROM pt) GROUP BY 1"
+        ).fetchall()
+        hb = np.array([r[0] for r in h]);  hc = np.array([float(r[1]) for r in h])
+        thresh = np.log(40.0 / (2.0 * 1e-6)) / eps_sel
+        ab = []
+        for _ in range(200):
+            noisy = hc + rng.laplace(0.0, 1.0 / eps_sel, hc.size)
+            ok = hb[noisy >= thresh]
+            ab.append(min(cands, key=lambda X: abs(X - 2.0 ** (ok.max() + 1))) if ok.size else min(cands))
+        ab_err = float(np.mean([err[X] for X in ab]))
+
+        # --- ours
+        true, releases = rung_releases(con, args, tcol, d_s)
+        hist = norm_histogram(con, args, tcol)
+        dph = bucketed_dp_hist(true, releases, hist, args, d_s, rng)
+
+        # --- Dandan: noisy rank -> percentile -> published bound
+        r1, rs = con.execute(
+            f"""
+            WITH passing AS (SELECT DISTINCT r.rk FROM
+                (SELECT pu, row_number() OVER (ORDER BY na DESC) AS rk FROM norms WHERE na > 0) r
+                JOIN (SELECT DISTINCT pu FROM pt) p ON p.pu = r.pu)
+            SELECT (SELECT min(rk) FROM passing),
+                   (SELECT rk FROM passing ORDER BY rk LIMIT 1 OFFSET {args.s - 1})
+            """
+        ).fetchone()
+        beta = args.epsilon / (2.0 * np.log(2.0 / args.elastic_delta))
+        ss_r1 = max(float(r1) - 1.0, 1.0) * np.exp(-beta)      # smooth sens of R_1 ~ R_1
+        d1 = [err[min(cands, key=lambda X: abs(X - ladder_lookup(
+                 np.clip(r1 + rng.laplace(0.0, ss_r1 / eps_sel), 1, n_pu))))] for _ in range(200)]
+        out_rs = "—"
+        if rs:
+            gap = max(float(rs) / args.s, 1.0)                  # optimistic: local, not smoothed
+            ds_ = [err[min(cands, key=lambda X: abs(X - ladder_lookup(
+                     np.clip(rs + rng.laplace(0.0, gap / eps_sel), 1, n_pu))))] for _ in range(200)]
+            out_rs = f"{np.mean(ds_):.1%}"
+        if i == 0:
+            print(hdr); print("-" * 77)
+        print(f"{label:<22}{min(err.values()):>10.1%}{ab_err:>11.1%}"
+              f"{dph['total']:>11.1%}{np.mean(d1):>11.1%}{out_rs:>11}")
+    print()
+    print("dandan Rs is OPTIMISTIC: scaled by the local gap, not a smoothed sensitivity.")
+    print()
 
 
 if __name__ == "__main__":
