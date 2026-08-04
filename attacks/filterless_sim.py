@@ -80,6 +80,47 @@ MEASURES = {
 
 BASE = "l_shipmode in ('AIR', 'REG AIR')"
 
+# Per-dataset plumbing: where the facts come from, what identifies the PU, and a
+# ladder of increasingly selective FACT filters (predicates on the fact rows, not on
+# the PU entity -- see the entity/fact distinction in docs/dp/bound_derivation.md).
+SO = "so.Posts WHERE OwnerUserId IS NOT NULL"
+DATASETS = {
+    "tpch": {
+        "from": "tpch.lineitem JOIN tpch.orders ON o_orderkey = l_orderkey",
+        "where": "true",
+        "pu": "o_custkey",
+        "groupbys": None,   # use GROUPBYS
+        "measures": None,   # use MEASURES
+        "ladder": None,     # use FILTER_LADDER
+        "row_table": "tpch.lineitem",
+    },
+    "so": {
+        "from": "so.Posts",
+        "where": "OwnerUserId IS NOT NULL",
+        "pu": "OwnerUserId",
+        "groupbys": {
+            "month": "strftime(CreationDate, '%Y-%m')",
+            "year": "cast(year(CreationDate) as varchar)",
+            "posttype": "cast(PostTypeId as varchar)",
+        },
+        "measures": {"count": "1", "views": "coalesce(ViewCount, 0)"},
+        "ladder": [
+            ("no filter", "true"),
+            ("questions only", "PostTypeId = 1"),
+            ("+ score > 0", "PostTypeId = 1 AND Score > 0"),
+            ("+ views > 500", "PostTypeId = 1 AND Score > 0 AND coalesce(ViewCount,0) > 500"),
+            ("+ views > 5000", "PostTypeId = 1 AND Score > 0 AND coalesce(ViewCount,0) > 5000"),
+        ],
+        "row_table": "so.Posts",
+    },
+}
+
+
+def dsconf(args):
+    d = DATASETS[args.dataset]
+    return (d, d["groupbys"] or GROUPBYS, d["measures"] or MEASURES,
+            d["ladder"] or FILTER_LADDER)
+
 # Progressively more selective filters. Bounds are frozen, so a filterless mechanism
 # reuses one set of metadata for all of them; Wilson re-derives per query.
 FILTER_LADDER = [
@@ -116,19 +157,21 @@ def build_contributions(con, args, filters):
     """One pass giving, per (PU, group): the full-domain contribution a, and one
     filtered contribution t_i per filter in `filters`. This is the per-user
     pre-aggregation of §3; both sides come out of the same pipeline."""
-    gexpr = GROUPBYS[args.groupby]
-    mexpr = MEASURES[args.measure]
+    d, gbs, ms, _ = dsconf(args)
+    gexpr = gbs[args.groupby]
+    mexpr = ms[args.measure]
     tcols = ",\n               ".join(
         f"sum(case when {f} then {mexpr} else 0 end) AS t{i}" for i, (_, f) in enumerate(filters)
     )
     con.execute(
         f"""
         CREATE OR REPLACE TABLE contrib AS
-        SELECT o_custkey AS pu,
+        SELECT {d["pu"]} AS pu,
                {gexpr}   AS g,
                sum({mexpr}) AS a,
                {tcols}
-        FROM tpch.lineitem JOIN tpch.orders ON o_orderkey = l_orderkey
+        FROM {d["from"]}
+        WHERE {d["where"]}
         GROUP BY 1, 2
         """
     )
@@ -136,6 +179,20 @@ def build_contributions(con, args, filters):
         "SELECT count(*), count(distinct pu), count(distinct g) FROM contrib"
     ).fetchone()
     log(f"contrib: {n_rows} (pu,group) rows, {n_pu} PUs, {n_groups} groups")
+    if args.pareto:
+        # Heavy-tail the per-PU contribution: scale by (1/u)^(1/alpha), u ~ U(0,1) keyed on
+        # the PU so it is reproducible. Small alpha = heavier tail = thinner top bins.
+        cols = ", ".join([f"a = a * s.f"] + [f"t{i} = t{i} * s.f" for i in range(len(filters))])
+        con.execute(
+            f"""
+            CREATE OR REPLACE TABLE pareto AS
+            SELECT pu, pow(1.0 / ((abs(hash(pu)) % 1000000 + 1) / 1000000.0),
+                           1.0 / {args.pareto}) AS f
+            FROM (SELECT DISTINCT pu FROM contrib)
+            """
+        )
+        con.execute(f"UPDATE contrib SET {cols} FROM pareto s WHERE s.pu = contrib.pu")
+        log(f"pareto: alpha={args.pareto}")
     apply_adversary(con, args, len(filters))
     return n_groups
 
@@ -499,15 +556,18 @@ def score(released, true, scale, trials, rng):
     }
 
 
-def selectivity(con, filt):
+def selectivity(con, args, filt):
+    d, _, _, _ = dsconf(args)
     return con.execute(
-        f"SELECT avg(case when {filt} then 1.0 else 0.0 end) FROM tpch.lineitem"
+        f"SELECT avg(case when {filt} then 1.0 else 0.0 end) FROM {d['row_table']} "
+        f"WHERE {d['where']}"
     ).fetchone()[0]
 
 
 def header(args, delta1, d_s, n_kept, n_groups):
     print()
-    print(f"measure=SUM({MEASURES[args.measure]})  group-by={args.groupby}  eps={args.epsilon}")
+    _, _, ms, _ = dsconf(args)
+    print(f"measure=SUM({ms[args.measure]})  group-by={args.groupby}  eps={args.epsilon}")
     print(f"f={args.f}  s={args.s}  groups in G*={n_kept}/{n_groups}")
     print(f"Delta1 (eq.25, max_u)={delta1:,.0f}   D_s (CROWD norm)={d_s:,.0f}")
 
@@ -549,7 +609,7 @@ def run_sweep(con, args):
     )
     print("-" * 93)
     for i, (label, filt) in enumerate(FILTER_LADDER):
-        sel = selectivity(con, filt)
+        sel = selectivity(con, args, filt)
         res = evaluate_filter(con, args, f"t{i}", delta1, d_s, rng)
         if res is None:
             print(f"{label:<22}{sel:>6.2%}{'0':>5}{'(no groups released)':>45}")
@@ -1345,8 +1405,10 @@ def main():
     )
     p.add_argument("--db", default="tpch_sass_sf10.db")
     p.add_argument("--sf", type=float, default=10)
-    p.add_argument("--groupby", default="month", choices=sorted(GROUPBYS))
-    p.add_argument("--measure", default="price", choices=sorted(MEASURES))
+    p.add_argument("--groupby", default="month", choices=sorted(
+        set(GROUPBYS) | {k for d in DATASETS.values() if d["groupbys"] for k in d["groupbys"]}))
+    p.add_argument("--measure", default="price", choices=sorted(
+        set(MEASURES) | {k for d in DATASETS.values() if d["measures"] for k in d["measures"]}))
     p.add_argument("--filter", default=BASE)
     p.add_argument("--epsilon", type=float, default=1.0)
     p.add_argument("-f", "--f", type=float, default=2.0, help="exponential bin factor")
@@ -1372,6 +1434,8 @@ def main():
     p.add_argument("--elastic", action="store_true", help="CROWD ladder vs smoothing for dp_elastic mf")
     p.add_argument("--rank", action="store_true", help="Dandan's rank-based bound selection")
     p.add_argument("--bounds", action="store_true", help="APPROX_BOUNDS vs Dandan vs ours")
+    p.add_argument("--pareto", type=float, default=0.0, help="heavy-tail the contributions, Pareto alpha")
+    p.add_argument("--dataset", default="tpch", choices=sorted(DATASETS))
     p.add_argument("--entity-filters", action="store_true", help="filter on the PU entity, not fact rows")
     p.add_argument("--elastic-delta", type=float, default=1e-6)
     p.add_argument("--partition-eps", type=float, default=0.1)
@@ -1399,6 +1463,8 @@ def main():
     )
     args = p.parse_args()
     con = open_db(args.db, args.sf)
+    if args.dataset == "so":
+        con.execute("DETACH tpch"); con.execute(f"ATTACH '{args.db}' AS so (READ_ONLY)")
     if args.bounds:
         args.elastic_delta = 1e-6
         run_bounds(con, args)
@@ -1438,7 +1504,8 @@ def run_bounds(con, args):
     rng = np.random.default_rng(args.seed)
     eps_sel = args.eps_select_frac * args.epsilon
     eps_val = args.epsilon - eps_sel
-    ladder = FILTER_LADDER[:5]
+    _, _, _, full_ladder = dsconf(args)
+    ladder = full_ladder[:5]
     build_contributions(con, args, ladder)
     _, d_s, n_kept = build_metadata(con, args)
     n_pu = con.execute("SELECT count(*) FROM norms WHERE na > 0").fetchone()[0]
@@ -1463,7 +1530,8 @@ def run_bounds(con, args):
     print()
     print(f"bound selectors, {n_pu:,} PUs, eps={args.epsilon} "
           f"(eps_select={eps_sel:g}), s={args.s}, f={args.f}")
-    print(f"APPROX_BOUNDS threshold = ln(B/2P)/eps_select with B=40 bins, P=1e-6")
+    print("APPROX_BOUNDS threshold = LaplaceQuantile(P^(1/2B)), P=1-1e-9, with the "
+          "relaxation loop (approx-bounds.h)")
     print()
     hdr = (f"{'filter':<22}{'oracle':>11}{'approx_b':>11}{'dp-hist':>11}"
            f"{'dandan R1':>11}{'dandan Rs':>11}")
@@ -1500,11 +1568,23 @@ def run_bounds(con, args):
             f"(SELECT DISTINCT pu, nt FROM pt) GROUP BY 1"
         ).fetchall()
         hb = np.array([r[0] for r in h]);  hc = np.array([float(r[1]) for r in h])
-        thresh = np.log(40.0 / (2.0 * 1e-6)) / eps_sel
+        # Real google/differential-privacy rule (cc/algorithms/approx-bounds.h):
+        #   threshold = LaplaceQuantile(P_success ** (1 / (2 * num_bins)))
+        # with P_success = 1 - 1e-9 by default, base 2, and a relaxation loop that
+        # multiplies the failure probability by 10 (max 30 tries) while
+        # P_success >= 1 - 1e-6.
+        n_bins = float(max(hb.max() - hb.min() + 1, 2))
+        def ab_threshold(fail):
+            p = (1.0 - fail) ** (1.0 / (2.0 * n_bins))
+            return -np.log(2.0 * (1.0 - p)) / eps_sel
         ab = []
         for _ in range(200):
             noisy = hc + rng.laplace(0.0, 1.0 / eps_sel, hc.size)
-            ok = hb[noisy >= thresh]
+            ok = np.array([], dtype=int)
+            fail = 1e-9
+            while fail <= 1e-6 and ok.size == 0:      # the relaxation loop
+                ok = hb[noisy >= ab_threshold(fail)]
+                fail *= 10.0
             ab.append(min(cands, key=lambda X: abs(X - 2.0 ** (ok.max() + 1))) if ok.size else min(cands))
         ab_err = float(np.mean([err[X] for X in ab]))
 
