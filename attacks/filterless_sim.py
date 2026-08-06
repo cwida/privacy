@@ -1438,6 +1438,7 @@ def main():
     p.add_argument("--dataset", default="tpch", choices=sorted(DATASETS))
     p.add_argument("--sass", action="store_true", help="SASS smooth-median vs Laplace")
     p.add_argument("--auto-bounds", action="store_true", help="worked example of the three approaches")
+    p.add_argument("--demo", action="store_true", help="step-by-step walkthrough on a toy dataset")
     p.add_argument("--sass-m", type=float, nargs="+", default=[64, 256, 1024, 4096, 16384])
     p.add_argument("--entity-filters", action="store_true", help="filter on the PU entity, not fact rows")
     p.add_argument("--elastic-delta", type=float, default=1e-6)
@@ -1465,6 +1466,8 @@ def main():
         "--attack-thresholds", type=float, nargs="+", default=[-1000, 0, 5000, 9000, 9800, 9990, 9998]
     )
     args = p.parse_args()
+    if args.demo:
+        run_demo(args); return
     con = open_db(args.db, args.sf)
     if args.dataset == "so":
         con.execute("DETACH tpch"); con.execute(f"ATTACH '{args.db}' AS so (READ_ONLY)")
@@ -1891,6 +1894,159 @@ def run_auto_bounds(con, args):
             arr = np.array(rows, dtype=float)
             e = score(arr[:, 1], arr[:, 0], B / eps_agg, 200, rng)
             print(f"    {name:<44}{B:>14,.0f}{B / u_true:>9.2f}x{e['total']:>9.1%}")
+    print()
+
+
+def run_demo(args):
+    """Small worked example: build a toy sales table, then walk all three automatic-bound
+    approaches through one query, printing every intermediate number."""
+    rng = np.random.default_rng(args.seed)
+    con = duckdb.connect()
+    eps_b, eps_agg = 1.0, 1.0
+
+    # ---- 1. the dataset ----------------------------------------------------
+    # 1000 customers in three tiers. Whales spend a lot but almost entirely in-store,
+    # so a 'web' filter leaves a much smaller maximum than the unfiltered one -- the
+    # situation that separates the three approaches.
+    rows = []
+    for c in range(1, 1001):
+        if c <= 900:      tier, n, lo, hi, web = "regular", 6, 50, 150, 0.5
+        elif c <= 990:    tier, n, lo, hi, web = "large",   8, 200, 350, 0.5
+        else:             tier, n, lo, hi, web = "whale",  20, 2000, 3000, 0.05
+        for _ in range(n):
+            rows.append((c, tier, int(rng.integers(1, 13)), float(rng.integers(lo, hi)),
+                         "web" if rng.random() < web else "store"))
+    con.execute("CREATE TABLE sales(custkey INT, tier TEXT, month INT, amount DOUBLE, channel TEXT)")
+    con.executemany("INSERT INTO sales VALUES (?,?,?,?,?)", rows)
+
+    print("\n" + "=" * 74)
+    print("DATASET   sales(custkey, tier, month, amount, channel), PU = customer")
+    print("=" * 74)
+    print(f"  {'tier':<10}{'customers':>11}{'rows':>8}{'total spend':>14}{'web spend':>13}")
+    for r in con.execute("""SELECT tier, count(DISTINCT custkey), count(*), sum(amount),
+                                   sum(amount) FILTER (channel='web')
+                            FROM sales GROUP BY tier ORDER BY sum(amount)""").fetchall():
+        print(f"  {r[0]:<10}{r[1]:>11,}{r[2]:>8,}{r[3]:>14,.0f}{r[4]:>13,.0f}")
+    print("\nQUERY:  SELECT month, SUM(amount) FROM sales WHERE channel='web' GROUP BY month")
+    print(f"        eps = 2.0  ->  {eps_b} for choosing the bound, {eps_agg} for the noisy sum")
+    print("        count sensitivity 2 (one PU can move between two bins)")
+
+    # ---- 2. per-customer contributions ------------------------------------
+    con.execute("""CREATE TABLE contrib AS
+        SELECT custkey, any_value(tier) AS tier, sum(amount) AS a,
+               coalesce(sum(amount) FILTER (channel='web'), 0) AS t
+        FROM sales GROUP BY custkey""")
+    a = np.array([r[0] for r in con.execute("SELECT a FROM contrib").fetchall()])
+    t = np.array([r[0] for r in con.execute("SELECT t FROM contrib WHERE t > 0").fetchall()])
+    u_nf, u_id = a.max(), t.max()
+    print("\n" + "-" * 74)
+    print("STEP 0  per-customer contributions (this is what all three methods bound)")
+    print("-" * 74)
+    print(f"  {'custkey':>9}{'tier':>10}{'filterless total':>19}{'web total':>12}")
+    for r in con.execute("SELECT custkey, tier, a, t FROM contrib ORDER BY a DESC LIMIT 4").fetchall():
+        print(f"  {r[0]:>9}{r[1]:>10}{r[2]:>19,.0f}{r[3]:>12,.0f}")
+    for r in con.execute("SELECT custkey, tier, a, t FROM contrib ORDER BY a LIMIT 2").fetchall():
+        print(f"  {r[0]:>9}{r[1]:>10}{r[2]:>19,.0f}{r[3]:>12,.0f}")
+    print(f"  U_nf = max filterless contribution = {u_nf:,.0f}   (a whale)")
+    print(f"  U    = max web contribution        = {u_id:,.0f}   <- the bound we WANT")
+    print(f"  the filter cuts the maximum by {u_nf/u_id:.0f}x, because whales barely use web")
+
+    out = {}
+    # ---- 3. Approach 1 -----------------------------------------------------
+    bins = np.floor(np.log2(t)).astype(int)
+    ub, cb = np.unique(bins, return_counts=True)
+    noisy = cb + rng.laplace(0.0, 2.0 / eps_b, cb.size)
+    thr = _lap_quantile_threshold(64, eps_b)
+    print("\n" + "-" * 74)
+    print(f"APPROACH 1  ApproxBounds: log2 histogram of the WEB totals, 64 bins")
+    print(f"            threshold = LaplaceQuantile(P^(1/128)) = {thr:.1f}")
+    print("-" * 74)
+    print(f"  {'bin':>4}{'range':>20}{'customers':>11}{'+Lap(2)':>10}{'>= thr?':>9}")
+    for bb, cc, nn in zip(ub, cb, noisy):
+        print(f"  {bb:>4}{f'[{2**bb:,}, {2**(bb+1):,})':>20}{cc:>11,}{nn:>10.1f}"
+              f"{('YES' if nn >= thr else 'no'):>9}")
+    ok = ub[noisy >= thr]
+    out["1  ApproxBounds"] = 2.0 ** (ok.max() + 1)
+    print(f"  -> rightmost bin clearing the threshold = {ok.max()}, bound = 2^{ok.max()+1} "
+          f"= {out['1  ApproxBounds']:,.0f}")
+
+    # ---- 4. Approach 1b ----------------------------------------------------
+    print("\n" + "-" * 74)
+    print("APPROACH 1b  tail-fraction variant: keep the bin where the top alpha of")
+    print("             customers starts, instead of thresholding on the count")
+    print("-" * 74)
+    tail = np.cumsum(noisy[::-1])[::-1] / noisy.sum()
+    print(f"  {'bin':>4}{'upper edge':>14}{'share at or above':>20}")
+    for bb, tf in zip(ub, tail):
+        print(f"  {bb:>4}{2**(bb+1):>14,}{tf:>19.1%}")
+    for alpha in (0.10, 0.20, 0.30):
+        idx = np.where(tail >= alpha)[0]
+        k = ub[idx[-1]]
+        out[f"1b tail alpha={alpha:.0%}"] = 2.0 ** (k + 1)
+        print(f"  alpha={alpha:.0%} -> last bin with share >= alpha is {k}, "
+              f"bound = {2.0**(k+1):,.0f}")
+
+    # ---- 5. Approach 2 -----------------------------------------------------
+    print("\n" + "-" * 74)
+    print("APPROACH 2  frozen filterless maximum")
+    print("-" * 74)
+    print(f"  release the FILTERED max U = {u_id:,.0f}, using the FILTERLESS max as its")
+    print(f"  sensitivity:  U* = U + Lap(U_nf / eps_b) = {u_id:,.0f} + Lap({u_nf/eps_b:,.0f})")
+    d = np.clip(u_id + rng.laplace(0.0, u_nf / eps_b, 9), 0, None)
+    print(f"  nine draws: " + ", ".join(f"{x:,.0f}" for x in d))
+    out["2  frozen filterless max"] = float(np.median(np.clip(
+        u_id + rng.laplace(0.0, u_nf / eps_b, 2001), 0, None)))
+    print(f"  median over 2001 draws = {out['2  frozen filterless max']:,.0f}    "
+          f"(noise is {u_nf/eps_b/u_id:.0f}x the quantity being released)")
+    nb = int(np.ceil(np.log2(u_nf))) + 1
+    thr2 = _lap_quantile_threshold(nb, eps_b)
+    ok2 = ub[noisy >= thr2]
+    out["2b ApproxBounds, fewer bins"] = 2.0 ** (ok2.max() + 1)
+    print(f"  2b: use U_nf to cut 64 bins -> {nb}. threshold {thr:.1f} -> {thr2:.1f}, "
+          f"bound = {out['2b ApproxBounds, fewer bins']:,.0f}")
+
+    # ---- 6. Approach 3 -----------------------------------------------------
+    edges = np.array([float(np.quantile(a, q)) for q in
+                      [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0]])
+    idx = np.clip(np.searchsorted(-edges, -t, side="left") - 1, 0, 9)
+    c3 = np.array([(idx == i).sum() for i in range(10)], dtype=float)
+    u3 = c3 + rng.laplace(0.0, 2.0 / eps_b, 10)
+    cum = np.cumsum(u3) / u3.sum()
+    print("\n" + "-" * 74)
+    print("APPROACH 3  frozen filterless metadata: 10 bins at the DECILES of the")
+    print("            filterless distribution, then bin the web totals into them")
+    print("-" * 74)
+    print(f"  {'bin':>4}{'U_k (decile)':>15}{'covers':>22}{'web custs':>11}{'+Lap(2)':>10}{'cum':>8}")
+    for i in range(10):
+        rangetxt = f"({edges[i+1]:,.0f}, {edges[i]:,.0f}]" if i < 9 else f"(0, {edges[9]:,.0f}]"
+        print(f"  {i+1:>4}{edges[i]:>15,.0f}{rangetxt:>22}{int(c3[i]):>11,}{u3[i]:>10.1f}{cum[i]:>8.1%}")
+    for alpha in (0.10, 0.20, 0.30):
+        k = int(np.argmax(cum >= alpha))
+        out[f"3  metadata alpha={alpha:.0%}"] = float(edges[k])
+        print(f"  alpha={alpha:.0%} -> leftmost k with cum >= alpha is {k+1}, "
+              f"bound U_{k+1} = {edges[k]:,.0f}")
+
+    # ---- 7. what each bound does to the answer -----------------------------
+    print("\n" + "=" * 74)
+    print("RESULT   apply each bound to the query, one row per month")
+    print("=" * 74)
+    truth = {m: float(v) for m, v in con.execute(
+        "SELECT month, sum(amount) FROM sales WHERE channel='web' GROUP BY month").fetchall()}
+    print(f"  {'approach':<30}{'bound':>12}{'vs ideal':>10}{'clip loss':>11}{'noise':>10}{'error':>9}")
+    print("  " + "-" * 72)
+    for name, B in sorted(out.items()):
+        rel, clip = [], []
+        for m, tv in truth.items():
+            cs = float(con.execute(
+                f"""SELECT sum(least(x.w, {B} * x.w / x.tot)) FROM
+                    (SELECT s.custkey, sum(s.amount) AS w, any_value(c.t) AS tot
+                     FROM sales s JOIN contrib c ON c.custkey = s.custkey
+                     WHERE s.channel='web' AND s.month={m} AND c.t > 0
+                     GROUP BY s.custkey) x""").fetchone()[0] or 0.0)
+            clip.append(1 - cs / tv)
+            rel += [abs(cs + rng.laplace(0, B / eps_agg) - tv) / tv for _ in range(400)]
+        print(f"  {name:<30}{B:>12,.0f}{B/u_id:>9.2f}x{np.mean(clip):>10.1%}"
+              f"{B/eps_agg:>10,.0f}{np.median(rel):>8.1%}")
     print()
 
 
