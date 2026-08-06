@@ -116,6 +116,14 @@ DATASETS = {
 }
 
 
+CELLS_TPCH = [("price", "month", 0, False), ("price", "quarter", 0, False),
+              ("count", "month", 0, False), ("quantity", "month", 0, False),
+              ("price", "month", 1.5, False), ("price", "month", 1.0, False),
+              ("price", "month", 0, True)]
+CELLS_SO = [("count", "month", 0, False), ("count", "year", 0, False),
+            ("views", "month", 0, False), ("views", "year", 0, False)]
+
+
 def dsconf(args):
     d = DATASETS[args.dataset]
     return (d, d["groupbys"] or GROUPBYS, d["measures"] or MEASURES,
@@ -1439,6 +1447,7 @@ def main():
     p.add_argument("--sass", action="store_true", help="SASS smooth-median vs Laplace")
     p.add_argument("--auto-bounds", action="store_true", help="worked example of the three approaches")
     p.add_argument("--demo", action="store_true", help="step-by-step walkthrough on a toy dataset")
+    p.add_argument("--matrix", action="store_true", help="all bound rules across many cells")
     p.add_argument("--sass-m", type=float, nargs="+", default=[64, 256, 1024, 4096, 16384])
     p.add_argument("--entity-filters", action="store_true", help="filter on the PU entity, not fact rows")
     p.add_argument("--elastic-delta", type=float, default=1e-6)
@@ -1471,7 +1480,9 @@ def main():
     con = open_db(args.db, args.sf)
     if args.dataset == "so":
         con.execute("DETACH tpch"); con.execute(f"ATTACH '{args.db}' AS so (READ_ONLY)")
-    if args.auto_bounds:
+    if args.matrix:
+        run_matrix(con, args)
+    elif args.auto_bounds:
         run_auto_bounds(con, args)
     elif args.sass:
         args.elastic_delta = 1e-6
@@ -1894,6 +1905,126 @@ def run_auto_bounds(con, args):
             arr = np.array(rows, dtype=float)
             e = score(arr[:, 1], arr[:, 0], B / eps_agg, 200, rng)
             print(f"    {name:<44}{B:>14,.0f}{B / u_true:>9.2f}x{e['total']:>9.1%}")
+    print()
+
+
+def candidate_bounds(a, t, eps_b, rng):
+    """Every automatic-bound rule, given filterless totals `a` and filtered totals `t`.
+    Includes two variants that are NOT in the draft, marked (fix), testing the two
+    diagnoses from the toy walkthrough: alpha on mass rather than counts, and rungs
+    spaced by tail probability rather than by decile."""
+    out = {}
+    t = t[t > 0]
+    if t.size == 0:
+        return out
+    bins = np.floor(np.log2(t)).astype(int)
+    ub, cb = np.unique(bins, return_counts=True)
+    noisy = np.maximum(cb + rng.laplace(0.0, 2.0 / eps_b, cb.size), 0.0)
+    thr = _lap_quantile_threshold(64, eps_b)
+    ok = ub[noisy >= thr]
+    out["1 approx_bounds"] = 2.0 ** (ok.max() + 1) if ok.size else 0.0
+
+    tot = max(noisy.sum(), 1e-9)
+    tail_c = np.cumsum(noisy[::-1])[::-1] / tot
+    mass = noisy * (2.0 ** (ub + 0.5))
+    tail_m = np.cumsum(mass[::-1])[::-1] / max(mass.sum(), 1e-9)
+    for alpha in (0.10, 0.30):
+        i = np.where(tail_c >= alpha)[0]
+        out[f"1b tail-count {alpha:.0%}"] = 2.0 ** (ub[i[-1]] + 1) if i.size else 0.0
+        j = np.where(tail_m >= alpha)[0]
+        out[f"1b tail-mass {alpha:.0%} (fix)"] = 2.0 ** (ub[j[-1]] + 1) if j.size else 0.0
+
+    out["2 frozen max"] = float(np.median(np.clip(
+        t.max() + rng.laplace(0.0, a.max() / eps_b, 501), 0.0, None)))
+    nb = max(int(np.ceil(np.log2(max(a.max(), 2.0)))) + 1, 2)
+    ok2 = ub[noisy >= _lap_quantile_threshold(nb, eps_b)]
+    out["2b approx, fewer bins"] = 2.0 ** (ok2.max() + 1) if ok2.size else 0.0
+
+    for tag, qs in (("3 deciles", [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0]),
+                    ("3 tail-prob (fix)",
+                     [1.0, 0.9999, 0.999, 0.99, 0.95, 0.9, 0.75, 0.5, 0.25, 0.0])):
+        edges = np.array([float(np.quantile(a, q)) for q in qs])
+        idx = np.clip(np.searchsorted(-edges, -t, side="left") - 1, 0, len(edges) - 1)
+        c3 = np.array([(idx == i).sum() for i in range(len(edges))], dtype=float)
+        u3 = np.maximum(c3 + rng.laplace(0.0, 2.0 / eps_b, len(edges)), 0.0)
+        cum = np.cumsum(u3) / max(u3.sum(), 1e-9)
+        for alpha in (0.10, 0.30):
+            out[f"{tag} {alpha:.0%}"] = float(edges[int(np.argmax(cum >= alpha))])
+    return out
+
+
+def run_matrix(con, args):
+    """All bound rules across many (dataset, measure, grouping, filter) cells."""
+    rng = np.random.default_rng(args.seed)
+    eps_b, eps_agg = args.epsilon / 2.0, args.epsilon / 2.0
+    cells = (CELLS_SO if args.dataset == "so" else CELLS_TPCH)
+    names, rows = None, []
+    for measure, groupby, pareto, entity in cells:
+        args.measure, args.groupby, args.pareto, args.entity_filters = measure, groupby, pareto, entity
+        _, _, _, fl = dsconf(args)
+        ladder = ([(f"acctbal>={x:g}", f"o_custkey IN (SELECT c_custkey FROM tpch.customer "
+                                      f"WHERE c_acctbal >= {x})") for x in [0, 8000, 9500]]
+                  if entity else fl[:4])
+        build_contributions(con, args, ladder)
+        _, d_s, _ = build_metadata(con, args)
+        for fi, (flab, _) in enumerate(ladder):
+            tcol = f"t{fi}"
+            con.execute(
+                f"""CREATE OR REPLACE TABLE pt AS
+                    SELECT pu, sum(a) AS a, sum({tcol}) AS t FROM contrib
+                    WHERE g IN (SELECT g FROM gstar) GROUP BY pu""")
+            a = np.array([float(r[0]) for r in con.execute("SELECT a FROM pt WHERE a>0").fetchall()])
+            tt = np.array([float(r[0]) for r in con.execute("SELECT t FROM pt WHERE t>0").fetchall()])
+            if tt.size < 50:
+                continue
+            cands = candidate_bounds(a, tt, eps_b, rng)
+            grid = sorted(set(list(cands.values()) + [tt.max() / 2.0 ** k for k in range(14)]))
+            errs = {}
+            for B in grid:
+                if B <= 0:
+                    continue
+                r = con.execute(
+                    f"""SELECT sum(c.{tcol}), sum(least(c.{tcol}, {B} * c.{tcol} / p.t))
+                        FROM contrib c JOIN pt p ON p.pu = c.pu
+                        WHERE c.{tcol} > 0 AND c.g IN (SELECT g FROM gstar) AND p.t > 0
+                        GROUP BY c.g""").fetchall()
+                if r:
+                    arr = np.array(r, dtype=float)
+                    errs[B] = score(arr[:, 1], arr[:, 0], B / eps_agg, 80, rng)["total"]
+            if not errs:
+                continue
+            row = {"cell": f"{measure}/{groupby}{'/pareto' if pareto else ''}"
+                           f"{'/entity' if entity else ''} | {flab}"[:40],
+                   "oracle": min(errs.values())}
+            for n, B in cands.items():
+                row[n] = errs.get(B, float("nan")) if B > 0 else float("nan")
+            names = names or ["oracle"] + list(cands.keys())
+            rows.append(row)
+    print()
+    short = {n: (n[:12]) for n in names}
+    hdr = f"{'cell':<42}" + "".join(f"{short[n]:>13}" for n in names)
+    print(hdr); print("-" * len(hdr))
+    for r in rows:
+        print(f"{r['cell']:<42}" + "".join(
+            (f"{r.get(n, float('nan')):>12.1%}" if r.get(n) == r.get(n) else f"{'-':>12}") + " "
+            for n in names))
+    print()
+    print(f"{'approach':<26}{'wins':>7}{'mean rank':>11}{'median err':>12}{'vs oracle':>11}")
+    print("-" * 67)
+    stats = []
+    for n in names[1:]:
+        v = [r.get(n) for r in rows if r.get(n) == r.get(n)]
+        wins = sum(1 for r in rows if r.get(n) == r.get(n) and
+                   r[n] <= min(r.get(m, 9e9) for m in names[1:] if r.get(m) == r.get(m)) + 1e-12)
+        ranks = []
+        for r in rows:
+            vals = sorted((r[m] for m in names[1:] if r.get(m) == r.get(m)))
+            if r.get(n) == r.get(n):
+                ranks.append(vals.index(r[n]) + 1)
+        ratio = np.median([r[n] / max(r["oracle"], 1e-9) for r in rows if r.get(n) == r.get(n)])
+        stats.append((np.mean(ranks) if ranks else 99, n, wins, np.median(v) if v else 9e9, ratio))
+    for mr, n, wins, med, ratio in sorted(stats):
+        print(f"{n:<26}{wins:>7}{mr:>11.1f}{med:>11.1%}{ratio:>10.1f}x")
     print()
 
 
