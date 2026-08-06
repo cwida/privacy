@@ -1437,6 +1437,7 @@ def main():
     p.add_argument("--pareto", type=float, default=0.0, help="heavy-tail the contributions, Pareto alpha")
     p.add_argument("--dataset", default="tpch", choices=sorted(DATASETS))
     p.add_argument("--sass", action="store_true", help="SASS smooth-median vs Laplace")
+    p.add_argument("--auto-bounds", action="store_true", help="worked example of the three approaches")
     p.add_argument("--sass-m", type=float, nargs="+", default=[64, 256, 1024, 4096, 16384])
     p.add_argument("--entity-filters", action="store_true", help="filter on the PU entity, not fact rows")
     p.add_argument("--elastic-delta", type=float, default=1e-6)
@@ -1467,7 +1468,9 @@ def main():
     con = open_db(args.db, args.sf)
     if args.dataset == "so":
         con.execute("DETACH tpch"); con.execute(f"ATTACH '{args.db}' AS so (READ_ONLY)")
-    if args.sass:
+    if args.auto_bounds:
+        run_auto_bounds(con, args)
+    elif args.sass:
         args.elastic_delta = 1e-6
         run_sass(con, args)
     elif args.bounds:
@@ -1752,6 +1755,142 @@ def run_sass(con, args):
     print("Lambda enters the smooth sensitivity as the endpoint x_{m+1}, so the endpoint term")
     print("is ~exp(-beta*m/2)*Lambda. Until that falls below the spread of the lane estimates,")
     print("the noise is set by Lambda and the bound-derivation question is moot.")
+    print()
+
+
+def _lap_quantile_threshold(n_bins, eps, p_success=1.0 - 1e-9):
+    """approx-bounds.h: threshold = LaplaceQuantile(P^(1/(2*num_bins)))."""
+    p = p_success ** (1.0 / (2.0 * n_bins))
+    return -np.log(2.0 * (1.0 - p)) / eps
+
+
+def run_auto_bounds(con, args):
+    """Worked numeric example of the three automatic-bound approaches in Dandan's
+    'DP automatic bounds' draft, on real TPC-H data.
+
+    Budget follows the Google DP default: half of eps to bound selection, half to the
+    aggregate. Count sensitivity is 2 throughout, per her note -- changing one PU can move
+    it between two bins.
+    """
+    rng = np.random.default_rng(args.seed)
+    eps_b = args.epsilon / 2.0
+    eps_agg = args.epsilon - eps_b
+    _, _, _, full_ladder = dsconf(args)
+    ladder = [full_ladder[1], full_ladder[3]]
+    build_contributions(con, args, ladder)
+    _, d_s, n_kept = build_metadata(con, args)
+
+    for fi, (label, _) in enumerate(ladder):
+        tcol = f"t{fi}"
+        con.execute(
+            f"""
+            CREATE OR REPLACE TABLE pt AS
+            WITH nt AS (SELECT pu, sum({tcol}) AS t FROM contrib
+                        WHERE g IN (SELECT g FROM gstar) GROUP BY pu)
+            SELECT n.pu, n.t, m.a
+            FROM nt n JOIN (SELECT pu, sum(a) AS a FROM contrib
+                            WHERE g IN (SELECT g FROM gstar) GROUP BY pu) m ON m.pu = n.pu
+            """
+        )
+        a = np.array([float(r[0]) for r in con.execute("SELECT a FROM pt WHERE a > 0").fetchall()])
+        t = np.array([float(r[0]) for r in con.execute("SELECT t FROM pt WHERE t > 0").fetchall()])
+        u_nf, u_true = a.max(), t.max()
+        print()
+        print("=" * 78)
+        print(f"filter: {label}")
+        print(f"  PUs with any contribution (filterless)   {a.size:,}")
+        print(f"  PUs passing the filter                   {t.size:,}")
+        print(f"  U_nf  = max filterless PU contribution    {u_nf:,.0f}")
+        print(f"  U     = max FILTERED PU contribution      {u_true:,.0f}   <- the ideal bound")
+        print(f"  eps = {args.epsilon} split {eps_b} bounds / {eps_agg} aggregate, count sensitivity 2")
+        print("=" * 78)
+
+        results = {}
+
+        # ---------- Approach 1: ApproxBounds as shipped -------------------------
+        bins = np.floor(np.log2(t)).astype(int)
+        ub, cb = np.unique(bins, return_counts=True)
+        noisy = cb + rng.laplace(0.0, 2.0 / eps_b, cb.size)
+        thr64 = _lap_quantile_threshold(64, eps_b)     # Google: (0, 2^64] -> 64 bins
+        ok = ub[noisy >= thr64]
+        b1 = 2.0 ** (ok.max() + 1) if ok.size else 0.0
+        results["1  ApproxBounds (threshold, 64 bins)"] = b1
+        print()
+        print(f"[1] ApproxBounds as shipped: 64 log2 bins over (0, 2^64], threshold = {thr64:,.1f}")
+        print(f"    {'bin':>5}{'range':>26}{'PUs':>10}{'noisy':>12}{'clears?':>9}")
+        for bb, cc, nn in list(zip(ub, cb, noisy))[-7:]:
+            print(f"    {bb:>5}{f'[2^{bb}, 2^{bb+1})':>26}{cc:>10,}{nn:>12,.0f}"
+                  f"{('yes' if nn >= thr64 else 'no'):>9}")
+        print(f"    -> selected bin {ok.max() if ok.size else None}, bound = {b1:,.0f}")
+
+        # ---------- Approach 1b: tail-mass variant ------------------------------
+        tot = noisy.sum()
+        print()
+        print("[1b] tail-fraction variant: smallest k with sum_{i>=k} c_i / sum c_i >= alpha")
+        for alpha in (0.10, 0.20, 0.30):
+            tail = np.cumsum(noisy[::-1])[::-1] / tot
+            idx = np.where(tail >= alpha)[0]
+            k = ub[idx[-1]] if idx.size else ub[0]
+            b = 2.0 ** (k + 1)
+            results[f"1b tail-fraction alpha={alpha:.0%}"] = b
+            print(f"     alpha={alpha:.0%} -> bin {k}, bound = {b:,.0f}")
+
+        # ---------- Approach 2: frozen filterless maximum -----------------------
+        draws = np.clip(u_true + rng.laplace(0.0, u_nf / eps_b, 2001), 0.0, None)
+        b2 = float(np.median(draws))
+        results["2  frozen filterless max U + Lap(U_nf/eps)"] = b2
+        print()
+        print(f"[2] U* = U + Lap(U_nf/eps_b) = {u_true:,.0f} + Lap({u_nf / eps_b:,.0f})")
+        print(f"    median draw = {b2:,.0f}   (noise scale is {u_nf / eps_b / max(u_true,1):.1f}x the "
+              f"quantity being released)")
+
+        n_small = int(np.ceil(np.log2(u_nf))) + 1
+        thr_s = _lap_quantile_threshold(n_small, eps_b)
+        ok2 = ub[noisy >= thr_s]
+        b2b = 2.0 ** (ok2.max() + 1) if ok2.size else 0.0
+        results[f"2b ApproxBounds restricted to {n_small} bins"] = b2b
+        print(f"[2b] using U_nf to cut 64 bins -> m = ceil(log2 U_nf)+1 = {n_small}: "
+              f"threshold {thr64:,.1f} -> {thr_s:,.1f}, bound = {b2b:,.0f}")
+
+        # ---------- Approach 3: frozen filterless metadata ----------------------
+        deciles = [float(np.quantile(a, q)) for q in [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0]]
+        edges = np.array(deciles)                       # U_1 .. U_10, descending
+        # bin k (1-based) = (U_{k+1}, U_k];  #edges strictly greater than v gives k
+        idx = np.clip(np.searchsorted(-edges, -t, side="left") - 1, 0, 9)
+        c3 = np.array([(idx == i).sum() for i in range(10)], dtype=float)
+        u3 = c3 + rng.laplace(0.0, 2.0 / eps_b, 10)
+        print()
+        print("[3] frozen filterless metadata: 10 bins at the deciles of the FILTERLESS")
+        print("    distribution, filtered PUs assigned to them")
+        print(f"    {'bin':>5}{'U_k':>14}{'PUs':>10}{'noisy':>10}{'cum share':>12}")
+        cum = np.cumsum(u3) / u3.sum()
+        for i in range(10):
+            print(f"    {i+1:>5}{edges[i]:>14,.0f}{int(c3[i]):>10,}{u3[i]:>10,.0f}{cum[i]:>11.1%}")
+        for alpha in (0.10, 0.20, 0.30):
+            k = int(np.argmax(cum >= alpha))
+            b = float(edges[k])
+            results[f"3  frozen metadata alpha={alpha:.0%}"] = b
+            print(f"     alpha={alpha:.0%} -> leftmost k = {k+1}, bound U_{k+1} = {b:,.0f}")
+
+        # ---------- what each bound costs ---------------------------------------
+        print()
+        print(f"    {'approach':<44}{'bound':>14}{'vs ideal':>10}{'rel err':>10}")
+        print("    " + "-" * 78)
+        for name, B in sorted(results.items(), key=lambda kv: kv[0]):
+            if B <= 0:
+                print(f"    {name:<44}{'failed':>14}"); continue
+            rows = con.execute(
+                f"""
+                SELECT sum(c.{tcol}), sum(least(c.{tcol}, {B} * c.{tcol} / n.t))
+                FROM contrib c JOIN (SELECT pu, sum({tcol}) AS t FROM contrib
+                                     WHERE g IN (SELECT g FROM gstar) GROUP BY pu) n ON n.pu = c.pu
+                WHERE c.{tcol} > 0 AND c.g IN (SELECT g FROM gstar) AND n.t > 0
+                GROUP BY c.g
+                """
+            ).fetchall()
+            arr = np.array(rows, dtype=float)
+            e = score(arr[:, 1], arr[:, 0], B / eps_agg, 200, rng)
+            print(f"    {name:<44}{B:>14,.0f}{B / u_true:>9.2f}x{e['total']:>9.1%}")
     print()
 
 
