@@ -1470,6 +1470,9 @@ def main():
     p.add_argument("--auto-bounds", action="store_true", help="worked example of the three approaches")
     p.add_argument("--demo", action="store_true", help="step-by-step walkthrough on a toy dataset")
     p.add_argument("--matrix", action="store_true", help="all bound rules across many cells")
+    p.add_argument("--nscale", type=float, nargs="*", default=None, help="population-size sweep")
+    p.add_argument("--per-bin-budget", action="store_true",
+                   help="Dandan (1): charge eps per bin instead of per histogram")
     p.add_argument("--sass-m", type=float, nargs="+", default=[64, 256, 1024, 4096, 16384])
     p.add_argument("--entity-filters", action="store_true", help="filter on the PU entity, not fact rows")
     p.add_argument("--elastic-delta", type=float, default=1e-6)
@@ -1503,7 +1506,10 @@ def main():
     if args.dataset in ("so", "cb"):
         con.execute("DETACH tpch")
         con.execute(f"ATTACH '{args.db}' AS {args.dataset} (READ_ONLY)")
-    if args.matrix:
+    if args.nscale is not None:
+        args.nscale = args.nscale or [10000, 30000, 100000, 300000, 1000000]
+        run_nscale(con, args)
+    elif args.matrix:
         run_matrix(con, args)
     elif args.auto_bounds:
         run_auto_bounds(con, args)
@@ -1931,7 +1937,8 @@ def run_auto_bounds(con, args):
     print()
 
 
-def candidate_bounds(a, t, eps_b, rng, n_groups=1, eps_agg=0.5):
+def candidate_bounds(a, t, eps_b, rng, n_groups=1, eps_agg=0.5, med_group_share=None,
+                     per_bin_budget=False):
     """Every automatic-bound rule, given filterless totals `a` and filtered totals `t`.
     Includes two variants that are NOT in the draft, marked (fix), testing the two
     diagnoses from the toy walkthrough: alpha on mass rather than counts, and rungs
@@ -1942,8 +1949,13 @@ def candidate_bounds(a, t, eps_b, rng, n_groups=1, eps_agg=0.5):
         return out
     bins = np.floor(np.log2(t)).astype(int)
     ub, cb = np.unique(bins, return_counts=True)
-    noisy = np.maximum(cb + rng.laplace(0.0, 2.0 / eps_b, cb.size), 0.0)
-    thr = _lap_quantile_threshold(64, eps_b)
+    # Dandan (1): charge per BIN rather than per histogram. A k-bin rule then gets
+    # eps_b * k/64 and the rest goes to the query. (I believe the histogram actually
+    # costs eps_b regardless of k by parallel composition -- this switch tests what her
+    # accounting would imply if it held.)
+    eps_ab = eps_b if not per_bin_budget else eps_b * min(ub.size, 64) / 64.0
+    noisy = np.maximum(cb + rng.laplace(0.0, 2.0 / eps_ab, cb.size), 0.0)
+    thr = _lap_quantile_threshold(64, eps_ab)
     ok = ub[noisy >= thr]
     out["1 approx_bounds"] = 2.0 ** (ok.max() + 1) if ok.size else 0.0
 
@@ -2000,10 +2012,18 @@ def candidate_bounds(a, t, eps_b, rng, n_groups=1, eps_agg=0.5):
     # --- objective rule: pick the bound minimising estimated clipped mass + noise,
     # from the SAME noisy histogram. No fixed alpha; the target adapts to eps and to how
     # many groups the noise has to cover.
+    # Score the objective on the SAME quantity we measure: median relative error.
+    # Clip loss is a roughly constant FRACTION of every group, but the noise is the same
+    # ABSOLUTE amount in each, so the median group -- not the mean -- sets the tradeoff.
+    # med_group_share comes from the per-group PU counts, which partition selection
+    # already releases, so it costs nothing extra.
     mids_o = 2.0 ** (ub + 0.5)
     cands_o = 2.0 ** (ub + 1)
-    est = [float(np.sum(noisy * np.maximum(mids_o - B, 0.0))) + n_groups * B / eps_agg
-           for B in cands_o]
+    total_mass = max(float(np.sum(noisy * mids_o)), 1e-9)
+    share = med_group_share if med_group_share else 1.0 / max(n_groups, 1)
+    med_group_total = max(total_mass * share, 1e-9)
+    est = [float(np.sum(noisy * np.maximum(mids_o - B, 0.0))) / total_mass
+           + B / (eps_agg * med_group_total) for B in cands_o]
     out["0 objective (clip+noise)"] = float(cands_o[int(np.argmin(est))])
 
     for tag, qs in (("3 deciles", [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0]),
@@ -2092,6 +2112,104 @@ def run_matrix(con, args):
         stats.append((np.mean(ranks) if ranks else 99, n, wins, np.median(v) if v else 9e9, ratio))
     for mr, n, wins, med, ratio in sorted(stats):
         print(f"{n:<26}{wins:>7}{mr:>11.1f}{med:>11.1%}{ratio:>10.1f}x")
+    print()
+
+
+# Nominal bin count each rule needs, for Dandan's per-bin accounting.
+RULE_BINS = {"1 approx_bounds": 64, "1b tail-count 10%": 64, "1b tail-count 30%": 64,
+             "1b tail-mass 10% (fix)": 64, "1b tail-mass 30% (fix)": 64,
+             "0 objective (clip+noise)": 64, "2 frozen max": 1,
+             "3 deciles 10%": 10, "3 deciles 30%": 10,
+             "3 tail-prob (fix) 10%": 10, "3 tail-prob (fix) 30%": 10,
+             "3+refine 10%": 20, "3+refine 30%": 20}
+
+
+def run_nscale(con, args):
+    """Isolate population size: same dataset, same measure/grouping/filter, only the
+    number of PUs varies (hash-subsample of the PU set, so the contribution distribution
+    keeps its shape). Reported as ratio-to-oracle, which controls for groups getting
+    smaller as n shrinks."""
+    rng = np.random.default_rng(args.seed)
+    eps_b, eps_agg = args.epsilon / 2.0, args.epsilon / 2.0
+    _, _, _, fl = dsconf(args)
+    lad = [fl[1]]
+    build_contributions(con, args, lad)
+    build_metadata(con, args)
+    ng = con.execute("SELECT count(*) FROM gstar").fetchone()[0]
+    n_all = con.execute("SELECT count(DISTINCT pu) FROM contrib").fetchone()[0]
+    M = 1000003
+    print()
+    print(f"population scaling: {args.dataset} {args.measure}/{args.groupby}, "
+          f"filter = {lad[0][0]}, {ng} groups, eps={args.epsilon}")
+    print(f"full population = {n_all:,} PUs; subsampled by hash so the shape is preserved")
+    keys = ["1 approx_bounds", "1b tail-count 10%", "1b tail-mass 30% (fix)",
+            "3 deciles 10%", "0 objective (clip+noise)"]
+    print()
+    print(f"{'n (PUs)':>10}{'thr as % of n':>15}{'mass clipped':>14}" +
+          "".join(f"{k.split(' ',1)[1][:11]:>13}" for k in keys))
+    print("-" * (39 + 13 * len(keys)))
+    for n in args.nscale:
+        n = int(n)
+        frac = min(n / n_all, 1.0)
+        cut = int(frac * M)
+        con.execute(
+            f"""CREATE OR REPLACE TABLE pt AS
+                SELECT pu, sum(a) AS a, sum(t0) AS t FROM contrib
+                WHERE g IN (SELECT g FROM gstar) AND abs(hash(pu)) % {M} < {cut}
+                GROUP BY pu""")
+        A_ = np.array([float(r[0]) for r in con.execute("SELECT a FROM pt WHERE a>0").fetchall()])
+        T_ = np.array([float(r[0]) for r in con.execute("SELECT t FROM pt WHERE t>0").fetchall()])
+        if T_.size < 200:
+            continue
+        gsz = np.array([float(r[0]) for r in con.execute(
+            "SELECT count(*) FROM contrib c JOIN pt p ON p.pu=c.pu "
+            "WHERE c.t0>0 AND c.g IN (SELECT g FROM gstar) GROUP BY c.g").fetchall()])
+        mgs = float(np.median(gsz) / gsz.sum()) if gsz.size else None
+        eb = eps_b if not args.per_bin_budget else eps_b
+        cb = candidate_bounds(A_, T_, eb, rng, n_groups=ng, eps_agg=eps_agg,
+                              med_group_share=mgs, per_bin_budget=args.per_bin_budget)
+        grid = sorted(set(list(cb.values()) + [T_.max() / 2.0 ** k for k in range(16)]))
+        errs = {}
+        for B in grid:
+            if B <= 0:
+                continue
+            r = con.execute(
+                f"""SELECT sum(c.t0), sum(least(c.t0, {B} * c.t0 / p.t))
+                    FROM contrib c JOIN pt p ON p.pu = c.pu
+                    WHERE c.t0 > 0 AND c.g IN (SELECT g FROM gstar) AND p.t > 0
+                    GROUP BY c.g""").fetchall()
+            if r:
+                arr = np.array(r, dtype=float)
+                errs[B] = score(arr[:, 1], arr[:, 0], B / eps_agg, 120, rng)["total"]
+        # Under Dandan (1) each rule pays bins * (eps/64) for bounds and keeps the rest for
+        # the query, so the aggregate budget -- and therefore the noise -- differs per rule.
+        errs_pb = {}
+        if args.per_bin_budget:
+            for k, B in cb.items():
+                if B <= 0:
+                    continue
+                e_b = args.epsilon * RULE_BINS.get(k, 64) / 64.0
+                e_a = max(2.0 * args.epsilon - e_b, 1e-3)
+                r = con.execute(
+                    f"""SELECT sum(c.t0), sum(least(c.t0, {B} * c.t0 / p.t))
+                        FROM contrib c JOIN pt p ON p.pu = c.pu
+                        WHERE c.t0 > 0 AND c.g IN (SELECT g FROM gstar) AND p.t > 0
+                        GROUP BY c.g""").fetchall()
+                arr = np.array(r, dtype=float)
+                errs_pb[k] = score(arr[:, 1], arr[:, 0], B / e_a, 120, rng)["total"]
+        oracle = min(errs.values())
+        Bab = cb["1 approx_bounds"]
+        above = T_ > Bab
+        mclip = (T_[above] - Bab).sum() / T_.sum() if above.any() else 0.0
+        thr = _lap_quantile_threshold(64, eps_b)
+        line = f"{T_.size:>10,}{thr / T_.size:>14.4%}{mclip:>13.2%}"
+        for k in keys:
+            B = cb.get(k, 0.0)
+            e = errs_pb.get(k) if args.per_bin_budget else (errs.get(B) if B > 0 else None)
+            line += f"{(e / oracle if e else float('nan')):>12.1f}x"
+        print(line)
+    print()
+    print("values are error / oracle error at that n (1.0x = best achievable bound)")
     print()
 
 
