@@ -73,19 +73,27 @@ Sensitivity is then exactly `D_s`, deterministically, with no random truncation.
 
 **2. A frozen bound cannot track selectivity, and that is structural.**
 
-| filter | selectivity | frozen | + rung selection | Wilson |
-|---|---|---|---|---|
-| no filter | 100% | 0.4% | 0.5% | 0.9% |
-| shipmode AIR/REG AIR | 28.6% | 0.9% | 0.3% | 1.2% |
-| + returnflag=R | 7.0% | 1.8% | 0.3% | 0.7% |
-| + quantity<10 | 1.3% | 48.3% | 0.5% | 0.9% |
-| + discount<0.03 | 0.34% | 186.3% | 0.9% | 2.0% |
-| + tax<0.03 | 0.11% | 562.3% | 2.9% | 2.6% |
+| filter | selectivity | min passing PUs/group | frozen | + rung selection | Wilson |
+|---|---|---|---|---|---|
+| no filter | 100% | — | 0.4% | 0.5% | 0.9% |
+| shipmode AIR/REG AIR | 28.6% | 818 | 0.9% | 0.3% | 1.2% |
+| + returnflag=R | 7.0% | ~100s | 1.8% | 0.3% | 0.7% |
+| + quantity<10 | 1.3% | 12 (2/42 groups fail τ) | 48.3% | 0.5% | 0.9% |
+| ~~+ discount<0.03~~ | 0.34% | — | — | — | — |
+| ~~+ tax<0.03~~ | 0.11% | 1, median 172 — **all 42 fail τ** | — | — | — |
 
-Below ~7% selectivity the frozen bound leaves the noise sized to the whole domain while the
-answers shrink. Same shape at sf10 and for `COUNT(*)` / `SUM(l_quantity)`. No purely frozen
-variant escapes it — Wilson's per-query budget spend on `APPROX_BOUNDS` is exactly what buys
-selective-query utility.
+**The last two rows are outside the mechanism's support and must not be read as results.** At
+0.11% selectivity every group has fewer than τ ≈ 380 distinct passing PUs (median 172, min 1),
+so per-query τ-thresholding suppresses all of them — the correct output is empty, and the
+2.9% / 562% figures previously recorded there describe an output no correct mechanism would
+release. Google DP suppresses the same groups for the same reason, so the comparison is moot
+on both sides.
+
+Within the supported range the finding stands and is if anything cleaner: at 1.3% selectivity,
+where 40 of 42 groups are releasable, the frozen bound gives **48.3%** and rung selection
+**0.5%**. Below ~7% the frozen bound leaves the noise sized to the whole domain while the
+answers shrink; no purely frozen variant escapes it. Same shape at sf10 and for `COUNT(*)` /
+`SUM(l_quantity)`.
 
 Fix: the frozen bounds already sit on a ladder, and nothing requires clipping at the **top**
 rung. Per query, pay `ε_select` (10% of ε) for a Laplace-noised histogram of the per-PU
@@ -252,8 +260,36 @@ Running both and taking the tighter bound would split ε, and the histogram at h
 the rank at full budget. **What to take from Dandan's proposal is the ladder construction** —
 equal support per rung — as the bin-coalescing rule below.
 
-Neither works when the filter passes ≲10 PUs: the ladder saturates and the release clips to
-nothing. That is the DP floor, not a defect.
+### Filters that pass too few PUs
+
+Neither bound rule works when a group has very few passing PUs — the histogram of ~10 filtered
+norms is pure noise, the rung is chosen at random, and the release clips to nothing. But the
+fix is not a better bound rule: it is **per-query τ-thresholding on the filtered distinct-PU
+count**, which suppresses the group outright. That converts silent garbage into an honest empty
+result, and it is the mechanism the extension already runs for `dp_standard` / `dp_sass`.
+
+Measured, distinct **passing** PUs per group across the ladder (τ ≈ 380 at s = 350, ε_η = 0.1):
+
+| filter | selectivity | min | median | groups failing τ |
+|---|---|---|---|---|
+| shipmode AIR/REG AIR | 28.6% | 818 | 12,025 | 0 / 80 |
+| + quantity<10 | 1.3% | 12 | 1,826 | 2 / 42 |
+| + tax<0.03 | 0.11% | 1 | 172 | **42 / 42** |
+
+So the usable range is roughly ≥1% selectivity on this schema, and the mechanism refuses
+cleanly below it rather than degrading.
+
+Three consequences:
+
+- **This supersedes the "do not omit empty groups" rule in the per-query procedure.** That rule
+  is only needed when the *frozen* `G*` is the sole gate: omitting a group because its filtered
+  value is zero would leak that no PU passed. With a per-query τ gate, the omission is done *by*
+  a DP mechanism under budget, so it is sanctioned.
+- It costs a third per-query channel, `(ε_η, δ_η)`, and needs the `C_u` **vote** cap, since one
+  PU can be borderline in many groups (52.8% → 63.3% MIA as that count goes 1 → 50).
+- **Charge `ε_select` and `ε_η` unconditionally**, including when the result comes out empty. If
+  the system skips the charge on an empty result, the remaining-budget ledger becomes a side
+  channel telling the analyst whether any group cleared τ.
 
 ## Procedure
 
@@ -314,6 +350,46 @@ per-group and cost `C_u`.
 
 Budget: `ε_select + ε_value` per query, `ε_meta` once for the session.
 
+### How do we know the grouping key for a whole dataset?
+
+As written above the metadata is per (measure, grouping) template, which is a real problem: you
+cannot materialise metadata for grouping keys nobody has asked for yet. Three answers, and the
+third makes the question go away.
+
+1. **Declare the templates** in DDL, alongside `PRIVACY_KEY` / `PRIVACY_LINK`, and restrict
+   analysts to them. Honest, matches Peter's "template family" language, and is how OLAP cubes
+   work — but it kills ad-hoc querying.
+2. **Build on first use**, charging `ε_meta` when a new template appears. The set of built
+   templates depends on query *text*, which is the analyst's own input, so it leaks nothing.
+   But the amortisation becomes `T·ε_meta + N·ε_select` for T templates, which only beats
+   Wilson's `N·ε_bounds` when N ≫ T — fine for dashboards, poor for exploration.
+3. **Drop the grouping dependence entirely.** This is the right answer, and it falls out of two
+   results already measured:
+
+   - `D_s` came out **identical across every grouping tried** — 5, 27, 80 and 395 groups all
+     gave 8,388,608 at f = 2. Not a coincidence: with `B_g` not binding,
+     `n_u = Σ_g a(u,g)` is just PU `u`'s **total** contribution to the measure, and refining a
+     partition cannot change a sum over it. Drop `B_g` and it holds by construction, not
+     empirically.
+   - `B_g` can be dropped at no measurable utility cost (§13), and per-query τ-thresholding
+     replaces the frozen `G*` as the release gate (above).
+
+   Together those remove both grouping-dependent quantities. What is left is **one scalar per
+   measure — a crowd bound on the per-PU total contribution — with no grouping key anywhere.**
+   The ℓ1 argument is unaffected: a PU's released vector still has norm `min(n_u, D_r) ≤ D_r`
+   regardless of how the rows are grouped. Only `|G*|` enters the rung objective, and that is
+   the query's own output group count, known at plan time, not metadata.
+
+That collapses the dataset phase from five steps to two: materialise per-PU **totals** per
+measure (no grouping key), and release the crowd bound on them through a noised τ. Since it is
+one number per numeric column, it can be precomputed for the whole schema and maintained with
+the table — the same shape of statistic as the MinMax stats Peter noted we already have on all
+base columns, just DP-released once.
+
+The remaining limit: measures that are *expressions* (`l_extendedprice * (1 - l_discount)`)
+cannot be precomputed per column. Those fall back to build-on-first-use, or to a loose bound
+composed from the column bounds. Worth measuring which of the two is better before choosing.
+
 ### Where this plugs into smooth-sensitivity SASS
 
 Steps 1–6 are a **`Λ`-derivation**, and that is the whole point of the exercise. To use it with
@@ -324,6 +400,40 @@ relation already used for the current bounds,
 removes the query-dependence of `Λ` that Peter's 6 June objection targets, and it generalises
 `dp_sass_private_range` (currently exponential-mechanism quantiles for the average release
 only) to the median release. **Untested — see below.**
+
+## Adaptive clipping: choosing the bound by the tradeoff, not by a quantile
+
+Every rule above targets a fixed quantile or a fixed count. The optimal bound is neither: it
+depends on the ratio of noise to group total, so it moves with **ε**, with the **number of
+PUs**, and with **grouping granularity**. Fixed rules ignore all three and drift away from
+optimal as any of them changes:
+
+| axis, held otherwise fixed | fixed-α rule | adaptive |
+|---|---|---|
+| ε from 0.1 → 10 (ClickBench) | 1.4× → **20.0×** oracle | 1.6× → **1.0×** |
+| grouping 395 → 7 groups (TPC-H) | 1.0× → **17.8×** | 1.0× → **1.0×** |
+| PUs 10k → 1M (TPC-H sf10) | 1.0× → **15.7×** | **1.0×** throughout |
+
+The rule: from the same noisy histogram ApproxBounds already builds, minimise
+`estimated clipped mass + noise`, weighting the noise term by the **median group total**
+(clipping removes a roughly constant *fraction* of every group, but noise is the same
+*absolute* amount in each, so the median group sets the tradeoff). The median group size
+comes free from the per-group PU counts partition selection already releases. Costs nothing
+beyond what ApproxBounds spends. Ranks first on TPC-H (2.8 mean rank, 1.1× oracle) and
+StackOverflow (1.9, 1.1×), and beats ApproxBounds on ClickBench (2.5× vs 4.5×).
+
+**Its one weakness, and why the obvious fix fails.** On cells where group totals span ~200×
+(ClickBench: 922 / 12,006 median / 2,523,201) it lands at ~2× oracle rather than ~1×, because
+the constant-fraction assumption breaks — heavy PUs concentrate in the large groups, so the
+global clip fraction (9.4% at the oracle bound) far overstates the median group's (≈1%).
+Estimating the clip loss **per group** is the right target — with the true per-group clip
+loss the rule is 1.0–1.4× everywhere, better than global in every cell — but it cannot be
+estimated privately: a 2-D (group × bin) count histogram gives 5.8–18.4× where the global
+rule gives 1.0–1.1×, and no choice of bin representative (lower edge, geometric midpoint,
+upper edge) fixes it. Supplying true per-group *masses* does not help either, so the blocker
+is the within-bin shape, which differs per group and is precisely what a count histogram
+discards. Same wall as certifying tail mass, one level down: aggregate quantities are
+privately estimable, per-group tail quantities are not.
 
 ## Untested
 
