@@ -1471,6 +1471,7 @@ def main():
     p.add_argument("--demo", action="store_true", help="step-by-step walkthrough on a toy dataset")
     p.add_argument("--matrix", action="store_true", help="all bound rules across many cells")
     p.add_argument("--nscale", type=float, nargs="*", default=None, help="population-size sweep")
+    p.add_argument("--epsilons", type=float, nargs="*", default=None, help="epsilon sweep")
     p.add_argument("--per-bin-budget", action="store_true",
                    help="Dandan (1): charge eps per bin instead of per histogram")
     p.add_argument("--sass-m", type=float, nargs="+", default=[64, 256, 1024, 4096, 16384])
@@ -1506,7 +1507,10 @@ def main():
     if args.dataset in ("so", "cb"):
         con.execute("DETACH tpch")
         con.execute(f"ATTACH '{args.db}' AS {args.dataset} (READ_ONLY)")
-    if args.nscale is not None:
+    if args.epsilons is not None:
+        args.epsilons = args.epsilons or [0.1, 0.3, 1.0, 3.0, 10.0]
+        run_epsscale(con, args)
+    elif args.nscale is not None:
         args.nscale = args.nscale or [10000, 30000, 100000, 300000, 1000000]
         run_nscale(con, args)
     elif args.matrix:
@@ -2210,6 +2214,59 @@ def run_nscale(con, args):
         print(line)
     print()
     print("values are error / oracle error at that n (1.0x = best achievable bound)")
+    print()
+
+
+def run_epsscale(con, args):
+    """Sweep epsilon (and optionally the grouping) at fixed n. The adaptive rule's
+    objective contains eps_agg and the group size, so if the adaptivity claim is real it
+    should track the oracle across both; fixed-alpha and fixed-count rules cannot."""
+    rng = np.random.default_rng(args.seed)
+    _, _, _, fl = dsconf(args)
+    lad = [fl[1]]
+    build_contributions(con, args, lad)
+    build_metadata(con, args)
+    ng = con.execute("SELECT count(*) FROM gstar").fetchone()[0]
+    con.execute(
+        """CREATE OR REPLACE TABLE pt AS SELECT pu, sum(a) AS a, sum(t0) AS t
+           FROM contrib WHERE g IN (SELECT g FROM gstar) GROUP BY pu""")
+    A_ = np.array([float(r[0]) for r in con.execute("SELECT a FROM pt WHERE a>0").fetchall()])
+    T_ = np.array([float(r[0]) for r in con.execute("SELECT t FROM pt WHERE t>0").fetchall()])
+    gsz = np.array([float(r[0]) for r in con.execute(
+        "SELECT count(*) FROM contrib c JOIN pt p ON p.pu=c.pu "
+        "WHERE c.t0>0 AND c.g IN (SELECT g FROM gstar) GROUP BY c.g").fetchall()])
+    mgs = float(np.median(gsz) / gsz.sum())
+    keys = ["1 approx_bounds", "1b tail-count 10%", "3 deciles 10%", "0 objective (clip+noise)"]
+    print()
+    print(f"epsilon sweep: {args.dataset} {args.measure}/{args.groupby}, filter={lad[0][0]}, "
+          f"{T_.size:,} PUs, {ng} groups")
+    print()
+    print(f"{'eps':>7}{'oracle err':>13}" + "".join(f"{k.split(' ',1)[1][:12]:>14}" for k in keys))
+    print("-" * (20 + 14 * len(keys)))
+    for eps in args.epsilons:
+        eb, ea = eps / 2.0, eps / 2.0
+        cb = candidate_bounds(A_, T_, eb, rng, n_groups=ng, eps_agg=ea, med_group_share=mgs)
+        grid = sorted(set(list(cb.values()) + [T_.max() / 2.0 ** k for k in range(16)]))
+        errs = {}
+        for B in grid:
+            if B <= 0:
+                continue
+            r = con.execute(
+                f"""SELECT sum(c.t0), sum(least(c.t0, {B} * c.t0 / p.t))
+                    FROM contrib c JOIN pt p ON p.pu = c.pu
+                    WHERE c.t0 > 0 AND c.g IN (SELECT g FROM gstar) AND p.t > 0
+                    GROUP BY c.g""").fetchall()
+            if r:
+                arr = np.array(r, dtype=float)
+                errs[B] = score(arr[:, 1], arr[:, 0], B / ea, 120, rng)["total"]
+        oracle = min(errs.values())
+        line = f"{eps:>7.2f}{oracle:>12.1%}"
+        for k in keys:
+            B = cb.get(k, 0.0)
+            line += f"{(errs[B] / oracle if B > 0 and B in errs else float('nan')):>13.1f}x"
+        print(line)
+    print()
+    print("values are error / oracle error at that eps")
     print()
 
 
