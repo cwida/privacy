@@ -94,6 +94,24 @@ DATASETS = {
         "ladder": None,     # use FILTER_LADDER
         "row_table": "tpch.lineitem",
     },
+    "cb": {                                   # ClickBench: 1.06M users, median 2 hits, max 2,496
+        "from": "cb.hits", "where": "UserID IS NOT NULL", "pu": "UserID",
+        "groupbys": {"date": "cast(EventDate as varchar)", "region": "cast(RegionID as varchar)"},
+        "measures": {"count": "1", "width": "ResolutionWidth"},
+        "ladder": [("no filter", "true"),
+                   ("searched", "SearchPhrase <> ''"),
+                   ("+ refresh", "SearchPhrase <> '' AND IsRefresh = 1"),
+                   ("+ mobile", "SearchPhrase <> '' AND IsRefresh = 1 AND IsMobile = 1")],
+        "row_table": "cb.hits",
+    },
+    "supp": {                                 # TPC-H with PU = supplier: ~600 rows each
+        "from": "tpch.lineitem", "where": "true", "pu": "l_suppkey",
+        "groupbys": {"month": "strftime(l_shipdate, '%Y-%m')",
+                     "year": "cast(year(l_shipdate) as varchar)"},
+        "measures": {"price": "l_extendedprice", "quantity": "l_quantity", "count": "1"},
+        "ladder": None,          # falls back to FILTER_LADDER via dsconf
+        "row_table": "tpch.lineitem",
+    },
     "so": {
         "from": "so.Posts",
         "where": "OwnerUserId IS NOT NULL",
@@ -122,6 +140,10 @@ CELLS_TPCH = [("price", "month", 0, False), ("price", "quarter", 0, False),
               ("price", "month", 0, True)]
 CELLS_SO = [("count", "month", 0, False), ("count", "year", 0, False),
             ("views", "month", 0, False), ("views", "year", 0, False)]
+CELLS_CB = [("count", "date", 0, False), ("count", "region", 0, False),
+            ("width", "date", 0, False), ("width", "region", 0, False)]
+CELLS_SUPP = [("price", "month", 0, False), ("price", "year", 0, False),
+              ("quantity", "month", 0, False), ("count", "month", 0, False)]
 
 
 def dsconf(args):
@@ -1478,8 +1500,9 @@ def main():
     if args.demo:
         run_demo(args); return
     con = open_db(args.db, args.sf)
-    if args.dataset == "so":
-        con.execute("DETACH tpch"); con.execute(f"ATTACH '{args.db}' AS so (READ_ONLY)")
+    if args.dataset in ("so", "cb"):
+        con.execute("DETACH tpch")
+        con.execute(f"ATTACH '{args.db}' AS {args.dataset} (READ_ONLY)")
     if args.matrix:
         run_matrix(con, args)
     elif args.auto_bounds:
@@ -1908,7 +1931,7 @@ def run_auto_bounds(con, args):
     print()
 
 
-def candidate_bounds(a, t, eps_b, rng):
+def candidate_bounds(a, t, eps_b, rng, n_groups=1, eps_agg=0.5):
     """Every automatic-bound rule, given filterless totals `a` and filtered totals `t`.
     Includes two variants that are NOT in the draft, marked (fix), testing the two
     diagnoses from the toy walkthrough: alpha on mass rather than counts, and rungs
@@ -1940,6 +1963,49 @@ def candidate_bounds(a, t, eps_b, rng):
     ok2 = ub[noisy >= _lap_quantile_threshold(nb, eps_b)]
     out["2b approx, fewer bins"] = 2.0 ** (ok2.max() + 1) if ok2.size else 0.0
 
+    # --- Approach 3 + Dandan's two-level refinement -------------------------------
+    # Level 1: pick a coarse quantile bin with half the bound budget. Level 2: subdivide
+    # THAT interval into log2 sub-bins and rerun the same alpha rule with the other half.
+    # Two releases over the same data, so eps_b splits sequentially.
+    qs0 = [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0]
+    e2 = eps_b / 2.0
+    edges0 = np.array([float(np.quantile(a, q)) for q in qs0])
+    i0 = np.clip(np.searchsorted(-edges0, -t, side="left") - 1, 0, 9)
+    c0 = np.array([(i0 == i).sum() for i in range(10)], dtype=float)
+    n0 = np.maximum(c0 + rng.laplace(0.0, 2.0 / e2, 10), 0.0)
+    cum0 = np.cumsum(n0) / max(n0.sum(), 1e-9)
+    for alpha in (0.10, 0.30):
+        k = int(np.argmax(cum0 >= alpha))
+        hi = float(edges0[k])
+        lo = float(edges0[k + 1]) if k + 1 < 10 else 0.0
+        sub = t[(t > lo) & (t <= hi)]
+        if sub.size < 2 or hi <= 0:
+            out[f"3+refine {alpha:.0%}"] = hi
+            continue
+        lo_b = int(np.floor(np.log2(max(lo, 1.0))))
+        hi_b = int(np.ceil(np.log2(hi)))
+        sb = np.arange(lo_b, hi_b + 1)
+        cs = np.array([float(((sub >= 2.0 ** b) & (sub < 2.0 ** (b + 1))).sum()) for b in sb])
+        ns = np.maximum(cs + rng.laplace(0.0, 2.0 / e2, cs.size), 0.0)
+        # The level-2 rule must target the RESIDUAL fraction, not alpha again: level 1 has
+        # already accounted for everything above this bin. Applying alpha at both levels
+        # compounds and over-clips.
+        tot0 = max(n0.sum(), 1e-9)
+        above = float(n0[:k].sum())
+        want = max(alpha * tot0 - above, 0.0)
+        cs_sub = np.cumsum(ns[::-1])[::-1]
+        j = np.where(cs_sub >= want)[0]
+        out[f"3+refine {alpha:.0%}"] = float(min(2.0 ** (sb[j[-1]] + 1), hi)) if j.size else hi
+
+    # --- objective rule: pick the bound minimising estimated clipped mass + noise,
+    # from the SAME noisy histogram. No fixed alpha; the target adapts to eps and to how
+    # many groups the noise has to cover.
+    mids_o = 2.0 ** (ub + 0.5)
+    cands_o = 2.0 ** (ub + 1)
+    est = [float(np.sum(noisy * np.maximum(mids_o - B, 0.0))) + n_groups * B / eps_agg
+           for B in cands_o]
+    out["0 objective (clip+noise)"] = float(cands_o[int(np.argmin(est))])
+
     for tag, qs in (("3 deciles", [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.0]),
                     ("3 tail-prob (fix)",
                      [1.0, 0.9999, 0.999, 0.99, 0.95, 0.9, 0.75, 0.5, 0.25, 0.0])):
@@ -1957,7 +2023,7 @@ def run_matrix(con, args):
     """All bound rules across many (dataset, measure, grouping, filter) cells."""
     rng = np.random.default_rng(args.seed)
     eps_b, eps_agg = args.epsilon / 2.0, args.epsilon / 2.0
-    cells = (CELLS_SO if args.dataset == "so" else CELLS_TPCH)
+    cells = {"so": CELLS_SO, "cb": CELLS_CB, "supp": CELLS_SUPP}.get(args.dataset, CELLS_TPCH)
     names, rows = None, []
     for measure, groupby, pareto, entity in cells:
         args.measure, args.groupby, args.pareto, args.entity_filters = measure, groupby, pareto, entity
@@ -1977,7 +2043,8 @@ def run_matrix(con, args):
             tt = np.array([float(r[0]) for r in con.execute("SELECT t FROM pt WHERE t>0").fetchall()])
             if tt.size < 50:
                 continue
-            cands = candidate_bounds(a, tt, eps_b, rng)
+            ng = con.execute("SELECT count(*) FROM gstar").fetchone()[0]
+            cands = candidate_bounds(a, tt, eps_b, rng, n_groups=ng, eps_agg=eps_agg)
             grid = sorted(set(list(cands.values()) + [tt.max() / 2.0 ** k for k in range(14)]))
             errs = {}
             for B in grid:
