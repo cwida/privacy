@@ -435,6 +435,58 @@ is the within-bin shape, which differs per group and is precisely what a count h
 discards. Same wall as certifying tail mass, one level down: aggregate quantities are
 privately estimable, per-group tail quantities are not.
 
+## Histogram-based τ-thresholding (Dandan, 11 Aug)
+
+Reuse the per-group histogram already released for bound selection to decide group
+existence: release group `g` iff `max_i c̃_{g,i} ≥ τ`. Since the histogram is already DP,
+the decision is post-processing, so partition selection costs no extra budget. τ solves
+`(1 − ½e^{−(τ−1)/b})(1 − ½e^{−τ/b})^{B−1} = (1−δ)^{1/C_u}` with `b = 2C_u/ε_b`.
+
+**It works, and the gain is exactly the freed ε_η.** End to end at C_u = 1, ε = 1 split
+0.25/0.25/0.5 (standard) vs 0.25/0.75 (hers):
+
+| | groups released | value ε | median error |
+|---|---|---|---|
+| TPC-H, standard | 100.0% | 0.50 | 0.5% |
+| TPC-H, hers | 98.8% | 0.75 | **0.4%** |
+| ClickBench, standard | 100.0% | 0.50 | 1.1% |
+| ClickBench, hers | 100.0% | 0.75 | **0.8%** |
+| StackOverflow, standard | 91.0% | 0.50 | 2.8% |
+| StackOverflow, hers | 84.8% | 0.75 | 2.7% |
+
+27% and 20% better where groups are large; a wash on StackOverflow where the lost groups
+cancel the saving. In our implementation `ε_η = ε/(c+1)`, so for a single aggregate τ is
+eating half the budget and the ceiling is nearer 50% than the 33% above.
+
+**Applicability is set by C_u, not by group size.** τ scales linearly in `C_u/ε_b`:
+C_u = 1 gives τ = 138 (works on ~350-PU groups); C_u = 10 gives τ = 1,567 (needs a few
+thousand). On TPC-H, with 12k+ PUs per group, it releases 98.7–100% at every C_u tried.
+
+**Three edge cases.**
+
+*It keys on distribution shape, not group size.* The rule needs `max_i c_i ≥ τ`, and the
+modal bin holds a fraction f of the group. At C_u = 1, τ = 138: a **400-PU** group with all
+PUs in one bin releases 100% of the time, while a **2,000-PU** group spread uniformly is
+suppressed 0% of the time. Worst case f = 1/B, so guaranteed release needs `n_g ≥ B·τ`
+(8,849 here). Measured f on real data is far better than worst case — median 0.88 for small
+count measures (ClickBench, StackOverflow), 0.33–0.49 for wide-valued sums, and 0.17 for a
+heavy-tailed measure (StackOverflow `views`), which is where it is most expensive.
+
+*The histogram must count distinct PUs, not rows.* The δ analysis assumes a singleton group
+has counts (1, 0, …, 0). If the histogram bins rows, one PU with ~200 rows in a bin gives
+`P(release) = 99.98%` against a target δ of 1e-6 — the guarantee is gone. Per-PU
+pre-aggregation before binning is load-bearing, not an optimisation.
+
+*The joint histogram does **not** degrade the bounds.* Its sensitivity is `2C_u` rather than
+2, so it might be expected to cost bound quality at C_u > 1. Measured, the selected bound is
+identical at C_u = 1, 5 and 10 on both datasets — bin counts are large enough to absorb 10×
+noise. So the only cost is the threshold itself.
+
+*Systematically stricter, never looser.* Since `max_i c_i ≤ n_g` and `τ_max > τ_single`, the
+rule can never release a group the standard rule would suppress. The gain is purely the
+freed budget, and it is largest for single-aggregate queries (where `ε/(c+1)` is half the
+budget) and shrinks as the number of aggregates grows.
+
 ## Untested
 
 - Everything here is a **single nonnegative additive aggregate**, sums and counts, static data.
