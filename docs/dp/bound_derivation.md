@@ -487,6 +487,51 @@ rule can never release a group the standard rule would suppress. The gain is pur
 freed budget, and it is largest for single-aggregate queries (where `ε/(c+1)` is half the
 budget) and shrinks as the number of aggregates grows.
 
+## Half-dataset splitting (Dandan, 11 Aug)
+
+Randomly partition PUs into two disjoint halves, evaluate `t/2` attributes on each. A PU
+then affects `C_u·t/2` cells instead of `C_u·t`, and parallel composition across the halves
+doubles the per-cell budget to `2ε/(C_u t)`. The accounting is correct; the utility is not.
+
+**SUM / COUNT: exactly neutral, then strictly worse.** The cell value is `V/2`, so the
+answer must be rescaled by 2, and `2·Lap(B/2ε₁) = Lap(B/ε₁)` — the doubled budget is
+*exactly* cancelled by the rescaling. Measured: identical noise (0.023% either way), and
+subsampling then adds **8.2×** the error.
+
+**AVG: same cancellation** (the ratio is scale-free, so the relative noise is unchanged),
+plus sampling error — 3.8× worse.
+
+**Median: a real but modest win**, and only in a window. The smooth sensitivity grows by
+~1.6× when the data halves while the budget doubles, so the net is ~0.85×:
+
+| m | endpoint term | SS full | SS half | err full | err half |
+|---|---|---|---|---|---|
+| 256 | 2,912,797 | 1,506,602 | 1,497,136 | 68.9% | 36.0% |
+| 1024 | 5 | 280,916 | 454,852 | 12.7% | **10.5%** |
+| 4096 | 0 | 150,142 | 262,692 | 7.3% | **6.3%** |
+| 16384 | 0 | 61,597 | 120,901 | 3.7% | 6.0% |
+
+The apparent 2× at m = 256 is inside the Λ-dominated regime where the release is unusable
+anyway. It reverses at m = 16384 where the lanes get too thin. General rule: splitting helps
+exactly when the sensitivity grows slower than the budget doubles.
+
+## Cross-attribute bound correspondence (Dandan, 11 Aug)
+
+Store a frozen mapping between attributes' contribution bins, pay for one attribute's bound
+and derive the rest. Offset `d = bin(a₂) − bin(a₁)` per PU, on TPC-H:
+
+| filter | price→quantity: d, corr | price→count: d, corr |
+|---|---|---|
+| no filter | −11.0, 1.00 | −15.0, 0.98 |
+| shipmode AIR | −11.0, 0.99 | −15.0, 0.95 |
+| + returnflag=R | −11.0, 0.99 | −15.0, 0.85 |
+| + quantity<10 | −10.0, 0.97 | **−12.0, 0.62** |
+
+It survives filters *independent* of the attributes and breaks under filters *correlated*
+with them: filtering on quantity shifts price→count by 3 bins, i.e. a derived bound wrong by
+**8×**, with the correlation collapsing from 0.98 to 0.62. Silent, and analyst-steerable —
+picking a filter correlated with `a₁` is enough to corrupt `a₂`'s bound.
+
 ## Untested
 
 - Everything here is a **single nonnegative additive aggregate**, sums and counts, static data.
