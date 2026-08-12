@@ -664,6 +664,40 @@ earlier was an artefact of a fixed 0.25/0.25/0.5 split in which ε_η was over-f
 reuse costs the values by pinning ε_b high. On TPC-H the two land exactly level; on
 StackOverflow the separate τ is better on both released groups and error.
 
+## Cap the votes, not the values — measured (and a methodological correction)
+
+Under an ℓ1 clip a PU's released vector has ℓ1 norm ≤ B **regardless of how many groups it
+touches**, so `Laplace(B/ε_v)` is ε_v-DP with no `C_u` anywhere. `C_u` is needed only for the
+τ **votes**, whose count vector has ℓ1 sensitivity `C_u`. Splitting the two:
+
+- values: no group cap, ℓ1-clip to B, `Laplace(B/ε_v)`
+- votes: rank-cap each PU to `C_u` groups, `Laplace(C_u/ε_η)`, Wilson τ
+- bounds: histogram of per-PU norms, one bin per PU, `Laplace(2/ε_b)`
+
+**Correction to every earlier `C_u` number in this document.** Those runs scored the release
+against the *capped* truth, which forgives exactly the error truncation causes. The analyst
+asked for the uncapped answer; Google's paper calls the difference `Error_{C_u}`. Rescored
+against the true answer (ε_b = 0.05, ε_η = 0.1, ε_v = 0.85):
+
+| dataset | C_u | cap values **and** votes | cap **votes only** | gain |
+|---|---|---|---|---|
+| TPC-H quarter | 1 | 73.58% | **0.10%** | 736× |
+| TPC-H quarter | 5 | 21.61% | **0.10%** | 216× |
+| TPC-H month | 1 | 76%* | **0.29%** | — |
+| TPC-H month | 5 | 27.49% | **0.29%** | 95× |
+| TPC-H month | 19 | 0.29% | 0.30% | tie |
+| StackOverflow | 1 | 40.98% | **7.12%** | 5.8× |
+| StackOverflow | 5 | 13.08% | **5.29%** | 2.5× |
+
+(*mass kept 23%, so the bias floor is ~77%.) The two coincide only when `C_u` is large enough
+that no truncation happens.
+
+This dissolves the "`C_u` tension" recorded earlier — that small `C_u` is forced on
+small-group data while large `C_u` is needed to keep the mass. With vote-only capping you
+take `C_u = 1` for the cheapest τ **and** keep 100% of the values. StackOverflow at `C_u = 1`
+then gives 87.6% of groups released at 7.12% error, the best configuration measured anywhere
+in this work.
+
 ## Untested
 
 - Everything here is a **single nonnegative additive aggregate**, sums and counts, static data.
