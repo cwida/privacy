@@ -721,6 +721,10 @@ norms, ℓ1 clip with no value cap, `Laplace(B/ε_v)`, vote-capped τ, split 0.0
 | + **ℓ1 clip instead of C_u truncation** | **0.29% (168×)** | **0.29% (12.4×)** |
 | + adaptive bound instead of ApproxBounds | 0.29% (—) | 0.29% (—) |
 
+> **CORRECTED BELOW — see "Google DP's best configuration".** The table above runs Google DP
+> at a fixed `C_u` and a fixed 1/3 split. Tuned over both, Google reaches 1.34% and the
+> honest gap is **4.6×**, not 12–880×.
+
 **The ℓ1 clip is essentially the entire gain.** Budget tuning is worth 2.5× but only where
 truncation bias is not already dominating, and the adaptive bound adds nothing on this data —
 ApproxBounds picks the same bound. So the defensible single claim is: **replace `C_u` random
@@ -761,6 +765,42 @@ vs 7.10% (1.25×) on StackOverflow.** Real, but ~1.2×, not 1.8×.
 **Methodological rule, now established twice** (here and for τ-reuse): *a DP mechanism
 comparison at a fixed budget split is not evidence.* Both gains looked like ~1.8× at a fixed
 split and shrank to ~1.2× or to nothing once the split was optimised for both arms.
+
+## Google DP's best configuration — the honest gap is 4.6×
+
+`C_u` is a free parameter Google would tune, and so is its budget split. Doing both, on
+TPC-H sf1 (max `k_u` = 28):
+
+| C_u | split | released | error |
+|---|---|---|---|
+| 5 | 1/3, 1/3, 1/3 | 100.0% | 49.42% |
+| 19 | 1/3, 1/3, 1/3 | 98.8% | 3.57% |
+| 14 | 0.05 / 0.05 / 0.90 | 98.8% | 3.64% |
+| **19** | **0.05 / 0.05 / 0.90** | **98.8%** | **1.34%** |
+| 28 | 0.05 / 0.05 / 0.90 | 97.5% | 1.97% |
+
+**Google DP's best is 1.34% against our 0.29% — a gap of 4.6×**, not the 12–880× obtained
+against a fixed-`C_u`, fixed-split Google. Its optimum sits at `C_u = 19`, trading truncation
+bias against the `C_u·U` noise.
+
+**The remaining gap is one number, and it is arithmetic.** With the budgets matched, the gap
+must equal the sensitivity ratio:
+
+| quantity | value |
+|---|---|
+| Google's sensitivity, `C_u·U` (C_u=19, U=524,288) | 9,961,472 |
+| our sensitivity, `B` | 2,097,152 |
+| ratio | **4.75×** |
+| measured gap | **4.6×** |
+
+Google bounds **cells** and multiplies by `C_u`; we bound the **norm** directly. `C_u·U` is
+the norm of a hypothetical PU with `C_u` cells all at the cell bound — but the true maximum
+per-PU norm is **2,403,585**, so `C_u·U` overstates the sensitivity by 4.1×. That slack *is*
+the contribution. (Our B = 2,097,152 sits just below the true max, so we clip slightly.)
+
+**This is the fourth gain in this document to shrink under a tuned comparison** (after
+τ-reuse, debiasing, and the `C_u` scoring fix). The pattern is consistent enough to state as
+a rule: *report the baseline's best configuration, not its default.*
 
 ## Two clean negatives
 
