@@ -780,7 +780,22 @@ vs 7.10% (1.25×) on StackOverflow.** Real, but ~1.2×, not 1.8×.
 comparison at a fixed budget split is not evidence.* Both gains looked like ~1.8× at a fixed
 split and shrank to ~1.2× or to nothing once the split was optimised for both arms.
 
-## Google DP's best configuration — the honest gap is 4.6×
+## FINAL HEADLINE — both mechanisms fully tuned: 2.8×–4.8×
+
+Tuning `C_u` **and** the budget split for *both* sides, scored against the uncapped truth:
+
+| dataset | Google DP best | ours best | gap |
+|---|---|---|---|
+| TPC-H price/month | 1.33% (C_u = 19) | **0.28%** (C_u = 5) | **4.8×** |
+| StackOverflow count/month | 16.29% (C_u = 5) | **5.76%** (C_u = 2) | **2.8×** |
+| ClickBench count/date | 1.33% (C_u = 2) | **0.48%** (C_u = 5) | **2.8×** |
+
+**This supersedes every earlier gain figure in this document.** The 12×–880× numbers were
+measured against a Google DP pinned at a fixed `C_u` and a fixed 1/3 budget split; both are
+free parameters a real deployment would tune. The defensible claim is a consistent **2.8×–4.8×**
+across three very different data shapes.
+
+## Where the 4.6× on TPC-H comes from
 
 `C_u` is a free parameter Google would tune, and so is its budget split. Doing both, on
 TPC-H sf1 (max `k_u` = 28):
