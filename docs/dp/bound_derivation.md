@@ -582,6 +582,54 @@ Lap(8)), scored by the fraction of real groups released:
 The max wins because the null is "one bin at 1, the rest pure noise" and real groups have a
 dominant bin (measured modal fraction 0.33–0.88). Combining counts does not reduce τ.
 
+## Noise mechanism: when Gaussian beats Laplace
+
+Independent of the bound, the noise distribution is a free choice. The switching rule turns
+out to be a single quantity.
+
+Under an ℓ1 clip to `B` the L1 sensitivity is `B`, so Laplace at `B/ε` gives std `√2·B/ε`.
+Under a **joint ℓ2 clip** (normalise each aggregate by its own bound, concatenate, clip the
+vector's ℓ2 norm) the L2 sensitivity is `B/√k_eff` where
+
+    k_eff = (‖v‖₁ / ‖v‖₂)²   — the *effective* number of groups a PU spreads across
+
+and ρ-zCDP Gaussian gives `σ = √(c/k_eff) / √(2ρ)` with `ε = ρ + 2√(ρ·ln(1/δ))`. Hence
+
+    Gaussian / Laplace  =  3.75 / √(c · k_eff)      →  **Gaussian wins when c·k_eff > 14**
+
+(at ε = 1, δ = 1e-6; the constant is `√(2ln(1.25/δ))/√2` and is nearly flat in ε — 3.78 at
+ε=0.5, 3.75 at ε=1, 3.85 at ε=2 — so there is no ε crossover for a single scalar.)
+
+**Measured k_eff on TPC-H** (per-PU contribution vectors, AIR filter):
+
+| grouping | groups | median groups/PU | median k_eff |
+|---|---|---|---|
+| year | 7 | 5 | 3.8 |
+| quarter | 27 | 8 | 5.6 |
+| month | 80 | 9 | 6.4 |
+| month × priority | 400 | 9 | **6.7** |
+
+`k_eff` **saturates around 6–7** and barely moves from 80 to 400 groups, because a customer's
+spend is dominated by a few months — refining the grouping splits it unevenly, so effective
+dimensionality does not grow. So the ℓ2 route alone never reaches 14 on this data.
+
+**But the two routes multiply.** With `k_eff = 6.7`:
+
+| aggregates c | verdict |
+|---|---|
+| 1 | Laplace 1.46× better |
+| 2 | tied (1.03×) |
+| 3 | **Gaussian 1.19× better** |
+| 4 | **Gaussian 1.37× better** |
+| 6 | **Gaussian 1.68× better** |
+
+AVG alone is two cells (sum + count), and a query with SUM, COUNT and AVG is four — so the
+common multi-aggregate case sits exactly where joint ℓ2 clipping + Gaussian wins. Single-
+aggregate queries should stay on Laplace.
+
+Caveat: this compares noise std only. The ℓ2 and ℓ1 clips have different bias, and δ becomes
+required — though grouped queries already need δ for τ.
+
 ## Untested
 
 - Everything here is a **single nonnegative additive aggregate**, sums and counts, static data.
