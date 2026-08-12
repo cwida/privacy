@@ -762,6 +762,33 @@ vs 7.10% (1.25×) on StackOverflow.** Real, but ~1.2×, not 1.8×.
 comparison at a fixed budget split is not evidence.* Both gains looked like ~1.8× at a fixed
 split and shrank to ~1.2× or to nothing once the split was optimised for both arms.
 
+## Two clean negatives
+
+**Free post-processing buys nothing.** Non-negativity projection, James–Stein shrinkage and
+SURE-tuned smoothing, applied to the released group vector at the tuned operating point:
+**1.001×**. JS shrinks by `c = 1 − (m−3)σ²/‖x−μ‖²`, and the *between-group* spread far
+exceeds the noise, so `c ≈ 1`. Non-negativity never binds because no group is near zero. It
+pays only when noise approaches the between-group spread — i.e. when the mechanism is
+already badly mis-tuned (measured 0.85× narrow / 0.25× wide on a `C_u`-truncating baseline at
+`C_u` = 19, which is exactly such a case).
+
+**Gaussian/zCDP loses.** Under the ℓ1 clip `Δ₂ = Δ₁ = B` exactly — attained when a PU puts
+all its mass in one group — so ℓ1 clipping gives *no* L2 advantage in the worst case; the
+`B/√k` intuition is the typical case, not the sensitivity. Enforcing an explicit L2 clip
+makes `Δ₂ = B₂`, but at ε_agg = 0.5, δ = 1e-6 Gaussian needs `Δ₂ ≤ Δ₁/4.23` (zCDP) or
+`Δ₁/3.21` (analytic) merely to break even. With each mechanism's bound tuned separately:
+
+| month, 80 groups | error |
+|---|---|
+| **ℓ1 clip + Laplace** | **0.408%** |
+| L2 clip + Gaussian, analytic (Balle–Wang) | 0.383% (0.94×) |
+| L2 clip + Gaussian, zCDP | 0.494% (1.21× worse) |
+| ℓ1 clip + Gaussian | 1.504% (3.69× worse) |
+
+Only the analytic-Gaussian calibration edges ahead, by 6% (and 10% at 400 groups) — not
+worth requiring δ for. The switching rule is `c · k_eff > 14`, and measured `k_eff` saturates
+at 6–7 on this data, so it takes 3+ aggregates to flip.
+
 ## Untested
 
 - Everything here is a **single nonnegative additive aggregate**, sums and counts, static data.
