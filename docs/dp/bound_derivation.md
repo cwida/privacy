@@ -532,6 +532,56 @@ with them: filtering on quantity shifts price→count by 3 bins, i.e. a derived 
 **8×**, with the correlation collapsing from 0.98 to 0.62. Silent, and analyst-steerable —
 picking a filter correlated with `a₁` is enough to corrupt `a₂`'s bound.
 
+### Half-dataset: the rest of the picture
+
+- **More parts is worse.** Splitting into k parts gives k× the per-cell budget and the same
+  exact cancellation: `k·Lap(B/(k·ε₁)) = Lap(B/ε₁)` for any k. Measured noise-only error is
+  flat at 0.046% for k = 1, 2, 4, 8, 16, 64; only the subsampling error grows, as ~√k.
+- **τ-suppression is neutral**, the cost she deferred. Halving the PUs halves every group,
+  but the doubled budget also halves τ, so the release test is the same inequality scaled by
+  ½. Measured, it is very slightly *favourable*: StackOverflow 91.4% → 93.7%, ClickBench
+  region 17.5% → 21.7%.
+- **The median gain equals the Λ-fraction of the smooth sensitivity.** At m = 64 the SS is
+  41,201,809 full against 41,224,952 half — identical, because it is entirely the
+  `exp(−βm/2)·Λ` endpoint, which does not depend on how much data there is. So the split is
+  free and the budget doubling is pure gain (0.53×) — on an answer that is 1884% wrong. As
+  m grows the endpoint dies, SS comes from the lane gaps which *do* widen when halved, and
+  the gain decays: 0.51× (m=128), 0.50× (256), 0.70× (1024), 0.96× (4096), 1.60× (16384).
+  The 2× and usability are mutually exclusive.
+
+### Cross-attribute correspondence: correlation is necessary, not sufficient
+
+| pair | corr (unfiltered) | worst shift under a filter | derived bound error |
+|---|---|---|---|
+| TPC-H price→quantity | 1.00 | 0 bins | 1× |
+| ClickBench count→width | 0.92 | 0 bins | 1× |
+| TPC-H price→count | **0.98** | **2 bins** (under `quantity<10`) | **4×** |
+| StackOverflow count→views | 0.47 | 2 bins (under `views>500`) | 4× |
+
+Price→count has 0.98 correlation and still breaks, so correlation does not predict safety.
+What predicts it is whether the *filter* selects on the ratio `a₂/a₁`: `quantity<10` is
+proportional to price but not to count, so it decouples them. The correspondence is safe
+when the ratio is near-constant **by construction** (a schema property, e.g. price =
+quantity × bounded unit price) and unsafe when it varies across rows — and since the analyst
+picks the filter, the unsafe case is steerable.
+
+### τ statistics: the max is already the best simple choice
+
+Six statistics calibrated to the same null (`P(release | singleton) ≤ 1e-3`, B = 64,
+Lap(8)), scored by the fraction of real groups released:
+
+| statistic | τ | TPC-H | StackOverflow | ClickBench |
+|---|---|---|---|---|
+| **max (Dandan)** | 83.4 | **100.0%** | **86.8%** | **12.5%** |
+| sum of top 3 | 154.3 | 100.0% | 86.2% | 12.0% |
+| sum of top 8 | 262.6 | 100.0% | 85.5% | 11.2% |
+| sum of all bins | 283.6 | 100.0% | 76.5% | 8.0% |
+| # bins ≥ 3b | 7.0 | 99.6% | 2.0% | 0.8% |
+| # bins ≥ 2b | 12.0 | 74.0% | 0.7% | 0.4% |
+
+The max wins because the null is "one bin at 1, the rest pure noise" and real groups have a
+dominant bin (measured modal fraction 0.33–0.88). Combining counts does not reduce τ.
+
 ## Untested
 
 - Everything here is a **single nonnegative additive aggregate**, sums and counts, static data.
