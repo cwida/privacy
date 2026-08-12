@@ -726,6 +726,42 @@ truncation bias is not already dominating, and the adaptive bound adds nothing o
 ApproxBounds picks the same bound. So the defensible single claim is: **replace `C_u` random
 truncation with an ℓ1 clip to a per-PU norm bound, and keep `C_u` only for the τ votes.**
 
+## Debiasing the clip loss
+
+The noisy histogram of per-PU norms already paid for by `ε_b` also estimates the **total**
+mass `M`. Since the released group sums `s_g` are DP outputs, `est_L = max(0, M_est − Σ s_g)`
+is the clipped mass, and redistributing it as `s_g + share_g · est_L` is **pure
+post-processing** — no extra ε.
+
+Two things make it work, and one unmakes it.
+
+**Bin width is free and decisive.** The histogram's L1 sensitivity is 2 regardless of how
+many bins it has, so refining from base 2 (11 bins) to base `2^(1/8)` (75 bins) costs
+nothing and cuts the geometric-midpoint bias from +2.17% to +0.023%. Coarse debiasing is
+*worse than not debiasing* (2.22% vs 0.50%); fine debiasing gives 0.275%.
+
+**It moves the optimal bound down 2 rungs** (2^21 → 2^19), which is the point — correcting
+the bias lets you clip harder and pay less noise. Verified independently: 0.5002% → 0.2753%,
+**1.82×**.
+
+**But the gain is mostly an artefact of ε_b = 0.5.** The fine histogram needs budget, and
+without debiasing that budget is better spent on the values:
+
+| ε_b | TPC-H no-debias | TPC-H debias | SO no-debias | SO debias |
+|---|---|---|---|---|
+| 0.50 | 0.5048% | **0.2667%** (1.89×) | 10.32% | **5.67%** (1.82×) |
+| 0.25 | 0.3390% | **0.2157%** (1.57×) | 8.87% | 9.07% (0.98×) |
+| 0.10 | 0.2799% | 0.2719% (1.03×) | 7.40% | 15.11% (0.49×) |
+| 0.05 | 0.2673% | 0.3946% (0.68×) | 7.34% | 25.81% (0.28×) |
+| 0.02 | **0.2570%** | 0.7096% (0.36×) | **7.10%** | 56.67% (0.13×) |
+
+Jointly optimising the split on both sides: **0.2157% vs 0.2570% (1.19×) on TPC-H and 5.67%
+vs 7.10% (1.25×) on StackOverflow.** Real, but ~1.2×, not 1.8×.
+
+**Methodological rule, now established twice** (here and for τ-reuse): *a DP mechanism
+comparison at a fixed budget split is not evidence.* Both gains looked like ~1.8× at a fixed
+split and shrank to ~1.2× or to nothing once the split was optimised for both arms.
+
 ## Untested
 
 - Everything here is a **single nonnegative additive aggregate**, sums and counts, static data.
