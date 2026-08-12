@@ -780,7 +780,11 @@ vs 7.10% (1.25×) on StackOverflow.** Real, but ~1.2×, not 1.8×.
 comparison at a fixed budget split is not evidence.* Both gains looked like ~1.8× at a fixed
 split and shrank to ~1.2× or to nothing once the split was optimised for both arms.
 
-## FINAL HEADLINE — both mechanisms fully tuned: 2.8×–4.8×
+## Both mechanisms fully tuned: 2.8×–4.8× (superseded — see HONEST HEADLINE below)
+
+> These numbers are measured on **coarse groupings where τ never binds**, and they use a
+> budget split that returns an empty answer on finer groupings. See *The tuned budget split
+> silently destroys the key set* and *HONEST HEADLINE* below for the corrected comparison.
 
 Tuning `C_u` **and** the budget split for *both* sides, scored against the uncapped truth:
 
@@ -857,6 +861,103 @@ makes `Δ₂ = B₂`, but at ε_agg = 0.5, δ = 1e-6 Gaussian needs `Δ₂ ≤ �
 Only the analytic-Gaussian calibration edges ahead, by 6% (and 10% at 400 groups) — not
 worth requiring δ for. The switching rule is `c · k_eff > 14`, and measured `k_eff` saturates
 at 6–7 on this data, so it takes 3+ aggregates to flip.
+
+## PRIVACY BUG in the ℓ1 clip as originally written — fixed, and the fix is free
+
+The clip was specified as `n_u = Σ_g min(t(u,g), B)`, then `released = min(t,B) · min(1, B/n_u)`.
+**That is a signed sum, not a norm, and it does not bound sensitivity.** Two failure modes:
+
+| construction | `n_u` | released ‖·‖₁ vs B |
+|---|---|---|
+| `k` cells alternating `+B, −B` — they cancel | 0 → scale = 1, PU released **unclipped** | `k`× (400× at k=400) |
+| 2 cells `+B, −B−e` | `−e` → scale = `B/n_u` < 0, diverges | 10¹⁵× at e=1e−12, **unbounded** |
+
+Mode 1 makes sensitivity grow linearly in the number of groups a PU touches — reintroducing
+exactly the `C_u` dependence the mechanism claims to remove.
+
+**It fires on an ordinary query.** `SUM(price shipped − price returned)` — net revenue after
+returns — by (customer, month) on sf10, 30.4M cells, 24.7% negative, at `B = 2²¹`:
+
+| | as written | with fix |
+|---|---|---|
+| PUs with `n_u < 0` | 13,266 | — |
+| PUs exceeding the bound | **393,053 (39.3%)** | **0** |
+| worst ‖released‖₁ / B | **2.6×** | 1.000000000× |
+
+A 2.6× sensitivity violation means the release is 2.6ε-DP, not ε-DP. A second signed measure
+(all-negative cells) keeps ‖·‖₁ = B but **flips the released sign** — every group reported
+with the wrong sign, a silent correctness failure.
+
+**Fix:** `n_u := Σ_g |clip(t, −B, B)|`. On non-negative data this is *bit-identical*
+(`min(t,B) ≡ |clip(t,−B,B)|` for `t ≥ 0`), so **every utility number in this document stands
+unchanged**. The ℓ1 clip is not in `src/` yet, so this never shipped. Every measure tested
+here was non-negative, which is why 20 commits of experiments never surfaced it.
+
+## The tuned budget split silently destroys the key set
+
+The headline split (`ε_b`=.05, `ε_η`=.10, `ε_v`=.85) was tuned on one 80-group query where τ
+never binds. Starving `ε_η` from 1/3 to 0.10 raises τ by 3.33× at every `C_u` — at `C_u`=19,
+τ goes **979 → 3,491**. Groups with 979 < PUs < 3,491 are released by Google's split and
+killed by mine. On ordinary sf10 queries:
+
+| query | groups | median PUs/group | released (ε_η=1/3) | released (ε_η=0.10) |
+|---|---|---|---|---|
+| month\|nation, acctbal≥8000 | 2,095 | 2,779 | 2,025 | **20** (−99%) |
+| day\|region, acctbal≥8000 | 12,630 | 875 | 1,117 | **0** |
+| day\|nation | 63,150 | 963 | 24,929 | **0** (empty result) |
+
+`day|nation` returns *literally nothing*. Any comparison must either match `ε_η` or tune it
+per query for both sides — and a mechanism that returns an empty answer must be scored as
+100% error, not excluded from the average.
+
+## HONEST HEADLINE — 4.65× on a τ-binding query, both fully tuned
+
+Scoring rule that charges for suppression: relative ℓ1 over the **true** key set, a suppressed
+group counted as released 0. Both sides tuned over `C_u ∈ {1,2,5,10,19,30,50,72}` × 8 budget
+splits (64 configs each). `SUM(price)` by month|nation, acctbal≥8000, sf10 — 2,095 groups,
+181,532 PUs, 5.5M cells, max `k_u` = 72:
+
+| | error | best config | released |
+|---|---|---|---|
+| Google DP | **19.34%** | `C_u`=30, (0.002, 0.300, 0.698) | 1,969/2,095 |
+| ours (ℓ1 clip) | **4.16%** | `C_u`=**1**, same split | 1,980/2,095 |
+| | **4.65×** | | |
+
+**The mechanism reduces to one structural fact: our value noise does not depend on `C_u` at
+all.** Google must *buy* `C_u` to limit truncation bias — at `C_u`=19 it still loses 40%, and
+its optimum `C_u`=30 costs `C_u·U` = 15,728,640 in noise, of which 15.56pp of the 19.34% is
+irreducible truncation + cell-clip **bias**. We set `C_u` = 1 (cheapest possible τ) because
+`C_u` enters only the vote histogram, and pay `B` = 4,194,304 — a **3.75× sensitivity ratio**
+that lands as a 4.65× error ratio.
+
+So the gain *grows* with grouping fineness: ~2.4× on a coarse 80-group query (where each PU
+touches few groups and `C_u` truncation is nearly free for Google), 4.65× here at max `k_u`=72.
+
+**Correction to method:** an earlier version of this run computed our vote counts from the
+*untruncated* per-group PU counts while scaling noise by `C_u` — not a valid sensitivity. With
+votes properly truncated to `C_u` groups per PU, ours goes 3.08% → 4.16% and the gap 13.0× →
+4.65×. The vote histogram must be truncated even though the values are not.
+
+## The adaptive bound rule is not needed — use ApproxBounds on the norm histogram
+
+The winning configuration above does **not** use the adaptive objective rule from the section
+above. It runs plain **ApproxBounds over the per-PU *norm* histogram** — same Google
+primitive, different input. This is strictly better as a proposal:
+
+- The adaptive rule **as written in this document is numerically broken**: the objective sums
+  over all 64 log2 bins, and empty high bins carry `Laplace(2/ε_b)` noise times
+  `mid₆₃ = 2^63.5 ≈ 1.3e19`, swamping both numerator and total mass. Argmin then always picks
+  `B = 2`. A verbatim implementation scores **50.3%**, not 0.30%. Reproducing 0.30% needs
+  clamping noisy counts at 0 *and* a public bin cap ≤ ~2²² — a load-bearing, undocumented
+  hyperparameter. (This code happened to use `np.unique` over occupied bins only, which is why
+  it never bit here.)
+- The rule also consumes `median_group_total`, a **non-private** data-dependent quantity never
+  charged to the ε budget.
+- Google's own ApproxBounds, given `ε_b` = 0.002, lands within 3% of the fine-grid oracle
+  bound. Starving `ε_b` is the whole trick, and it is free.
+
+The mechanism contribution is therefore *only* the change of clipping geometry — bound the
+per-PU norm, keep `C_u` for the votes — with no new bound-selection machinery.
 
 ## Untested
 
