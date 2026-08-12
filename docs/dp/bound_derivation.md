@@ -630,6 +630,40 @@ aggregate queries should stay on Laplace.
 Caveat: this compares noise std only. The ℓ2 and ℓ1 clips have different bias, and δ becomes
 required — though grouped queries already need δ for τ.
 
+## The budget split — and a correction to the τ-reuse result
+
+**Bound selection needs almost no budget.** Sweeping ε_b at ε_total = 1:
+
+| ε on bounds | TPC-H bound picked | TPC-H error | StackOverflow error |
+|---|---|---|---|
+| 0.50 (`bounded-sum.h` default) | 2,097,152 | 0.51% | 10.26% |
+| 0.10 | 2,097,152 | 0.28% | 7.38% |
+| **0.05** | 2,097,152 | **0.27%** | **7.29%** |
+| 0.01 | 2,097,152 | 0.25% | 7.22% |
+
+The selected bound is *identical at every split* on TPC-H — it is a choice among ~15 log₂
+bins on counts in the thousands, so noise cannot move it. Google's `SetEpsilon(epsilon/2)`
+default therefore over-spends by roughly 2×. This is a tuning fix available to both
+mechanisms, not a differentiator. Below ~0.02 the selection destabilises (StackOverflow
+wobbles between bins 16/32/64), so ~0.05 is the safe operating point.
+
+**This overturns the τ-reuse gain.** Reusing the histogram for τ forces ε_b to stay large,
+because `τ ∝ 2C_u/ε_b`. Jointly optimising the split at C_u = 1:
+
+| scheme | ε_b | τ | released | error |
+|---|---|---|---|---|
+| TPC-H, τ reuse | 0.10 | 346 | 98.8% | 0.30% |
+| TPC-H, **separate τ** (ε_b=0.05, ε_η=0.05) | 0.05 | 263 | 98.8% | **0.30%** |
+| StackOverflow, τ reuse | 0.50 | 69 | 88.3% | 2.72% |
+| StackOverflow, τ reuse | 0.10 | 346 | 28.5% | 1.80% |
+| StackOverflow, **separate τ** (ε_b=0.05, ε_η=0.1) | 0.05 | 132 | 87.2% | **2.42%** |
+
+**τ-reuse trades ε_η for ε_b at roughly 1:1, so it is a wash.** The 20–27% gain measured
+earlier was an artefact of a fixed 0.25/0.25/0.5 split in which ε_η was over-funded.
+τ-thresholding is cheap — ε_η ≈ 0.05–0.1 suffices — so freeing it buys little, while the
+reuse costs the values by pinning ε_b high. On TPC-H the two land exactly level; on
+StackOverflow the separate τ is better on both released groups and error.
+
 ## Untested
 
 - Everything here is a **single nonnegative additive aggregate**, sums and counts, static data.
