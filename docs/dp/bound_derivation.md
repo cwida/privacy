@@ -624,11 +624,25 @@ dimensionality does not grow. So the ℓ2 route alone never reaches 14 on this d
 | 6 | **Gaussian 1.68× better** |
 
 AVG alone is two cells (sum + count), and a query with SUM, COUNT and AVG is four — so the
-common multi-aggregate case sits exactly where joint ℓ2 clipping + Gaussian wins. Single-
-aggregate queries should stay on Laplace.
+common multi-aggregate case sits where the *noise formula* favours joint ℓ2 clipping and
+Gaussian.
 
-Caveat: this compares noise std only. The ℓ2 and ℓ1 clips have different bias, and δ becomes
-required — though grouped queries already need δ for τ.
+**Measured end-to-end, it does not.** Four aggregates on TPC-H month (SUM price, SUM
+quantity, SUM discounted price, COUNT), normalised per-PU vectors over all 4×80 cells giving
+median `k_eff = 24.1` — far above the `3.75²/c = 3.5` the formula requires:
+
+| mechanism | error |
+|---|---|
+| per-aggregate ℓ1 clip + Laplace | **1.227%** |
+| joint ℓ2 clip (R=1.0) + Gaussian | 1.272% (0.96×) |
+| joint ℓ2 clip (R=1.5) + Gaussian | 1.938% |
+| joint ℓ2 clip (R=2.0) + Gaussian | 2.589% |
+
+The formula predicts Gaussian 2.6× better here and it comes out 0.96× — a wash. The noise
+analysis is right; the **bias** cancels it. ℓ2 clipping preferentially shrinks *concentrated*
+PUs and spares spread ones, while ℓ1 treats equal totals equally, so at matched noise the ℓ2
+arm carries a different and here larger bias. **A noise-std comparison is not a mechanism
+comparison** — the same lesson as the fixed-budget-split trap, in a different guise.
 
 ## The budget split — and a correction to the τ-reuse result
 
