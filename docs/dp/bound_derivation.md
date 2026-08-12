@@ -698,6 +698,34 @@ take `C_u = 1` for the cheapest τ **and** keep 100% of the values. StackOverflo
 then gives 87.6% of groups released at 7.12% error, the best configuration measured anywhere
 in this work.
 
+## Head to head with Google DP, and where the gain actually comes from
+
+ε = 1, scored against the **uncapped** truth. Google DP: ApproxBounds on per-(PU,group)
+partials, `C_u` truncation, `Laplace(C_u·U/ε_v)`, 1/3 split. Ours: adaptive bound on per-PU
+norms, ℓ1 clip with no value cap, `Laplace(B/ε_v)`, vote-capped τ, split 0.05/0.10/0.85.
+
+| dataset / grouping | C_u | Google DP | ours | gain |
+|---|---|---|---|---|
+| tpch price/month | 1 / 5 / 19 | 89.51% / 49.41% / 3.57% | 0.30% / 0.30% / 0.29% | 301× / 165× / 12× |
+| tpch price/quarter | 1 / 5 / 19 | 88.14% / 43.15% / 1.19% | 0.10% / 0.21% / 0.10% | 880× / 210× / 12× |
+| tpch count/month | 1 / 5 / 19 | 89.51% / 49.45% / 4.21% | 0.35% / 0.35% / 0.35% | 256× / 142× / 12× |
+| StackOverflow count/month | 1 / 5 | 44.36% / 38.51% | 7.13% / 5.15% | 6.2× / 7.5× |
+| ClickBench count/date | 1 / 4 | 4.37% / 13.85% | 0.75% / 0.73% | 5.8× / 19× |
+
+**Decomposed** (tpch price/month), turning on one change at a time:
+
+| cumulative change | C_u = 5 | C_u = 19 |
+|---|---|---|
+| Google DP as shipped | 49.37% | 3.58% |
+| + tuned budget split | 49.40% (1.0×) | 1.42% (2.5×) |
+| + **ℓ1 clip instead of C_u truncation** | **0.29% (168×)** | **0.29% (12.4×)** |
+| + adaptive bound instead of ApproxBounds | 0.29% (—) | 0.29% (—) |
+
+**The ℓ1 clip is essentially the entire gain.** Budget tuning is worth 2.5× but only where
+truncation bias is not already dominating, and the adaptive bound adds nothing on this data —
+ApproxBounds picks the same bound. So the defensible single claim is: **replace `C_u` random
+truncation with an ℓ1 clip to a per-PU norm bound, and keep `C_u` only for the τ votes.**
+
 ## Untested
 
 - Everything here is a **single nonnegative additive aggregate**, sums and counts, static data.
