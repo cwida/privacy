@@ -1147,6 +1147,25 @@ this document evaporated once the baseline was tuned as hard as the proposal.** 
 4.8× → 4.65× → 1.36×. A DP mechanism comparison at a fixed budget split, a fixed `C_u`, or
 against a library's default configuration is not evidence.
 
+## Open threads — resume here
+
+Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
+file plus the scripts under `attacks/`.
+
+- **Two adversarial agents were still running against the 1.36×** when work paused, re-deriving
+  the steelmanned Google baseline and the δ argument from scratch. Their results were never read.
+  If the 1.36× is going into a paper, redo that check — every previous headline in this document
+  fell to exactly this kind of pass.
+- **Neither free fix is implemented in `src/`.** The ℓ1 clip does not exist there yet, so
+  `n_u := Σ_g |clip(t, −B, B)|` and the ≥1-vote gate must land *with* it, not after.
+- **Not yet measured against the fixed baseline:** debiasing the clip loss (was 1.19–1.25× against
+  the old one), and whether the 1.1×–2.4× range holds on StackOverflow / ClickBench — the earlier
+  cross-dataset numbers all used the unfixed Google.
+- **Dandan's histogram-based τ-thresholding is still untested inside this comparison**, and the
+  ~1,000-PUs-per-group floor (where every arm returns ~100% error) is exactly the regime it
+  targets. That is the most promising remaining direction.
+- Everything here is grouped SUM on non-negative measures, static data, single aggregate.
+
 ## Untested
 
 - Everything here is a **single nonnegative additive aggregate**, sums and counts, static data.
