@@ -1147,6 +1147,72 @@ this document evaporated once the baseline was tuned as hard as the proposal.** 
 4.8× → 4.65× → 1.36×. A DP mechanism comparison at a fixed budget split, a fixed `C_u`, or
 against a library's default configuration is not evidence.
 
+## Dandan's follow-ups, 12 Aug — all four are the same cancellation
+
+`attacks/dandan_followups.py`. Every one of these splits a budget across `k` sub-mechanisms and
+recombines. The recombination never repays the split, because Laplace/exponential error scales as
+`1/ε` while any accompanying reduction in data re-inflates the relative error by exactly the same
+factor.
+
+**(1) "AVG needs no rescaling, so it escapes the cancellation."** It doesn't — and the reason is
+worth stating precisely, because the intuition is a good one. Halving the PUs and doubling the
+per-attribute budget halves the noise scale on the SUM (16,000,000 → 8,000,000), but it also
+halves the true SUM (416.7e9 → 208.3e9). Relative error is unchanged: 0.0446% vs 0.0441%
+= **0.988×**. No rescale is written down, but the **halved COUNT in the denominator is the
+rescale**. And the half then carries 0.254% sampling error — 5.8× the noise it was trying to
+save.
+
+**(2) Restricting ApproxBounds to `c₂−c₁+2` candidate bins.** The threshold is
+`−ln(2(1 − P^(1/2n)))/ε_b`, which is **logarithmic in the bin count**:
+
+| bins | 2 | 4 | 16 | 64 | 256 | 512 |
+|---|---|---|---|---|---|---|
+| threshold × `ε_b` | 21.42 | 22.11 | 23.50 | 24.88 | 26.27 | 26.96 |
+
+Collapsing 64 candidate bins to 4 lowers it by **11%**. And the budget it would save is not
+there to save: **the tuned optimum is `ε_b` = 0.002 in every sweep in this document, 0.2% of ε.**
+Making automatic bounding entirely free is worth 0.2%. The frozen-correspondence machinery — a
+parser that picks a bounding strategy per query and per attribute, plus stored exception sets —
+is a large amount of work for at most that.
+
+**(3) Combining `t` per-group histograms to lower τ.** τ genuinely does drop, which is the
+appealing part: **48.8 → 46.4 → 41.8 → 32.6** for `t` = 1, 2, 4, 8 (each test must fire with
+probability `δ_η^(1/t)`, so each log-term is divided by `t`). But τ is not the decision-relevant
+number. The smallest group actually *released* — where all `t` tests pass with probability ½ —
+goes the other way: **48.8 → 50.0 → 57.1 → 80.5**. Splitting `ε_η` across `t` tests multiplies
+each test's noise by `t`, and requiring all `t` to pass costs more than the lower threshold buys.
+The root cause: all `t` histograms estimate the *same* quantity — how many PUs are in the group —
+so measuring it `t` times at `ε_η/t` is strictly worse than measuring it once at `ε_η`. An OR
+instead of an AND loses too (false positives then need `δ/t`, raising τ). Reusing the
+bound-selection histograms for free doesn't rescue it either: at `ε_b` = 0.002 their noise scale
+is `C_u`/0.002 = 500 against a threshold near 48.
+
+**(4) Half-dataset splitting with a global-sensitivity median.** Worth testing, because by the
+rule *"splitting helps exactly when the sensitivity grows slower than the budget doubles"* a
+global-sensitivity median should be the ideal case — its sensitivity is 1 rank regardless of `n`,
+so it doesn't grow at all. Implemented the exponential mechanism on rank utility over a public
+range (pure ε-DP, no δ) and swept ε and `n`:
+
+| n | ε | full | half (2ε) | ratio | subsampling alone | dominated by |
+|---|---|---|---|---|---|---|
+| 1,971 | 0.002 | 95.35% | 92.92% | 0.97× | 1.43% | DP noise |
+| 1,971 | 0.02 | 8.86% | 7.06% | **0.80×** | 1.43% | DP noise |
+| 1,971 | 0.2 | 1.41% | 1.79% | 1.27× | 1.43% | subsampling |
+| 181,532 | 0.002 | 0.77% | 0.84% | 1.09× | 0.14% | DP noise |
+| 181,532 | 0.02 | 0.08% | 0.17% | 1.97× | 0.14% | subsampling |
+| 181,532 | 2.0 | 0.0005% | 0.148% | **290×** | 0.14% | subsampling |
+
+Same shape as the smooth-sensitivity result: a ~1.25× win in a narrow window where DP noise
+dominates, and catastrophic loss (1.3×, 20×, 290×) once the mechanism is accurate. **The window
+sits exactly where the median is too noisy to be worth releasing.** So the global-sensitivity
+median does not rescue splitting — and it shows the earlier ~0.85× smooth-sensitivity win was not
+splitting working, but smooth sensitivity growing sub-linearly over a narrow range of `m`.
+
+**The one direction from this batch that is not dead:** none of these attack the real bottleneck.
+`ε_b` is 0.2% of the budget and τ's floor is set by a single count measurement that cannot be
+beaten by subdividing it. If the ~1,000-PUs-per-group floor is to move, it has to come from
+somewhere other than budget re-allocation.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
