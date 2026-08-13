@@ -1726,6 +1726,109 @@ explains why the same mechanism gives 6.0× on TPC-H and 0.90× on StackOverflow
 difference between an empty answer and 94% key-set recovery on the two queries where Laplace
 partition selection returns nothing at any budget.
 
+## THE GAIN IS A RESONANCE, NOT A PLATEAU — and the SASS port is a loss
+
+Two adversarial reports plus my own independent re-measurement. This supersedes the scoping in
+the two sections above.
+
+**1. The gain is a window in ε.** Retuning *both* arms at every ε on `month|nation` (my own run,
+independent of the agent's):
+
+| ε | 0.10 | 0.25 | 0.50 | 1.00 | 2.00 | 4.00 |
+|---|---|---|---|---|---|---|
+| Laplace | 100.0% | 54.51% | 9.56% | 3.91% | 3.04% | 1.26% |
+| Gaussian | 99.96% | 16.45% | 6.64% | 3.10% | 2.78% | 1.24% |
+| **gain** | 1.00× | **3.31×** | 1.44× | 1.26× | 1.09× | 1.02× |
+
+The agent's independent sweep of the flagship query agrees in shape: 1.00× (0.1), 1.00× (0.25),
+1.01× (0.5), **4.53×** (1.0), 1.63× (2.0), 1.42× (4.0). **Each query has its own resonant ε**, and
+the published "gain grows as `n_g/k_u` falls" table is a slice at ε=1 through several different
+resonances — not evidence about grouping fineness at all.
+
+**2. The mechanism of the resonance, which subsumes the earlier `k_u` condition.** Both rules
+threshold the same effective count, so the groups that flip are those with
+`thr_G(C*) < n_g < k_h·τ_L(1)` — a band of fixed width `√k_h/ρ` ≈ **3.5×** in `n_g`. The gain is
+therefore *the share of the key set lying inside one 3.5×-wide window*. TPC-H's group sizes span
+only **2.1×** (p95/p5), narrower than the band, so ~94% of its key set flips at once; StackOverflow
+and ClickBench span **8.3×–584×**, so **0.0%** of their key sets can flip on any query tested.
+
+A controlled synthetic proof separates this from `k_u`: fixing every PU at `k_u`=49 (far above
+crossover) and varying **only** group-size dispersion moves the gain 2.82× → **1.47×** (ℓ1) and
+2.94× → **1.08×** (per-group) as `n_g` p95/p5 goes 1.2 → 581. **So `k_u` concentration is
+necessary but not sufficient** — my scope condition was one-sided. The full condition is:
+
+> harmonic-mean `k_u` > 4.1, **and** group sizes dispersed by less than ≈3.5×, **and** ε
+> positioned so the band overlaps the key set.
+
+TPC-H satisfies all three by construction — uniform group sizes, uniform `k_u`, and ε=1 happens to
+land the band on `week|nation`. Nothing else tested does.
+
+**3. The crossover is the harmonic mean, and a heavy tail buys nothing.** `ρ` = 2.02 at δ=1e−6
+(2.09 at 1e−3, 2.01 at 1e−9), so the crossover is `k_h` = `ρ²` ≈ **4.1**. Four shapes with *mean*
+`k_u` = 20: all-20 → `f`=0.52 (Gaussian wins); half-39/half-1 → 2.02; 5%-at-381 → 2.02;
+1%-at-1901 → 2.02 (Gaussian loses identically). **A useful asymmetry for the port:** `C_e`=1 is
+always available, so a wrong *Gaussian* choice costs at most `ρ` ≈ 2.1× in ε, while a wrong
+*Laplace* choice is unbounded (7.9× at `k_h`=250). **Prefer Gaussian under uncertainty.**
+
+**4. The metric that produced every headline in this document is unsafe on skewed data.** On
+`cb hits|date|region` a tuned release scores **ℓ1 = 8.6%** while its *mean per-group* error is
+**90%** — it releases 6.8% of groups covering 95.1% of the mass. Injecting realistic skew into
+TPC-H (`n_g` p95/p5 = 169×, vote structure untouched) takes the ℓ1 gain 4.55× → 3.33× but the mean
+per-group gain to **1.18×** and p95 per-group to **1.00×**, with 19% of Gaussian's releases worse
+than silence. On unskewed TPC-H the result *does* survive six metrics (4.56× ℓ1, 3.79× mean
+per-group, 3.70× nRMSE, released-group p50 error 0.10 and flat across size quintiles) — but TPC-H
+cannot test the failure mode, because its group totals span only 2.1×.
+
+**5. The SASS port loses under this document's own scoring rule.** The transfer agent measured a
+73.8× key-set gain inside genuine smooth-sensitivity accounting (verified: exact NRS envelope,
+64 lanes, reproduces `dp_smooth_median_noise_scale` to 16 digits, and matches the built extension
+across 12 configs). The refutation confirmed the floor arithmetic (28.63/43.66/74.66 at c=1/2/4)
+and reproduced the key-set gain (68.7× vs 73.8×) — **but that metric charges released groups zero
+error**, so the median machinery is dead code for every number in it. Under relative ℓ1 with
+suppressed groups charged full error:
+
+| query | Laplace votes | Gaussian votes |
+|---|---|---|
+| month\|nation, c=1 | 252.5% | **288.3%** |
+| month\|nation, c=2 | 100.0% | **382.9%** |
+| month\|nation, c=4 | 100.0% | 122.3% |
+
+**Why it inverts, and this is the interesting part:** Laplace's τ grows *linearly* in `C`, so
+Laplace can always buy total suppression — releasing nothing scores 100%. Gaussian's threshold
+grows only as `√C`, so **it cannot fall back to silence**; the very property that wins the key set
+forces it to release groups whose value error exceeds their mass. Releasing more is worse when the
+value channel is broken.
+
+**And the SASS value channel is broken independently**, in a pincer: at small `C_v` the rank cap
+biases every group by `1 − C_v/k_u` (≈98% on these groupings); at large `C_v`,
+`ε_cell = ε/((c+1)C_v)` drives `β` so small that the NRS envelope collapses to its sentinel term
+`2Λe^{−65β}`, needing `ε_cell ≳ 3` (i.e. ε ≳ 6) to decay. The built extension agrees — its best
+config on the *coarsest* grouping is 102% rel-ℓ1. **`month|nation` already releases 96.6% of its
+key set at c=1 and still scores 252%: τ-suppression is not the bottleneck in SASS.** Fixing the
+vote geometry there optimises a channel that is not binding.
+
+**Two corrections to the transfer agent's own claims**, both found by the refutation: "SASS is
+worse off than `dp_standard`" is false — `FinalizeDPLaplace:2790` uses the *identical*
+`ε/(k+1)`, so the comparison was against an idealised `dp_standard` that nothing implements (the
+untuned-baseline error, inverted). And the plan's structural change is wrong: `BuildRankCapFilter`
+ANDs every spec, so a second `RankCapSpec` applies `min(C_e,C_v)` — it tightens rather than
+decouples.
+
+### Revised honest summary
+
+| setting | gain |
+|---|---|
+| TPC-H, at each query's resonant ε | 3.3×–6.0× |
+| TPC-H, off resonance | 1.0×–1.6× |
+| TPC-H with realistic group-size skew, per-group metrics | 1.00×–1.18× |
+| StackOverflow / ClickBench, end-to-end | **0.90×–1.45×** (sign flips) |
+| smooth-sensitivity SASS, end-to-end | **loses** (252% → 288%) |
+
+The durable results are the **negative and structural** ones: the ℓ1/ℓ2 rule itself; the proof
+that Laplace partition selection has an immovable `ln(1/2δ_η)/ε_η` floor; the `k_h` ≈ 4.1
+crossover with its asymmetric risk; and the finding that total-ℓ1 hides a release answering 7% of
+a key set. **The utility headline does not survive as a general claim.**
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
@@ -1755,9 +1858,15 @@ file plus the scripts under `attacks/`.
   the Gaussian/Laplace choice needs, and whether the same band argument bounds the ℓ1-clip gain too
   (it should — the value channel has its own threshold-free geometry, so probably not, but it has
   not been checked).
-- **Not yet ported:** none of this is in `src/`. The smooth-sensitivity (`dp_sass`) path uses the
-  same Wilson τ with Laplace votes, so the floor should apply there and Gaussian votes should
-  transfer without touching the median/lane machinery — unverified.
+- **Do not port yet.** The SASS floor is confirmed (28.63/43.66/74.66 at c=1/2/4) and Gaussian
+  votes do recover the key set there — but end-to-end they *lose*, because SASS's value channel is
+  independently broken and releasing more is worse. **Fix the SASS value channel first** (the
+  `C_v` pincer: rank-cap bias at small `C_v`, NRS envelope collapse at large `C_v`), then re-measure.
+  Two free fixes are worth doing regardless: clamp the released SUM/COUNT median to the public
+  domain (src clamps only the AVG ratio, which is why rel-ℓ1 reaches 2349), and the vote-support
+  gate.
+- **Re-examine every headline in this document under a per-group metric.** Total-ℓ1 reported 8.6%
+  for a release answering 7% of a key set. All the numbers here are total-ℓ1.
 
 ## Untested
 
