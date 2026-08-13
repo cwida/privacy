@@ -1147,6 +1147,94 @@ this document evaporated once the baseline was tuned as hard as the proposal.** 
 4.8× → 4.65× → 1.36×. A DP mechanism comparison at a fixed budget split, a fixed `C_u`, or
 against a library's default configuration is not evidence.
 
+## THE 1.3× IS MEASURED AT TPC-H'S BEST CASE FOR GOOGLE
+
+Two adversarial re-derivations of the 1.36× came back. Both reproduced it; both found the
+*framing* wrong, in opposite directions. Net: the number is right and the conclusion drawn from
+it was not.
+
+**First, two corrections to our own harness.**
+
+1. **The split grid capped `ε_η` at 1/3, which structurally under-tunes Google.** Google's τ
+   scales with `C_u`, so it needs a large `C_u` (to kill truncation bias) *and* a large `ε_η` (to
+   afford the τ that `C_u` buys) — a combination the grid could not express. This is this
+   document's own rule failing on this document's own harness, for the seventh time. Re-running
+   with `ε_η` up to 0.6:
+
+   | grouping | old grid | widened grid |
+   |---|---|---|
+   | month | 2.40× | **2.13×** |
+   | month\|priority | 1.30× | 1.30× |
+   | month\|nation | 1.34× | 1.35× |
+   | day | 1.11× | **1.17×** |
+
+   Honest range **1.17×–2.13×**, replacing 1.1×–2.4×. Google gains most on `day` (21.12% →
+   14.60%), where it wants `C_v`=30.
+
+2. **`taubinding_headtohead.py` truncates votes incorrectly** — `keep` is built from indices into
+   the `pi`-sorted arrays and then applied to the *unsorted* `gi`/`val`, so at `C_u`=1 a PU can
+   get up to 9 votes and 26.6% of PUs exceed the cap. That is a 9× ε violation in the vote
+   channel of the harness that produced the 4.65×. **`fineness_sweep.py` is clean** — verified
+   directly, max votes per PU equals `C_u` exactly and 0 PUs over cap at `C_u` ∈ {1,2,5,30} for
+   both random and top ranking — so every number in the sections above stands.
+
+**Then the finding that matters.** Google's rescale moves most of every PU's mass onto that PU's
+top-`C_v` cells. The group-level bias of doing so is small *only if PUs disagree about which of
+their own groups is biggest*, so the misallocation cancels across many PUs. TPC-H ship dates are
+uniform, so which of a customer's 30 months is largest is essentially noise — the best possible
+case for the trick. Tilting each PU's allocation toward a shared direction while holding fixed
+**every quantity either mechanism's accounting reads** (per-PU totals, per-PU norms and therefore
+`B`, the (PU,group) incidence and therefore `k_u`, both vote histograms and τ, and Σtruth):
+
+| alignment | Google | +top | +rescale | ours | gap |
+|---|---|---|---|---|---|
+| **1.07 (real TPC-H)** | 12.31% | 9.61% | 5.59% | 4.13% | **1.35×** |
+| 3.81 | 14.85% | 11.00% | 9.41% | 4.06% | **2.32×** |
+| 7.58 | 23.58% | 17.70% | 17.81% | 4.07% | **4.35×** |
+| 12.04 | 46.23% | 19.27% | 22.00% | 4.23% | **4.56×** |
+
+*(alignment = HHI of each PU's argmax group × K; 1.0 means PUs disagree entirely.)*
+
+**Ours is flat at 4.06–4.23% across the entire range.** That is the real structural statement,
+and it is sharper than the `C_u`-free claim it replaces: **our error depends only on the per-PU
+norm distribution, which the perturbation preserves; Google's additionally depends on how each PU
+spreads its mass across groups.** The ℓ1 clip never redistributes, so it cannot be wrong about
+where the mass went.
+
+**How aligned is real data?** Measured on every dataset available, restricted to PUs with
+`k_u ≥ 5` — the ones truncation actually moves:
+
+| dataset | alignment | PUs with `k_u ≥ 5` |
+|---|---|---|
+| TPC-H price by month\|nation | **1.07** | 99.9% |
+| StackOverflow posts by month | 1.41 | 5.3% |
+| StackOverflow score by month | 1.49 | 5.3% |
+| ClickBench hits by date | 2.07 | 0.0% (31 users) |
+| ClickBench hits by region | 13.02 | 0.0% (40 users) |
+
+This does **not** establish that real workloads are aligned where it matters. TPC-H is the only
+dataset here in which PUs genuinely spread across many groups, and it sits at 1.07 — essentially
+the theoretical floor. StackOverflow and ClickBench show more alignment (1.4–13) but almost no
+wide-spread PUs, so truncation barely engages there at all.
+
+**The defensible statement is therefore narrower than either previous headline:** on the only
+available dataset with wide per-user spread, the gap is 1.17×–2.13×, and that dataset has the
+most Google-favourable allocation structure achievable. A workload with both wide spread and
+genuine alignment — seasonal retail, event data around releases — would show 2×–4.5×, but no such
+dataset was tested. **Getting one is the single highest-value next experiment.**
+
+**Three further corrections from the refutations**, all against claims recorded above:
+
+- **"The gap equals the sensitivity ratio" is wrong.** Decomposed at both optima: noise-term ratio
+  1.086×, bias-term ratio 2.176×. The 1.25× sensitivity ratio explains almost none of it — the gap
+  is essentially *all* redistribution bias, which is exactly what the alignment probe then
+  confirmed by moving the bias alone.
+- **Decoupling `C_e` from `C_v` is not load-bearing** — worth 0.10pp at the rescale rung
+  (5.552% → 5.451%), not the 0.55pp claimed. It matters only at the pre-rescale rung.
+- **The steelman's rescale re-introduced the signed-value bug** this document already found and
+  fixed in the ℓ1 clip: `min(v·f, U)` caps only from above, and on signed data violates `C_v·U` by
+  3.14×. Fixed here to two-sided `clip(·, −U, U)`; identical on non-negative data.
+
 ## Dandan's follow-ups, 12 Aug — all four are the same cancellation
 
 `attacks/dandan_followups.py`. Every one of these splits a budget across `k` sub-mechanisms and
