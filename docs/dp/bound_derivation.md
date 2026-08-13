@@ -910,7 +910,12 @@ killed by mine. On ordinary sf10 queries:
 per query for both sides — and a mechanism that returns an empty answer must be scored as
 100% error, not excluded from the average.
 
-## HONEST HEADLINE — 4.65× on a τ-binding query, both fully tuned
+## 4.65× on a τ-binding query (superseded — the baseline was still not fully tuned)
+
+> Superseded by *THE GAP IS 1.36×* below. The Google arm here is missing three legal
+> improvements (top-`C_v` selection, rescale-with-re-clip, decoupled `C_e`/`C_v`) and its vote
+> histogram is untruncated. Kept for the record because the `C_u`-decoupling reasoning below is
+> what the audit then falsified.
 
 Scoring rule that charges for suppression: relative ℓ1 over the **true** key set, a suppressed
 group counted as released 0. Both sides tuned over `C_u ∈ {1,2,5,10,19,30,50,72}` × 8 budget
@@ -1021,6 +1026,74 @@ different metrics gives 1.23×–1.45×, and no metric makes Google win:
 stands and should be the methodological headline of the writeup: *a DP mechanism comparison is
 evidence only if the baseline was tuned as hard as the proposal.*
 
+## The gain does NOT grow with grouping fineness — sweep against the fixed baseline
+
+Reproduced the 1.34× independently, at the same configuration the steelman found
+(`C_e`=1, `C_v`=10), then swept grouping granularity. TPC-H sf10, `acctbal ≥ 8000`, every arm
+tuned over `C_e` × `C_v` × 7 splits (`attacks/fineness_sweep.py`):
+
+| grouping | groups | max `k_u` | median PUs/group | Google | +top | +rescale | ours | gap |
+|---|---|---|---|---|---|---|---|---|
+| year | 7 | 7 | 163,565 | 0.02% | 0.02% | 0.02% | 0.01% | 1.81× |
+| month | 84 | 72 | 69,976 | 0.76% | 0.73% | 0.42% | 0.17% | **2.40×** |
+| month\|priority | 420 | 104 | 17,100 | 3.45% | 2.13% | 1.18% | 0.91% | 1.30× |
+| month\|nation | 2,095 | 72 | 2,779 | 15.95% | 12.76% | 5.62% | 4.20% | 1.34× |
+| day | 2,526 | 176 | 4,386 | 21.12% | 21.08% | 6.77% | 6.08% | 1.11× |
+| week\|nation | 9,050 | 130 | 1,038 | 99.97% | 99.93% | 99.90% | 99.92% | — |
+| day\|region | 12,630 | 176 | 875 | 100.0% | 99.99% | 99.99% | 100.0% | — |
+
+Two conclusions, both against the earlier draft:
+
+**The fineness hypothesis is dead.** Against the *unfixed* Google the gap did grow with fineness
+(5.27× at month, 5.21× at day). Against the fixed one it *shrinks* — 2.40× → 1.11×. The rescale
+trick repairs truncation bias precisely where truncation was worst, which is exactly the fine
+groupings, so it flattens the curve. The earlier reading was an artifact of the missing baseline
+improvement.
+
+**Below ~1,000 PUs per group, both mechanisms return nothing at ε=1.** `week|nation` and
+`day|region` sit at ~100% error for every arm: τ suppresses essentially every group. The
+comparison is only meaningful above that floor, and no clipping geometry rescues it — it is a
+partition-selection limit, not a sensitivity limit.
+
+**Honest range: 1.1×–2.4×, median ~1.3×.**
+
+## Four more clean negatives, one of them provable
+
+**Finer bound grids buy nothing (1.009×).** Google's effective bound `C_v·U` lives on a fine
+grid (any integer × a power of two) while ours is `B = 2^j`, so we should be paying a rounding
+penalty of up to 2×. Measured with log-base 2, √2, 2^(1/4), 2^(1/8) — every grid converges on the
+same `B` = 2²², and 2^(1/8) is *worse* (5.29%) because 512 bins raise the ApproxBounds threshold
+enough to push `B` up a notch. The threshold itself grows only logarithmically
+(24.88/`ε_b` at 64 bins → 26.96 at 512), so fine bins are cheap; they just have nothing to win
+here. `attacks/bound_grid.py`.
+
+**The ℓ1 clipping geometry cannot matter — this one is exact, not empirical.** Five geometries at
+identical sensitivity `‖v_u‖₁ ≤ B` (proportional scaling, ℓ1-ball projection / soft-threshold,
+per-PU water-filling cap, greedy keep-top, flat `B/k_u` cap):
+
+| geometry | error | clip bias |
+|---|---|---|
+| proportional | 4.223% | 0.753% |
+| softthresh | 4.295% | 0.753% |
+| waterfill | 4.222% | 0.753% |
+| keeptop | 4.230% | 0.753% |
+| uniformcap | 5.124% | 2.688% |
+
+The first four have *bit-identical* bias, and necessarily so: on non-negative data every
+budget-saturating geometry removes exactly `max(0, ‖t_u‖₁ − B)` from each PU, and because all
+per-group deficits share a sign,
+`Σ_g |tot_g − truth_g| = Σ_u max(0, ‖t_u‖₁ − B)` — independent of *which* cells the mass came
+from. Geometry is invisible to any total-absolute-error metric; only budget **saturation**
+matters, which is the whole reason `uniformcap` (`Σ min(|t|, B/k_u)` ≪ `B` for skewed PUs) loses.
+It would matter for per-group *relative* metrics. `attacks/clip_geometry.py`.
+
+**Fractional votes: 1.018×.** Replacing random truncation in the vote histogram with a fractional
+`C_u/k_u` vote in every group a PU touches keeps ℓ1 vote sensitivity at `C_u` (so τ is unchanged)
+while removing the binomial sampling variance — a strict improvement in principle, worth nothing
+in practice: at 2,779 PUs/group the mean count is 77 against τ = 48.8, so groups clear τ either
+way. `attacks/vote_geometry.py`. Top-`C_u` votes are actively *worse* (5.01%) — value-ranked
+votes concentrate the key set on groups that were already safe.
+
 ## The adaptive bound rule is not needed — use ApproxBounds on the norm histogram
 
 The winning configuration above does **not** use the adaptive objective rule from the section
@@ -1041,6 +1114,38 @@ primitive, different input. This is strictly better as a proposal:
 
 The mechanism contribution is therefore *only* the change of clipping geometry — bound the
 per-PU norm, keep `C_u` for the votes — with no new bound-selection machinery.
+
+## WHERE THIS LANDED — read this section first
+
+After correcting the baseline six times and finding two privacy bugs in our own mechanism, the
+defensible claim is:
+
+**Bound the per-PU ℓ1 norm and clip to it, instead of bounding cells and multiplying by `C_u`.
+Against a fully tuned Google DP this is worth 1.1×–2.4× (median ~1.3×) on grouped SUM.**
+
+Two required fixes, both free:
+1. `n_u := Σ_g |clip(t, −B, B)|`, never `Σ_g min(t, B)` — the latter is not a norm and loses ε-DP
+   entirely on signed measures (39.3% of PUs over bound on an ordinary net-revenue query).
+2. Gate released groups on having ≥1 truncated vote, or δ is understated by ~`k_u/C_u` (53.6× at
+   the `C_u`=1 we want).
+
+What the gain actually is: after Google gets rescale-with-re-clip, both mechanisms reduce to
+*clip each PU's total to a bound, add Laplace(bound/ε)*. The residual is (a) a slightly tighter
+bound, `C_v·U`/`B` = 1.25×, and (b) that top-`C_v` truncation **misallocates** a PU's mass onto
+its largest groups, which ℓ1 clipping never does — 2.51% vs 0.75% bias. That is the contribution.
+It is real, small, and does not grow with grouping fineness.
+
+What measured as nothing, after tuning both sides: adaptive bound selection (ties ApproxBounds,
+and is numerically broken as documented), finer bound grids (1.009×), ℓ1 clipping geometry
+(provably 1.000× for total-error metrics), fractional votes (1.018×), free post-processing
+(1.001×), Gaussian/zCDP (loses for us; *helps* Google), τ-reuse (wash), half-dataset splitting
+(exact cancellation), per-group clip estimation (5.8–18.4× worse). The only other real gain is
+debiasing the clip loss, 1.19–1.25×.
+
+**Methodological finding, and arguably the most transferable result here: six separate gains in
+this document evaporated once the baseline was tuned as hard as the proposal.** 880× → 12× →
+4.8× → 4.65× → 1.36×. A DP mechanism comparison at a fixed budget split, a fixed `C_u`, or
+against a library's default configuration is not evidence.
 
 ## Untested
 
