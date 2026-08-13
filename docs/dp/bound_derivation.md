@@ -1829,6 +1829,85 @@ that Laplace partition selection has an immovable `ln(1/2δ_η)/ε_η` floor; th
 crossover with its asymmetric risk; and the finding that total-ℓ1 hides a release answering 7% of
 a key set. **The utility headline does not survive as a general claim.**
 
+## FIVE MORE LEVERS TRIED — four dead, one free but not a differentiator
+
+**Dual clip: buy ℓ2 slack on the value channel by forbidding concentration — 0.93×.** The rule
+said values are Laplace-only because a PU may concentrate all mass in one group (`Δ₂ = Δ₁ = B`).
+But concentration is a *choice*: cap each cell at `b` **then** norm-clip to `B`, giving
+`‖v‖₁ ≤ B` and `‖v‖_∞ ≤ b`, hence `‖v‖₂ ≤ √(B·b)`. Gaussian then wins iff `B/b > ln(1.25/δ)` ≈ 14.
+Google has no equivalent knob — its per-cell cap `U` must also carry the bound. It still fails,
+and the sweep shows exactly why:
+
+| `b` | B/1 | B/4 | B/16 | B/64 | B/256 |
+|---|---|---|---|---|---|
+| error | 13.36% | 7.29% | **4.33%** | 10.98% | 61.63% |
+
+A squeeze: the noise needs `B/b` > 28 to beat Laplace, but bias explodes by `B/64`. On TPC-H the
+per-PU norm is only ≈5.5× the max cell, so there is no room between "cap bites" and "ℓ2 pays".
+It would open on data where a PU's norm greatly exceeds its largest cell. `attacks/dual_clip.py`.
+
+**MSE-optimal `B` instead of ApproxBounds — 1.010×.** Adversarial review found ApproxBounds is a
+max-finder and costs *Google* 2× on `U`; the same criticism applied to our `B` yields nothing —
+the MSE objective selects the **same bound** ApproxBounds does (4,194,304). Our bound was already
+at its optimum.
+
+**Debiasing the clip loss — 0.854×, now a loss.** Estimating the clipped mass from the noisy norm
+histogram and adding it back proportionally *hurts*, because the clip removes mass from the
+whales' groups specifically, not proportionally. The 1.19×–1.25× recorded earlier was measured
+against the old baseline and **does not survive**. That was the last unvalidated positive in this
+document. `attacks/bound_and_debias.py`.
+
+**Marginal reconciliation — 0.791×.** Composite keys are a 2-D grid, so release the grid plus both
+marginals and solve for the closest consistent table (Hay et al.); reconciliation is free
+post-processing. It loses at every budget share, and the diagnostic says why: the `month|nation`
+grid is **99.8% dense**, so marginals carry almost no information the cells lack, while the 3-way
+split costs real noise. This predicts where it *would* pay — sparse grids — which is a different
+regime from the one we are in. `attacks/marginal_reconcile.py`.
+
+**Count-conditioned shrinkage — 1.02×–2.15×, free, but Google gets it too.** We already pay `ε_η`
+for a noisy per-group PU count and use it only for τ. It is strongly correlated with the SUM, so
+regressing the released sums on the released counts and shrinking toward the fit is pure
+post-processing. Plain James–Stein failed (1.001×) because between-group spread swamps the noise;
+*conditioned on the count* that spread mostly vanishes:
+
+| query | corr | ours | +regr | gain | Google | +regr | gain |
+|---|---|---|---|---|---|---|---|
+| so posts\|month | 0.986 | 36.48% | 16.99% | **2.15×** | 33.69% | 16.72% | **2.01×** |
+| so posts\|month score | 0.561 | 47.19% | 44.03% | 1.07× | 59.83% | 48.36% | 1.24× |
+| cb hits\|region | 0.982 | 5.81% | 5.69% | 1.02× | 6.19% | 6.10% | 1.01× |
+
+The gain tracks the correlation, and **Google gains as much or more**. So it is a genuine free
+improvement to the Wilson-et-al. line — nobody does it today, and it is worth publishing on its
+own — but it moves both arms and does not widen the gap. (On pure COUNT queries the correlation is
+near-tautological, so the 2.15× there should not be quoted as typical.)
+
+## WHERE THE ARGUMENT ACTUALLY STANDS
+
+Against **Google DP as published** — Wilson et al. and the library, one `C_u`, Laplace everywhere —
+we win **3.2×–6.0×** on TPC-H. That claim is intact and is the one a reader can check against a
+real system.
+
+Against the **steelman**, we win 1.2×–1.5×. But the steelman is not a system that exists: the
+rescale-to-true-total trick and the `C_e`/`C_v` decoupling were invented *in this project's own
+adversarial review*. Reporting only that number would be self-flagellation rather than science.
+
+**And the steelman is fragile in a way our mechanism is not.** From the alignment probe, holding
+every marginal fixed and tilting only how each PU spreads its own mass:
+
+| alignment | 1.07 (real TPC-H) | 3.81 | 7.58 | 12.04 |
+|---|---|---|---|---|
+| Google + rescale | 5.59% | 9.41% | 17.81% | **22.00%** |
+| ours | 4.13% | 4.06% | 4.07% | **4.23%** |
+| gap | 1.35× | 2.32× | 4.35× | **4.56×** |
+
+**Ours is flat across the entire range; the steelman degrades 4×.** Rescale works by assuming a
+PU's dropped mass belongs in its largest groups — true when users disagree about which group is
+biggest, false under any seasonality or shared trend. So the honest headline is not one number:
+
+> Against deployed Google DP, 3.2×–6.0×. Against the best Google DP we could construct, 1.2×–1.5×
+> on uniformly-allocated data and 2.3×–4.6× as soon as privacy units share allocation structure —
+> because the ℓ1 clip never redistributes mass, and every truncation-based method must.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
