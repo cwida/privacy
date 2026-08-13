@@ -1361,6 +1361,30 @@ Even at `ε_η` = 0.99 — leaving essentially nothing for the values — the fl
 split that exists**. The two queries Gaussian votes rescue are provably unrescuable by budget
 re-allocation, which is the strongest form of the answer to Dandan's (3).
 
+**The crossover is `k_u` ≈ 4.3, and it barely moves.** Solving for where the two release
+thresholds cross — Laplace releases iff `n_g > k_u·τ(1)`, Gaussian iff
+`n_g > 1 + √C_e·√(2ln(1.25/(δ/2)))·Φ⁻¹(1−(δ/2)/C_e)/ε_η`:
+
+| `ε_η` | 0.2 | 0.3 | 0.5 |
+|---|---|---|---|
+| crossover `k_u`, δ=1e−6 | 4.5 | 4.4 | 4.3 |
+| crossover `k_u`, δ=1e−9 | 4.3 | 4.2 | 4.2 |
+
+Both thresholds scale as `1/ε_η`, so the crossover is nearly invariant to the budget *and* to δ.
+**Gaussian votes win whenever a privacy unit can touch about five or more groups** — which is
+almost every grouped query with a per-user privacy unit. The Laplace `C_e` truncation is the
+wrong default, not merely a suboptimal one. (This is far below the 30–60 a first guess suggests:
+Laplace's cost is *linear* in `k_u` while Gaussian's is `√k_u`, so the `√(2ln(1.25/δ))` ≈ 5.3
+constant is repaid almost immediately.)
+
+**Implementation warning for the port — the sensitivity must not read the data.** The simulation
+uses `√(min(C_e, k_max))`, which is safe there only because the `C_e` grid is capped at the true
+`k_max`, making `min(C_e, k_max) = C_e` always. In a deployment `C_e` is a public setting
+(`dp_max_groups_contributed`) that a user may set *above* the true `k_max`, and then reading
+`k_max` from the data understates sensitivity: at public `C_e` = 200 against a true `k_max` = 72,
+`√200` = 14.14 but `√72` = 8.49, a **1.67× understatement** — the release would be
+`1.67·ε_η`-DP. **`src/` must use `√C_e` from the public setting and never a data-read `k_max`.**
+
 **This is a partition-selection change, so Google can adopt it too** — it is a contribution to the
 mechanism, not to the gap. Google DP's library uses Laplace for partition selection (Wilson et
 al.), so it is not something it does today, but nothing stops it. Giving Gaussian votes to *both*
