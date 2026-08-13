@@ -1952,6 +1952,55 @@ the filterless max is one source, but so is a domain constant. On this query the
 1.68×; the finite range is. That makes the result *simpler* than the proposal: it needs one public
 scale, not a metadata-correspondence system.
 
+## DANDAN'S FROZEN GROUP SET — 8.2×, the largest gain found in this project
+
+Her 13 Aug proposal: release the group set **once** from the filterless data under its own
+`(ε₀, δ₀)`, freeze it as `G_fix`, and let every later filtered query skip τ for those groups.
+
+**It is sound, and the reason is worth stating precisely: partition selection protects group
+EXISTENCE, not values.** Once `G_fix` is a released (hence public) object, conditioning later
+releases on it is post-processing. A frozen group holding a single user after filtering is still
+safe — its value carries the usual `Laplace(B/ε_v)`. This is exactly the public-partition model
+FLEX/Chorus assume and that `dp_elastic` already relies on, except *obtained legitimately* rather
+than assumed. Her own worry — that freezing rare groups would leak them — is handled by
+construction: a group that cannot clear `τ₀` never enters `G_fix`.
+
+**There are two gains, and the second is the larger.** Groups in `G_fix` are never suppressed;
+and `ε_η` is no longer needed for them, so the entire partition-selection budget — 30–60% of ε —
+moves to the value channel.
+
+**The structural reason it works:** the filterless query has the *most* users per group and clears
+τ most easily; filtered queries have the fewest and suffer most. Freezing transfers the easy
+query's key set to the hard ones. On `week|nation` (τ-binding, filter `acctbal ≥ 8000`), `G_fix`
+built at `ε₀`=1, `δ₀`=1e-4 captured **100% of groups** — the filterless query has 5.5× more users
+per group, so nothing is marginal there.
+
+**Fair comparison, charging `ε₀/N` to the frozen arm so both spend the same total per query:**
+
+| N queries | query ε | τ only | with `G_fix` | gain |
+|---|---|---|---|---|
+| 1 | 0.000 | 73.31% | 100.00% | **0.73×** |
+| 2 | 0.500 | 73.31% | 17.98% | **4.08×** |
+| 5 | 0.800 | 73.31% | 11.05% | 6.63× |
+| 20 | 0.950 | 73.31% | 9.40% | 7.80× |
+| 100 | 0.990 | 73.31% | 9.06% | **8.09×** |
+
+**Break-even at N = 2.** At N=1 it correctly loses (you paid twice for one answer). On the
+non-τ-binding `month|nation` the gain is 1.83×, entirely from the freed `ε_η`.
+
+**This is larger than the Gaussian-votes fix (4.46×) and than anything else in this document.** The
+two compose rather than compete: `G_fix` handles groupings seen before, Gaussian votes handle novel
+ones — and Gaussian is what you want for the *first* query, which is exactly where `G_fix` cannot
+help.
+
+**Three costs to state honestly.** One `G_fix` is needed **per grouping key**, and the space of
+groupings is large — this is an amortisation over *repeated* queries on the *same* grouping, not
+over all queries. `G_fix` is only valid while the data is static; after writes it must be re-paid
+(the metadata-refresh problem already open in this document). And it answers a slightly different
+question — the released key set is the *filterless* one, so a group empty after filtering returns
+noise centred on zero rather than being absent. That is arguably the more useful answer for a
+dashboard, but it is not the same object τ-thresholding returns.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
