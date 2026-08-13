@@ -938,6 +938,89 @@ touches few groups and `C_u` truncation is nearly free for Google), 4.65× here 
 votes properly truncated to `C_u` groups per PU, ours goes 3.08% → 4.16% and the gap 13.0× →
 4.65×. The vote histogram must be truncated even though the values are not.
 
+## δ IS UNDER-ACCOUNTED — and worst exactly where we wanted to operate
+
+The ε accounting survives audit. Write `D' = D ⊎ {u}`; the release is adaptive sequential
+composition of ApproxBounds (`ε_b`), the vote histogram (`ε_η`), and the values (`ε_v`):
+
+```
+P[M(D) = (b, ĉ, ŷ)] = P[M_b(D)=b] · P[M_η(D)=ĉ] · P[M_v(D,b)=ŷ]
+```
+
+The `M_v` factor is evaluated at the **same released `b`** on both sides, which settles the
+subtle point: `B`'s data-dependence is paid entirely by `ε_b` and never reappears as an extra
+sensitivity term. Publishing values only for `g ∈ S` is post-processing and costs nothing.
+Verified numerically — with `B` held fixed, max ‖v(D) − v(D\u)‖₁ = **4,194,304.000 = B exactly**,
+attained by 7,434 PUs, never exceeded, independent of `k_u`.
+
+**The δ is wrong.** `ĉ` and `ŷ` are indexed by `G(D) ⊊ G(D')`, and a PU creates a group by
+having a **value** there, not a vote. So `|G_new| = k_u`, but Wilson's τ inverts a union bound
+over only the `C_u` groups where the PU votes:
+
+```
+δ_actual = 1 − (1−p₁)^{C_u} (1−p₀)^{k_u−C_u}      shortfall ≈ k_u / C_u
+```
+
+| C_u | actual δ / charged δ |
+|---|---|
+| **1** | **53.6×** (1.61e−5 vs 3.0e−7) |
+| 5 | 13.5× |
+| 30 | 2.3× |
+
+**The utility win — pick `C_u`=1 — is exactly what maximises the uncharged δ.** Fix: gate
+released groups on having at least one truncated vote (`released &= votes ≥ 1`), so `|G_new| ≤ C_u`
+with count exactly 1 and τ's union bound is right. Measured: charged δ ratio → 1.000×, and on
+real data the gate never fires (19 of 2,095 groups have zero truncated votes at `C_u`=1, and they
+clear τ=48.8 with probability 2.2e−7). **The fix is free.**
+
+## THE GAP IS 1.36×, NOT 4.65× — the structural claim is dead
+
+`taubinding_headtohead.py` also left *Google's* vote histogram untruncated while truncating its
+values — invalid sensitivity, and it flattered Google. Fixing that costs Google 20.0% → 21.2%.
+But three further improvements are legal and were missing, and together they dwarf it:
+
+| Google configuration | error |
+|---|---|
+| baseline with DP-valid truncated votes | 20.94% |
+| \+ **top-`C_v` selection** (keep each PU's largest cells, not a random `C_v`) | 14.18% |
+| \+ **rescale to the PU's true total, then re-clip to `U`** | 6.06% |
+| \+ **decouple `C_e` (votes) from `C_v` (values)** | **5.51%** |
+| ours (ℓ1 clip), fully retuned | **4.04%** |
+| | **1.36×** |
+
+**Rescale-with-re-clip is the big one (2.34×) and it is unambiguously legal.** Google pays
+`C_v·U` noise whether or not a PU's contribution actually reaches it. Multiplying the kept cells
+by `total_u/kept_u` and re-clipping each to `U` leaves ≤ `C_v` cells each ≤ `U`, so `Δ₁ = C_v·U`
+is untouched — measured max ‖v_u‖₁/(`C_v·U`) = **1.000000**, i.e. it exactly fills the budget
+Google was already buying. (Rescaling *without* the re-clip is illegal — measured violation up
+to 13.7× — and buys only 0.36pp anyway.)
+
+**Decoupling `C_e` from `C_v` kills the structural story.** The vote histogram and the value
+histogram are two releases with two sensitivities; nothing forces one parameter. Google sets
+`C_e`=1 for the cheapest τ — exactly what we do — and `C_v`=10 independently. So *"our value
+noise is `C_u`-free, so we can afford `C_u`=1 while Google cannot"* is **false**: Google gets the
+same cheap τ. What remains is only the sensitivity ratio, `C_v·U` = 5,242,880 vs `B` = 4,194,304
+= **1.25×**, landing as a measured 1.36× once clip bias (2.51% vs 0.75%) is added.
+
+**The scoring rule is not the source of the gap** — retuning each arm separately under nine
+different metrics gives 1.23×–1.45×, and no metric makes Google win:
+
+| metric | Google | ours | gap |
+|---|---|---|---|
+| relative ℓ1 over the true key set (used here) | 5.48% | 4.05% | 1.35× |
+| relative ℓ1 over the intersection of released sets | 4.63% | 3.43% | 1.35× |
+| each judged on its own released set | 4.64% | 3.45% | 1.34× |
+| RMSE / mean(truth) | 8.17% | 6.34% | 1.29× |
+| median per-group relative error | 3.71% | 2.56% | 1.45× |
+
+**Gaussian is now asymmetric and favours Google.** For us `Δ₂ = Δ₁ = B`, so Gaussian loses
+(13.27% vs 4.06%; an explicit L2 clip gives 4.13%, still no gain). For Google at large `C_v`,
+`√C_v·U` genuinely beats `C_v·U`: 14.18% → 11.62%.
+
+**This is the sixth gain in this document to shrink under a properly tuned baseline.** The rule
+stands and should be the methodological headline of the writeup: *a DP mechanism comparison is
+evidence only if the baseline was tuned as hard as the proposal.*
+
 ## The adaptive bound rule is not needed — use ApproxBounds on the norm histogram
 
 The winning configuration above does **not** use the adaptive objective rule from the section
