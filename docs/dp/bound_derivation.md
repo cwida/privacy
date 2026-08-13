@@ -1301,6 +1301,75 @@ splitting working, but smooth sensitivity growing sub-linearly over a narrow ran
 beaten by subdividing it. If the ~1,000-PUs-per-group floor is to move, it has to come from
 somewhere other than budget re-allocation.
 
+## THE τ FLOOR IS AN ℓ1 ARTIFACT — Gaussian votes break it (up to 4.5×)
+
+The `week|nation` / `day|region` rows where *every* arm returned ~100% error are not a sensitivity
+limit and not a budget-allocation problem. They are the ℓ1 geometry of the **vote** channel, and
+the algebra says so exactly. With votes truncated to `C_e`, a PU spread over `k_u` groups puts
+only `C_e/k_u` of a vote in each, so a group's expected vote count is `n_g·C_e/k_u` against a
+threshold `τ ≈ C_e·ln(1/2δ_η)/ε_η`. **`C_e` cancels**, leaving
+
+```
+a group is releasable  iff  n_g / k_u  ≳  ln(1/2δ_η) / ε_η   ≈  30–45
+```
+
+That is why the tuner always lands on `C_e`=1 and why nothing helps: `week|nation` has
+`n_g`/`k_u` = 8.0 and `day|region` 5.0. No re-allocation of ε moves a ratio that ε barely enters.
+
+**The fix is to change the noise geometry, not the budget.** Gaussian lost badly on the *value*
+channel because the ℓ1 clip makes `Δ₂ = Δ₁ = B` exactly — a PU may put all its mass in one group.
+The vote channel is the opposite: a PU voting 1 in each of its `k_u` groups has
+
+```
+ℓ1 sensitivity = k_u        but        ℓ2 sensitivity = √k_u
+```
+
+so Laplace *must* truncate while Gaussian can let every PU vote everywhere and pay only `√k_u`.
+Both arms given the same total δ for partition selection (Laplace spends it all on the threshold;
+Gaussian must split it between mechanism and threshold, a real cost to Gaussian):
+
+| grouping | `n_g/k_u` | Laplace | Gaussian | gain | groups released |
+|---|---|---|---|---|---|
+| month\|priority | 164 | 0.92% | 0.87% | 1.06× | 415 → 415 of 420 |
+| month\|nation | 39 | 3.93% | 3.04% | 1.29× | 1,987 → 2,021 of 2,095 |
+| day | 25 | 5.22% | 3.78% | 1.38× | 2,415 → 2,444 of 2,526 |
+| **week\|nation** | 8.0 | 73.22% | **16.42%** | **4.46×** | 2,943 → **8,493** of 9,050 |
+| **day\|region** | 5.0 | 96.77% | **26.73%** | **3.62×** | 545 → **11,735** of 12,630 |
+
+The gain is monotone in `k_u/n_g` and vanishes exactly where the theory says the floor stops
+binding — a strong internal check. Two queries that previously returned essentially nothing now
+return 94% of their key set. `attacks/vote_gaussian.py`.
+
+**This is a partition-selection change, so Google can adopt it too** — it is a contribution to the
+mechanism, not to the gap. Google DP's library uses Laplace for partition selection (Wilson et
+al.), so it is not something it does today, but nothing stops it. Giving Gaussian votes to *both*
+arms and retuning everything:
+
+| grouping | gap, Laplace votes | gap, Gaussian votes | Google | ours |
+|---|---|---|---|---|
+| month\|nation | 1.35× | 1.48× | 5.58% → 4.55% | 4.13% → 3.08% |
+| day | 1.17× | 1.24× | 6.32% → 4.66% | 5.41% → 3.77% |
+| week\|nation | — (both ~100%) | 1.13× | 99.90% → **18.45%** | 99.92% → **16.39%** |
+| day\|region | — (both ~100%) | **0.85×** | 99.99% → **22.59%** | 100% → 26.69% |
+
+**So the honest reading is that Gaussian votes are worth far more than the ℓ1 clip is.** They
+convert two queries from *unanswerable* to 94% key-set recovery, and they do it for either
+mechanism. The ℓ1-clip gap stays at 1.2×–1.5× and **inverts to 0.85× on the finest grouping**,
+where large `C_e` lets Google decouple a small `C_v`=10 for values and its rescale works well —
+on TPC-H's minimum-alignment data, which is its best case.
+
+Ranking the session's findings by size, honestly: Gaussian votes (up to 4.5×, both arms) ≫ the
+ℓ1 clip (1.2×–2.1×, ours only, and it can invert) > everything else (≤1.02×).
+
+**Caveat to carry:** the δ under-accounting found earlier applies here too and is *worse*, since
+a PU votes in up to `C_e`=88 groups while holding values in up to `k_u`=176. The vote-support
+gate (`released &= votes ≥ 1`) is still the fix and is still free.
+
+**This is the constructive answer to Dandan's (3).** She asked whether combining evidence across
+`t` per-group histograms could lower τ. Splitting the budget `t` ways cannot (above). But
+changing the *noise geometry* of the single histogram lowers the effective floor by 4–5× on
+exactly the queries that motivated the question.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
