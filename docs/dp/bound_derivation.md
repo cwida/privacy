@@ -1340,6 +1340,27 @@ The gain is monotone in `k_u/n_g` and vanishes exactly where the theory says the
 binding — a strong internal check. Two queries that previously returned essentially nothing now
 return 94% of their key set. `attacks/vote_gaussian.py`.
 
+**The floor is provable, not asymptotic — and no Laplace budget split can clear it.** The worry
+about the argument above was that "`C_e` cancels" holds only in the limit. Expanding Wilson's τ for
+small `δ_η` gives `τ ≈ 1 + (C_e/ε_η)·[ln(1/2δ_η) + ln C_e]`, so the release condition is
+
+```
+n_g / k_u  >  τ(C_e)/C_e  ≈  (1/ε_η)·[ln(1/2δ_η) + ln C_e]
+```
+
+`C_e` cancels except for a residual `+ln C_e` that makes larger `C_e` strictly worse. Computing
+the **exact** τ confirms `τ/C_e` is monotone increasing in `C_e`, so **`C_e` = 1 is optimal
+exactly**, and the floor is `ln(1/2δ_η)/ε_η` — a function of `ε_η` alone:
+
+| `ε_η` | 0.3 | 0.5 | 0.6 | 0.9 | 0.99 |
+|---|---|---|---|---|---|
+| floor `τ/C_e` at `C_e`=1 | 44.7 | 27.2 | 22.9 | 15.6 | **14.3** |
+
+Even at `ε_η` = 0.99 — leaving essentially nothing for the values — the floor is 14.3, so
+`week|nation` (`n_g/k_u` = 8.0) and `day|region` (5.0) **stay fully suppressed under every Laplace
+split that exists**. The two queries Gaussian votes rescue are provably unrescuable by budget
+re-allocation, which is the strongest form of the answer to Dandan's (3).
+
 **This is a partition-selection change, so Google can adopt it too** — it is a contribution to the
 mechanism, not to the gap. Google DP's library uses Laplace for partition selection (Wilson et
 al.), so it is not something it does today, but nothing stops it. Giving Gaussian votes to *both*
@@ -1445,11 +1466,12 @@ file plus the scripts under `attacks/`.
   during a full tune: the tuner holds ~100 arrays of cell length. Keep to `month|nation` (5.5M) or
   smaller, `threads=2`, one process at a time. `geometry_matched.py --max-cells` enforces this;
   `fineness_sweep.py` does not yet.
-- **Not yet attacked:** the Gaussian-votes result. Its sensitivity and threshold are verified, but
-  the *tuning* of the Laplace arm it is compared against is not — and that is where all six
-  previous collapses came from. The specific worry is that "`C_e` cancels, so the floor is
-  immovable" is an asymptotic argument; a fine `C_e` sweep with `ε_η` up to 0.9, or fractional
-  votes, could close it.
+- **Partly attacked:** the Gaussian-votes result now has its sensitivity, its threshold, *and* the
+  Laplace arm's tuning settled — the last analytically (`τ/C_e` monotone in `C_e`, floor
+  = `ln(1/2δ_η)/ε_η` ≥ 14.3 for any split). What remains unattacked is empirical: whether the
+  total-ℓ1 metric flatters the newly released groups, and whether it generalises off TPC-H
+  (StackOverflow and ClickBench have almost no PUs with `k_u` ≥ 5, so the floor may never bind
+  there — which would bound how general the result is).
 - **Not yet ported:** none of this is in `src/`. The smooth-sensitivity (`dp_sass`) path uses the
   same Wilson τ with Laplace votes, so the floor should apply there and Gaussian votes should
   transfer without touching the median/lane machinery — unverified.
