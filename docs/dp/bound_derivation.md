@@ -1908,6 +1908,50 @@ biggest, false under any seasonality or shared trend. So the honest headline is 
 > on uniformly-allocated data and 2.3×–4.6× as soon as privacy units share allocation structure —
 > because the ℓ1 clip never redistributes mass, and every truncation-based method must.
 
+## DANDAN'S ADAPTIVE BASE WORKS — 1.68× worst case, and my earlier dismissal was an artifact
+
+Her 13 Aug proposal: use the **filterless `U`** (frozen metadata) to shrink the histogram *range*,
+then spend the saved bins on *resolution* — keep ≤64 bins and the same `ε_b`, but make the base
+`(U_hi/U_lo)^(1/64)` instead of 2.
+
+**This is not what `attacks/bound_grid.py` tested.** That made the base finer over a *fixed* range
+`[1, 2^45]`, so base 2^(1/8) needed 360 bins and paid a higher ApproxBounds threshold. Her version
+holds the bin count at 64 and buys resolution by narrowing the range — a materially different, and
+better, proposal. It measured 1.009× my way and **1.68× hers**.
+
+**Why my measurement missed it.** The error curve in `B` has a basin only **1.3× wide** (within
+10% of optimal for `B` ∈ [0.88, 1.18]·`B*`), while a base-2 grid has **2.0× spacing** — *coarser
+than the basin*. So base-2 lands wherever the data's maximum happens to sit relative to a power of
+two, and TPC-H happens to sit at a lucky spot. Rescaling the measure by `s` ∈ [1,2) sweeps every
+alignment:
+
+| scheme | s=1.00 | 1.15 | 1.32 | 1.52 | 1.74 | 1.95 | worst | spread |
+|---|---|---|---|---|---|---|---|---|
+| base 2 (width 2.00) | **3.53%** | 5.68% | 6.00% | 5.60% | 5.24% | 4.96% | 6.00% | **1.70×** |
+| range 2³², 64 bins (1.41) | 4.19% | 4.18% | 4.18% | 4.17% | 4.16% | 4.15% | 4.19% | 1.01× |
+| range 2¹⁶, 64 bins (1.19) | **3.58%** | 3.58% | 3.58% | 3.58% | 3.58% | 3.58% | **3.58%** | **1.00×** |
+
+**Worst case 6.00% → 3.58% = 1.68×; mean over alignments 5.17% → 3.58% = 1.44×.** The fine grid is
+*exactly* alignment-invariant, as it should be. My single-point measurement at `s`=1.00 landed on
+base-2's best alignment — **the same one-lucky-operating-point error this document has caught six
+times, committed again.**
+
+**Two refinements to her mechanism, from the measurements.**
+
+1. **Don't also switch to an MSE objective.** ApproxBounds targets the *maximum*, but the
+   error-optimal `B*` = **0.61 × the true max** — so it aims at the wrong target and two offsets
+   happen to cancel. Aiming at `B*` directly is worse, because it must be estimated from the noisy
+   histogram: mean |log₂(B/B*)| is 0.079 (max-finder, base 2), **0.066** (max-finder, fine grid),
+   0.128–0.334 (MSE). **Keep the max-finder; just make its grid finer.**
+2. **Range 2¹⁶ beats range 2³².** Too wide a range wastes resolution below anything that occurs;
+   too narrow and the bottom bin clips. 2¹⁶ (width 1.19) was best here.
+
+**Why it does not need the filterless `U` specifically.** Any public upper bound sets the range —
+the filterless max is one source, but so is a domain constant. On this query the filterless `U`
+(7,244,710) is only 1.01× the filtered max, so the frozen-metadata machinery is not what earns the
+1.68×; the finite range is. That makes the result *simpler* than the proposal: it needs one public
+scale, not a metadata-correspondence system.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
