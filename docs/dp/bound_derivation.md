@@ -1528,6 +1528,204 @@ workload. This does not make the result narrow — user-level analytics over tim
 this shape — but the claim must be conditioned on `k_u` concentration rather than asserted
 generally.
 
+## THE 4.5× IS A RESONANCE, NOT A PLATEAU — the flip band is ~3.5× wide and TPC-H fits inside it
+
+The `k_u` scope limit above is **necessary but not sufficient**, and the shape of the remaining
+condition is what makes the result narrow. Both release rules are thresholds on the *same*
+effective vote count `eff(C) = Σ_u min(C,k_u)/k_u`, so writing `k_h = n_g/eff(1)` for the
+**harmonic-mean `k_u`** of a group's members, a group is released iff
+
+```
+Laplace :  n_g  >  k_h · τ_L(1)          Gaussian:  n_g  >  thr_G(C*)
+```
+
+Groups that **flip** — the entire source of the gain — are those with `thr_G(C*) < n_g < k_h·τ_L(1)`,
+a window of multiplicative width
+
+```
+band  =  k_h·τ_L(1) / thr_G(C*)  =  √k_h / ρ ,      ρ = (thr_G(1)−1)/(τ_L(1)−1) ≈ 2.02
+```
+
+**≈ 3.5× at `k_h` = 49.** Everything above the band both arms release; below it, neither. Both
+thresholds carry the same `1/ε_η`, so changing ε **slides** the band along `n_g` without widening
+it. Three consequences, all measured (`attacks/band_map.py`, `band_synth.py`, `metric_audit.py`;
+the flagship is reproduced on a 5-nation replica of `week|nation`, structurally identical —
+`n_g/eff` 49.3 vs 49.5, 4.47× vs the published 4.46× — at 1.8M cells instead of 9.0M):
+
+**1. The gain is the share of the key set inside one band, so it is maximal iff every group is the
+same size.** TPC-H is exactly that: `n_g` p95/p5 = **2.1×** (`week|nation`), 2.0× (`day|region`),
+2.2× (`month|nation`) — narrower than the 2.9–3.5× band, so *the whole key set flips at once*.
+Real data is not: SO `posts|month` 219×, `posts|day` 8.3×, CB `hits|region` 584×,
+`hits|date|region` 234×. Measured share of the key set that can flip: **94% on TPC-H
+`week|nation`, 0.0% on every StackOverflow and ClickBench query.**
+
+**2. Holding `k_u` fixed at 49 — far above the crossover — dispersion alone destroys the gain.**
+Synthetic bipartite key sets, every PU in exactly 49 groups, group sizes lognormal(0,σ), value 1
+per cell (so a group's total *is* its `n_g`):
+
+| `n_g` p95/p5 | 1.2 | 3.7 | 14 | 50 | 209 | 581 |
+|---|---|---|---|---|---|---|
+| gain, total ℓ1 | **2.82×** | 2.25× | 1.97× | 1.76× | 1.60× | **1.47×** |
+| gain, mean per-group rel. err | **2.94×** | 1.93× | 1.47× | 1.26× | 1.15× | **1.08×** |
+
+So the condition is `k_u` concentrated **and** `n_g` concentrated. The second half was invisible
+because TPC-H is uniform by construction.
+
+**3. Each query resonates at one ε, about a factor 2 wide.** Same query, same data, tuned at each ε:
+
+| ε | 0.1 | 0.25 | 0.5 | 1.0 | 2.0 | 4.0 |
+|---|---|---|---|---|---|---|
+| `week\|nation` gain | 1.00× | 1.00× | 1.01× | **4.53×** | 1.63× | 1.42× |
+| `month\|nation` gain | 1.00× | **3.59×** | 2.54× | 1.26× | — | — |
+
+The published table — gain rising monotonically as `n_g/k_u` falls — is a **slice at ε = 1** of a
+per-query resonance, not evidence that fine groupings benefit. `month|nation` is a 3.6× query at
+ε = 0.25 and a 1.3× query at ε = 1. Below the window both arms return ~100%; above it, the gain
+decays to the leftover-budget residual.
+
+### Is the total-ℓ1 metric hiding anything? On TPC-H no — because TPC-H cannot tell metrics apart
+
+Re-tuning **both** arms separately under six metrics on the flagship query (ε=1):
+
+| metric | Laplace | Gaussian | gain |
+|---|---|---|---|
+| total rel. ℓ1 (as published) | 0.7338 | 0.1608 | 4.56× |
+| median per-group rel. err | 1.0000 | 0.1102 | 9.07× (degenerate: Laplace releases <50%) |
+| mean per-group rel. err | 0.7480 | 0.1971 | 3.79× |
+| mean capped at 1 | 0.7476 | 0.1970 | 3.79× |
+| nRMSE | 0.8276 | 0.2237 | 3.70× |
+| **p95 per-group rel. err** | 1.0000 | 0.9866 | **1.01×** |
+| **ℓ1 on the intersection of released sets** | 0.2227 | 0.1468 | **1.52×** |
+
+The newly released groups are *not* junk here: released rel. err p50 0.102 / p95 0.44, only 3.4%
+above 0.5, and the median error is flat across true-size quintiles (0.12/0.10/0.10/0.10/0.10).
+Release is only mildly size-biased (69.9% of the smallest quintile, ~100% of the rest). **But this
+is unfalsifiable on TPC-H**: its group totals span p95/p5 = 2.1×, so a total-mass metric and a
+per-group metric are near-identical by construction. Two checks that break it:
+
+- **Inject realistic group-size skew** (lognormal, p95/p5 = 169×; vote structure untouched):
+  ℓ1 gain 4.55× → **3.33×**, mean per-group rel. err gain → **1.18×**, p95 → **1.00×**. 19% of
+  Gaussian's released groups are then *worse than silence* (rel. err > 1) and the smallest
+  quintile's median error is 1.74.
+- **The intersection number is not a vote-geometry effect at all.** 1.52× is exactly the value
+  budget ratio 0.598/0.398 = 1.50: on the groups both arms release, Gaussian is ahead only because
+  Laplace had to buy a lower τ with ε.
+
+**The metric issue is real but it belongs to the whole document, not to this result.** On ClickBench
+`hits|date|region` the tuned release scores **ℓ1 = 0.086** while its mean per-group error is
+**0.90** — 6.8% of groups released, covering 95.1% of the mass. Every headline in this file is a
+total-ℓ1 number, and total ℓ1 reports 8.6% error for a release that answers 7% of the key set.
+
+### Off TPC-H it loses, end to end
+
+`dataset_profile.py` compared release counts; this is the full pipeline with error, both arms
+tuned (`metric_audit.py --query`):
+
+| query | `k_h` | ℓ1 Laplace | ℓ1 Gaussian | gain | released |
+|---|---|---|---|---|---|
+| so posts\|month | 1.9 | 0.3666 | 0.3687 | **0.99×** | 162 → 162 of 190 |
+| so posts\|day | 3.0 | 0.8998 | 0.9964 | **0.90×** | 636 → **21** of 5,107 |
+| cb hits\|date\|region | 1.0 | 0.0859 | 0.0939 | **0.91×** | 512 → 437 of 7,564 |
+
+Gaussian votes lose on *every* metric on *every* non-TPC-H query tested. Stated plainly: **of the
+three datasets available, the vote-geometry result is positive on one, and that one is synthetic
+and uniform.**
+
+### The crossover, derived and confirmed — and the downside is bounded
+
+Since both thresholds are `1 + const/ε_η`, the ε a group *needs* is `const/eff`, so the whole
+comparison is one ε-cost ratio, independent of ε and of `n_g`:
+
+```
+f  =  min_C [(thr_G(C)−1)/eff(C)]  /  min_C [(τ_L(C)−1)/eff(C)]        f < 1 ⇒ Gaussian wins
+```
+
+For a homogeneous group `f = ρ/√k_h` exactly. `ρ` is astonishingly stable: **2.09** (δ=1e−3),
+**2.02** (1e−6), **2.01** (1e−9) — so **the crossover is `k_h = ρ² ≈ 4.1`, i.e. 5 in integers,**
+and the best Gaussian can ever do is `√k_h/ρ`. Monte-Carlo (20k trials, the smallest `n_g` each
+arm releases ≥50% of the time) reproduces it to two digits:
+
+| `k_u` | 1 | 2 | 3 | 4 | 5 | 6 | 8 | 20 | 50 |
+|---|---|---|---|---|---|---|---|---|---|
+| measured `n_g*` ratio G/L | 1.99 | 1.44 | 1.19 | 1.04 | 0.94 | 0.86 | 0.75 | 0.55 | 0.34 |
+| predicted `ρ/√k` | 2.02 | 1.47 | 1.22 | 1.07 | 0.96 | 0.88 | 0.77 | 0.52 | 0.35 |
+
+Three deliverables from this:
+
+- **`k_h` must be the harmonic mean, not the mean and not the max.** Four `k_u` shapes with mean
+  20: all-20 → `f` = 0.52; half-39/half-1 → 2.02; 5%-at-381 → 2.02; 1%-at-1901 → 2.02.
+  A heavy tail buys *nothing*: the PUs with `k_u`=1 already vote at full weight under truncation.
+- **The adversarial case is exactly `k_h < 4`, and it costs a factor `ρ`.** With `k_h` ≈ 1 the
+  tuner drives Gaussian to `C_e`=1, where `eff` is identical for both arms and `f = ρ` *exactly* —
+  Gaussian needs **2.02× the ε** for the same key set (2.09× at δ=1e−3, where it is worst).
+- **…which also means the downside is bounded and the upside is not.** `C_e`=1 is always available,
+  so a wrongly-chosen Gaussian never costs more than ρ ≈ 2.1× in ε, while a wrongly-chosen Laplace
+  costs `√k_h/ρ`, unbounded (7.9× at `k_h`=250). For the port: **choose Gaussian iff harmonic-mean
+  `k_u` > 4.1**, and prefer it when the statistic is uncertain — but that statistic is
+  data-dependent, which is the same unresolved accounting question flagged above.
+
+**Honest headline:** Gaussian votes are right for the vote channel and the crossover math holds,
+but "4.2×–6.0×" is the peak of a resonance measured on the one dataset whose group sizes are
+uniform. Conditioned on all three requirements — `k_h` > 4, `n_g` spread narrower than `√k_h/ρ`,
+and ε inside the query's window — the honest range off the resonance is **1.1×–1.6×**.
+
+## END-TO-END OFF TPC-H — and the unifying condition for the whole approach
+
+`attacks/cross_dataset.py` runs the real pipeline (bound selection, clipping, partition selection,
+value noise) on StackOverflow and ClickBench, scored as before. Every arm tuned over its own
+`C_e` × `C_v` × split:
+
+| query | groups | `k_u` med/max | published | ours-Laplace | ours-Gaussian | gain |
+|---|---|---|---|---|---|---|
+| so posts\|month | 190 | 1/156 | 32.65% | 36.36% | 36.61% | **0.90×** |
+| so posts\|month score | 190 | 1/156 | 57.92% | 47.26% | 48.07% | 1.23× |
+| so posts\|day | 5,107 | 1/2126 | 91.27% | 89.26% | 99.73% | 1.02× |
+| so comments\|month | 182 | 1/154 | 43.56% | 47.63% | 47.14% | **0.92×** |
+| so badges\|month | 165 | 1/154 | 8.52% | 5.90% | 6.22% | 1.45× |
+| cb hits\|region | 3,238 | 1/54 | 6.13% | 5.87% | 6.10% | 1.04× |
+| cb hits\|date\|region | 7,564 | 1/58 | 9.98% | 8.68% | 9.15% | 1.15× |
+| cb width\|region | 3,238 | 1/54 | 6.50% | 6.36% | 7.02% | 1.02× |
+
+**Gaussian votes lose on all eight**, exactly as `dataset_profile.py` predicted from the `k_u`
+shape — the analytic prediction and the end-to-end measurement agree, which is the strongest
+check either has had. And on two queries **the whole package is worse than Google as published**
+(0.90×, 0.92×). Range off TPC-H: **0.90×–1.45×**, against 4.2×–6.0× on TPC-H.
+
+**Why — and this unifies the two channels into one condition.** Google's value sensitivity is
+`C_v·U` (ApproxBounds over *cells*); ours is `B` (over per-PU *norms*). We win iff `C_v·U / B` is
+large:
+
+| query | `k_u` med/max | `U` (cells) | `B` (norms) | `B/U` | `C_v·U/B` at `C_v`=1 |
+|---|---|---|---|---|---|
+| so posts\|month | 1/156 | 4 | 4 | 1.0 | 1.00 |
+| so comments\|month | 1/154 | 4 | 2 | 0.5 | 2.00 |
+| so badges\|month | 1/154 | 4 | 8 | **2.0** | 0.50 |
+| cb hits\|region | 1/54 | 64 | 64 | 1.0 | 1.00 |
+| tpch month\|nation | 30/72 | 524,288 | 4,194,304 | 8.0 | 0.12 |
+
+When `k_u` is heavy-tailed, **Google sets `C_v` = 1 and loses almost nothing** (the median user
+touches one group), so its sensitivity is just `U` — and `U ≈ B`, since a median user's norm *is*
+their single cell. We gain nothing, and where the tail pushes `B` above `U` (badges: `B/U` = 2.0)
+we are strictly **worse**. On TPC-H, `B/U` = 8 looks bad for us in isolation, but Google is
+*forced* to `C_v` ≈ 10 because truncating a customer spread over 30–55 months to one month would
+discard ~97% of their mass — so `C_v·U` = 10`U` beats `B` = 8`U` only by 1.25×, the sensitivity
+ratio measured earlier.
+
+**So the single condition governing this entire line of work is:**
+
+> **The mechanism helps iff Google is *forced* into a large `C_u`, which happens iff `k_u` is
+> concentrated — every privacy unit spreading across many groups. It is the same condition for
+> the value channel (`C_v·U` vs `B`) and the vote channel (truncation cost vs `√C_e`).**
+
+That is a much more useful claim than any of the ratios: it says *in advance* which workloads to
+expect gains on, it is measurable from public schema knowledge plus one cheap statistic, and it
+explains why the same mechanism gives 6.0× on TPC-H and 0.90× on StackOverflow.
+
+**Honest summary across everything measured:** 4.2×–6.0× where `k_u` is concentrated (TPC-H),
+0.90×–1.45× where it is heavy-tailed (StackOverflow, ClickBench), and — separately — the
+difference between an empty answer and 94% key-set recovery on the two queries where Laplace
+partition selection returns nothing at any budget.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
@@ -1550,12 +1748,13 @@ file plus the scripts under `attacks/`.
   during a full tune: the tuner holds ~100 arrays of cell length. Keep to `month|nation` (5.5M) or
   smaller, `threads=2`, one process at a time. `geometry_matched.py --max-cells` enforces this;
   `fineness_sweep.py` does not yet.
-- **Partly attacked:** the Gaussian-votes result now has its sensitivity, its threshold, *and* the
-  Laplace arm's tuning settled — the last analytically (`τ/C_e` monotone in `C_e`, floor
-  = `ln(1/2δ_η)/ε_η` ≥ 14.3 for any split). What remains unattacked is empirical: whether the
-  total-ℓ1 metric flatters the newly released groups, and whether it generalises off TPC-H
-  (StackOverflow and ClickBench have almost no PUs with `k_u` ≥ 5, so the floor may never bind
-  there — which would bound how general the result is).
+- **Attacked, and it shrank** — see "THE 4.5× IS A RESONANCE" above. Sensitivity, threshold and the
+  Laplace arm's tuning are settled; the metric is fine on TPC-H but TPC-H cannot test it; the size
+  of the gain is set by group-size dispersion and by ε, and off TPC-H the sign flips. What is still
+  open there: whether any *sequence* of releases can pay for the harmonic-mean-`k_u` statistic that
+  the Gaussian/Laplace choice needs, and whether the same band argument bounds the ℓ1-clip gain too
+  (it should — the value channel has its own threshold-free geometry, so probably not, but it has
+  not been checked).
 - **Not yet ported:** none of this is in `src/`. The smooth-sensitivity (`dp_sass`) path uses the
   same Wilson τ with Laplace votes, so the floor should apply there and Gaussian votes should
   transfer without touching the median/lane machinery — unverified.

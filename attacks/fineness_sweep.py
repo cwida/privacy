@@ -72,9 +72,11 @@ class Cells:
             SELECT dense_rank() OVER (ORDER BY pu)-1 AS pid,
                    dense_rank() OVER (ORDER BY g)-1 AS gid, t
             FROM c""").fetchnumpy()
-        self.pi = rows["pid"].astype(np.int64)
-        self.gi = rows["gid"].astype(np.int64)
-        self.val = rows["t"].astype(np.float64)
+        self._init_from(rows["pid"].astype(np.int64), rows["gid"].astype(np.int64),
+                        rows["t"].astype(np.float64))
+
+    def _init_from(self, pi, gi, val):
+        self.pi, self.gi, self.val = pi, gi, val
         self.K = int(self.gi.max()) + 1
         self.P = int(self.pi.max()) + 1
         self.truth = np.bincount(self.gi, weights=self.val, minlength=self.K)

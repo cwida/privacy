@@ -108,6 +108,7 @@ def lane_matrix(c, keep, clipped, lane_of_pu):
     return ls
 
 
+
 # ---------------------------------------------------------------------- driver
 
 def main():
@@ -118,40 +119,38 @@ def main():
     ap.add_argument("--extra", default="", help="extra SQL predicate, e.g. ' AND c_nationkey<5'")
     ap.add_argument("--label", default=None)
     ap.add_argument("--aggs", default="1,2,4", help="c = number of user aggregates")
+    ap.add_argument("--eps", type=float, default=EPS)
     ap.add_argument("--trials", type=int, default=3)
     ap.add_argument("--max-cells", type=int, default=6_000_000)
     a = ap.parse_args()
+    eps = a.eps
 
     import duckdb
     con = duckdb.connect(config={"threads": 2})
     con.execute("SET enable_progress_bar=false")
     con.execute(f"ATTACH '{a.db}' AS tpch (READ_ONLY)")
-
-    gexpr = GROUPINGS[a.grouping][0]
-    c = Cells(con, gexpr, a.filter + a.extra)
+    c = Cells(con, GROUPINGS[a.grouping][0], a.filter + a.extra)
     con.close()
     n_cells = len(c.val)
     if n_cells > a.max_cells:
         raise SystemExit(f"refusing: {n_cells:,} cells > --max-cells {a.max_cells:,}")
     label = a.label or (a.grouping + a.extra)
     mk = int(c.k_u.max())
-    ratio = float(np.median(c.npu_g)) / mk
+    tot = c.truth
+    truth_l1 = float(np.abs(tot).sum())
     print(f"{label}: {n_cells:,} cells, {c.K:,} groups, {c.P:,} PUs, max k_u={mk}, "
-          f"median PUs/group={np.median(c.npu_g):,.0f}, n_g/k_u={ratio:.1f}")
-    print(f"eps={EPS}, delta={DELTA:g}, SUM(l_extendedprice), PU=customer, {a.trials} trials\n")
+          f"median PUs/group={np.median(c.npu_g):,.0f}, n_g/k_u={np.median(c.npu_g)/mk:.1f}")
+    print(f"eps={eps}, delta={DELTA:g}, SUM(l_extendedprice), PU=customer, {a.trials} trials")
+    print("floor(c) = tau(C=1) = 1 + ln(1/(2 delta/(c+1)))/(eps/(c+1)); release needs n_g/k_u > floor\n")
 
     r = np.random.default_rng(7)
     lane_of_pu = r.integers(0, M, size=c.P)
     ranks = [c.rank_random(r) for _ in range(a.trials)]
-
     cs = sorted({1, 2, 5, 10, 30, mk // 2 or 1, mk})
     absv = np.abs(c.val)
     Bs = [float(np.quantile(absv, q)) for q in (0.90, 0.99, 0.999)] + [float(absv.max())]
-    tot = c.truth
     Ls = [float(np.quantile(np.abs(tot), q)) for q in (0.5, 0.9, 0.99)] + [float(np.abs(tot).max())]
 
-    # ---- value channel: cache sorted lane matrices per (C_v, B, trial); they do not depend on
-    # the vote arm, LAMBDA, or c.
     lanes = {}
     for cv in cs:
         for bi, B in enumerate(Bs):
@@ -159,69 +158,61 @@ def main():
             for t in range(a.trials):
                 lanes[(cv, bi, t)] = lane_matrix(c, ranks[t] < cv, clipped, lane_of_pu)
             del clipped
-
-    # ---- vote channel: cache raw (untruncated-by-arm) vote counts per (C_e, trial)
     vt = {(ce, t): np.bincount(c.gi[ranks[t] < ce], minlength=c.K).astype(float)
           for ce in cs for t in range(a.trials)}
 
-    truth_l1 = float(np.abs(tot).sum())
-    print(f"{'c':>2} {'arm':<12}{'rel L1':>9}{'released':>10}{'true L1 kept':>14}"
-          f"{'C_e':>5}{'C_v':>5}{'B':>11}{'LAMBDA':>12}{'tau':>10}")
-    results = {}
+    print(f"{'c':>2} {'arm':<10}{'relL1 SASS':>12}{'relL1 oracle':>14}{'released':>10}"
+          f"{'trueL1 kept':>13}{'C_e':>5}{'C_v':>5}{'tau':>12}  (objective)")
     for cc in [int(x) for x in a.aggs.split(",")]:
-        eps_eta = EPS / (cc + 1.0)
-        delta_eta = DELTA / (cc + 1.0)
-        # released masks per (arm, C_e, trial)
-        masks = {}
+        eps_eta, delta_eta = eps / (cc + 1.0), DELTA / (cc + 1.0)
+        print(f"-- c={cc}: eps_eta={eps_eta:.3f} delta_eta={delta_eta:.3g} "
+              f"floor={wilson_tau(eps_eta, delta_eta, 1.0):.1f}  "
+              f"eps_cell(C_v)={eps:.1f}/({cc+1}*C_v)")
+        masks, thr = {}, {}
         for ce in cs:
-            th_lap = wilson_tau(eps_eta, delta_eta, ce)
+            th_l = wilson_tau(eps_eta, delta_eta, ce)
             sig, th_g = gauss_vote(ce, mk, eps_eta, delta_eta)
+            thr[("lap", ce)], thr[("gauss", ce)] = th_l, th_g
             for t in range(a.trials):
                 v = vt[(ce, t)]
-                masks[("lap", ce, t)] = ((v + r.laplace(0, ce / eps_eta, size=c.K) >= th_lap)
-                                         & (v >= 1))
-                masks[("gauss", ce, t)] = ((v + r.normal(0, sig, size=c.K) >= th_g) & (v >= 1))
-            masks[("lap", ce, "thr")] = th_lap
-            masks[("gauss", ce, "thr")] = th_g
-        # noised value vectors per (C_v, B, LAMBDA, trial)
+                masks[("lap", ce, t)] = (v + r.laplace(0, ce / eps_eta, size=c.K) >= th_l) & (v >= 1)
+                masks[("gauss", ce, t)] = (v + r.normal(0, sig, size=c.K) >= th_g) & (v >= 1)
         vals = {}
         for cv in cs:
-            eps_cell = EPS / ((cc + 1.0) * cv)
-            delta_cell = DELTA / ((cc + 1.0) * cv)
+            ec, dc = eps / ((cc + 1.0) * cv), DELTA / ((cc + 1.0) * cv)
             for bi in range(len(Bs)):
                 for li, lam in enumerate(Ls):
                     for t in range(a.trials):
-                        vals[(cv, bi, li, t)] = smooth_median_release(
-                            lanes[(cv, bi, t)], lam, eps_cell, delta_cell, r)
-
+                        vals[(cv, bi, li, t)] = smooth_median_release(lanes[(cv, bi, t)], lam, ec, dc, r)
+        res = {}
         for arm, vote, coupled in (("today", "lap", True), ("decoupled", "lap", False),
                                    ("gaussian", "gauss", False)):
-            best = None
+            grid = []
             for ce in cs:
-                cvs = [ce] if coupled else cs
-                for cv, bi, li in itertools.product(cvs, range(len(Bs)), range(len(Ls))):
-                    es, rel_n, kept = [], [], []
-                    for t in range(a.trials):
-                        m = masks[(vote, ce, t)]
-                        out = np.where(m, vals[(cv, bi, li, t)], 0.0)
-                        es.append(float(np.abs(out - tot).sum() / truth_l1))
-                        rel_n.append(int(m.sum()))
-                        kept.append(float(np.abs(tot[m]).sum() / truth_l1))
-                    e = float(np.mean(es))
-                    if best is None or e < best[0]:
-                        best = (e, np.mean(rel_n), np.mean(kept), ce, cv, Bs[bi], Ls[li],
-                                masks[(vote, ce, "thr")])
-            results[(cc, arm)] = best
-            print(f"{cc:>2} {arm:<12}{100*best[0]:>8.2f}%{best[1]:>10,.0f}{100*best[2]:>13.1f}%"
-                  f"{best[3]:>5}{best[4]:>5}{best[5]:>11,.0f}{best[6]:>12,.0f}{best[7]:>10,.0f}",
-                  flush=True)
-        t_ = results[(cc, "today")]
-        d_ = results[(cc, "decoupled")]
-        g_ = results[(cc, "gaussian")]
-        print(f"   -> c={cc}: gaussian vs today {t_[0]/g_[0]:.2f}x, vs decoupled-Laplace "
-              f"{d_[0]/g_[0]:.2f}x | groups {t_[1]:,.0f}/{d_[1]:,.0f} -> {g_[1]:,.0f} of {c.K:,}"
-              f" | true L1 kept {100*t_[2]:.1f}%/{100*d_[2]:.1f}% -> {100*g_[2]:.1f}%\n",
-                  flush=True)
+                for cv in ([ce] if coupled else cs):
+                    for bi, li in itertools.product(range(len(Bs)), range(len(Ls))):
+                        es, rn, kp = [], [], []
+                        for t in range(a.trials):
+                            m = masks[(vote, ce, t)]
+                            out = np.where(m, vals[(cv, bi, li, t)], 0.0)
+                            es.append(float(np.abs(out - tot).sum() / truth_l1))
+                            rn.append(int(m.sum()))
+                            kp.append(float(np.abs(tot[m]).sum() / truth_l1))
+                        grid.append((float(np.mean(es)), float(np.mean(kp)), float(np.mean(rn)),
+                                     ce, cv, thr[(vote, ce)]))
+            best_l1 = min(grid, key=lambda g: g[0])
+            best_ks = max(grid, key=lambda g: g[1])
+            res[arm] = (best_l1, best_ks)
+            for tag, b in (("min relL1", best_l1), ("max key-set", best_ks)):
+                print(f"{cc:>2} {arm:<10}{100*b[0]:>11.1f}%{100*(1-b[1]):>13.2f}%{b[2]:>10,.0f}"
+                      f"{100*b[1]:>12.1f}%{b[3]:>5}{b[4]:>5}{b[5]:>12,.0f}  ({tag})", flush=True)
+        t_, d_, g_ = res["today"], res["decoupled"], res["gaussian"]
+        print(f"   -> key-set (oracle values): today {100*(1-t_[1][1]):.2f}% | decoupled-Laplace "
+              f"{100*(1-d_[1][1]):.2f}% | Gaussian {100*(1-g_[1][1]):.2f}%  "
+              f"=> {(1-d_[1][1])/max(1-g_[1][1],1e-12):.2f}x vs decoupled, "
+              f"{(1-t_[1][1])/max(1-g_[1][1],1e-12):.2f}x vs today")
+        print(f"   -> end-to-end SASS median: today {100*t_[0][0]:.1f}% | decoupled "
+              f"{100*d_[0][0]:.1f}% | Gaussian {100*g_[0][0]:.1f}%\n", flush=True)
 
 
 if __name__ == "__main__":
