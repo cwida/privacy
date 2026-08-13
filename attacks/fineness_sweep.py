@@ -35,8 +35,12 @@ GROUPINGS = {
     "day|region":     ("cast(l_shipdate as varchar)||'|'||cast(n_regionkey as varchar)", 12630),
 }
 
+# eps_b, eps_eta, eps_v. The high-eps_eta rows matter: Google's tau scales with C_u, so it needs
+# a LARGE C_u (to kill truncation bias) and a large eps_eta (to afford the tau that C_u buys).
+# A grid capped at eps_eta = 1/3 cannot express that and silently under-tunes the baseline.
 SPLITS = [(1 / 3, 1 / 3, 1 / 3), (.05, 1 / 3, .6167), (.05, .25, .70),
-          (.002, .30, .698), (.002, .20, .798), (.05, .10, .85), (.05, .05, .90)]
+          (.002, .30, .698), (.002, .20, .798), (.05, .10, .85), (.05, .05, .90),
+          (.002, .40, .598), (.002, .50, .498), (.002, .60, .398), (.0001, .50, .4999)]
 
 
 def tau(eps_eta, delta_eta, cu):
@@ -109,11 +113,13 @@ def google_values(c, cv, U, rank, rescale):
     is not legal.
     """
     keep = rank < cv
-    v = np.minimum(c.val, U)
+    # two-sided: np.minimum(.,U) alone caps only from above and loses the bound on signed data,
+    # the same bug class already found and fixed in the l1 clip. Identical on non-negative data.
+    v = np.clip(c.val, -U, U)
     if rescale:
         kept = np.bincount(c.pi, weights=np.where(keep, c.val, 0.0), minlength=c.P)
-        f = np.where(kept > 1e-30, c.norms / np.maximum(kept, 1e-30), 1.0)
-        v = np.minimum(c.val * f[c.pi], U)
+        f = np.where(np.abs(kept) > 1e-30, c.norms / np.maximum(np.abs(kept), 1e-30), 1.0)
+        v = np.clip(c.val * f[c.pi], -U, U)
     tot = np.bincount(c.gi[keep], weights=v[keep], minlength=c.K)
     used = np.bincount(c.pi[keep], weights=np.abs(v[keep]), minlength=c.P).max()
     assert used <= cv * U * 1.000001, f"sensitivity violated: {used} > {cv*U}"
@@ -185,6 +191,7 @@ def main():
     ap.add_argument("--db", default="/home/ila/Code/privacy/tpch_sass_sf10.db")
     ap.add_argument("--filter", default="c_acctbal>=8000")
     ap.add_argument("--trials", type=int, default=4)
+    ap.add_argument("--groupings", default=",".join(GROUPINGS))
     a = ap.parse_args()
 
     con = duckdb.connect(config={"threads": 2})
@@ -197,7 +204,8 @@ def main():
            f"{'Google':>8}{'+top':>8}{'+rescale':>9}{'ours':>8}{'gap':>7}  best cfg")
     print(hdr)
     print("-" * (len(hdr) + 14))
-    for name, (gexpr, _) in GROUPINGS.items():
+    for name in a.groupings.split(","):
+        gexpr = GROUPINGS[name][0]
         c = Cells(con, gexpr, a.filter)
         mk = int(c.k_u.max())
         cus = sorted({1, 2, 5, 10, 19, 30, mk // 2 or 1, mk})
