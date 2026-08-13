@@ -1370,6 +1370,59 @@ gate (`released &= votes ≥ 1`) is still the fix and is still free.
 changing the *noise geometry* of the single histogram lowers the effective floor by 4–5× on
 exactly the queries that motivated the question.
 
+## GEOMETRY-MATCHED NOISE — the generic statement, and 4.2×–6.0× vs Google DP as published
+
+The findings above stop being a grab-bag once stated as one rule. A grouped DP release is several
+independent channels. For each, take **one PU's contribution vector to that channel**. Laplace
+pays its ℓ1; Gaussian pays its ℓ2 × `√(2ln(1.25/δ))`. So Gaussian is right for a channel iff
+
+```
+‖·‖₁ / ‖·‖₂  >  √(ln(1.25/δ))      ≈ 3.75 at δ = 1e-6
+```
+
+| channel | one PU's vector | ℓ1 | ℓ2 | ratio | → |
+|---|---|---|---|---|---|
+| values, under the ℓ1 norm clip | mass over groups | `B` | `B` | **1.0** | Laplace |
+| values, Google (`C_v` cells ≤ `U`) | ≤ `C_v` cells at `U` | `C_v·U` | `√C_v·U` | `√C_v` | Gaussian if `C_v` > 14 |
+| votes / partition selection | 1 in each of `k_u` | `k_u` | `√k_u` | `√k_u` | **Gaussian** if `k_u` > 14 |
+| bounds histogram over per-PU norms | exactly one bin | 1 | 1 | **1.0** | Laplace |
+| bounds histogram over per-cell values | ≤ `C_v` bins | `C_v` | `√C_v` | `√C_v` | Gaussian if `C_v` > 14 |
+
+**The ℓ1 clip is precisely what forces ratio = 1 on the value channel.** It permits a PU to
+concentrate all its mass in one group, so the worst case is fully concentrated and there is no ℓ2
+advantage to buy. Same distribution, opposite geometries, opposite answers — which is why Gaussian
+measured 3.7× *worse* on values and 4.5× *better* on votes. It also retro-explains the earlier
+"Gaussian/zCDP loses" result, which was measured on the value channel only and wrongly generalised.
+
+**The vote channel's accounting is verified, not argued.** Neighbour simulation on sf10: measured
+max ‖Δ‖₂ equals `√(min(C_e, k_max))` to a ratio of **1.000 at every `C_e`** ∈ {1,5,30,72}; ℓ1/ℓ2 =
+8.49 at `C_e`=72, comfortably over the 3.75 rule threshold. The Gaussian τ never released a
+singleton in 4M trials against a charged 6.9e−9. The classical σ is valid for ε ≤ 1 and the tuner
+picks `ε_η` ∈ [0.2, 0.6]; Balle–Wang would be tighter, so this is the conservative choice.
+
+**Against Google DP as published** — Wilson et al. 2020 and the library: ApproxBounds over
+per-cell values, **one** `C_u` randomly truncating values and votes together, Laplace on every
+channel. (The rescale-to-true-total trick and the `C_e`/`C_v` decoupling are this project's own
+inventions from adversarial review; they belong in a discussion section, not the baseline.)
+
+| grouping | `n_g/k_u` | published | package | gain |
+|---|---|---|---|---|
+| month | 972 | 0.92% | 0.17% | **5.34×** |
+| month\|priority | 164 | 4.35% | 0.86% | **5.04×** |
+| month\|nation | 39 | 12.79% | 3.04% | **4.21×** |
+| day | 25 | 16.17% | 3.80% | **4.25×** |
+| week\|nation | 8.0 | 98.83% | 16.46% | **6.00×** |
+
+**4.2×–6.0×, median 5.0×.** `day|region` did not finish — it OOM-killed the machine;
+`geometry_matched.py` now carries a `--max-cells` guard.
+
+**Both numbers must be reported.** Against a Google DP we improve ourselves — rescale plus
+decoupled `C_e`/`C_v`, neither published anywhere — the value-channel gap is 1.2×–1.5× and
+*inverts* to 0.85× on the finest grouping. The defensible framing is: *the package is 5× better
+than deployed Google DP; roughly half of that survives against improvements to Google DP that we
+had to invent ourselves, and the vote-channel half survives regardless because Google's Laplace
+partition selection cannot be fixed by re-allocating budget.*
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
@@ -1388,6 +1441,18 @@ file plus the scripts under `attacks/`.
   ~1,000-PUs-per-group floor (where every arm returns ~100% error) is exactly the regime it
   targets. That is the most promising remaining direction.
 - Everything here is grouped SUM on non-negative measures, static data, single aggregate.
+- **Machine limits are real.** `day|region` (12,630 groups, 10.6M cells) OOM-killed the laptop
+  during a full tune: the tuner holds ~100 arrays of cell length. Keep to `month|nation` (5.5M) or
+  smaller, `threads=2`, one process at a time. `geometry_matched.py --max-cells` enforces this;
+  `fineness_sweep.py` does not yet.
+- **Not yet attacked:** the Gaussian-votes result. Its sensitivity and threshold are verified, but
+  the *tuning* of the Laplace arm it is compared against is not — and that is where all six
+  previous collapses came from. The specific worry is that "`C_e` cancels, so the floor is
+  immovable" is an asymptotic argument; a fine `C_e` sweep with `ε_η` up to 0.9, or fractional
+  votes, could close it.
+- **Not yet ported:** none of this is in `src/`. The smooth-sensitivity (`dp_sass`) path uses the
+  same Wilson τ with Laplace votes, so the floor should apply there and Gaussian votes should
+  transfer without touching the median/lane machinery — unverified.
 
 ## Untested
 
