@@ -1468,6 +1468,66 @@ than deployed Google DP; roughly half of that survives against improvements to G
 had to invent ourselves, and the vote-channel half survives regardless because Google's Laplace
 partition selection cannot be fixed by re-allocating budget.*
 
+## WHEN DOES THIS APPLY? StackOverflow and ClickBench say: only for concentrated `k_u`
+
+`attacks/dataset_profile.py`. The quantity I had been using, `n_g / max k_u`, is a caricature. The
+exact one is per group: with votes truncated to `C_e`, a PU spread over `k_u` groups contributes
+`min(C_e,k_u)/k_u` of a vote to each group it touches, so
+
+```
+E[votes in g] = Σ_{u ∈ g} min(C_e, k_u)/k_u          ("effective vote count")
+```
+
+and `g` is releasable iff that clears the arm's threshold. `n_g / eff` is the **harmonic-mean
+`k_u` of the group's members** — exactly what Laplace truncation throws away. Both arms share the
+vote count and differ only in threshold, so `C_e` must be tuned **separately for each** (pinning
+`C_e` = `k_max` is catastrophic for Gaussian on heavy-tailed `k_u`, and my first version of this
+profile did exactly that — the untuned-baseline error again, this time against my own result):
+
+| query | groups | `k_u` med/p90/max | `n_g/eff` | Laplace rel. | `C_e` | Gaussian rel. | `C_e` |
+|---|---|---|---|---|---|---|---|
+| tpch month\|nation | 2,095 | 30 / 45 / 72 | 30.4 | 2,025 | 1 | 2,044 | 34 |
+| tpch day | 2,526 | 55 / 93 / 183 | 58.2 | 2,506 | 3 | 2,520 | 55 |
+| **tpch week\|nation** | 9,050 | 48 / 77 / 130 | 49.5 | **0** | any | **8,480** | 55 |
+| **tpch day\|region** | 12,630 | 55 / 93 / 176 | 58.3 | **0** | any | **11,600** | 55 |
+| so posts\|month | 190 | 1 / 3 / 156 | 1.9 | 165 | 2 | 162 | 3 |
+| so posts\|day | 5,107 | 1 / 4 / 2,126 | 3.0 | 6 | 1 | 0 | — |
+| so comments\|month | 182 | 1 / 3 / 154 | 2.1 | 164 | 1 | 158 | 3 |
+| so badges\|month | 165 | 1 / 4 / 154 | 2.0 | 165 | 3 | 165 | 2 |
+| cb hits\|region | 3,238 | 1 / 1 / 54 | 1.0 | 665 | 1 | 484 | 1 |
+| cb hits\|date\|region | 7,564 | 1 / 1 / 58 | 1.5 | 1,006 | 1 | 695 | 1 |
+| cb hits\|url | 2,019,483 | 1 / 6 / 1,067 | 7.0 | 1,626 | 1 | 692 | 1 |
+
+**Three regimes, and the middle one was invisible until now.**
+
+1. **Floor-binding, concentrated `k_u` → Gaussian is the difference between nothing and
+   everything.** `week|nation` and `day|region` release **0 groups under Laplace at every `C_e`**
+   against 8,480 and 11,600 under Gaussian. The earlier 4.46× understated this: measured as
+   released key set it is not a ratio at all.
+2. **Not floor-binding → Gaussian buys ~1%.** `month|nation` 2,025 → 2,044, `day` 2,506 → 2,520.
+   (The earlier 1.29×–1.38× *error* gains come from which groups get released, not how many.)
+3. **Heavy-tailed `k_u` → Gaussian LOSES, by up to 2.4×.** Every StackOverflow and ClickBench
+   query. `cb hits|url` is the extreme: 1,626 groups under Laplace vs 692 under Gaussian.
+
+**The predictor is the shape of the `k_u` distribution, not its scale.** TPC-H has
+median 30–55 against max 72–183 — every customer spreads widely, so truncation to `C_e`=1 costs
+*every* PU a factor of ~30–55 and Gaussian's `√C_e` is cheap by comparison. StackOverflow and
+ClickBench have median `k_u` = 1 with max 154–2,126: **most users touch one group and lose nothing
+to truncation, while Gaussian must pay `√C_e` sized for the tail.** Laplace truncation is nearly
+free on a heavy tail and ruinous on a concentrated distribution.
+
+**Design rule for the port:** compare median `k_u` against `max k_u`. Choose Gaussian votes when
+`k_u` is concentrated and above the ≈4.3 crossover; choose Laplace when `k_u` is heavy-tailed
+(median ≈ 1). Both statistics are data-dependent, so a deployment must either take them from the
+public `C_e` setting or spend budget to estimate them — **an unresolved accounting question, and
+the most important open item for the implementation.**
+
+**Scope limit, stated plainly:** the vote-channel result applies to workloads where privacy units
+genuinely spread across many groups. Of the three datasets available, only TPC-H is such a
+workload. This does not make the result narrow — user-level analytics over time buckets is exactly
+this shape — but the claim must be conditioned on `k_u` concentration rather than asserted
+generally.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
