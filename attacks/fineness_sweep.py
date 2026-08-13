@@ -21,6 +21,7 @@ import itertools
 
 import duckdb
 import numpy as np
+from scipy.stats import norm
 
 EPS, DELTA = 1.0, 1e-6
 
@@ -162,17 +163,32 @@ class Cache:
 ARMS = {"google": "g_rand", "google+top": "g_top", "google+top+rescale": "g_res", "ours": None}
 
 
-def tune(cache, cus, arm):
+def gauss_vote_params(ce, mk, eps_eta, delta):
+    """Gaussian on the vote histogram: every PU votes 1 in each of its (truncated to C_e) groups,
+    so l2 sensitivity is sqrt(min(C_e, max k_u)) where l1 would have been C_e. Both arms may use
+    this -- it is a partition-selection change, independent of how values are clipped."""
+    sigma = np.sqrt(min(ce, mk)) * np.sqrt(2.0 * np.log(1.25 / (delta / 2))) / eps_eta
+    thr = 1.0 + sigma * norm.ppf(1.0 - (delta / 2) / max(ce, 1))
+    return sigma, thr
+
+
+def tune(cache, cus, arm, vote_noise="laplace"):
     """Tune over C_e (votes) x C_v (values) x budget split. Ours has no C_v."""
     c, r = cache.c, cache.r
     tab = ARMS[arm]
     cvs = cus if tab else [None]
+    mk = int(c.k_u.max())
     best = None
     for ce, cv, (eb, ee, ev) in itertools.product(cus, cvs, SPLITS):
-        thr = tau(EPS * ee, DELTA * ee, ce)
+        if vote_noise == "gauss":
+            sigma, thr = gauss_vote_params(ce, mk, EPS * ee, DELTA)
+        else:
+            thr = tau(EPS * ee, DELTA, ce)
         es, rels = [], []
         for t in range(cache.trials):
-            rel = cache.votes[(t, ce)] + r.laplace(0, ce / (EPS * ee), size=c.K) >= thr
+            vn = (r.normal(0, sigma, size=c.K) if vote_noise == "gauss"
+                  else r.laplace(0, ce / (EPS * ee), size=c.K))
+            rel = cache.votes[(t, ce)] + vn >= thr
             if tab:
                 tot, sc = getattr(cache, tab)[(eb, t, cv)], cv * cache.U[(eb, t)]
             else:
@@ -192,6 +208,7 @@ def main():
     ap.add_argument("--filter", default="c_acctbal>=8000")
     ap.add_argument("--trials", type=int, default=4)
     ap.add_argument("--groupings", default=",".join(GROUPINGS))
+    ap.add_argument("--votes", default="laplace", choices=["laplace", "gauss"])
     a = ap.parse_args()
 
     con = duckdb.connect(config={"threads": 2})
@@ -210,7 +227,7 @@ def main():
         mk = int(c.k_u.max())
         cus = sorted({1, 2, 5, 10, 19, 30, mk // 2 or 1, mk})
         cache = Cache(c, cus, a.trials)
-        res = {arm: tune(cache, cus, arm) for arm in ARMS}
+        res = {arm: tune(cache, cus, arm, a.votes) for arm in ARMS}
         g = min(res[k][0] for k in ARMS if k != "ours")
         o = res["ours"]
         print(f"{name:<15}{c.K:>7,}{mk:>8}{np.median(c.npu_g):>9,.0f}"
