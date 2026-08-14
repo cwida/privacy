@@ -2155,6 +2155,57 @@ filterless `U` is itself a DP release that can be frozen and reused exactly like
 entry in the persistent table carries *both* the releasable groups and the bound range for that
 (filterless query, grouping) pair. Dandan's two proposals share one mechanism.
 
+## THE PERSISTENT TABLE, INVESTIGATED — it works, with a statically decidable condition
+
+Four arms, each spending the same total per query; the frozen arms additionally pay `ε₀/N` with
+N=20. `goog-frozen` is a fair arm, not a strawman — Privacy on Beam (`SelectPartitions` →
+`PublicPartitions`) and Tumult (`get_groups` → `KeySet`) both support it.
+`attacks/frozen_vs_google.py`.
+
+| filter | frozen-but-absent | goog-τ | goog-frozen | ours-τ | ours-frozen | vs published |
+|---|---|---|---|---|---|---|
+| none | 0 | 4.25% | 3.52% | 0.95% | **0.79%** | **5.4×** |
+| PU: acctbal≥8000 | 0 | 13.50% | 9.76% | 3.95% | **2.28%** | **5.9×** |
+| PU: acctbal≥9900 | 9 | 99.99% | 65.37% | 100.0% | **44.77%** | 2.2× |
+| GRP: ship≥1996 | 1,200 | 1.72% | 2.23% | 0.44% | 0.94% | 1.8× |
+| GRP: ship≥1998 | 1,800 | 0.72% | 2.99% | 0.24% | 1.19% | **0.61×** |
+| GRP: ship≥1998 & nation<5 | 2,027 | 0.68% | 10.28% | 0.22% | 4.62% | **0.15×** |
+
+**The failure mode is real and it is not subtle.** A filter on the *privacy unit* removes users but
+leaves the groups, so τ binds harder and freezing wins 5–6×. A filter on the *grouping key* deletes
+whole groups — up to 2,027 of 2,085 frozen groups no longer exist, get released anyway, and
+contribute pure noise. Freezing then loses by 5–21× against its own τ baseline, and by 6.7× against
+Google. It hits `goog-frozen` just as hard (0.68% → 10.28%), so this is inherent to freezing, not to
+our clip.
+
+**The fix is free, and it is the interesting part.** When the filter constrains the grouping key,
+*which frozen groups survive is determined by the predicate alone* — no data access — so `G_fix`
+can be pruned publicly before use:
+
+| filter | `G_fix` | pruned | frozen-raw | frozen-pruned | τ | gain |
+|---|---|---|---|---|---|---|
+| ship≥1996 | 2,085 | 885 | 0.94% | **0.39%** | 0.44% | 1.14× |
+| ship≥1998 | 2,085 | 285 | 1.18% | **0.23%** | 0.24% | 1.02× |
+| nation<5 | 2,085 | 417 | 2.37% | **0.80%** | 0.86% | 1.07× |
+| both | 2,085 | 57 | 4.61% | **0.21%** | 0.21% | 1.00× |
+
+Pruning turns a 5–21× loss into a small win or a wash. **With it, the frozen set is never harmful.**
+
+**Why the gain is small on group-side filters, and this is the unifying point:** those filters
+leave few groups but each still holds many users, so τ was never binding and removing it buys
+nothing. **Freezing pays exactly when τ binds — i.e. when the filter thins the users inside groups
+rather than deleting groups.**
+
+**The applicability rule is decidable from the query text**, which suits a rewriter-based system:
+*does the `WHERE` clause constrain columns that appear in, or functionally determine, the grouping
+key?* If no → use `G_fix` directly, expect a large win. If yes → prune `G_fix` by the predicate
+first, expect a wash. Never use it unpruned.
+
+**Answering "how much vs Google DP":** 5.4×–5.9× against Google as published where τ binds, falling
+to ~1.0× where it does not. Against Google using *its own* frozen-partition feature the gap is
+4.5× (no filter) and 4.3× (acctbal≥8000) — and that residual is the ℓ1 clip, which carries its own
+scope condition. The frozen table itself is worth 1.2×–2.9× to *either* mechanism.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
