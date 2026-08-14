@@ -3,6 +3,74 @@
 Two proposals for the same open problem, and what simulating them showed.
 Reproduce with `attacks/filterless_sim.py` (TPC-H, PU = `customer`, ε = 1, static data).
 
+## PRIOR ART — four of the five already exist. Read before writing anything up.
+
+Checked 14 Aug against actual source (729 blobs enumerated from `google/differential-privacy`,
+files fetched raw) and primary papers, with an independent refutation pass that re-fetched every
+load-bearing quote. **The utility measurements below stand; the novelty claims mostly do not.**
+
+**#1 Frozen group set — SHIPS, in two systems.** Tumult Analytics is the exact technique:
+`QueryBuilder.get_groups()` under an `ApproxDPBudget(ε₀,δ₀)`, then `KeySet.from_dataframe()` for
+later queries — and their tutorial spends δ once and runs the follow-up under `PureDPBudget`.
+Privacy on Beam documents the derive-then-reuse case explicitly in `pbeam/count.go`: *"You use a
+differentially private operation to come up with the list of partitions… the output of a
+SelectPartitions operation"*, and **enforces** it (`checkPartitionSelectionEpsilon` requires ε=0
+with public partitions). Their codelab states the amortisation rationale verbatim: *"privacy budget
+on partition selection only once for the entire pipeline."* Wilson et al. §6 lists caching as future
+work. Narrow residue: everyone frames this **within one pipeline**; a *persistent* key set reused
+across separately-submitted later sessions is not costed anywhere. That is a systems framing, not a
+mechanism.
+
+**#2 Adaptive base — a config flag.** `ApproxBounds<T>::Builder::SetBase()`, `SetScale()`,
+`SetNumBins()` are all public (`cc/algorithms/approx-bounds.h:731`, default `base_ = 2.0`). The
+proposal is literally `.SetScale(lo).SetBase(pow(hi/lo,1.0/64)).SetNumBins(64)`. Residue: Wilson
+et al. §5.1.1 *hard-codes* "64-bin logarithmic histogram of base 2" while the library parameterises
+it, Java hard-codes `base = 2.0` with no setter, and nothing auto-derives the base from a public
+bound. So the contribution is **"use the knob the paper didn't"** plus the 1.68× measurement —
+never the capability.
+
+**#3 Gaussian votes — pre-empted comprehensively, and one of my claims is false.**
+- Implemented: Google C++ `GaussianPartitionSelection` (`cc/algorithms/partition-selection.h:443`,
+  `CalculateStddev(..., sqrt(max_partitions_contributed))` — the √`C_u` argument exactly); Go
+  dispatches on `if s.l0Sensitivity > 3 { // Gaussian thresholding outperforms }`; PipelineDP ships
+  four strategies including `GAUSSIAN_THRESHOLDING` and `WEIGHTED_GAUSSIAN_THRESHOLDING`; OpenDP
+  `make_gaussian_threshold`; Qrlew's `gaussian_tau(...)` is a line-for-line match.
+- Published: Gopi et al. (ICML 2020) call it *"a straight-forward extension… ℓ₁-sensitivity by Δ₀
+  (and ℓ₂-sensitivity by √Δ₀)"* and use it as a **benchmark**. Desfontaines et al. (PoPETs 2022)
+  Fig. 4 benchmarks it and recommends *"weighted Gaussian thresholding for κ ≥ 4… the crossing
+  point happens for κ = 3, this stays true for varying ε and δ."* **My measured crossover of
+  harmonic-mean `k_u` ≈ 4.3, ε/δ-invariant, is a rediscovery of their κ = 3.**
+- **And "no per-user truncation to `C_u` is needed" is definitively false.** DPSU's Weighted
+  Gaussian still pre-truncates each user to Δ₀. Gaussian buys `√k_u` instead of `k_u` — it does not
+  remove the cap. That sentence must be struck wherever it appears below.
+
+**#4 Count-conditioned shrinkage — the only survivor, and narrowly.** The refuter searched
+empirical Bayes, James–Stein, constrained inference, Fay–Herriot and noise-aware Bayesian
+post-processing and found nothing using the partition-selection count as a *covariate* for the
+co-released sums. Two near misses to pre-empt: **Private-PGM** (McKenna et al.) fuses all noisy
+measurements into one coherent estimate — a reviewer will say a count and a sum are just two
+measurements; and **"Debiasing Functions of Private Statistics in Postprocessing"** (FORC 2025)
+covers private sample sizes and means. Also exists: James–Stein for DP (arXiv 2211.15019).
+
+**#5 ℓ1 per-PU-norm clip — prior art exists, though the report's citations were partly
+misattributed.** Harrison & Manurangsi (arXiv 2603.09167) build selection mechanisms under *"Lr
+norm constraints on vector contributions… When r = 1 it gives us a drop-in replacement for the
+Laplace mechanism"*. PipelineDP's `max_contributions` is the ℓ₁-vs-ℓ₀×ℓ∞ parameterisation choice
+and genuinely ships — **but it caps the *number* of contributions, giving `max_contributions ×
+max_value`, not a rescaled norm bound `B`**, so it is not our clip. Norm clipping with rescaling is
+standard in DP-SGD/FL (Abadi et al.; Andrew et al.) but for gradients, not grouped SQL aggregates.
+**This is the least-settled verdict and the one worth a careful manual check before claiming
+anything.**
+
+**Two citation errors to fix before anyone checks them:** Google's `partition_selection.md`
+describes only truncated geometric — it does *not* document Gaussian (the class exists, the doc
+doesn't mention it); and PipelineDP's `NormKind.L1`/`vector_max_norm` governs `VECTOR_SUM`
+coordinates, not group keys.
+
+**Net:** this was worth doing and the timing is lucky. What survives is the *measurement* work —
+the τ floor proof, the `k_u`-shape scope condition, the resonance finding, the metric critique, the
+two privacy bugs — plus one small post-processing idea. The mechanism contributions do not survive.
+
 ## SUMMARY — five results, and what each is worth
 
 Read this first; the sections below are in the order they were discovered, and most of the early
