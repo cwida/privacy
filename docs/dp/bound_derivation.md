@@ -2113,6 +2113,48 @@ question — the released key set is the *filterless* one, so a group empty afte
 noise centred on zero rather than being absent. That is arguably the more useful answer for a
 dashboard, but it is not the same object τ-thresholding returns.
 
+## Dandan's 14 Aug follow-ups: positional storage is unsafe, and the public bound is optional
+
+**Storing row positions instead of group values does not work.** She proposed making the filterless
+query deterministic in content *and tuple order*, then storing only row positions (run-length
+compressed) and re-running the filterless query to recover the groups. Measured:
+
+| grouping | groups | as values | as positions | filterless re-run |
+|---|---|---|---|---|
+| month | 84 | 0.7 KB | 0.3 KB | 3.35 s |
+| month\|nation | 2,100 | 21.7 KB | 8.2 KB | 4.13 s |
+| day\|region | 12,630 | 160.3 KB | 49.3 KB | 3.38 s |
+| day\|nation | 63,150 | **838.7 KB** | 246.7 KB | 3.86 s |
+
+Two reasons not to: the storage being optimised is under 1 MB even at 63,150 groups, while the
+recovery costs **3–4 s of full-scan on every filtered query**; and the determinism premise is false.
+**Four runs of the same `GROUP BY` with no `ORDER BY` returned four distinct orderings**, and
+changing `threads` from 2 to 4 changed it again — so positional storage would silently return the
+*wrong* groups. (This also independently confirms the row-order nondeterminism an earlier audit
+flagged in `taubinding_headtohead.py`.) An explicit `ORDER BY` would fix correctness but adds a
+sort to every recovery.
+
+**Peter's objection about join queries is real, and the fix is not a two-stage bound.** Tested
+splitting `ε_b` between a coarse base-2 pass to locate the magnitude and a fine 64-bin pass in a
+window around it — no public bound needed:
+
+| scheme | needs public bound? | median `B` | error |
+|---|---|---|---|
+| base 2, full type range (current) | no | 4,194,304 | **3.96%** |
+| 1-stage fine grid, public `U` | **yes** | 4,307,730 | 3.97% |
+| 2-stage: coarse then fine | no | 5,558,445 | 5.22% |
+
+Two-stage **loses** — halving an already-tiny `ε_b` raises the ApproxBounds threshold enough to
+move the selected bin. But the first row is the real answer: **at TPC-H's alignment base-2 and the
+fine grid are identical (3.96% vs 3.97%)**. The fine grid's value is *insurance* against unlucky
+alignment (1.70× worst case), not a gain at any given alignment. So a query with no public bound
+simply keeps base-2 and accepts the alignment lottery — it does not break.
+
+**And when the bound is worth having, it comes from the same place as the group set.** The
+filterless `U` is itself a DP release that can be frozen and reused exactly like `G_fix`, so one
+entry in the persistent table carries *both* the releasable groups and the bound range for that
+(filterless query, grouping) pair. Dandan's two proposals share one mechanism.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
