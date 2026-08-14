@@ -3,6 +3,50 @@
 Two proposals for the same open problem, and what simulating them showed.
 Reproduce with `attacks/filterless_sim.py` (TPC-H, PU = `customer`, ε = 1, static data).
 
+## SUMMARY — five results, and what each is worth
+
+Read this first; the sections below are in the order they were discovered, and most of the early
+headline numbers were later corrected. All figures are relative ℓ1 over the true uncapped key set,
+τ-suppressed groups charged full error, **every arm tuned over its own parameters**.
+
+| # | result | gain | whose | where measured |
+|---|---|---|---|---|
+| 1 | **Frozen group set `G_fix`** — derive the key set once by DP, reuse it, skip τ | **8.2×** (break-even at N=2 queries) | Dandan | τ-binding query, TPC-H sf10 |
+| 2 | **Gaussian votes** — partition selection has ℓ1=`k_u`, ℓ2=`√k_u` | **4.5×**, and empty answer → 94% key set | this project | τ-binding queries |
+| 3 | **Adaptive-base ApproxBounds** — fixed 64 bins over a narrowed range | **1.68×** worst case, 1.00× alignment spread | Dandan | month\|nation |
+| 4 | **Count-conditioned shrinkage** — free post-processing of the τ counts | 1.02×–2.15× | this project | all datasets |
+| 5 | **ℓ1 per-PU-norm clip** — the idea this file started from | **3.2×–6.0×** | this project | TPC-H only |
+
+**The baseline is Google DP as published** (Wilson et al. PoPETs 2020 and the library): one `C_u`
+truncating values and votes together, Laplace on every channel, ApproxBounds over per-cell values
+in base-2 bins. A hardened Google — adding rescale-to-true-total and separate `C_u` for votes vs
+values, **neither of which is published anywhere** — would close #5 to 1.2×–1.5× on uniform data,
+though not on aligned data (2.3×–4.6×). That belongs in a discussion section, not the headline.
+
+**Scope conditions, all measured, none optional:**
+
+- **#5 needs privacy units that spread across many groups.** On StackOverflow and ClickBench
+  (median `k_u` = 1) it gives 0.90×–1.45× and is *worse* than Google on 2 of 8 queries. The
+  condition is that Google be *forced* into a large `C_u`; when it can set `C_u`=1 for free, its
+  per-cell bound `U` ≈ our norm bound `B` and there is no advantage available.
+- **#2 needs the same thing** — crossover at harmonic-mean `k_u` ≈ 4.3 — and it *loses* in the
+  smooth-sensitivity (`dp_sass`) path, where the value channel is independently broken so
+  releasing more groups is worse (252% → 288%).
+- **#1 needs one frozen set per grouping key** and expires when the data changes.
+- **#1–#4 do not depend on the ℓ1 clip**, so a reviewer can correctly observe they would improve
+  Google DP just as much. They are contributions to the Wilson-et-al. line, not a moat.
+- **Nothing is implemented in `src/`.** All simulation.
+
+**Two privacy bugs were found and fixed in our own mechanism** before shipping: the clip was
+written as `Σ_g min(t, B)`, a signed sum rather than a norm, which loses ε-DP entirely on signed
+measures (39.3% of PUs over bound on an ordinary net-revenue query); and δ was under-charged ~53×
+because a PU creates a group by having a *value* there, not a vote. Both fixes are free.
+
+**Methodological finding, and the most transferable result here:** eight separate gains in this
+document evaporated once the baseline was tuned as hard as the proposal — 880× → 12× → 4.8× →
+4.65× → 1.36×. A DP mechanism comparison at a fixed budget split, a fixed `C_u`, or against a
+library's default configuration is not evidence.
+
 ## The problem
 
 Smooth-sensitivity SASS needs a **public output domain** `Λ`. Without it the smooth
