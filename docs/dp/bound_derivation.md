@@ -2206,6 +2206,63 @@ to ~1.0× where it does not. Against Google using *its own* frozen-partition fea
 4.5× (no filter) and 4.3× (acctbal≥8000) — and that residual is the ℓ1 clip, which carries its own
 scope condition. The frozen table itself is worth 1.2×–2.9× to *either* mechanism.
 
+## `C_u` CANNOT BE FROZEN — and this is the real case for the ℓ1 clip
+
+Dandan asks (14 Aug) whether `C_u` must also be estimated privately and frozen, since it is
+"relatively stable". The premise is right about one quantity and wrong about the one that matters,
+and the consequence reframes result #5. `attacks/cu_automatic.py`.
+
+**The data statistic *is* stable. The optimal parameter is not.** Across six filters on
+`month|nation`, median `k_u` is **30 in every single case** and max `k_u` is 66–72 — exactly the
+stability she describes. But Google's error-optimal `C_v` ranges **21–55, a 3× spread**, and is
+nowhere near either statistic:
+
+| filter | PUs | median `k_u` | max `k_u` | best `C_v` | Google | ours |
+|---|---|---|---|---|---|---|
+| none | 999,982 | 30 | 72 | **55** | 3.24% | 0.96% |
+| acctbal≥4000 | 545,077 | 30 | 72 | **55** | 4.79% | 1.55% |
+| acctbal≥8000 | 181,532 | 30 | 72 | **34** | 13.42% | 3.98% |
+| acctbal≥9500 | 45,320 | 30 | 66 | **21** | 81.49% | 61.99% |
+| mktseg=AUTOMOBILE | 200,165 | 30 | 68 | **55** | 13.02% | 3.54% |
+| nation<5 | 199,738 | 30 | 68 | **55** | 2.55% | 0.85% |
+
+`C_v` is not an estimate of `k_u` — it is a bias/variance tradeoff point that depends on the group
+sizes, on `U`, and on how close the query sits to the τ floor. It therefore moves with the
+*filter*, which is precisely what frozen metadata cannot track.
+
+**And getting it wrong is brutally expensive, asymmetrically so** (penalty vs each filter's own
+best `C_v`):
+
+| filter | `C_v`=1 | 5 | 13 | 21 | 34 | 55 | 89 |
+|---|---|---|---|---|---|---|---|
+| none | **29.9×** | 25.9× | 18.1× | 11.0× | 3.2× | 1.0× | 1.6× |
+| nation<5 | **38.0×** | 33.0× | 23.0× | 13.9× | 4.0× | 1.0× | 1.6× |
+| acctbal≥8000 | 7.2× | 6.3× | 4.4× | 2.7× | 1.0× | 1.1× | 1.7× |
+| acctbal≥9500 | 1.2× | 1.1× | 1.0× | 1.0× | 1.0× | 1.1× | 1.1× |
+
+Under-estimating costs up to **38×**; over-estimating costs at most 1.7×. So a safe automatic
+system must over-estimate `C_v` — and then pay the `C_v·U` noise for a bound it never uses. (The
+`acctbal≥9500` row is flat only because τ-suppression dominates everything there.)
+
+**This is the strongest case for the ℓ1 clip, and it is not a utility argument.** The norm clip has
+**no `C_v` at all**: sensitivity is `B` however many groups a PU touches. Combined with the other
+two results, a fully automatic system needs:
+
+| parameter | Google | ours |
+|---|---|---|
+| value bound | `U` — ApproxBounds, automatic | `B` — ApproxBounds, automatic |
+| `C_v` (values) | **must be chosen; 3× unstable; 38× if wrong** | **does not exist** |
+| `C_e` (votes) | must be chosen | **provably 1**, and absent entirely under a frozen group set |
+
+So the answer to "can we determine `C_u` automatically and freeze it" is: **for our mechanism the
+question does not arise**, and for Google's it cannot be answered by freezing, because the quantity
+that is stable is not the quantity that is needed.
+
+**Result #5 should be re-framed on this basis.** Its utility margin against a hardened Google is
+1.2×–1.5× and scope-limited — but it removes a parameter that is unfreezable, query-dependent, and
+worth up to 38× when misspecified. For an *automatic* system that is the more valuable property,
+and it is the argument that survives the prior-art check intact.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
