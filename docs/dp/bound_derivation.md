@@ -2362,6 +2362,38 @@ shows `C_e` = 1 is exactly optimal, the OR→AND saving exists only in configura
 should never be in. **The idea is correct, inert as specified, and unnecessary once the statistic
 is chosen correctly.**
 
+## THE FULL STACK — 4.5x-9.7x vs Google DP as published, and only 1.35x headroom left
+
+`attacks/full_stack.py`. Everything that survived, stacked, at matched total budget (frozen arms
+pay `eps_0/N`, N=20). The ORACLE arm has the error-optimal bound *and* free partition selection —
+not implementable, it bounds what any further tuning could reach.
+
+| grouping / filter | published | +frozen | ours | ours+froz | ours+all | ORACLE | vs pub | headroom |
+|---|---|---|---|---|---|---|---|---|
+| month, acctbal>=8000 | 0.78% | 0.65% | 0.18% | **0.16%** | 0.16% | — | **4.97x** | — |
+| month, acctbal>=9500 | 2.94% | 2.46% | 0.78% | **0.62%** | 0.65% | — | **4.53x** | — |
+| month\|nation, acctbal>=8000 | 13.53% | 9.82% | 4.01% | 2.26% | **2.27%** | 1.68% | **5.96x** | **1.35x** |
+| month\|nation, acctbal>=9500 | 82.49% | 20.31% | 62.21% | 8.60% | **8.47%** | 2.88% | **9.74x** | 2.94x |
+
+**Three readings.**
+
+**The value channel is nearly exhausted.** Headroom at the main operating point is **1.35x** — an
+oracle that knows the error-optimal bound and pays nothing for partition selection is only 35%
+better than the implementable stack. That is the answer to "can we do even better": on the value
+side, essentially no. The 2.94x headroom at high selectivity is almost entirely the
+partition-selection cost the oracle is excused from, not bound selection.
+
+**Count-conditioned shrinkage and the frozen key set are substitutes, not complements.** Shrinkage
+measured 1.277x on this query *before* the frozen set existed (3.943% -> 3.086%); with the frozen
+set it is a wash (2.26% -> 2.27%). Both attack the same cost — the price of partition selection —
+so they do not stack. The earlier 1.277x came partly from the regression letting the tuner move
+budget off the vote channel, which the frozen set does outright and better.
+
+**Freezing is worth most exactly where the query is hardest.** At `acctbal>=9500` it takes our arm
+from 62.21% to 8.60% (7.2x) and Google's from 82.49% to 20.31% (4.1x). At `acctbal>=8000` it is
+1.8x and 1.4x. The pattern matches the tau-floor analysis: freezing pays in proportion to how much
+tau was suppressing.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
