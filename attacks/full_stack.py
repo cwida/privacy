@@ -30,11 +30,26 @@ import numpy as np
 from fineness_sweep import (DELTA, GROUPINGS, SPLITS, Cells, approx_bounds, google_values, tau,
                             votes)
 
-FILTERS = {"none": "true", "acctbal>=8000": "c_acctbal>=8000",
-           "mktseg=AUTOMOBILE": "c_mktsegment='AUTOMOBILE'", "acctbal>=9500": "c_acctbal>=9500"}
+# All PU-side (functions of the customer), which is where the applicability rule says the frozen
+# set may be used directly. Group-side filters need public predicate pruning first and are covered
+# separately in attacks/frozen_vs_google.py.
+FILTERS = {
+    "none": "true",
+    "acctbal>=4000": "c_acctbal>=4000",
+    "acctbal>=8000": "c_acctbal>=8000",
+    "acctbal>=9500": "c_acctbal>=9500",
+    "acctbal<0": "c_acctbal<0",
+    "mktseg=AUTOMOBILE": "c_mktsegment='AUTOMOBILE'",
+    "mktseg=BUILDING": "c_mktsegment='BUILDING'",
+    "acctbal>=9500 & AUTO": "c_acctbal>=9500 AND c_mktsegment='AUTOMOBILE'",
+}
 
 
-def load(con, gexpr, filt):
+def load(con, gexpr, filt, gfix=None):
+    """If gfix is given, the group space is extended with frozen groups absent after filtering:
+    their truth is 0 and a frozen release must still emit noise for them, so the cost of freezing
+    is charged rather than silently ignored. Without this, group-side filters look far better than
+    they are."""
     rows = con.execute(f"""
         WITH c AS (SELECT o_custkey AS pu, {gexpr} AS g, sum(l_extendedprice) AS t
                    FROM tpch.lineitem JOIN tpch.orders ON o_orderkey=l_orderkey
@@ -46,9 +61,15 @@ def load(con, gexpr, filt):
     c = Cells.__new__(Cells)
     c._init_from(rows["pid"].astype(np.int64), rows["gid"].astype(np.int64),
                  rows["t"].astype(np.float64))
-    lab = np.empty(c.K, dtype=object)
-    lab[rows["gid"].astype(np.int64)] = rows["g"]
-    return c, lab
+    lab = list(np.unique(rows["g"]))
+    if gfix:
+        extra = sorted(g for g in gfix if g not in set(lab))
+        if extra:
+            lab += extra
+            c.K += len(extra)
+            c.truth = np.concatenate([c.truth, np.zeros(len(extra))])
+            c.npu_g = np.concatenate([c.npu_g, np.zeros(len(extra))])
+    return c, np.array(lab, dtype=object)
 
 
 def build_gfix(con, gexpr, eps0, delta0, r):
@@ -106,7 +127,7 @@ def main():
     print(hdr)
     print("-" * len(hdr))
     for fname, filt in FILTERS.items():
-        c, lab = load(con, gexpr, filt)
+        c, lab = load(con, gexpr, filt, gfix)
         if len(c.val) > a.max_cells:
             print(f"{fname:<20}  SKIPPED: {len(c.val):,} cells > --max-cells {a.max_cells:,}",
                   flush=True)

@@ -2362,37 +2362,47 @@ shows `C_e` = 1 is exactly optimal, the OR→AND saving exists only in configura
 should never be in. **The idea is correct, inert as specified, and unnecessary once the statistic
 is chosen correctly.**
 
-## THE FULL STACK — 4.5x-9.7x vs Google DP as published, and only 1.35x headroom left
+## THE FULL STACK — 4.8x-6.4x vs Google DP as published across six filters
 
-`attacks/full_stack.py`. Everything that survived, stacked, at matched total budget (frozen arms
-pay `eps_0/N`, N=20). The ORACLE arm has the error-optimal bound *and* free partition selection —
-not implementable, it bounds what any further tuning could reach.
+`attacks/full_stack.py`, `month|nation` on sf10, matched total budget (frozen arms pay `eps_0/N`,
+N=20). All filters are PU-side, which is where the applicability rule permits using the frozen set
+directly; group-side filters need predicate pruning first and are covered in
+`attacks/frozen_vs_google.py`. The ORACLE arm has the error-optimal bound *and* free partition
+selection — not implementable, it bounds what any further tuning could reach.
 
-| grouping / filter | published | +frozen | ours | ours+froz | ours+all | ORACLE | vs pub | headroom |
+| filter | published | +frozen | ours | ours+froz | ours+all | ORACLE | vs pub | headroom |
 |---|---|---|---|---|---|---|---|---|
-| month, acctbal>=8000 | 0.78% | 0.65% | 0.18% | **0.16%** | 0.16% | — | **4.97x** | — |
-| month, acctbal>=9500 | 2.94% | 2.46% | 0.78% | **0.62%** | 0.65% | — | **4.53x** | — |
-| month\|nation, acctbal>=8000 | 13.53% | 9.82% | 4.01% | 2.26% | **2.27%** | 1.68% | **5.96x** | **1.35x** |
-| month\|nation, acctbal>=9500 | 82.49% | 20.31% | 62.21% | 8.60% | **8.47%** | 2.88% | **9.74x** | 2.94x |
+| acctbal>=8000 | 13.54% | 9.83% | 4.06% | 2.26% | **2.27%** | 1.62% | **5.96x** | 1.41x |
+| acctbal>=9500 | 82.54% | 20.25% | 61.98% | 8.67% | **8.71%** | 2.91% | **9.47x** | 2.99x |
+| acctbal<0 | 20.97% | 13.80% | 9.57% | 4.33% | **4.39%** | 2.19% | **4.78x** | 2.01x |
+| mktseg=AUTOMOBILE | 13.06% | 8.37% | 3.53% | 2.11% | **2.09%** | 1.52% | **6.24x** | 1.38x |
+| mktseg=BUILDING | 13.19% | 8.26% | 3.50% | 2.07% | **2.06%** | 1.55% | **6.40x** | 1.33x |
+| acctbal>=9500 & AUTO | 100.0% | 65.14% | 100.0% | 45.55% | **42.02%** | 6.48% | 2.38x | **6.49x** |
 
-**Three readings.**
+**Median 6.10x, and it does not depend on the filter being a numeric threshold** — the two
+categorical `mktsegment` filters give 6.24x and 6.40x, in line with the 5.96x threshold case. An
+earlier version of this table had only two filters on one column; this is the widened one.
 
-**The value channel is nearly exhausted.** Headroom at the main operating point is **1.35x** — an
-oracle that knows the error-optimal bound and pays nothing for partition selection is only 35%
-better than the implementable stack. That is the answer to "can we do even better": on the value
-side, essentially no. The 2.94x headroom at high selectivity is almost entirely the
-partition-selection cost the oracle is excused from, not bound selection.
+**Headroom tracks selectivity, and that localises what is left to win.** 1.33-1.41x on ordinary
+filters, 2.0-3.0x as selectivity tightens, 6.5x on the compound filter. Since the oracle differs
+from the stack in exactly two ways — a perfect bound and free partition selection — and bound
+selection is already within 1.35x at normal selectivity, **the remaining headroom is almost
+entirely the price of partition selection**, not the value channel.
 
-**Count-conditioned shrinkage and the frozen key set are substitutes, not complements.** Shrinkage
-measured 1.277x on this query *before* the frozen set existed (3.943% -> 3.086%); with the frozen
-set it is a wash (2.26% -> 2.27%). Both attack the same cost — the price of partition selection —
-so they do not stack. The earlier 1.277x came partly from the regression letting the tuner move
-budget off the vote channel, which the frozen set does outright and better.
+**The compound filter is where everything breaks.** `acctbal>=9500 AND AUTOMOBILE` leaves ~9,000
+customers: Google as published scores 100.0% (releases nothing usable) and so does our arm without
+freezing. Only the frozen key set rescues it at all, 100.0% -> 45.55%, and even then the oracle is
+at 6.48%. This is the regime the tau-floor proof describes, and it is where a frozen key set stops
+being an optimisation and becomes the only thing that works.
 
-**Freezing is worth most exactly where the query is hardest.** At `acctbal>=9500` it takes our arm
-from 62.21% to 8.60% (7.2x) and Google's from 82.49% to 20.31% (4.1x). At `acctbal>=8000` it is
-1.8x and 1.4x. The pattern matches the tau-floor analysis: freezing pays in proportion to how much
-tau was suppressing.
+**Shrinkage remains a wash** (2.26 vs 2.27, 8.67 vs 8.71, 2.11 vs 2.09) except on that compound
+filter, 45.55% -> 42.02%, i.e. it helps only where noise dominates the signal entirely. It stays
+redundant once freezing is in.
+
+**One correction folded in:** `full_stack.py` originally computed frozen-set membership only over
+groups *present* in the filtered query, so frozen-but-absent groups were never released and their
+noise was never charged. Harmless for these PU-side filters (0 absent groups) but it would have
+flattered any group-side filter. Now charged, as in `frozen_vs_google.py`.
 
 ## Open threads — resume here
 
