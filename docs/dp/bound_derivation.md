@@ -2263,6 +2263,49 @@ that is stable is not the quantity that is needed.
 worth up to 38× when misspecified. For an *automatic* system that is the more valuable property,
 and it is the argument that survives the prior-art check intact.
 
+## All-or-Frozen (Dandan, 15 Aug): the analysis is right, the rule is inert
+
+Her §2 replaces K per-group release tests with one global AND — release the query-specific group
+set iff *every* group passes, else fall back to `G_fix`. **The privacy argument is correct.**
+Conventional per-group thresholding leaks if *any* of a PU's ≤`C_u` new groups passes (an OR,
+needing `ρ_τ ≤ 1−(1−δ)^{1/C_u} ≈ δ/C_u`); All-or-Frozen needs *all* of them to pass (an AND, so
+`Pr ≤ ρ_τ^m ≤ ρ_τ`, worst case `m`=1, needing only `ρ_τ ≤ δ`). My implementation of her exact
+threshold reproduces her predicted gap to the digit: `τ_PG − τ_AF` = 6,158 measured against her
+`(C_u/ε_B)·log C_u` = 6,158. `attacks/all_or_frozen.py`.
+
+**But it never fires — 0 out of 200 trials, at every setting tested**, including `C_u` from her own
+70% rule and `ε_B` swept to 0.9 (i.e. 90% of the entire budget on the bounding histogram, against a
+tuned optimum of 0.002):
+
+| grouping | `ε_B` | `C_u` | `b` | `τ_AF` | per-group pass | **P[AllPass]** |
+|---|---|---|---|---|---|---|
+| month (84 groups) | 0.05 | 72 | 1,440 | 24,885 | 10.3% | **0.0%** |
+| month | 0.90 | 37 | 41 | 710 | **98.81%** | **0.0%** |
+| month\|nation (2,095) | 0.90 | 37 | 41 | 710 | 92.0% | **0.0%** |
+
+**The reason is structural, not probabilistic, and that is the useful finding.** At a 98.81%
+per-group rate over 84 groups, independent failures would give `0.9881^84` ≈ 36% AllPass. We see
+0%. The explanation: 98.81% of 84 is exactly 83 — **one specific group fails every single time**.
+The smallest group's largest histogram bin is **14** for `month` and **1** for `month|nation`,
+while the threshold must sit at ≈17 noise scales (`τ_AF ≈ b·ln((e^{1/b}+B−1)/2δ)` ≈ 17.3`b` at
+B=64, δ=1e-6). For that group to clear it you would need `b` < 0.81, i.e.
+**`ε_B` > 37** — thirty-seven times the entire query budget.
+
+**So a single permanently-small group vetoes the mechanism forever.** It is not a tuning problem
+and no budget allocation fixes it: real group-size distributions have a long tail, the AND is taken
+over the minimum, and the minimum is always tiny. The rule is correct and inert.
+
+**What would have to change.** The AND must cover every group a PU could have created, and since we
+cannot know which those are it covers all of them — so the minimum group has veto power. Any fix
+has to break that link: restricting the AND to a subset needs to know publicly which groups are
+large (circular), and blocking the group set only works if a PU's new groups cannot span blocks,
+which `C_u` > 1 does not guarantee. I do not see a repair that keeps the OR→AND saving.
+
+**Worth noting the saving was small anyway.** `τ_PG − τ_AF` = `(C_u/ε_B)·log C_u` — but the
+τ-floor proof above shows the *conventional* threshold is already minimised at `C_e` = 1, where
+`log C_u` = 0. The OR→AND gain only exists at large `C_u`, which is a configuration the mechanism
+should not be in.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
