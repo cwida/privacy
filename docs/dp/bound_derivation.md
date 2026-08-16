@@ -2301,10 +2301,39 @@ has to break that link: restricting the AND to a subset needs to know publicly w
 large (circular), and blocking the group set only works if a PU's new groups cannot span blocks,
 which `C_u` > 1 does not guarantee. I do not see a repair that keeps the OR→AND saving.
 
-**Worth noting the saving was small anyway.** `τ_PG − τ_AF` = `(C_u/ε_B)·log C_u` — but the
-τ-floor proof above shows the *conventional* threshold is already minimised at `C_e` = 1, where
-`log C_u` = 0. The OR→AND gain only exists at large `C_u`, which is a configuration the mechanism
-should not be in.
+**Repair search — three directions, and the diagnosis moves off the AND entirely.**
+
+**A. The real defect is the *reuse*, not the AND.** Her test is `max` over B=64 bins of a histogram
+whose sensitivity is `C_u`, so two penalties stack: sensitivity `C_u` instead of 1, and a
+max-over-bins term worth another `ln B`. A **dedicated distinct-PU count at `C_e` = 1** has neither:
+
+| scheme | sensitivity | noise scale | threshold |
+|---|---|---|---|
+| reuse bounding histogram, per-group | 72 | 1,440 | 31,043 |
+| reuse bounding histogram, All-or-Frozen | 72 | 1,440 | 24,885 |
+| **dedicated distinct-PU count, `C_e`=1** | **1** | **2.5** | **33.8** |
+
+**736× lower threshold**, for `ε_η` = 0.4 of budget. Reusing the histogram saves that budget and
+pays 736× for it — a very bad trade, and it is what makes the mechanism inert. "Free" statistics
+are not free when they are the wrong statistic: group *existence* is a question about privacy
+units, and answering it with a histogram of *values* imports a sensitivity and a bin-count penalty
+that have nothing to do with the question.
+
+**B. The bloat that motivates §2 is already solved.** Measured frozen-groups-absent-from-the-query:
+PU-side filters leave **0 and 9 of 2,084** — there is no bloat for All-or-Frozen to remove.
+Group-side filters leave 1,800–2,027, and public predicate pruning removes them *exactly*
+(4.61% → 0.21%), with no privacy cost, no AND, and no fallback branch.
+
+**C. Narrowing the AND to groups not already in `G_fix` does not work.** Tempting, since a `G_fix`
+group's existence is already public — but whether it *survives the filter* is not. Omitting it from
+the compact output reveals that no PU in that group passed the filter, which is a one-PU fact. The
+only leak-free version releases all of `G_fix` padded with noise, i.e. the bloat we started from.
+
+**And after repair A the AND is worth exactly zero.** `τ_PG − τ_AF` = `(C_u/ε)·log C_u`, and at
+`C_u` = 1 the two thresholds are *identical* (`1 − (1−δ)^{1/1}` = `δ`). Since the τ-floor proof
+shows `C_e` = 1 is exactly optimal, the OR→AND saving exists only in configurations the mechanism
+should never be in. **The idea is correct, inert as specified, and unnecessary once the statistic
+is chosen correctly.**
 
 ## Open threads — resume here
 
