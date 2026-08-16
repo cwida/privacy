@@ -2404,6 +2404,52 @@ groups *present* in the filtered query, so frozen-but-absent groups were never r
 noise was never charged. Harmless for these PU-side filters (0 absent groups) but it would have
 flattered any group-side filter. Now charged, as in `frozen_vs_google.py`.
 
+## ALL-OR-FROZEN, COMPREHENSIVE — it can only be used when it is not needed
+
+`attacks/all_or_frozen_full.py`. Eight queries across TPC-H, StackOverflow and ClickBench, three
+variants: as-specified (max over 64 bins of the reused bounding histogram), +A (dedicated
+distinct-PU count at `C_e`=1), +A+D (... and the AND taken per block, where a block is a
+PU-determined grouping-key component).
+
+| query | groups | min support | median | as-spec | +A | +A+D | mass | veto |
+|---|---|---|---|---|---|---|---|---|
+| tpch month | 84 | **192** | 765,457 | 0.0% | **100%** | 100% | 100% | min >= tau |
+| tpch month\|nation | 2,095 | 1 | 27,340 | 0.0% | 0.0% | **20.0%** | 20.0% | 20/25 blocks |
+| tpch month\|priority | 420 | 10 | 171,025 | 0.0% | 0.0% | 0.0% | 0.0% | min < tau |
+| tpch day\|region | 12,630 | 12 | 7,152 | 0.0% | 0.0% | 0.3% | 0.3% | 5/5 blocks |
+| so posts\|month | 190 | 1 | 4,140 | 0.0% | 0.0% | 0.0% | 0.0% | min < tau |
+| so comments\|month | 182 | 1 | 3,620 | 0.0% | 0.0% | 0.0% | 0.0% | min < tau |
+| cb hits\|region | 3,238 | 1 | 6 | 0.0% | 0.0% | 0.0% | 0.0% | min < tau |
+| cb hits\|date\|region | 7,564 | 1 | 4 | 0.0% | 0.0% | 0.0% | 0.0% | min < tau |
+
+**As specified it fires on none of the eight.** With repair A it fires on exactly one — `tpch
+month`, the only query whose smallest group has more than one privacy unit (192). With repair D it
+additionally reaches 20% of blocks on `month|nation` and 0.3% on `day|region`.
+
+**The `veto` column is fully predictive, and no simulation is needed to compute it.** The outcome
+is decided entirely by *min group support vs tau*: a group whose support is hopelessly below the
+threshold fails with probability `1 - delta` every time, so it vetoes its scope permanently. This
+is why the earlier budget sweep found the result identical at every `eps_eta` from 0.1 to 0.9.
+
+**And that gives the decisive statement.** Any valid threshold must satisfy
+`P[1 + Lap >= tau] <= delta`, so `tau` is far above 1 — meaning **a group containing a single
+privacy unit can never pass, at any budget, by construction**. Five of the eight queries have min
+support exactly 1. But the existence of single-PU groups is *precisely why partition selection
+exists at all*: if no group had one user, nothing would need suppressing.
+
+> **All-or-Frozen therefore requires that the query contain no singleton group — and a query with
+> no singleton group does not need partition selection in the first place. The mechanism can only
+> be used where it is not needed.**
+
+`tpch month` confirms this exactly: it is the one query where the rule fires, and it is also the
+one query where tau suppresses nothing, so the compact and frozen group sets coincide anyway.
+
+**Recommendation: do not pursue section 2.** The privacy analysis is correct and the OR->AND
+reframing is genuinely clever, but the AND is taken over a scope that always contains its own
+counterexample. Repair D (blocking by a PU-determined key component) is worth keeping as an idea
+in its own right — it is a valid way to shrink any per-query conjunction — but it cannot rescue
+this one.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
