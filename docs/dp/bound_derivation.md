@@ -2450,6 +2450,47 @@ counterexample. Repair D (blocking by a PU-determined key component) is worth ke
 in its own right — it is a valid way to shrink any per-query conjunction — but it cannot rescue
 this one.
 
+## All-or-Frozen: privacy verified by simulation, and replace-one answered
+
+`attacks/all_or_frozen_privacy.py`. Before endorsing her analysis I checked it the way I check my
+own — by neighbour construction rather than by reading. Two privacy bugs were found in *our*
+mechanism this session by exactly this step, after the argument had already convinced me.
+
+**Her section 2.8 bound holds.** `D' = D + u*` with `u*` creating `m` singleton groups; the leak is
+`Pr[compact branch | D']`, since that is when the new groups are exposed:
+
+| m | Pr[AllPass \| D] | Pr[AllPass \| D'] | measured leak |
+|---|---|---|---|
+| 1 | 0.999990 | 0.00000000 | 0.00e+00 |
+| 2 | 0.999975 | 0.00000000 | 0.00e+00 |
+| 4 | 0.999965 | 0.00000000 | 0.00e+00 |
+| 8 | 0.999980 | 0.00000000 | 0.00e+00 |
+
+*Resolution caveat:* 200k trials against a charged `δ` = 1e-6 expects 0.2 hits, so observing zero
+confirms the bound is not grossly violated but cannot confirm it is tight. The worst case is at
+m = 1 as she states, and `ρ_τ^m` decreasing in `m` is visible in the construction.
+
+**The gap her draft does not cover is also fine.** `AllPass` can flip 1→0 without any new group
+being created — `u*` merely joining an existing marginal group — which changes the output *domain*
+and is therefore observable. That bit is a function of the noisy histogram alone, so it should be
+post-processing of an `ε_B`-DP release. Measured on a deliberately marginal group:
+
+- `Pr[AllPass]` = 0.067465 vs 0.072170, ratio **1.0697** against `e^{ε_B}` = 1.6487 → OK
+- `Pr[fallback]` = 0.932535 vs 0.927830, ratio **1.0051** → OK
+
+Both well inside the bound, in both directions. **Her accounting is complete.**
+
+**Replace-one adjacency (her stated future work): sound, but strictly worse.** Swapping a PU means
+one PU's counts leave while another's arrive, so the histogram sensitivity doubles to `2·C_u`, the
+noise scale goes 16.0 → 32.0 and `τ_AF` goes **276.5 → 553.0 (2.00×)**. Every group must clear a
+threshold twice as high. The AND argument itself survives — entering the compact branch still
+requires every newly created group to pass — so nothing becomes unsound. An already inert rule
+simply becomes more inert.
+
+**With this, section 2 is settled.** The analysis is verified (including the branch bit), the
+adjacency question is answered, the mechanism is measured across 8 queries and 3 datasets, the
+root cause is proven, and three repairs have been explored. Nothing material remains open.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
