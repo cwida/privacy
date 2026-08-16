@@ -2329,6 +2329,33 @@ group's existence is already public — but whether it *survives the filter* is 
 the compact output reveals that no PU in that group passed the filter, which is a one-PU fact. The
 only leak-free version releases all of `G_fix` padded with noise, i.e. the bloat we started from.
 
+**D. Blocking the AND by a PU-determined key component — valid, and the best available repair.**
+The AND must cover every group a PU could create. But when part of the grouping key is
+*functionally determined by the privacy unit* — a customer has exactly one nation — all of that
+customer's groups share it, so the AND only has to cover one block. Verified directly: **max
+distinct blocks touched by one PU = 1** over 300 sampled PUs. A tiny group in another nation can
+then no longer veto everything. This reduces the AND from `K` groups to roughly `k_u`.
+
+**With both repairs applied — dedicated count *and* blocking — it fires on 20%:**
+
+| `ε_η` | τ | per-group pass | blocks all-pass | mass compacted |
+|---|---|---|---|---|
+| 0.10 | 132.2 | 99.0% | **20.0%** | 20.0% |
+| 0.40 | 33.8 | 99.0% | **20.0%** | 20.0% |
+| 0.60 | 22.9 | 99.0% | **20.0%** | 20.0% |
+
+**Note it is completely insensitive to budget** — 20.0% at every `ε_η`. That is the final
+diagnosis: *the AND fires for a block iff that block contains no group below τ*, which is a
+property of the data, not of the budget. 20 of 25 blocks contain a group with fewer than 40 PUs,
+and the smallest group has **1 PU** — a group that can never pass any valid threshold, by
+construction, since that is exactly what thresholding exists to suppress. Those blocks are
+permanently vetoed at any ε.
+
+For an AND over a block to fire even half the time you need a per-group pass rate of **99.18%** at
+84 groups per block, or 97.72% at 30. The block size cannot be reduced below `k_u`, because a PU
+spans that many groups by definition — so the AND is inherently over a PU's whole footprint, and
+fires only where that entire footprint is dense.
+
 **And after repair A the AND is worth exactly zero.** `τ_PG − τ_AF` = `(C_u/ε)·log C_u`, and at
 `C_u` = 1 the two thresholds are *identical* (`1 − (1−δ)^{1/1}` = `δ`). Since the τ-floor proof
 shows `C_e` = 1 is exactly optimal, the OR→AND saving exists only in configurations the mechanism
