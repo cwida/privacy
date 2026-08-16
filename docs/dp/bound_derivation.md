@@ -2380,10 +2380,14 @@ file plus the scripts under `attacks/`.
   ~1,000-PUs-per-group floor (where every arm returns ~100% error) is exactly the regime it
   targets. That is the most promising remaining direction.
 - Everything here is grouped SUM on non-negative measures, static data, single aggregate.
-- **Machine limits are real.** `day|region` (12,630 groups, 10.6M cells) OOM-killed the laptop
-  during a full tune: the tuner holds ~100 arrays of cell length. Keep to `month|nation` (5.5M) or
-  smaller, `threads=2`, one process at a time. `geometry_matched.py --max-cells` enforces this;
-  `fineness_sweep.py` does not yet.
+- **Machine limits are real, and were hit twice.** (1) `day|region` (12,630 groups, 10.6M cells)
+  OOM-killed the laptop during a full tune — the tuner holds ~100 arrays of cell length. (2) The
+  first version of `full_stack.py` drove the load average to **43** with an oracle arm sweeping 60
+  bound values x 3 trials x 4 filters = 720 full clip+bincount passes over every cell. Rules that
+  follow: keep to `month|nation` (5.5M cells) or smaller, `threads=2`, **one process at a time**,
+  and count how many full passes over the cell arrays a script implies before running it — that
+  product, not the per-pass cost, is what kills the machine. `geometry_matched.py` and
+  `full_stack.py` enforce `--max-cells`; `fineness_sweep.py` does not yet.
 - **Attacked, and it shrank** — see "THE 4.5× IS A RESONANCE" above. Sensitivity, threshold and the
   Laplace arm's tuning are settled; the metric is fine on TPC-H but TPC-H cannot test it; the size
   of the gain is set by group-size dispersion and by ε, and off TPC-H the sign flips. What is still
