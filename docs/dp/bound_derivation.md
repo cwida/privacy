@@ -2796,6 +2796,47 @@ rather than `2^1`. Effect on this sweep was modest (constant(5) 0.67x -> 0.79x, 
 StackOverflow and ClickBench all have norm distributions spread over many bins, so no bin-count
 threshold was ever missed there. **But any future synthetic or pre-binned data could have hit it.**
 
+## eps SWEEP, AND A CORRECTION TO THE ApproxBounds "UNAFFECTED" CLAIM
+
+**The benchmark is not an artifact of eps = 1.** An earlier finding (gain 3.31x at eps=0.25 vs
+1.26x at eps=1 on one query) suggested the whole table might be a slice through a resonance. It is
+not — the *ranking* is stable and only the magnitude moves:
+
+| query | eps=0.25 | eps=0.5 | eps=1 | eps=2 | eps=4 |
+|---|---|---|---|---|---|
+| tpch SUM price / mo\|nation | 1.45x | 2.28x | 3.50x | 2.39x | 3.76x |
+| tpch SUM price / mo\|prio | 1.20x | 2.72x | 2.88x | 2.92x | 3.08x |
+| tpch COUNT / mo\|nation | 1.21x | 2.11x | 3.27x | 4.20x | 4.58x |
+| so COUNT posts / month | 0.87x | 0.95x | 0.90x | 0.93x | 0.88x |
+| cb COUNT hits / region | 1.06x | 1.04x | 1.06x | 1.02x | 1.10x |
+| **median** | **1.20x** | 2.11x | 2.88x | 2.39x | **3.08x** |
+
+TPC-H wins at every eps, ClickBench ties at every eps. The gain is *smallest at small eps*
+(median 1.20x at 0.25) and grows to 3.08x at eps=4 — the opposite of a peak. Worth stating,
+since small eps is the interesting regime for privacy.
+
+**Correction: I claimed the ApproxBounds relaxation fix left real-data results unaffected. It did
+not.** The fix materially changed StackOverflow and ClickBench, in *Google's* favour, because
+those queries' norm histograms sometimes had no bin clear the threshold. Re-running the whole
+benchmark with the corrected routine:
+
+| | before fix | after fix |
+|---|---|---|
+| median vs google-best | 1.88x | **1.90x** |
+| range | 1.05x-9.53x | **1.02x-9.56x** |
+| so COUNT posts / month | 1.59x | **1.40x** |
+
+The headline survives, but the claim of "unaffected" was wrong and the individual SO rows moved by
+up to 0.2x. Any number in this document produced before that commit should be treated as
+approximate on SO/ClickBench.
+
+**And a second correction, to my own diagnostic.** An isolated re-test appeared to show
+`so COUNT posts / month` flipping to a 0.91x *loss*. That test accidentally gave Google
+**decoupled** `C_e`/`C_v`, which is not published. Under the published coupled baseline the row is
+1.40x in our favour; under a decoupled Google it is 0.91x. Both are true of different baselines,
+and it is a reminder that the decoupling — invented in this project's own review — is worth about
+1.5x to Google on its own.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
