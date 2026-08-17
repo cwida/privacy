@@ -3065,6 +3065,62 @@ reduce the cost of any single refresh, it reduces how many refreshes are needed*
 why a minimum batch size helps. A monitor that refreshes only when the key set has genuinely
 drifted, rather than on a schedule, is where a sparse-vector construction would pay.
 
+## DOES THE C_u SELECTION TRANSFER TO SMOOTH SENSITIVITY? The rule inverts.
+
+`attacks/em_cu_sass.py`, `attacks/em_cu_sass_eps.py`, reusing the validated NRS envelope from
+`attacks/sass_vote_geometry.py`.
+
+The Laplace-path recommendation is **overshoot**: undershooting `C_u` discards user data and costs
+up to 35x, overshooting merely adds noise and costs at most 2x, so target `p` = 0.95-0.99. That rule
+depends entirely on the shape of the error curve, and in SASS the shape is different, because `C_u`
+does two things at once:
+
+- rank-caps each PU to `C_u` partials, so small `C_u` biases every group by `1 - C_u/k_u`
+- divides the per-aggregate cell budget, `eps_cell = eps/((c+1)·C_u)`, and `eps_cell` sets
+  `beta = eps_cell / (2 ln(2/delta_cell))` in the NRS envelope
+  `S* = max_{i<=p<=j}(x_j - x_i) e^{-beta(j-i-1)}`
+
+Measured on `month|nation`, sf10, eps=1, c=1:
+
+| `C_u` | `eps_cell` | `beta` | rank-cap bias | median `S*` | total error |
+|---|---|---|---|---|---|
+| 1 | 0.5000 | 1.6e-02 | 90.3% | 3.20e8 | **666%** |
+| 5 | 0.1000 | 3.3e-03 | 64.2% | 7.43e8 | 7,544% |
+| 21 | 0.0238 | 7.8e-04 | 15.0% | 8.73e8 | 37,173% |
+| 72 | 0.0069 | 2.3e-04 | 0.0% | 9.04e8 | **133,198%** |
+
+**Error rises monotonically in `C_u`, by 200x across the grid.** The bias falls exactly as intended
+(90.3% -> 0.0%) but the noise grows so much faster that reducing bias never pays. **The optimum sits
+at `C_u` = 1 — the extreme the Laplace path punishes hardest.** So the overshoot rule does not merely
+weaken here, it *inverts*.
+
+**The diagnostic is `beta·64`.** The NRS envelope only decays across the 64 lanes once
+`beta·(j-i-1)` reaches order 1; below that `S*` saturates on its domain sentinel and the noise is
+set by `Lambda` rather than by the data. Sweeping eps confirms this is the whole story:
+
+| eps | best `C_u` | `beta·64` at `C_u`=1 | best error |
+|---|---|---|---|
+| 1 | 1 | 1.05 | 665% |
+| 8 | 1 | 8.42 | 92.0% |
+| 64 | **5** | 67.4 | 65.6% |
+
+Only at eps = 64 — sixty-four times a normal budget — does the optimum move off 1, and even then the
+release is 65.6% error. **`eps_cell` must satisfy `beta·64 >~ 1`, i.e. `eps >~ (c+1)·C_u/6`, before
+`C_u` > 1 is affordable at all.**
+
+**Conclusion for the paper.** The selection *mechanism* transfers unchanged — it is
+`(eps_N + eps_C, 0)`-DP and composes as another line item, and the `k_u` statistic means the same
+thing. What does not transfer is the **calibration**: `p` = 0.95-0.99 would pick `C_u` = 48 on this
+query, which is 3-4 orders of magnitude worse than `C_u` = 1. In SASS the correct target is the
+*bottom* of the distribution, not the top.
+
+**And that makes automatic selection close to pointless there**, because the answer is `C_u` = 1
+almost regardless of the data — which needs no mechanism and no budget. The honest statement is that
+**this is not a calibration problem to be fixed but a symptom: the SASS value channel cannot afford
+any cross-group contribution at realistic eps.** That has to be repaired before automatic bound
+selection is worth anything on that path, and it is the same pincer found earlier when the
+Gaussian-votes port lost end-to-end.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
