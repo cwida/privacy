@@ -312,6 +312,35 @@ $\Ce$, $\Cv$ separate & 17.75$\times$ & 2.91$\times$ & 2.91$\times$ & \textbf{1.
 \textbf{Recommendation: $p \approx 0.95$ with a shared $\Cu$, $p \approx 0.99$ with separate
 bounds. Not $0.7$.}
 
+\subsection{Multiple aggregates}\label{sec:multiagg}
+
+Real queries request several measures at once, which splits $\epsilon_v$ $c$ ways while the
+partition-selection cost is paid once. Measured on \texttt{month|nation} with up to four aggregates
+(SUM price, SUM quantity, COUNT, SUM discount):
+
+\begin{center}\small
+\begin{tabular}{lrrrr}
+\toprule
+aggregates $c$ & 1 & 2 & 3 & 4 \\
+\midrule
+baseline & 13.52\% & 18.93\% & 22.86\% & 26.25\% \\
+$\ell_1$ clip & 3.89\% & 8.02\% & 11.40\% & 13.40\% \\
+\midrule
+advantage & 3.48$\times$ & 2.36$\times$ & 2.01$\times$ & \textbf{1.96$\times$} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The clip's advantage decays and appears to flatten near $2\times$: $\tau$ is a fixed cost paid once
+regardless of $c$, so as $c$ grows both arms converge toward pure value-channel noise where the gap
+is just the sensitivity ratio. \textbf{Single-aggregate figures should therefore be read as the
+upper end of a range.}
+
+The selection mechanism is unaffected: $\Cu$ is chosen once per query, so its
+$\epsilon_N + \epsilon_C$ is paid once regardless of $c$ and its relative cost stays at $\approx 1\%$
+of the query budget. (Reasoned, not measured --- the experiment above varies the value channel, not
+the selection.)
+
 \subsection{Freeze once, or re-select per query?}\label{sec:freeze}
 
 A single frozen $\Cu$ suffices for filters on the \emph{privacy unit}; only group-removing filters
@@ -401,27 +430,18 @@ data it removes 19 of 2,095 groups, each with a $2\times10^{-7}$ chance of relea
 chances: $\Pr[\text{exposed}] = 1-(1-p)^R \le R\,\delta_0$, confirmed exactly at $R = 1..50$.
 Batching updates does not reduce the cost of a single refresh; it reduces $R$.
 
-\section{Methodology}\label{sec:method}
+\section{Experimental practice}\label{sec:method}
 
-Nine headline numbers were produced and then invalidated during this work
-($880\times \to 12\times \to 4.8\times \to 4.65\times \to 1.36\times$, and separately
-$4.5\times \to 1.9\times$). Every collapse had one of three causes, and the pattern is more
-transferable than any of the numbers.
-
-\begin{enumerate}
-\item \textbf{An untuned baseline.} Comparisons at a fixed budget split, a fixed $\Cu$, or against
-a library default are not evidence. $\Cu$ tuning alone moved one result by $12\times$.
-\item \textbf{A forgiving scoring rule.} Scoring against a capped or truncated ``truth'' silently
-forgives exactly the bias being measured. Suppressed groups must be charged full error.
-\item \textbf{Mixing regimes in an average.} A median across queries that violate a mechanism's
-scope condition misleads in both directions. Report by regime.
-\end{enumerate}
-
-Three practices proved necessary:
+Several headline figures in this project were produced and later invalidated
+($880\times \to 12\times \to 4.8\times \to 4.65\times \to 1.36\times$ for the clip, and separately
+$4.5\times \to 1.9\times$ for the stack), in every case because a baseline had been left at a
+default while our own arm was tuned. That is why every number here is reported against a baseline
+tuned over its own free parameters, and why suppressed groups are charged full error. Three further
+practices were needed, each learned from a result that turned out to be an artifact:
 
 \begin{itemize}
-\item \textbf{Verify sensitivity by neighbour simulation, never by argument.} Both privacy bugs
-survived a convincing derivation and died on explicit construction.
+\item \textbf{Verify sensitivity by neighbour simulation, never by argument.} Both findings in
+\S\ref{sec:privacy} survived a convincing derivation and died on explicit construction.
 \item \textbf{At $\delta$ scale, compute exactly rather than simulate.} A Monte Carlo run suggested
 a $1.4\times$ violation that was pure noise; resolving that at $\delta=10^{-6}$ needs $\sim10^8$
 trials.
@@ -430,7 +450,7 @@ $2\times$-spaced grid --- coarser than the $1.3\times$ error basin --- reported 
 worse under perfect bounds. Pure artifact.
 \end{itemize}
 
-\section{Other ideas we tried}
+\section{Other ideas we tried}\label{sec:other}
 
 Four other directions were evaluated at length. None is recommended as a headline contribution,
 for different reasons.
@@ -471,11 +491,11 @@ findings survive: reusing the bound-selection histogram costs $736\times$ on the
 dedicated count (a free statistic is not free when it is the wrong statistic), and blocking the
 conjunction by a unit-determined key component is a valid way to shrink any per-query AND.
 
-\section{Open questions}
+\section{Future work}
 
 \begin{enumerate}
-\item \textbf{Prior art for the selection mechanism is being checked.} Our earlier prior-art sweep
-covered the four ideas in \S6 and found four of five techniques already exist. The
+\item \textbf{Settle prior art for the selection mechanism.} Our earlier sweep covered the four
+ideas in \S\ref{sec:other} and found four of five techniques already exist. The
 exponential-mechanism selection of $\Cu$ was proposed later and is going through that process now.
 The nearest neighbours to settle: Amin et al., ``Bounding User Contributions'' (ICML 2019);
 ``Algorithms for bounding contribution for histogram estimation under user-level privacy''
@@ -483,16 +503,29 @@ The nearest neighbours to settle: Amin et al., ``Bounding User Contributions'' (
 (NeurIPS 2021), which estimates a norm quantile online under DP; and the DP-quantile literature
 generally, since steps 3--4 are an exponential-mechanism quantile. \textbf{This should be settled
 before any claim of novelty.}
-\item \textbf{Nothing is implemented.} All results are simulation. Both privacy fixes must land
+
+\item \textbf{Updates and refreshes.} Everything here assumes static data, and the frozen bound is
+the part most exposed to that assumption. What is established: $R$ re-releases of frozen metadata
+give an adversary $R$ independent chances, so $\Pr[\text{exposed}] = 1-(1-p)^R \le R\,\delta_0$
+(confirmed exactly at $R = 1..50$), and a unit \emph{arriving} between two releases is protected by
+the composed $\epsilon$ of the releases containing it. What follows is that batching updates does
+not make any single refresh cheaper --- it reduces how many refreshes are needed, which is the real
+argument for a minimum batch size.
+
+What is open is when to refresh at all. A schedule pays $R\,\delta_0$ whether or not anything
+changed. Since the mechanism only needs the \emph{shape} of the $\ku$ distribution, and that shape
+proved stable under filters discarding $99\%$ of users (\S\ref{sec:freeze}), it is plausibly stable
+under ordinary data growth too --- but this is untested, and it is the assumption a deployment
+would rest on. The natural construction is drift-triggered rather than scheduled refresh: a
+sparse-vector monitor that pays per \emph{positive} answer rather than per check, so a frozen bound
+that is checked often and replaced rarely costs close to nothing. Testing that needs a temporal
+dataset, which none of the three used here provides.
+
+\item \textbf{Implement it.} All results are simulation. Both safety modifications must land
 \emph{with} the mechanism, not after.
-\item \textbf{Multi-aggregate queries dilute the effect.} Every headline here is single-aggregate;
-with four aggregates the advantage of the clip decays from $3.48\times$ to $1.96\times$ as
-$\epsilon_v$ splits and the shared $\tau$ cost is amortised.
+
 \item \textbf{The smooth-sensitivity path is untested.} A preliminary port \emph{lost}, because
 that value channel is independently broken --- releasing more groups makes it worse.
-\item \textbf{Drift-triggered rather than scheduled refreshes.} Since refreshes compose linearly, a
-monitor that re-releases only on genuine drift (a sparse-vector construction, paying per positive
-rather than per check) is the natural next step for frozen metadata.
 \end{enumerate}
 
 \end{document}
