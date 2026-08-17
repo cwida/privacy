@@ -2696,6 +2696,52 @@ nations removes whole customers rather than shrinking anyone's `k_u`. The rule i
 That is the *same* PU-determined-key-component test used for pruning `G_fix` and for blocking the
 All-or-Frozen AND — one static analysis serves all three.
 
+## WHERE GOOGLE DP WINS — bimodal `k_u`, and the complete map
+
+Deliberate search for queries where Google DP as published beats the l1 clip. Twelve further
+StackOverflow and ClickBench queries (`attacks/hunt_google_wins.py`) turned up exactly one real
+loss — `so SUM ViewCount / day`, 95.82% vs 99.99% = 0.96x — where both arms are useless anyway.
+The interesting result came from constructing the loss deliberately.
+
+**The construction** (`attacks/where_google_wins.py`): most PUs touch one group, so `C_v`=1 is
+nearly lossless for Google, plus a fraction `f` of "whales" spread over `W` of 200 groups:
+
+| whale fraction | `W` | google | ours | ratio | winner |
+|---|---|---|---|---|---|
+| 0.0002 | 20 | 1.32% | 1.30% | 1.01x | tie |
+| 0.0002 | 100 | 2.31% | 2.39% | **0.97x** | **GOOGLE** |
+| 0.0010 | 20 | 2.44% | 2.26% | 1.08x | ours |
+| 0.0010 | 100 | 8.88% | 8.67% | 1.02x | ours |
+| 0.0050 | 20 | 7.68% | 7.87% | **0.98x** | **GOOGLE** |
+| 0.0050 | 100 | 27.46% | 32.34% | **0.85x** | **GOOGLE** |
+| 0.0200 | 20 | 11.21% | 9.18% | 1.22x | ours |
+| 0.0200 | 100 | 24.86% | 31.41% | **0.79x** | **GOOGLE** |
+
+**Google wins by up to 1.27x** (31.41 / 24.86) when a small fraction of users spread very widely
+while the bulk touch one group. The mechanism is direct: the whales set our `B`, since we must clip
+to the largest per-PU norm and every ordinary user then pays that noise — whereas Google simply
+truncates each whale to one cell and pays only `U`. Our clip refuses to discard anyone, and here
+that is the wrong instinct.
+
+**This completes the map, and the shape of the `k_u` distribution decides all of it:**
+
+| `k_u` distribution | example | outcome |
+|---|---|---|
+| concentrated **high** — everyone spreads widely | TPC-H (median 30, max 72) | **ours wins 4x-9x** |
+| concentrated **low** — everyone touches one group | ClickBench (median 1, max 54) | **tie**, 1.0x-1.15x |
+| **bimodal** — most touch one, a few touch many | constructed; `so ViewCount/day` | **Google wins, up to 1.27x** |
+
+The earlier scope condition ("helps iff `k_u` is concentrated") was right but one-sided: it
+identified the win region and treated everything else as "no gain". In fact the residual splits
+into a tie region and a genuine loss region, and the loss region is exactly where a norm bound is
+the wrong summary — a single whale drags `B` up for everybody, which is the cost of never
+discarding anyone.
+
+**Practical consequence:** the same statistic that predicts the win predicts the loss, and it is
+cheap and public-ish to estimate. A system could choose between norm clipping and truncation per
+query from the `k_u` histogram it already builds for `C_u` selection — bimodality favours
+truncation, concentration favours the norm clip.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
