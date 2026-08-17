@@ -2491,62 +2491,72 @@ simply becomes more inert.
 adjacency question is answered, the mechanism is measured across 8 queries and 3 datasets, the
 root cause is proven, and three repairs have been explored. Nothing material remains open.
 
-## SECTION 1 (EM selection of C_u): it works, costs 1% of budget, and is robust
+## SECTION 1 (EM selection of C_u): the machinery works, but p = 0.7 is the wrong target
 
-`attacks/em_cu.py`. Unlike section 2, this one holds up on every axis tested.
+`attacks/em_cu.py`, `attacks/em_cu_vs_manual.py`. An earlier version of this section endorsed the
+proposal on the strength of ONE grouping. Widened to nine queries across three datasets it is more
+interesting: **the mechanism is sound and nearly free, but her target fraction is badly chosen, and
+fixing it is a one-line change.**
 
-**A. Her `Delta_q <= 1` argument is correct, and verified by construction.** The subtlety she
-identifies is real: removing one PU with `k_u` = k shifts `K-k+1` cumulative counts simultaneously,
-so *releasing* the vector `(F(1)..F(K))` would have l1 sensitivity up to `K`. But the EM scores each
-candidate separately, so what matters is `max_r |q(d,r) - q(d',r)|`:
+**Her `Delta_q <= 1` argument is correct, verified by construction.** Removing a PU with `k_u` = k
+shifts `K-k+1` cumulative counts at once, so *releasing* `(F(1)..F(K))` would have l1 sensitivity
+up to `K` — but the EM scores each candidate separately:
 
-| removed PU | cumulative counts changed | l1 change | **max_r \|dq\|** |
+| removed PU | counts changed | l1 change | **max_r \|dq\|** |
 |---|---|---|---|
 | `k_u`=1 | 80 of 80 | 80 | **1.0** |
 | `k_u`=30 | 51 of 80 | 51 | **1.0** |
 | `k_u`=70 | 11 of 80 | 11 | **1.0** |
 
-The l1 of the histogram is a red herring exactly as she says.
+**The EM itself is essentially deterministic and nearly free.** With ~180k PUs, `F` jumps by
+thousands between adjacent candidates, so all 15 draws agree at every budget from 0.010 to 0.250.
+Spending more only hurts, since it comes from the query. **~0.01 of eps is enough.**
 
-**B. The EM finds the target essentially deterministically, for ~1% of the budget.** With ~180k
-PUs, `F` jumps by thousands between adjacent candidates, so the score is sharply peaked:
+**But the p-quantile of `k_u` is not the error-optimal bound, and p = 0.7 under-shoots.** The
+tolerance band around the optimum is severely asymmetric — halving `C_u` costs 2.6x-35x, doubling
+costs 1.7x-2.0x:
 
-| `eps_N + eps_C` | EM pick, 15 draws | penalty |
-|---|---|---|
-| **0.010** | **37-37** | **1.00x** |
-| 0.025 | 37-37 | 1.00x |
-| 0.100 | 37-37 | 1.04x |
-| 0.250 | 37-37 | 1.16x |
+| query | best | x1/8 | x1/4 | x1/2 | x1 | x2 | x4 |
+|---|---|---|---|---|---|---|---|
+| tpch month | 55 | 137.7x | 104.0x | **35.3x** | 1.00x | 1.94x | 2.49x |
+| tpch month\|nation | 44 | 7.32x | 5.93x | 3.14x | 1.00x | 1.96x | 3.11x |
+| tpch month\|prio | 72 | 9.11x | 6.62x | 2.60x | 1.00x | 1.70x | 1.70x |
+| so posts\|month | 44 | 1.44x | 1.32x | 1.13x | 1.00x | 1.28x | 1.67x |
 
-All 15 draws agree at every budget; spending *more* only hurts, because it is taken from the query.
-**Optimal EM budget is ~0.01, i.e. 1% of eps.**
+So the selection should sit deliberately *above* the optimum, and p = 0.7 sits below it. Sweeping p:
 
-**C. And the p-quantile is a good target — which I did not expect.** I had worried it was the wrong
-statistic, since the error-optimal `C_v` swings 21-55 across filters while the `k_u` quantiles sit
-flat. It does not matter, because the error curve is flat near its optimum:
-
-| filter | EM pick | best `C_v` | err@EM | err@best | penalty |
+| query | best | p=0.7 | p=0.9 | p=0.95 | **p=0.99** |
 |---|---|---|---|---|---|
-| acctbal>=8000 | 37 | 34 | 13.72% | 13.59% | **1.01x** |
-| acctbal>=9500 | 37 | 13 | 89.46% | 83.44% | **1.07x** |
-| mktseg=AUTOMOBILE | 37 | 55 | 13.30% | 12.89% | **1.03x** |
-| acctbal<0 | 37 | 34 | 22.49% | 21.07% | **1.07x** |
+| tpch month | 55 | **17.75x** | 2.91x | 2.91x | **1.35x** |
+| tpch month\|nation | 44 | 1.18x | 1.02x | 1.00x | 1.21x |
+| tpch month\|prio | 55 | 1.41x | 1.03x | 1.00x | 1.17x |
+| so posts\|month | 44 | 2.02x | 1.56x | 1.31x | 1.22x |
+| so comments\|month | 34 | 1.70x | 1.34x | 1.11x | 1.36x |
+| cb hits\|region | 1 | 1.02x | 1.00x | 0.99x | 1.00x |
+| **worst case** | | **17.75x** | 2.91x | 2.91x | **1.36x** |
 
-Even a 3x miss (37 against a best of 13) costs 7%.
+**p = 0.99 cuts the worst case from 17.75x to 1.36x** at a typical cost of ~1.2x. Her reasoning
+for erring high was right; the data says go much further than 0.7.
 
-**Choice of p barely matters, above a floor:** 0.5 -> 1.02x, 0.7 -> 1.02x, 0.9 -> 1.03x,
-0.95 -> 1.08x, 0.99 -> 1.08x. Only **p = 0.3 fails, at 2.67x**, because it lands below the safe
-zone. That is precisely the asymmetry measured independently in `cu_automatic.py` — under-estimating
-`C_u` costs up to 38x, over-estimating at most 1.7x — so **her choice of p = 0.7 is well-motivated,
-and the guidance is to err high.**
+**And this is where the mechanism earns its place: no fixed manual value works across datasets.**
+Google DP as published requires the analyst to supply `max_partitions_contributed`; the penalty for
+plausible guesses, against each query's own optimum:
 
-**Freezing is sound here, unlike the optimum itself.** The `k_u` quantiles are *identical* across
-all four filters (p50=30, p70=37, p90=45, p99=53), confirming her stability premise for the
-quantity her mechanism actually estimates.
+| guess | tpch month | tpch month\|nation | so posts\|month | cb hits\|region | **worst** |
+|---|---|---|---|---|---|
+| `C_u`=1 | 177.6x | 7.25x | 2.00x | 1.00x | **177.6x** |
+| `C_u`=10 | 136.3x | 5.56x | 1.32x | 2.39x | **136.3x** |
+| `C_u`=100 | 1.57x | 1.69x | 1.09x | 5.18x | **5.18x** |
+| `C_u`=max | 1.36x | 1.37x | 1.49x | 4.18x | **4.18x** |
+| **EM, p=0.99** | 1.35x | 1.21x | 1.22x | 1.00x | **1.36x** |
 
-**Verdict: recommend section 1.** Sound argument, near-free, robust to `p`, and freezable. Its
-scope is systems that use `C_u`-based truncation — our l1 clip has no `C_v` to select, but her
-All-or-Frozen histogram needs one, and so does Google's value channel.
+`C_u`=1 is catastrophic on TPC-H (177x) yet optimal on ClickBench; `C_u`=100 is fine on TPC-H yet
+5.2x on ClickBench. **The best fixed choice is 4.18x worst-case; the EM at p=0.99 is 1.36x — a 3.1x
+improvement, and it comes from adapting rather than from being cleverer.**
+
+**Verdict: recommend section 1, with p = 0.99 rather than 0.7.** Sound argument, ~1% of budget,
+freezable (the `k_u` quantiles are identical across every filter tested), and it beats any fixed
+value an analyst could supply.
 
 ## Open threads — resume here
 
