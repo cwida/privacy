@@ -2558,6 +2558,46 @@ improvement, and it comes from adapting rather than from being cleverer.**
 freezable (the `k_u` quantiles are identical across every filter tested), and it beats any fixed
 value an analyst could supply.
 
+## BROAD BENCHMARK — 14 queries, 3 datasets: median 1.88x, range 1.05x-9.53x
+
+`attacks/broad_benchmark.py`. `google-best` gives Google DP as published its **optimal `C_u` for
+each query** — an upper bound on any Google configuration, since an analyst cannot beat knowing
+the answer in advance. `google-EM` is what an automated Google achieves using Dandan's section 1
+at p=0.95.
+
+| query | groups | google-best | google-EM | ours | ours+frozen | vs g-best |
+|---|---|---|---|---|---|---|
+| tpch SUM price / month | 84 | 0.68% | 0.81% | 0.17% | **0.16%** | 4.26x |
+| tpch SUM price / mo\|nation | 2,096 | 14.01% | 15.68% | 3.92% | **2.27%** | 6.17x |
+| tpch SUM price / mo\|prio | 420 | 10.23% | 12.10% | 3.12% | **1.77%** | 5.78x |
+| tpch SUM price / day | 2,526 | 99.57% | 100.0% | 85.12% | **10.45%** | **9.53x** |
+| tpch COUNT / mo\|nation | 2,096 | 14.66% | 17.98% | 4.35% | **2.49%** | 5.90x |
+| tpch SUM qty / mo\|nation | 2,096 | 12.39% | 12.34% | 5.32% | **3.15%** | 3.93x |
+| tpch SUM price / yr\|nation | 175 | 0.69% | 0.62% | 0.36% | **0.33%** | 2.06x |
+| so COUNT posts / month | 190 | 42.35% | 44.48% | 34.89% | **26.67%** | 1.59x |
+| so SUM score / month | 190 | 62.97% | 64.66% | 46.80% | **37.11%** | 1.70x |
+| so COUNT comments / month | 182 | 55.54% | 100.0% | 46.32% | **35.02%** | 1.59x |
+| so COUNT posts / day | 5,107 | 92.70% | 100.0% | 89.63% | **56.21%** | 1.65x |
+| cb COUNT hits / region | 3,238 | 6.06% | 6.29% | **5.71%** | 7.29% | 1.06x |
+| cb COUNT hits / date\|reg | 7,564 | 10.04% | 9.97% | **8.74%** | 12.36% | 1.15x |
+| cb SUM width / region | 3,238 | 6.50% | 6.54% | **6.21%** | 9.55% | 1.05x |
+
+**The `k_u`-concentration condition predicts every row.** Median gain by dataset: TPC-H **5.78x**
+(users spread over 30-176 groups), StackOverflow **1.62x** (median `k_u` = 1, long tail),
+ClickBench **1.06x** (median `k_u` = 1, short tail). This is the same scope condition established
+earlier, now confirmed across measures (SUM and COUNT behave alike) and group counts (84 to 7,564).
+
+**New negative: freezing HURTS on unfiltered queries.** On all three ClickBench rows `ours+frozen`
+is worse than `ours` (5.71% -> 7.29%, 8.74% -> 12.36%, 6.21% -> 9.55%). The reason is structural
+and obvious in hindsight — those queries have no filter, so the filterless group set *is* the
+query's own group set, and freezing buys nothing while still paying the amortised `eps_0/N`. **Rule:
+freeze only when the query is filtered relative to the frozen query.** An unfiltered query should
+skip the frozen path entirely, which is statically decidable.
+
+**`google-EM` tracks `google-best` on TPC-H but fails on StackOverflow** (55.54% -> 100.0% on
+comments/month, 92.70% -> 100.0% on posts/day) — the heavy-tailed `k_u` case where the quantile
+chases the tail, exactly as the p-sweep predicted.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
