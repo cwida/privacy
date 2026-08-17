@@ -2837,6 +2837,64 @@ approximate on SO/ClickBench.
 and it is a reminder that the decoupling — invented in this project's own review — is worth about
 1.5x to Google on its own.
 
+## ATTACKING THE BENCHMARK: the metric survives, the strong-Google attack lands
+
+`attacks/attack_benchmark.py`. Two attacks on the median-1.90x headline.
+
+**Attack 1 — the metric — FAILS, and per-group metrics are kinder to us in scope.** Every number
+in this document is relative total L1, a metric shown earlier to report 8.6% for a release
+answering 7% of a key set. Re-tuning each arm separately under four metrics:
+
+| query | total-L1 | mean-rel | median-rel | nRMSE |
+|---|---|---|---|---|
+| tpch SUM price / mo\|nation | 3.61x | 2.44x | **5.17x** | 2.93x |
+| tpch SUM price / mo\|prio | 3.25x | 2.31x | **4.18x** | 2.97x |
+| tpch COUNT / mo\|nation | 3.48x | 2.36x | **5.41x** | 2.79x |
+| **median, all 8 queries** | **1.23x** | 1.19x | 1.22x | **1.29x** |
+
+All four agree in direction, and median-rel is the *most* favourable on TPC-H — the l1 clip helps
+typical groups more than it helps the total. The metric worry is closed.
+
+**Attack 2 — a maximally strong Google — LANDS.** Giving Google every DP-legal improvement found
+in this project (top-`C_v` selection, rescale-with-re-clip, decoupled `C_e`/`C_v` — none of them in
+Wilson et al. or the library):
+
+| query | vs published | **vs strong** |
+|---|---|---|
+| tpch SUM price / mo\|nation | 3.61x | **1.38x** |
+| tpch SUM price / mo\|prio | 3.25x | **1.30x** |
+| tpch COUNT / mo\|nation | 3.48x | **2.33x** |
+| tpch SUM price / day | 1.16x | 0.99x |
+| so COUNT posts / month | 1.12x | **0.74x** |
+| so SUM score / month | 1.28x | **0.80x** |
+| cb COUNT hits / region | 1.04x | 0.98x |
+| cb COUNT hits / date\|reg | 1.18x | 1.02x |
+| **median** | **1.23x** | **1.01x** |
+
+**Against the strongest Google-shaped mechanism the l1 clip is a wash overall** — and it *loses* on
+StackOverflow (0.74x, 0.80x), which is the out-of-scope regime the `k_u` condition already flags.
+
+### Two corrections this forces
+
+**1. The 1.90x headline was mostly the frozen key set, not the clip.** This attack has no frozen
+arm, and the clip alone measures **1.23x** median against published Google. Recomputing from the
+broad benchmark's `ours` column confirms it (~1.28x). Since the frozen key set is prior art
+(Tumult `get_groups` + `KeySet`, Privacy on Beam `SelectPartitions`), **the novel component is worth
+~1.23x, and the larger number comes from something already shipping.**
+
+**2. A median across queries that violate the scope condition is misleading in both directions.**
+Reporting by regime is honest:
+
+| regime | vs published | vs strong |
+|---|---|---|
+| **in scope** (`k_u` concentrated, >~10): TPC-H mo\|nation, mo\|prio, COUNT | **3.25x-3.61x** (5.4x on median-rel) | **1.30x-2.33x** |
+| **out of scope** (`k_u`=1 or bimodal): SO, ClickBench, tpch day | 1.04x-1.28x | **0.74x-1.02x** |
+
+That is the defensible claim: **in its stated scope the l1 clip is worth 3.3x-3.6x against Google
+DP as published and 1.3x-2.3x against the best Google-shaped mechanism I could build; outside that
+scope it is a wash or a small loss.** The scope condition is not a caveat bolted on afterwards —
+it is measurable in advance from the `k_u` histogram.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
