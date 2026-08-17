@@ -38,26 +38,82 @@ $\delta$. All headline numbers moved substantially during evaluation, and \S\ref
 argues that the methodology is the most transferable contribution.
 \end{abstract}
 
-\section{Problem and baseline}
+\paragraph{Roadmap.} \S1 motivates the problem and fixes the baseline. \S2 states the four ideas.
+\S3 measures utility and establishes the scope condition. \S4 covers automatic $\Cu$ selection,
+\S5 the one idea that does not work. \S6 is privacy validation, including two bugs we found in our
+own mechanism. \S7 is methodology, \S8 prior art, \S9 recommendations.
 
-A grouped DP query \texttt{SELECT g, SUM(v) FROM T WHERE p GROUP BY g} with a per-user privacy
-unit has three channels, each needing its own budget:
+\section{Motivation}
+
+\subsection{The gap between a DP library and a DP system}
+
+Differentially private aggregation is solved as an \emph{algorithm} and unsolved as a
+\emph{product}. Every mature library --- Google DP, OpenDP, Tumult, PipelineDP --- can answer
+\texttt{SELECT g, SUM(v) FROM T GROUP BY g} with a rigorous user-level guarantee. But none of them
+can answer it \emph{without a human first supplying constants that depend on the data}:
+
+\begin{itemize}
+\item \textbf{How much can one user contribute to one group?} A clipping bound. Set it too low and
+you destroy the signal; too high and you drown it in noise.
+\item \textbf{How many groups can one user touch?} \texttt{max\_partitions\_contributed}, called
+$\Cu$ here. A required input in Google DP, with no default.
+\end{itemize}
+
+Our system rewrites ordinary SQL into a private plan automatically. An analyst writes a query; they
+do not know --- and should not need to know --- the maximum number of months any customer appears
+in. So every one of these constants is a blocker, and the question driving this work is narrow and
+practical: \textbf{can they be chosen from the data itself, privately, without spending so much
+budget that the answer becomes useless?}
+
+\subsection{Why this is hard, and why the constants matter so much}
+
+Two facts make guessing unsafe. First, the penalty is \emph{severely asymmetric}: across our
+queries, setting $\Cu$ too small costs up to $38\times$ in error while setting it too large costs
+at most $1.7\times$. Second, no single value works. The worst-case penalty of a fixed choice across
+our query set:
+
+\begin{center}\small
+\begin{tabular}{lrrrrr}
+\toprule
+analyst supplies & $\Cu{=}1$ & $\Cu{=}10$ & $\Cu{=}100$ & $\Cu{=}$ schema max & automatic \\
+\midrule
+worst case over queries & 177.6$\times$ & 136.3$\times$ & 5.18$\times$ & 4.18$\times$ &
+\textbf{1.36$\times$} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+$\Cu{=}1$ is catastrophic on TPC-H and simultaneously \emph{optimal} on ClickBench. A single
+constant cannot serve both, so the choice must adapt to the data --- which means spending privacy
+budget to make it.
+
+\subsection{Where the budget goes}
+
+A grouped DP query has three channels, and every idea in this document buys one of them at the
+expense of another:
 
 \begin{enumerate}
-\item \textbf{Bound selection} ($\epsilon_b$): how large can one unit's contribution be?
-\item \textbf{Partition selection} ($\epsilon_\eta$): which groups may be named at all?
-\item \textbf{Values} ($\epsilon_v$): the noised aggregates.
+\item \textbf{Bound selection} ($\epsilon_b$): how large is one user's contribution?
+\item \textbf{Partition selection} ($\epsilon_\eta$): which groups may be named at all? A group
+existing because of a single user must not be revealed, so groups are released only when a noised
+count of contributing users clears a threshold $\tau$.
+\item \textbf{Values} ($\epsilon_v$): the noised aggregates themselves.
 \end{enumerate}
 
-\paragraph{Baseline.} Google DP as published: \textsc{ApproxBounds} over per-cell values in
-base-2 log bins gives $U$; a single $\Cu$ randomly truncates each unit to $\Cu$ groups, applied to
+The third is what the analyst wants; the first two are overhead. \textbf{Reducing that overhead, or
+removing the need for it, is the whole game.}
+
+\subsection{The baseline}
+
+Google DP as published (Wilson et al., PoPETs 2020): \textsc{ApproxBounds} over per-cell values in
+base-2 log bins gives $U$; a single $\Cu$ randomly truncates each user to $\Cu$ groups, applied to
 \emph{both} the value and the vote channel; value sensitivity is $\Cu \cdot U$ with Laplace noise;
-partition selection is a noised distinct-unit count against the Wilson threshold
+partition selection uses the Wilson threshold
 $\tau = 1 - \Cu\log(2-2(1-\delta_\eta)^{1/\Cu})/\epsilon_\eta$.
 
-Crucially, $\Cu$ is a \emph{required input} the analyst supplies
-(\texttt{max\_partitions\_contributed}). Making the system automatic means choosing it without a
-human.
+We compare against this, not against a hardened variant of our own invention. Where we do build a
+stronger baseline (\S\ref{sec:decomp}) we say so explicitly, because a comparison against a
+mechanism nobody has published or deployed is not evidence about the state of the art.
 
 \paragraph{Scoring.} Throughout: relative $\ell_1$ error over the \emph{true, uncapped} key set,
 with $\tau$-suppressed groups charged as released $0$ (full error). Every arm is tuned separately
@@ -65,7 +121,11 @@ over its own free parameters --- $\Cu$ or $(\Ce,\Cv)$, and the three-way budget 
 less lets a mechanism buy accuracy by returning fewer rows, or flatters one side by fixing a
 parameter the other gets to optimise.
 
-\section{The four ideas}
+\section{Four ideas, and which channel each attacks}
+
+Ideas (A) attacks the value channel; (B) and (D) attack partition selection; (C) attacks bound
+selection. They are independent, and \S\ref{sec:decomp} shows each helps the baseline as much as it
+helps us.
 
 \paragraph{(A) $\ell_1$ per-unit norm clip.} Rather than bounding each (unit, group) cell by $U$
 and multiplying sensitivity by $\Cu$, bound the unit's \emph{total} across groups:
@@ -161,7 +221,7 @@ whereas truncation discards them for the price of $U$. Our clip refuses to disca
 is here the wrong instinct.
 \end{itemize}
 
-\subsection{Decomposition: what the gain is actually made of}
+\subsection{Decomposition: what the gain is actually made of}\label{sec:decomp}
 
 Two decompositions matter for honest reporting.
 
