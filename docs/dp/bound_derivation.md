@@ -2985,6 +2985,48 @@ of 500k trials gave 4.0e-06 to 1.4e-05 around an expected 1.0e-05, because only 
 run. **At `delta` = 1e-06 a simulation needs ~1e8 trials to resolve a 1.4x effect**, so any
 delta-scale claim in this document should be checked exactly rather than by MC.
 
+## MULTI-AGGREGATE QUERIES, AND AN ADAPTIVE ATTACKER
+
+`attacks/multi_agg_adaptive.py`, `attacks/adaptive_target_selection.py`.
+
+**C1 — the advantage shrinks with more aggregates, and flattens near 2x.** Every headline in this
+document is a *single* aggregate; real queries are not. With `c` aggregates, `eps_v` splits `c`
+ways while tau is paid once:
+
+| c | google | ours | ratio | aggregates |
+|---|---|---|---|---|
+| 1 | 13.52% | 3.89% | **3.48x** | SUM price |
+| 2 | 18.93% | 8.02% | 2.36x | + SUM qty |
+| 3 | 22.86% | 11.40% | 2.01x | + COUNT |
+| 4 | 26.25% | 13.40% | **1.96x** | + SUM discount |
+
+The decay is structural, not a defect: tau is a fixed cost paid once regardless of `c`, so as `c`
+grows the shared vote channel shrinks as a fraction of the total and both arms converge toward
+pure value-channel noise, where the gap is just the sensitivity ratio. **Report single-aggregate
+numbers as an upper end of the range, not as typical.**
+
+**C2 — an adaptive attacker cannot beat composition, tested properly the second time.**
+
+My first attempt was weak and is worth recording as a lesson: it had the attacker sum `k` noisy
+observations of the *same* quantity, which is a fixed strategy wearing an adaptive label. It
+confirmed composition arithmetic (advantage 0.39 at k=1 falling to 0.10 at k=8) and nothing about
+adaptivity.
+
+The real test lets round 1 **choose the target** for round 2: `M` candidate PUs, one present; spend
+`eps/2` probing all of them, pick the most suspicious, spend `eps/2` on that one alone. Against a
+blind attacker spending the whole `eps` on one fixed target:
+
+| M | adaptive advantage | blind advantage | gain | bound at `eps`=1 |
+|---|---|---|---|---|
+| 2 | 0.1402 | 0.3929 | **0.36x** | 0.4621 |
+| 5 | 0.0672 | 0.3931 | 0.17x | 0.4621 |
+| 20 | 0.0165 | 0.3947 | 0.04x | 0.4621 |
+| 100 | 0.0057 | 0.3931 | **0.01x** | 0.4621 |
+
+Under the bound everywhere, and **adaptivity actively loses** — badly, and worse as `M` grows —
+because the selection round costs budget and its pick is usually wrong. That is the expected
+behaviour of a correctly composed mechanism, but it had been assumed rather than measured.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
