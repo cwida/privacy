@@ -501,9 +501,10 @@ conjunction by a unit-determined key component is a valid way to shrink any per-
 \section{Related work}\label{sec:related}
 
 \paragraph{The primitive is standard.} Steps 3--4 are an exponential-mechanism
-quantile~\cite{mcsherry2007}, originating with Smith~\cite{smith2011} and formalised with exactly
-this rank-distance utility by Gillenwater et al.~\cite{gillenwater2021}, who also prove its
-sensitivity is $1$. It ships in SmartNoise and IBM diffprivlib. \textbf{We claim nothing here}, and
+quantile~\cite{mcsherry2007}. Gillenwater et al.~\cite{gillenwater2021} state exactly this
+rank-distance utility and prove its $L_1$ sensitivity is $1$ (their Lemma 7), and attribute the
+single-quantile algorithm to Smith~\cite{smith2011}, noting it ``has since been incorporated into
+the SmartNoise and IBM differential privacy libraries''. It ships in SmartNoise and IBM diffprivlib. \textbf{We claim nothing here}, and
 in particular the observation that the exponential mechanism needs only \emph{score} sensitivity
 rather than the sensitivity of the underlying statistic is the defining property of that mechanism,
 not an insight.
