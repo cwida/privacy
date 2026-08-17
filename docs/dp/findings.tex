@@ -7,7 +7,6 @@
 \usepackage{enumitem}
 \setlist{itemsep=2pt,topsep=3pt}
 
-\newcommand{\win}{\textbf{\color{teal}}}
 \newcommand{\lose}{\color{red}}
 \newcommand{\Cu}{C_u}
 \newcommand{\Cv}{C_v}
@@ -41,12 +40,14 @@ $\Cu$ here. A required input in Google DP, with no default.
 Our system rewrites ordinary SQL into a private plan automatically. An analyst writes a query; they
 do not know --- and should not need to know --- the maximum number of months any customer appears
 in. So every one of these constants is a blocker, and the question driving this work is narrow and
-practical: \textbf{can they be chosen from the data itself, privately, without spending so much
+practical: \textbf{can $\Cu$ be chosen from the data itself, privately, without spending so much
 budget that the answer becomes useless?}
 
-Guessing is not a safe fallback, for two measured reasons. The penalty is \emph{severely
-asymmetric} --- across our queries, setting $\Cu$ too small costs up to $38\times$ in error while
-setting it too large costs at most $1.7\times$ --- and no single value works across datasets:
+\subsection{Guessing is not a safe fallback}
+
+Two measured facts rule it out. The penalty is \emph{severely asymmetric} --- setting $\Cu$ too
+small costs up to $38\times$ in error while setting it too large costs at most $1.7\times$ --- and
+no single value works across datasets:
 
 \begin{center}\small
 \begin{tabular}{lrrrrr}
@@ -61,12 +62,11 @@ worst case over queries & 177.6$\times$ & 136.3$\times$ & 5.18$\times$ & 4.18$\t
 
 $\Cu{=}1$ is catastrophic on TPC-H and simultaneously \emph{optimal} on ClickBench. A single
 constant cannot serve both, so the choice must adapt to the data --- which means spending privacy
-budget to make it.
+budget to make it. The mechanism below spends about $1\%$ of $\epsilon$ doing so.
 
 \subsection{Where the budget goes}
 
-A grouped DP query spends privacy budget on three things, and every idea in this document buys one
-of them at the expense of another:
+A grouped DP query spends privacy budget on three things:
 
 \begin{enumerate}
 \item \textbf{Bound selection} ($\epsilon_b$): how large is one user's contribution?
@@ -76,210 +76,86 @@ count of contributing users clears a threshold $\tau$.
 \item \textbf{Values} ($\epsilon_v$): the noised aggregates themselves.
 \end{enumerate}
 
-The third is what the analyst wants; the first two are overhead. \textbf{Reducing that overhead, or
-removing the need for it, is the whole game.}
+The third is what the analyst wants; the first two are overhead.
 
-\paragraph{How the baseline actually divides it.} Google DP charges these separately, though not as
-three co-equal shares. Privacy on Beam splits the top level \emph{two} ways --- \texttt{count.go}
-exposes \texttt{AggregationEpsilon} and \texttt{PartitionSelectionEpsilon} as distinct fields,
-consumed by distinct calls --- and bound selection sits \emph{inside} the aggregation:
-\texttt{ApproxBounds} is constructed with its own \texttt{epsilon}
-(\texttt{ApproxBounds(double epsilon, \ldots)}, \texttt{SetEpsilon}) taken from the aggregation's
-share. We model all three as a single three-way split $(\epsilon_b, \epsilon_\eta, \epsilon_v)$ and
-tune it jointly for every arm, which is at least as favourable to the baseline as its own
-two-level structure, since a nested split cannot beat a free one.
-
-\subsection{The baseline}
-
-Google DP as published (Wilson et al., PoPETs 2020): \textsc{ApproxBounds} over per-cell values in
-base-2 log bins gives $U$; a single $\Cu$ randomly truncates each user to $\Cu$ groups, applied to
-\emph{both} the value and the vote channel; value sensitivity is $\Cu \cdot U$ with Laplace noise;
-partition selection uses the Wilson threshold
-$\tau = 1 - \Cu\log(2-2(1-\delta_\eta)^{1/\Cu})/\epsilon_\eta$.
-
-We compare against this, not against a hardened variant of our own invention. Where we do build a
-stronger baseline (\S\ref{sec:decomp}) we say so explicitly, because a comparison against a
-mechanism nobody has published or deployed is not evidence about the state of the art.
+\paragraph{How the baseline divides it.} Google DP charges these separately, though not as three
+co-equal shares. Privacy on Beam splits the top level \emph{two} ways --- \texttt{count.go} exposes
+\texttt{AggregationEpsilon} and \texttt{PartitionSelectionEpsilon} as distinct fields, consumed by
+distinct calls --- and bound selection sits \emph{inside} the aggregation: \texttt{ApproxBounds} is
+constructed with its own \texttt{epsilon} taken from the aggregation's share. We model all three as
+a single three-way split and tune it jointly for every arm, which is at least as favourable to the
+baseline as its own nested structure, since a nested split cannot beat a free one.
 
 \paragraph{Scoring.} Throughout: relative $\ell_1$ error over the \emph{true, uncapped} key set,
 with $\tau$-suppressed groups charged as released $0$ (full error). Every arm is tuned separately
-over its own free parameters --- $\Cu$ or $(\Ce,\Cv)$, and the three-way budget split. Anything
-less lets a mechanism buy accuracy by returning fewer rows, or flatters one side by fixing a
-parameter the other gets to optimise.
+over its own free parameters. Anything less lets a mechanism buy accuracy by returning fewer rows,
+or flatters one side by fixing a parameter the other gets to optimise.
 
-\section{Four ideas, and which channel each attacks}
+\section{The mechanism}
 
-Ideas (A) attacks the value channel; (B) and (D) attack partition selection; (C) attacks bound
-selection. They are independent, and \S\ref{sec:decomp} shows each helps the baseline as much as it
-helps us.
+Let $\ku = |\{g : u \text{ contributes to } g\}|$ and $F_d(r) = |\{u : \ku \le r\}|$. Choose a
+target fraction $p$ and release $\Cu$ as the $p$-quantile of the $\ku$ distribution, privately:
 
-\paragraph{(A) $\ell_1$ per-unit norm clip.} Rather than bounding each (unit, group) cell by $U$
-and multiplying sensitivity by $\Cu$, bound the unit's \emph{total} across groups:
-\[
-n_u = \sum_g \bigl|\mathrm{clip}(t(u,g), -B, B)\bigr|,
-\qquad
-v(u,g) = \mathrm{clip}(t(u,g),-B,B)\cdot\min\!\bigl(1, B/n_u\bigr),
-\]
-giving $\|v_u\|_1 \le B$ regardless of how many groups $u$ touches. $B$ comes from
-\textsc{ApproxBounds} applied to per-unit \emph{norms} rather than per-cell values.
+\begin{enumerate}
+\item Release $\tilde N = N + \mathrm{Lap}(1/\epsilon_N)$, the unit count, at cost
+$(\epsilon_N, 0)$.
+\item Form a conservative target rank $T = p\tilde N + (p/\epsilon_N)\ln(1/2\beta_N)$, the margin
+ensuring $T \ge pN$ with probability $1-\beta_N$.
+\item Score each candidate $r \in \{1,\dots,K\}$ by $q(d,r) = -|F_d(r) - T|$.
+\item Sample by exponential mechanism, $\Pr[\hat\Cu = r] \propto \exp(\epsilon_C\, q(d,r)/2)$,
+at cost $(\epsilon_C, 0)$.
+\end{enumerate}
 
-\paragraph{(B) Frozen partition set.} Release the group set once from the filterless query under
-its own $(\epsilon_0,\delta_0)$, then reuse it: later queries skip $\tau$ entirely for those
-groups, freeing $\epsilon_\eta$ for the values. Sound because partition selection protects group
-\emph{existence}, not values --- once released, $G_{\mathrm{fix}}$ is public and conditioning on
-it is post-processing.
+Total $(\epsilon_N + \epsilon_C, 0)$-DP by adaptive sequential composition. $\hat\Cu$ is then
+frozen and reused as public metadata.
 
-\paragraph{(C) EM selection of $\Cu$.} Score each candidate $r$ by $q(d,r) = -|F_d(r) - T|$ where
-$F_d(r) = |\{u : \ku \le r\}|$ and $T$ is a target rank, then sample by exponential mechanism.
-The key observation: removing one unit shifts $K-k+1$ cumulative counts at once, so
-\emph{releasing} $(F(1),\dots,F(K))$ would have $\ell_1$ sensitivity up to $K$ --- but the EM
-scores each candidate separately, so $\Delta q = \max_r |q(d,r)-q(d',r)| \le 1$.
+\subsection{Why the score sensitivity is $1$, not $K$}
 
-\paragraph{(D) All-or-Frozen thresholding.} Replace $K$ per-group release tests with one global
-AND: release the query-specific group set iff \emph{every} group clears a threshold, else fall
-back to $G_{\mathrm{fix}}$. Conventional thresholding leaks if \emph{any} of a unit's $\le\Cu$ new
-groups passes (an OR, needing $\rho_\tau \le \delta/\Cu$); the AND needs only $\rho_\tau\le\delta$,
-saving $\approx(\Cu/\epsilon_B)\log \Cu$ on the threshold.
-
-\section{Headline results}
-
-\subsection{Utility versus the published baseline}
-
-Fourteen queries, three datasets (TPC-H sf10, StackOverflow, ClickBench), SUM and COUNT measures,
-$\epsilon=1$, $\delta=10^{-6}$. \textsc{g-best} gives the baseline its \emph{optimal} $\Cu$ per
-query --- an upper bound on any configuration an analyst could supply.
-
-\begin{center}\small
-\begin{tabular}{lrrrrr}
-\toprule
-query & groups & g-best & ours & ours+frozen & vs g-best \\
-\midrule
-tpch SUM price / month        &     84 &  0.68\% & 0.17\% & \textbf{0.16\%} & 4.38$\times$ \\
-tpch SUM price / mo$|$nation  &  2,095 & 13.96\% & 3.95\% & \textbf{2.25\%} & 6.21$\times$ \\
-tpch SUM price / mo$|$prio    &    420 & 10.10\% & 3.11\% & \textbf{1.83\%} & 5.53$\times$ \\
-tpch SUM price / day          &  2,526 & 99.56\% & 85.22\% & \textbf{10.41\%} & \textbf{9.56$\times$} \\
-tpch COUNT / mo$|$nation      &  2,096 & 14.76\% & 4.39\% & \textbf{2.50\%} & 5.90$\times$ \\
-tpch SUM qty / mo$|$nation    &  2,096 & 15.52\% & 5.31\% & \textbf{3.17\%} & 4.90$\times$ \\
-tpch SUM price / yr$|$nation  &    175 &  0.70\% & 0.37\% & \textbf{0.33\%} & 2.14$\times$ \\
-so COUNT posts / month        &    190 & 41.55\% & 36.36\% & \textbf{29.74\%} & 1.40$\times$ \\
-so SUM score / month          &    190 & 62.73\% & 45.81\% & \textbf{37.86\%} & 1.66$\times$ \\
-so COUNT comments / month     &    182 & 55.21\% & 48.12\% & \textbf{35.76\%} & 1.54$\times$ \\
-so COUNT posts / day          &  5,107 & 92.65\% & 89.44\% & \textbf{56.29\%} & 1.65$\times$ \\
-cb COUNT hits / region        &  3,238 &  6.00\% & \textbf{5.72\%} & 7.27\% & 1.05$\times$ \\
-cb COUNT hits / date$|$reg    &  7,564 & 10.01\% & \textbf{8.49\%} & 12.38\% & 1.18$\times$ \\
-cb SUM width / region         &  3,238 &  6.41\% & \textbf{6.29\%} & 9.50\% & 1.02$\times$ \\
-\midrule
-\multicolumn{5}{l}{\textbf{median 1.90$\times$, range 1.02--9.56$\times$}} \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-The best row --- \texttt{tpch SUM price / day}, $99.56\% \to 10.41\%$ --- is the regime where
-$\tau$ suppresses nearly everything and the frozen set is the only thing that works.
-
-\subsection{The scope condition}
-
-The distribution of $\ku$ (groups touched per unit) predicts every row, and we established it in
-three parts.
-
-\begin{center}\small
-\begin{tabular}{llll}
-\toprule
-$\ku$ distribution & example & median gain & winner \\
-\midrule
-concentrated, high ($\gtrsim 10$) & TPC-H (med 30, max 72) & 5.78$\times$ & ours \\
-concentrated, low (all touch one) & ClickBench (med 1, max 54) & 1.06$\times$ & tie \\
-bimodal (most one, few many) & constructed; so ViewCount/day & 0.68--0.97$\times$ & \lose baseline \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-Sweeping fifteen $\ku$ families at matched unit count, group count and value distribution isolates
-two effects that a one-sided ``concentration'' story missed:
-
-\begin{itemize}
-\item \textbf{A level threshold near $\ku \approx 7$.} \texttt{constant(5)} is \emph{perfectly}
-concentrated yet the baseline wins $0.79\times$; \texttt{constant(20)} and \texttt{constant(60)}
-lose $1.5$--$1.6\times$. The clip needs units touching roughly ten or more groups before it pays.
-\item \textbf{A genuine loss region.} With most units at $\ku=1$ plus a $2\%$ tail at $\ku=100$,
-the baseline wins $1.27\times$: the whales set our $B$ and every ordinary unit pays that noise,
-whereas truncation discards them for the price of $U$. Our clip refuses to discard anyone, which
-is here the wrong instinct.
-\end{itemize}
-
-\subsection{Decomposition: what the gain is actually made of}\label{sec:decomp}
-
-Two decompositions matter for honest reporting.
-
-\paragraph{Bounds are not free.} $U$ and $B$ both come from \textsc{ApproxBounds}, a DP release
-costing $\epsilon_b$. Giving \emph{both} arms oracle bounds on a $1.19\times$-spaced grid:
+This is what makes the mechanism cheap. Removing one unit with $\ku = k$ shifts $K-k+1$ cumulative
+counts \emph{simultaneously}, so \emph{releasing} the vector $(F(1),\dots,F(K))$ would have $\ell_1$
+sensitivity up to $K$. But the exponential mechanism never releases that vector --- it scores each
+candidate separately, and what matters is $\Delta q = \max_r |q(d,r) - q(d',r)|$. Verified by
+explicit construction:
 
 \begin{center}\small
 \begin{tabular}{lrrr}
 \toprule
-query & DP bounds & oracle bounds \\
+removed unit & cumulative counts changed & $\ell_1$ change & $\max_r |\Delta q|$ \\
 \midrule
-tpch SUM price / mo$|$nation & 3.57$\times$ & \textbf{2.25$\times$} \\
-so COUNT posts / month & 0.94$\times$ & 1.02$\times$ \\
-cb COUNT hits / region & 1.08$\times$ & 1.05$\times$ \\
+$\ku = 1$  & 80 of 80 & 80 & \textbf{1.0} \\
+$\ku = 30$ & 51 of 80 & 51 & \textbf{1.0} \\
+$\ku = 70$ & 11 of 80 & 11 & \textbf{1.0} \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-So on TPC-H roughly $2.25\times$ is the clipping geometry, surviving perfect bounds on both sides,
-and $\approx 1.6\times$ is \textsc{ApproxBounds} serving the baseline's per-cell $U$ worse than our
-per-unit $B$. The latter has a cause: \textsc{ApproxBounds} is a max-finder while the error-optimal
-per-cell bound is roughly half the maximum, making it $\approx 2\times$ suboptimal for $U$ by
-construction. \emph{Ours is less sensitive to bound selection}, which is a robustness claim, not a
-sharper clip.
+The $\ell_1$ of the histogram is a red herring: one cheap release replaces $K$ noisy counts.
 
-\paragraph{The ideas are independent of each other.} The frozen set (B) and the EM (C) act on the
-\emph{partition-selection} channel; the clip (A) acts on the \emph{value} channel. Neither depends
-on the other, and both help the published baseline just as much: giving it the frozen set gives
-$4.25\%\to3.52\%$, $13.50\%\to9.76\%$ and $82.10\%\to20.20\%$ across three filters, a
-$1.2$--$4.1\times$ gain with no $\ell_1$ clip anywhere. Idea (C) is if anything \emph{more} useful
-to the baseline than to us, since our clip has no $\Cv$ to select. They should therefore be
-reported --- and adopted --- separately.
+\section{Results}
 
-\paragraph{Most of the stack's gain is the frozen set, which is prior art.} Against a maximally
-strong baseline (top-$\Cv$ selection, rescale-with-re-clip, decoupled $\Ce/\Cv$ --- none of which
-is published), the clip alone is a wash: median $1.01\times$. Against the published baseline the
-clip alone is $1.23\times$. The larger stack numbers come from the frozen partition set.
+\subsection{The selection is nearly free and essentially deterministic}
 
-\subsection{Sensitivity to $\epsilon$ and to the metric}
-
-Two robustness checks that could have invalidated everything:
+With $\sim$180k units, $F$ jumps by thousands between adjacent candidates, so the exponential
+mechanism's distribution is sharply peaked. All 15 draws agree at every budget tested, and
+\emph{spending more actively hurts}, because it comes out of the query:
 
 \begin{center}\small
-\begin{tabular}{lrrrrr}
+\begin{tabular}{lrrrr}
 \toprule
-& $\epsilon{=}0.25$ & $0.5$ & $1$ & $2$ & $4$ \\
+$\epsilon_N + \epsilon_C$ & 0.010 & 0.025 & 0.100 & 0.250 \\
 \midrule
-median gain & 1.20$\times$ & 2.11$\times$ & 2.88$\times$ & 2.39$\times$ & 3.08$\times$ \\
-\bottomrule
-\end{tabular}
-\qquad
-\begin{tabular}{lr}
-\toprule
-metric & median \\
-\midrule
-total-$\ell_1$ & 1.23$\times$ \\
-mean per-group rel. & 1.19$\times$ \\
-median per-group rel. & 1.22$\times$ \\
-nRMSE & 1.29$\times$ \\
+selected $\Cu$, 15 draws & 37--37 & 37--37 & 37--37 & 37--37 \\
+penalty vs oracle $\Cu$ & \textbf{1.00$\times$} & 1.00$\times$ & 1.04$\times$ & 1.16$\times$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-The ranking is stable in $\epsilon$ (TPC-H wins everywhere, ClickBench ties everywhere) and the
-gain is \emph{smallest} at small $\epsilon$ --- the opposite of a resonance peak. All four metrics
-agree in direction, with per-group metrics \emph{more} favourable on TPC-H
-($5.17\times$ median-rel against $3.61\times$ total-$\ell_1$).
+\textbf{About $1\%$ of $\epsilon$ is the right budget.}
 
-\section{Automatic $\Cu$ selection}
+\subsection{The target fraction matters, and $p = 0.7$ is too low}
 
-The EM (idea C) is sound and nearly free, but the target fraction matters. Penalty is error at the
-selected $\Cu$ over error at that query's best $\Cu$, so $1.00\times$ equals an oracle:
+Penalty is error at the selected $\Cu$ over error at that query's best $\Cu$, so $1.00\times$ equals
+an oracle that already knew the answer:
 
 \begin{center}\small
 \begin{tabular}{lrrrrr}
@@ -298,66 +174,132 @@ cb hits$|$region     &  1 & 1.02$\times$ & 1.00$\times$ & \textbf{0.99$\times$} 
 \end{tabular}
 \end{center}
 
-The tolerance band is severely asymmetric --- halving $\Cu$ costs $2.6$--$35\times$, doubling costs
-only $1.7$--$2.0\times$ --- so the selection should sit deliberately above the optimum. Note the
-choice interacts with the mechanism: if $\Cu$ is shared with $\tau$ (the published baseline),
-$p\approx0.95$ is better, since $p=0.99$ chases heavy tails and inflates $\tau$; with $\Ce$ and
-$\Cv$ separate, $p\approx0.99$ wins.
+The reason is the shape of the error curve around the optimum, which is severely asymmetric:
 
-\paragraph{Why automate at all.} No fixed value works across datasets. Worst-case penalty over
-queries: $\Cu{=}1$ gives $177.6\times$, $\Cu{=}10$ gives $136.3\times$, $\Cu{=}100$ gives
-$5.18\times$, $\Cu{=}\text{schema max}$ gives $4.18\times$, and the EM gives $\mathbf{1.36\times}$.
-$\Cu{=}1$ is catastrophic on TPC-H yet optimal on ClickBench. The mechanism wins by
-\emph{adapting}, not by being cleverer than the analyst.
+\begin{center}\small
+\begin{tabular}{lrrrrrr}
+\toprule
+query & $\Cu/8$ & $\Cu/4$ & $\Cu/2$ & $\Cu$ & $2\Cu$ & $4\Cu$ \\
+\midrule
+tpch month          & 137.7$\times$ & 104.0$\times$ & \lose 35.3$\times$ & 1.00$\times$ & 1.94$\times$ & 2.49$\times$ \\
+tpch month$|$nation & 7.32$\times$ & 5.93$\times$ & 3.14$\times$ & 1.00$\times$ & 1.96$\times$ & 3.11$\times$ \\
+tpch month$|$prio   & 9.11$\times$ & 6.62$\times$ & 2.60$\times$ & 1.00$\times$ & 1.70$\times$ & 1.70$\times$ \\
+so posts$|$month    & 1.44$\times$ & 1.32$\times$ & 1.13$\times$ & 1.00$\times$ & 1.28$\times$ & 1.67$\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
 
-\paragraph{Frozen versus per-query.} A filter on the privacy unit leaves the $\ku$ distribution
-\emph{identical} (p50 $=30$, p95 $=48$ even at a filter retaining $9{,}182$ of $1{,}000{,}000$
-units), so re-running the EM returns the same value and is slightly worse for paying its cost
-again. A filter that removes \emph{groups} collapses $\ku$ (p50 $30\to4$) and per-query wins
-$1.8\times$. The decidable rule: re-run selection when the filter constrains a grouping-key
-component \emph{not} functionally determined by the privacy unit.
+Halving $\Cu$ costs $2.6$--$35\times$; doubling costs $1.7$--$2.0\times$. \textbf{The selection
+should sit deliberately above the optimum.}
 
-\section{All-or-Frozen: correct but inert}
+\paragraph{What $p$ means concretely.} $p$ is the fraction of \emph{users} who escape truncation,
+which is not the same as the fraction of groups they may occupy:
 
-The privacy analysis is right --- we reproduced the predicted threshold gap to the digit
-($\tau_{PG}-\tau_{AF} = 6{,}158$ measured against $(\Cu/\epsilon_B)\log\Cu = 6{,}158$) --- but the
-rule essentially never fires. Across eight queries and three datasets, as specified it fires on
-none; with a dedicated distinct-unit count instead of the reused bounding histogram it fires on
-one; with additional blocking by a unit-determined key component it reaches $20\%$ of blocks on
-one more.
+\begin{center}\small
+\begin{tabular}{lrrrrr}
+\toprule
+query & groups & $p{=}0.7$ & $p{=}0.9$ & $p{=}0.95$ & $p{=}0.99$ \\
+\midrule
+tpch month          &    84 & 37 (44\%) & 45 (54\%) & 48 (57\%) & 63 (75\%) \\
+tpch month$|$nation & 2,095 & 37 (1.8\%) & 45 (2.1\%) & 48 (2.3\%) & 62 (3.0\%) \\
+so posts$|$month    &   190 & 1 (0.5\%) & 3 (1.6\%) & 8 (4.2\%) & 120 (63\%) \\
+\midrule
+users truncated     &       & 24--38\% & 7--11\% & 2--11\% & \textbf{0.0--0.4\%} \\
+\bottomrule
+\end{tabular}
+\end{center}
 
-The reason is structural and needs no simulation. Any valid threshold satisfies
-$\Pr[1 + \mathrm{Lap} \ge \tau] \le \delta$, so $\tau \gg 1$ and \emph{a group holding a single
-privacy unit can never pass}. Five of eight queries have minimum support exactly $1$. But
-single-unit groups are precisely why partition selection exists.
+At $p = 0.99$ on a fine grouping this is modest ($3\%$ of groups); on a coarse one it does approach
+``may appear almost everywhere'', which is correct there, because with few groups truncation bias
+dominates and noise is comparatively cheap.
+
+\paragraph{The right $p$ depends on the surrounding mechanism.} If $\Cu$ is shared with $\tau$ ---
+the published baseline's structure --- then a large $\Cu$ inflates the partition-selection threshold
+too, and chasing a heavy tail backfires:
+
+\begin{center}\small
+\begin{tabular}{lrrrr}
+\toprule
+worst case over queries & $p{=}0.7$ & $p{=}0.9$ & $p{=}0.95$ & $p{=}0.99$ \\
+\midrule
+$\Cu$ shared with $\tau$ (published) & 15.60$\times$ & 2.50$\times$ & \textbf{2.31$\times$} & 2.46$\times$ \\
+$\Ce$, $\Cv$ separate & 17.75$\times$ & 2.91$\times$ & 2.91$\times$ & \textbf{1.36$\times$} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Recommendation: $p \approx 0.95$ with a shared $\Cu$, $p \approx 0.99$ with separate
+bounds. Not $0.7$.}
+
+\subsection{Freeze once, or re-select per query?}
+
+A single frozen $\Cu$ suffices for filters on the \emph{privacy unit}; only group-removing filters
+justify re-selection. Frozen $\Cu = 48$ from the unfiltered query; per-query re-runs the mechanism
+and pays $0.01$ again each time:
+
+\begin{center}\small
+\begin{tabular}{lrrrrrr}
+\toprule
+query & units & $\ku$ p50 & p95 & per-query $\Cu$ & frozen & per-query \\
+\midrule
+PU-side: acctbal $\ge$ 8000 & 181,532 & 30 & 48 & 48 & \textbf{12.36\%} & 12.56\% \\
+PU-side: acctbal $\ge$ 9500 &  45,320 & 30 & 48 & 53 & \textbf{85.14\%} & 87.16\% \\
+PU-side: acctbal $\ge$ 9900 &   9,182 & 30 & 48 & 57 & 100.0\% & 99.99\% \\
+GRP-side: ship $\ge$ 1998   & 821,108 & \textbf{4} & \textbf{8} & \textbf{8} & 2.52\% & \textbf{1.38\%} \\
+GRP-side: nation $<$ 5      & 199,738 & 30 & 48 & 48 & \textbf{2.31\%} & 2.40\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A filter on the privacy unit removes users, but the survivors still touch the same number of groups
+--- the $\ku$ distribution is \emph{identical} (p50 $=30$, p95 $=48$) even at a filter retaining
+9,182 of 1,000,000 users. Re-selection returns the same value and is slightly worse for paying its
+cost again. A filter that removes \emph{groups} collapses $\ku$ (p50 $30\to4$), and there
+re-selection wins $1.8\times$.
+
+Note that \texttt{nation < 5} constrains the grouping key yet behaves like a unit-side filter,
+because nation is functionally determined by the customer. The decidable rule is therefore:
 
 \begin{quote}
-All-or-Frozen requires a query with no singleton group --- and such a query does not need partition
-selection in the first place.
+\textbf{Re-run the selection when the filter constrains a grouping-key component that is \emph{not}
+functionally determined by the privacy unit. Otherwise reuse the frozen value.}
 \end{quote}
-
-The one query where it fires is also the one where $\tau$ suppresses nothing, so the two group sets
-coincide and the result is vacuous. Two findings are worth keeping: reusing the bounding histogram
-costs $736\times$ on the threshold relative to a dedicated count (a free statistic is not free when
-it is the wrong statistic), and blocking by a unit-determined key component is a valid way to
-shrink any per-query conjunction.
 
 \section{Privacy validation}
 
-Two bugs were found in \emph{our own} mechanism, both by explicit neighbour construction after the
+Beyond the $\Delta q \le 1$ construction above, we ran an explicit adversary against the full
+pipeline, $4\times10^6$ trials per attack, measuring the advantage
+$\Pr[\text{say } D'\,|\,D'] - \Pr[\text{say } D'\,|\,D]$ against the ceiling
+$(e^\epsilon-1)/(e^\epsilon+1)$.
+
+\begin{center}\small
+\begin{tabular}{lll}
+\toprule
+attack & result & verdict \\
+\midrule
+value channel, worst-case target & advantage 0.2587 vs bound 0.2913, \emph{scale-free} & pass \\
+omniscient attacker (knows all other units) & 0.2590 even at a target contributing $4B$ & pass \\
+reconstruction of a target's value & posterior sd 1,167 vs prior 1,183 ($1.01\times$) & pass \\
+reuse of one frozen set over $N$ queries & advantage tracks composed $\epsilon_v$ only & pass \\
+adaptive: round 1 picks the round-2 target & \emph{loses}, $0.36\times$ to $0.01\times$ & pass \\
+SQL join fan-out (182 rows per unit) & $\|\Delta\|_1 = 1.000000\,B$ exactly & pass \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two bugs were found in \emph{our own} mechanisms, both by explicit neighbour construction after the
 argument had already convinced us.
 
-\paragraph{Bug 1: the clip was not a norm.} Written as $n_u = \sum_g \min(t,B)$ it is a signed sum.
-On signed measures it fails open (cancelling cells give $n_u=0$, so the unit is released unclipped)
-or diverges ($n_u<0$ gives a negative scale). On \texttt{SUM(shipped - returned)} by (customer,
-month) at sf10, \textbf{393,053 of 999,982 units exceeded the bound}, worst $2.6\times$ --- making
-the release $2.6\epsilon$-DP. Fixed by $n_u := \sum_g|\mathrm{clip}(t,-B,B)|$, which is
-bit-identical on non-negative data.
+\paragraph{Bug 1: a clip that was not a norm.} Written as $n_u = \sum_g \min(t,B)$ it is a signed
+sum, which fails open on signed measures. On \texttt{SUM(shipped - returned)} at sf10,
+\textbf{393,053 of 999,982 units exceeded the bound}, worst $2.6\times$ --- making the release
+$2.6\epsilon$-DP. Fixed by $n_u := \sum_g|\mathrm{clip}(t,-B,B)|$, bit-identical on non-negative
+data.
 
 \paragraph{Bug 2: $\delta$ under-charged, demonstrated by an adversary.} A unit creates a group by
 having a \emph{value} there, not a vote, so with votes truncated to $\Ce$ the $\ku-\Ce$ unvoted
 groups each get an independent chance to clear $\tau$ on noise alone --- chances $\tau$'s union
-bound never covered. An explicit attacker over $4\times10^6$ trials:
+bound never covered:
 
 \begin{center}\small
 \begin{tabular}{rrrrr}
@@ -371,100 +313,105 @@ $\Ce$ & $\ku$ & leak, no gate & leak, gated & over by \\
 \end{tabular}
 \end{center}
 
-The fix is a one-line gate --- release a group only if it has at least one vote --- which is free:
-on real data it removes 19 of 2,095 groups, each with a $2\times10^{-7}$ chance of release.
+The fix is one line --- release a group only if it has at least one vote --- and it is free: on real
+data it removes 19 of 2,095 groups, each with a $2\times10^{-7}$ chance of release.
 
-\paragraph{What else the adversary could not break.} Value channel: advantage $0.2587$ against a
-$0.2913$ bound, and \emph{scale-free} across a $128\times$ range of $B$. Omniscient attacker
-(knows all other units exactly): $0.2590$ even for a target trying to contribute $4B$, because the
-clip caps it. Reconstruction: posterior sd $1{,}167$ against prior $1{,}183$, a $1.01\times$
-narrowing. Reuse of one frozen set across $N$ queries: advantage tracks the composed $\epsilon_v$
-only. Adaptivity, where round 1 selects the target for round 2: \emph{loses} to a blind attacker,
-$0.36\times$ at $M{=}2$ down to $0.01\times$ at $M{=}100$. SQL join fan-out, with one customer
-owning up to 182 rows: $\max\|\text{released}(D)-\text{released}(D\setminus u)\|_1 = 1.000000\,B$
-exactly, because the clip is on the unit's total rather than on rows.
-
-\paragraph{Refreshes must be budgeted.} $R$ re-releases of the frozen set give $R$ independent
-chances: $\Pr[\text{exposed}] = 1-(1-p)^R \le R\,\delta_0$, confirmed exactly at $R=1..50$. Batching
-updates does not reduce the cost of a single refresh; it reduces $R$.
+\paragraph{Refreshes must be budgeted.} $R$ re-releases of frozen metadata give $R$ independent
+chances: $\Pr[\text{exposed}] = 1-(1-p)^R \le R\,\delta_0$, confirmed exactly at $R = 1..50$.
+Batching updates does not reduce the cost of a single refresh; it reduces $R$.
 
 \section{Methodology}\label{sec:method}
 
-Nine headline numbers were produced and then invalidated during this work:
-$880\times \to 12\times \to 4.8\times \to 4.65\times \to 1.36\times$, and separately
-$4.5\times \to 1.9\times$. Every collapse had one of three causes, and we state them because the
-pattern is more transferable than any of the numbers.
+Nine headline numbers were produced and then invalidated during this work
+($880\times \to 12\times \to 4.8\times \to 4.65\times \to 1.36\times$, and separately
+$4.5\times \to 1.9\times$). Every collapse had one of three causes, and the pattern is more
+transferable than any of the numbers.
 
 \begin{enumerate}
 \item \textbf{An untuned baseline.} Comparisons at a fixed budget split, a fixed $\Cu$, or against
-a library default are not evidence. Each free parameter must be optimised \emph{for the baseline}
-before the comparison is meaningful --- $\Cu$ tuning alone moved one result by $12\times$.
+a library default are not evidence. $\Cu$ tuning alone moved one result by $12\times$.
 \item \textbf{A forgiving scoring rule.} Scoring against a capped or truncated ``truth'' silently
-forgives exactly the bias being measured. Suppressed groups must be charged full error, or a
-mechanism can buy accuracy by returning fewer rows.
-\item \textbf{Mixing regimes in an average.} A median across queries that violate the scope
-condition misleads in both directions. Report by regime.
+forgives exactly the bias being measured. Suppressed groups must be charged full error.
+\item \textbf{Mixing regimes in an average.} A median across queries that violate a mechanism's
+scope condition misleads in both directions. Report by regime.
 \end{enumerate}
 
-Three further practices proved necessary:
+Three practices proved necessary:
 
 \begin{itemize}
 \item \textbf{Verify sensitivity by neighbour simulation, never by argument.} Both privacy bugs
 survived a convincing derivation and died on explicit construction.
-\item \textbf{At $\delta$ scale, compute exactly rather than simulate.} A Monte Carlo run
-suggested a $1.4\times$ violation that was pure noise; resolving a $1.4\times$ effect at
-$\delta=10^{-6}$ needs $\sim10^8$ trials.
+\item \textbf{At $\delta$ scale, compute exactly rather than simulate.} A Monte Carlo run suggested
+a $1.4\times$ violation that was pure noise; resolving that at $\delta=10^{-6}$ needs $\sim10^8$
+trials.
 \item \textbf{Check the grid before believing a negative.} An ``oracle bounds'' comparison on a
-$2\times$-spaced grid --- coarser than the $1.3\times$ error basin --- reported our arm getting
+$2\times$-spaced grid --- coarser than the $1.3\times$ error basin --- reported our own arm getting
 worse under perfect bounds. Pure artifact.
 \end{itemize}
 
-\section{Prior art}
+\section{Other ideas we tried}
 
-Four of five techniques exist. This was checked against library source and primary papers.
+Four other directions were evaluated at length. None is recommended as a headline contribution,
+for different reasons.
 
-\begin{center}\small
-\begin{tabular}{lll}
-\toprule
-technique & status & where \\
-\midrule
-frozen partition set & \lose ships & Tumult \texttt{get\_groups}+\texttt{KeySet}; Beam \texttt{SelectPartitions} \\
-Gaussian partition selection & \lose published & Google C++, OpenDP, PipelineDP, Qrlew; Desfontaines 2022 \\
-adaptive log base & \lose config flag & \texttt{ApproxBounds::SetBase/SetScale/SetNumBins} \\
-$\ell_1$ norm clipping & \lose adjacent & Harrison \& Manurangsi, $\ell_r$-constrained contributions \\
-count-conditioned shrinkage & unclaimed & nearest: Private-PGM; FORC 2025 debiasing \\
-\bottomrule
-\end{tabular}
-\end{center}
+\paragraph{$\ell_1$ per-unit norm clip.} Bound a unit's \emph{total} across groups rather than each
+cell, giving sensitivity $B$ independent of how many groups it touches. Against the published
+baseline it is worth $3.3$--$3.6\times$ within its scope, $1.23\times$ in median across all
+queries; against a baseline hardened with unpublished improvements it is a wash ($1.01\times$). The
+scope condition is measurable in advance from the $\ku$ histogram: it needs units touching
+$\gtrsim 10$ groups, and it \emph{loses} by up to $1.27\times$ when $\ku$ is bimodal, because a few
+wide-spreading units set $B$ for everybody. Its real argument is not utility but parameter
+elimination --- it has no $\Cv$ to select at all.
 
-Notably, Desfontaines et al.\ (PoPETs 2022) already publish the Gaussian-versus-Laplace crossover
-at $\kappa=3$ with $\epsilon/\delta$-invariance; we independently measured $\ku \approx 4.3$ with
-the same invariance, which is a rediscovery. What remains unclaimed is narrower: a
-\emph{persistent} key set reused across separately-submitted queries (everyone frames reuse within
-one pipeline), the tuning rule for the log base, and the count-shrinkage post-processing.
+\paragraph{Frozen partition set.} Release the group set once and reuse it, freeing $\epsilon_\eta$
+for the values. This works well ($1.2$--$4.1\times$, up to $8.2\times$ where $\tau$ binds hard) and
+helps \emph{any} mechanism, ours or the baseline's. It is however prior art: Tumult Analytics ships
+\texttt{get\_groups} + \texttt{KeySet}, and Privacy on Beam documents deriving partitions via
+\texttt{SelectPartitions} and passing them as public partitions. What remains unclaimed is narrow
+--- a \emph{persistent} catalogue reused across separately-submitted queries rather than within one
+pipeline. One caveat found late: freezing \emph{hurts} on unfiltered queries, where the frozen set
+is the query's own set and the amortised cost buys nothing.
 
-\section{Recommendations}
+\paragraph{Gaussian partition selection.} Votes have $\ell_1 = \ku$ but $\ell_2 = \sqrt{\ku}$, so
+Gaussian noise avoids truncation entirely and converts queries that return nothing into ones
+returning $94\%$ of their key set. Comprehensively pre-empted: implemented in Google's C++
+(\texttt{GaussianPartitionSelection}), OpenDP, PipelineDP and Qrlew, and Desfontaines et al.\
+(PoPETs 2022) publish the crossover at $\kappa = 3$ with $\epsilon/\delta$-invariance --- we
+independently measured $\ku \approx 4.3$ with the same invariance, which is a rediscovery.
+
+\paragraph{All-or-Frozen thresholding.} Replace $K$ per-group release tests with one global AND,
+saving $\approx(\Cu/\epsilon_B)\log\Cu$ on the threshold. The privacy analysis is correct --- we
+reproduced the predicted gap to the digit --- but the rule essentially never fires. Any valid
+threshold satisfies $\Pr[1+\mathrm{Lap}\ge\tau] \le \delta$, so $\tau \gg 1$ and a group holding a
+single unit can never pass; five of eight tested queries have minimum support exactly $1$. But
+single-unit groups are precisely why partition selection exists. \textbf{The mechanism requires a
+query with no singleton group, and such a query does not need partition selection at all.} Two
+findings survive: reusing the bound-selection histogram costs $736\times$ on the threshold versus a
+dedicated count (a free statistic is not free when it is the wrong statistic), and blocking the
+conjunction by a unit-determined key component is a valid way to shrink any per-query AND.
+
+\section{Open questions}
 
 \begin{enumerate}
-\item \textbf{Adopt EM selection of $\Cu$} with $p\approx0.95$ (shared $\Cu$) or $p\approx0.99$
-(separate $\Ce/\Cv$). It costs $\approx1\%$ of $\epsilon$, beats any fixed value by $\approx3\times$
-worst-case, and its stability premise holds for the quantity it estimates.
-\item \textbf{Adopt the persistent frozen partition set}, with public predicate pruning when the
-filter constrains the grouping key, and a guard that skips it entirely for unfiltered queries
-(where it \emph{hurts}: $5.71\% \to 7.29\%$ on ClickBench).
-\item \textbf{Do not pursue All-or-Frozen.} Correct but inert, for a structural reason.
-\item \textbf{Ship the $\ell_1$ clip with both fixes}, conditioned on the $\ku$ scope test, and
-present its value as \emph{parameter elimination} --- it removes a bound that is unfreezable,
-query-dependent, and worth up to $38\times$ when misspecified --- rather than as raw utility.
-\item \textbf{Report by regime, and report the published baseline.} In scope:
-$3.3$--$3.6\times$ versus published, $1.3$--$2.3\times$ versus the strongest baseline we could
-build. Out of scope: a wash or a small loss.
+\item \textbf{Prior art for the selection mechanism is being checked.} Our earlier prior-art sweep
+covered the four ideas in \S6 and found four of five techniques already exist. The
+exponential-mechanism selection of $\Cu$ was proposed later and is going through that process now.
+The nearest neighbours to settle: Amin et al., ``Bounding User Contributions'' (ICML 2019);
+``Algorithms for bounding contribution for histogram estimation under user-level privacy''
+(arXiv:2206.03008); Andrew et al., ``Differentially Private Learning with Adaptive Clipping''
+(NeurIPS 2021), which estimates a norm quantile online under DP; and the DP-quantile literature
+generally, since steps 3--4 are an exponential-mechanism quantile. \textbf{This should be settled
+before any claim of novelty.}
+\item \textbf{Nothing is implemented.} All results are simulation. Both privacy fixes must land
+\emph{with} the mechanism, not after.
+\item \textbf{Multi-aggregate queries dilute the effect.} Every headline here is single-aggregate;
+with four aggregates the advantage of the clip decays from $3.48\times$ to $1.96\times$ as
+$\epsilon_v$ splits and the shared $\tau$ cost is amortised.
+\item \textbf{The smooth-sensitivity path is untested.} A preliminary port \emph{lost}, because
+that value channel is independently broken --- releasing more groups makes it worse.
+\item \textbf{Drift-triggered rather than scheduled refreshes.} Since refreshes compose linearly, a
+monitor that re-releases only on genuine drift (a sparse-vector construction, paying per positive
+rather than per check) is the natural next step for frozen metadata.
 \end{enumerate}
-
-\paragraph{Open.} Nothing is implemented in \texttt{src/}; both privacy fixes must land
-\emph{with} the clip, not after. Untested: the smooth-sensitivity (SASS) path, where a preliminary
-port \emph{lost} because its value channel is independently broken; workloads with genuine
-seasonal alignment, where the baseline's rescaling assumption should fail and our advantage should
-grow; and drift-triggered rather than scheduled refreshes.
 
 \end{document}
