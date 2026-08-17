@@ -49,13 +49,26 @@ def tau(eps_eta, delta_eta, cu):
     return np.inf if inner <= 0 else 1.0 - cu * np.log(inner) / eps_eta
 
 
-def approx_bounds(vals, eps_b, r):
-    """Google's ApproxBounds over log2 bins. Occupied bins only."""
-    b = np.clip(np.floor(np.log2(np.maximum(vals, 1.0))).astype(int), 0, 45)
+def approx_bounds(vals, eps_b, r, n_bins=46, p_success=1.0 - 1e-9):
+    """Google's ApproxBounds over log2 bins, WITH the relaxation loop.
+
+    Wilson et al. retry with a laxer threshold when no bin clears, multiplying the failure
+    probability by 10 each round while it stays under 1e-6. Without that retry a tightly
+    concentrated distribution straddling a bin boundary can split its mass across two bins so that
+    NEITHER clears, and the routine falls through to its 2^1 fallback -- which silently destroys
+    the bound. That is not hypothetical: 20,000 PUs with norms all near 500 produced B = 2 here.
+    """
+    b = np.clip(np.floor(np.log2(np.maximum(vals, 1.0))).astype(int), 0, n_bins - 1)
     ub, cb = np.unique(b, return_counts=True)
     noisy = cb + r.laplace(0, 1.0 / eps_b, size=len(ub))
-    ok = ub[noisy >= 24.88 / eps_b]
-    return 2.0 ** ((ok.max() + 1) if len(ok) else 1)
+    fail = 1.0 - p_success
+    while fail <= 1e-6:
+        thr = -np.log(2.0 * (1.0 - (1.0 - fail) ** (1.0 / (2.0 * n_bins)))) / eps_b
+        ok = ub[noisy >= thr]
+        if len(ok):
+            return 2.0 ** (ok.max() + 1)
+        fail *= 10.0
+    return 2.0 ** (ub.max() + 1)      # last resort: the top occupied bin, not 2^1
 
 
 class Cells:
