@@ -3027,6 +3027,44 @@ Under the bound everywhere, and **adaptivity actively loses** — badly, and wor
 because the selection round costs budget and its pick is usually wrong. That is the expected
 behaviour of a correctly composed mechanism, but it had been assumed rather than measured.
 
+## SQL JOINS AND PU ARRIVALS — both clean
+
+`attacks/joins_and_arrivals.py`. Two distinct things that the word "join" covers.
+
+**D1 — SQL join fan-out is invisible to the bound.** Every experiment in this document queries
+`lineitem JOIN orders JOIN customer` with the privacy unit on the far side, so one customer owns
+many rows — the classic place sensitivity analysis breaks. Measured: **182 rows per customer at the
+max**, across up to 44 distinct orders. Running the *full pipeline on both sides* for the 40
+fattest customers:
+
+```
+max ||released(D) - released(D\u)||_1  =  4,194,304.000  =  1.000000 x B
+```
+
+Exact, not approximate. The fan-out cannot matter because the clip is on the PU's **total**, not on
+rows or cells — which is precisely the property row-level DP lacks. (An earlier note in this file
+said "4,000 rows"; the measured figure is 182.)
+
+**D2 — a PU arriving between releases is protected by composition.** Target absent at release 1,
+present at release 2, both against the same frozen `G_fix`; the attacker differences the two, so
+the target's mass appears against two independent noise draws:
+
+| releases | attacker advantage | bound at composed `eps_v` |
+|---|---|---|
+| 1 | 0.2591 | 0.2913 |
+| 2 | 0.2856 | 0.5370 |
+| 3 | 0.3239 | 0.7163 |
+
+Differencing buys nothing beyond the composed `eps`.
+
+**The caveat is where Dandan's update question actually lands.** This assumes `G_fix` is *not*
+refreshed when the new PU arrives. If an arriving PU creates a group and the frozen set is then
+re-released, that is the `R*delta_0` regime measured earlier — the arrival's *values* are protected
+by `eps_v`, but the *key set* refresh is a separate charge. Hence: **batching arrivals does not
+reduce the cost of any single refresh, it reduces how many refreshes are needed**, which is exactly
+why a minimum batch size helps. A monitor that refreshes only when the key set has genuinely
+drifted, rather than on a schedule, is where a sparse-vector construction would pay.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
