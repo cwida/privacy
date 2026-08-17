@@ -158,6 +158,38 @@ only $\hat\Cu$ is released.
 Total $(\epsilon_N + \epsilon_C, 0)$-DP by adaptive sequential composition. $\hat\Cu$ is then
 frozen and reused as public metadata.
 
+\subsection{What we changed}
+
+The construction above is Dandan's; steps 1--4 and the $\Delta q \le 1$ argument are hers. Our
+contribution to the mechanism itself is three modifications, each forced by a measurement.
+
+\paragraph{The target fraction, $0.7 \to 0.95$/$0.99$.} The original proposal suggested
+$p = 0.7$ as a reasonable default. Measured across nine queries, that is the single worst choice
+tested: it costs $17.75\times$ in the worst case, against $1.36\times$ at $p = 0.99$. The reason is
+the asymmetry of \S\ref{sec:asym} --- at $p = 0.7$ the selected bound lands \emph{below} the
+error-optimal one, on the steep side of the curve. The instinct to err high was right; the data
+says to go much further.
+
+\paragraph{The right $p$ depends on the surrounding mechanism.} A single value does not serve both
+architectures. Where $\Cu$ is shared with the partition-selection threshold --- the published
+baseline's structure --- a large $\Cu$ inflates $\tau$ as well, and chasing a heavy tail backfires:
+$p = 0.99$ costs $2.46\times$ against $2.31\times$ at $p = 0.95$. Where the value and vote bounds
+are separate, $p = 0.99$ wins outright ($1.36\times$ against $2.91\times$). This interaction was not
+part of the original proposal and changes the recommendation depending on where the mechanism is
+deployed.
+
+\paragraph{When to re-select rather than reuse.} The proposal freezes $\hat\Cu$ and reuses it. We
+find that is correct for filters on the privacy unit --- where the $\ku$ distribution is
+\emph{identical} even after discarding $99\%$ of users --- but wastes $1.8\times$ on filters that
+remove whole groups, where $\ku$ collapses and re-selection pays for itself. The decidable test is
+in \S\ref{sec:freeze}, and it is not simply ``does the \texttt{WHERE} clause touch the grouping
+key''.
+
+\paragraph{Two safety modifications} were needed for the mechanisms this one feeds
+(\S\ref{sec:privacy}): a clip written as a signed sum rather than a norm, and a $\delta$ that did
+not cover every group a user can create. Neither is in the selection mechanism itself, but both
+must be fixed in anything that consumes its output.
+
 \subsection{Why the score sensitivity is $1$, not $K$}
 
 This is what makes step 4 cheap. Removing one user with $\ku = k$ shifts $K-k+1$ cumulative counts
@@ -314,7 +346,7 @@ because nation is functionally determined by the customer. The decidable rule is
 functionally determined by the privacy unit. Otherwise reuse the frozen value.}
 \end{quote}
 
-\section{Privacy validation}
+\section{Privacy validation}\label{sec:privacy}
 
 Beyond the $\Delta q \le 1$ construction above, we ran an explicit adversary against the full
 pipeline, $4\times10^6$ trials per attack, measuring the advantage
@@ -336,16 +368,16 @@ SQL join fan-out (182 rows per unit) & $\|\Delta\|_1 = 1.000000\,B$ exactly & pa
 \end{tabular}
 \end{center}
 
-Two bugs were found in \emph{our own} mechanisms, both by explicit neighbour construction after the
-argument had already convinced us.
+Two findings came out of this, both about \emph{our own} mechanisms, and both surfaced by explicit
+neighbour construction after the informal argument had already convinced us.
 
-\paragraph{Bug 1: a clip that was not a norm.} Written as $n_u = \sum_g \min(t,B)$ it is a signed
+\paragraph{Finding 1: a clip that was not a norm.} Written as $n_u = \sum_g \min(t,B)$ it is a signed
 sum, which fails open on signed measures. On \texttt{SUM(shipped - returned)} at sf10,
 \textbf{393,053 of 999,982 units exceeded the bound}, worst $2.6\times$ --- making the release
 $2.6\epsilon$-DP. Fixed by $n_u := \sum_g|\mathrm{clip}(t,-B,B)|$, bit-identical on non-negative
 data.
 
-\paragraph{Bug 2: $\delta$ under-charged, demonstrated by an adversary.} A unit creates a group by
+\paragraph{Finding 2: $\delta$ was under-charged, and an adversary confirms it.} A unit creates a group by
 having a \emph{value} there, not a vote, so with votes truncated to $\Ce$ the $\ku-\Ce$ unvoted
 groups each get an independent chance to clear $\tau$ on noise alone --- chances $\tau$'s union
 bound never covered:
