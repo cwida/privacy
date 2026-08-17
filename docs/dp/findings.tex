@@ -44,12 +44,9 @@ in. So every one of these constants is a blocker, and the question driving this 
 practical: \textbf{can they be chosen from the data itself, privately, without spending so much
 budget that the answer becomes useless?}
 
-\subsection{Why this is hard, and why the constants matter so much}
-
-Two facts make guessing unsafe. First, the penalty is \emph{severely asymmetric}: across our
-queries, setting $\Cu$ too small costs up to $38\times$ in error while setting it too large costs
-at most $1.7\times$. Second, no single value works. The worst-case penalty of a fixed choice across
-our query set:
+Guessing is not a safe fallback, for two measured reasons. The penalty is \emph{severely
+asymmetric} --- across our queries, setting $\Cu$ too small costs up to $38\times$ in error while
+setting it too large costs at most $1.7\times$ --- and no single value works across datasets:
 
 \begin{center}\small
 \begin{tabular}{lrrrrr}
