@@ -1,0 +1,93 @@
+\begin{thebibliography}{10}
+
+\bibitem{plume2022}
+Kareem Amin, Jennifer Gillenwater, Matthew Joseph, Alex Kulesza, and Sergei
+  Vassilvitskii.
+\newblock Plume: Differential privacy at scale.
+\newblock {\em arXiv preprint}, 2022.
+
+\bibitem{amin2019}
+Kareem Amin, Alex Kulesza, Andres~Mu{\~n}oz Medina, and Sergei Vassilvitskii.
+\newblock Bounding user contributions: A bias-variance trade-off in
+  differential privacy.
+\newblock In {\em International Conference on Machine Learning (ICML)},
+  volume~97 of {\em PMLR}, pages 263--271, 2019.
+
+\bibitem{andrew2021}
+Galen Andrew, Om~Thakkar, H.~Brendan McMahan, and Swaroop Ramaswamy.
+\newblock Differentially private learning with adaptive clipping.
+\newblock In {\em Advances in Neural Information Processing Systems (NeurIPS)},
+  2021.
+
+\bibitem{click2024}
+Anonymous.
+\newblock Click without compromise: Online advertising measurement via per user
+  differential privacy.
+\newblock {\em arXiv preprint}, 2024.
+
+\bibitem{tumult2022}
+Skye Berghel, Philip Bohannon, Damien Desfontaines, Charles Estes, Sam Haney,
+  Luke Hartman, Michael Hay, Ashwin Machanavajjhala, Tom Magerlein, Gerome
+  Miklau, Amritha Pai, William Sexton, and Ruchit Shrestha.
+\newblock Tumult analytics: a robust, easy-to-use, scalable, and expressive
+  framework for differential privacy.
+\newblock {\em arXiv preprint}, 2022.
+
+\bibitem{desfontaines2022}
+Damien Desfontaines, James Voss, Bryant Gipson, and Chinmoy Mandayam.
+\newblock Differentially private partition selection.
+\newblock {\em Proceedings on Privacy Enhancing Technologies (PoPETs)},
+  2022(1):339--352, 2022.
+
+\bibitem{gillenwater2021}
+Jennifer Gillenwater, Matthew Joseph, and Alex Kulesza.
+\newblock Differentially private quantiles.
+\newblock In {\em International Conference on Machine Learning (ICML)}, volume
+  139 of {\em PMLR}, 2021.
+
+\bibitem{gopi2020}
+Sivakanth Gopi, Pankaj Gulhane, Janardhan Kulkarni, Judy~Hanwen Shen, Milad
+  Shokouhi, and Sergey Yekhanin.
+\newblock Differentially private set union.
+\newblock In {\em International Conference on Machine Learning (ICML)}, 2020.
+
+\bibitem{turbo2023}
+Kelly Kostopoulou, Pierre Tholoniat, Asaf Cidon, Roxana Geambasu, and Mathias
+  L{\'e}cuyer.
+\newblock Turbo: Effective caching in differentially-private databases.
+\newblock In {\em ACM Symposium on Operating Systems Principles (SOSP)}, 2023.
+
+\bibitem{liu2023}
+Yuhan Liu, Ananda~Theertha Suresh, Wennan Zhu, Peter Kairouz, and Marco
+  Gruteser.
+\newblock Algorithms for bounding contribution for histogram estimation under
+  user-level privacy.
+\newblock In {\em International Conference on Machine Learning (ICML)}, 2023.
+
+\bibitem{mcsherry2007}
+Frank McSherry and Kunal Talwar.
+\newblock Mechanism design via differential privacy.
+\newblock In {\em IEEE Symposium on Foundations of Computer Science (FOCS)},
+  pages 94--103, 2007.
+
+\bibitem{smith2011}
+Adam Smith.
+\newblock Privacy-preserving statistical estimation with optimal convergence
+  rates.
+\newblock In {\em ACM Symposium on Theory of Computing (STOC)}, pages 813--822,
+  2011.
+
+\bibitem{wilson2020}
+Royce~J. Wilson, Celia~Yuxin Zhang, William Lam, Damien Desfontaines, Daniel
+  Simmons-Marengo, and Bryant Gipson.
+\newblock Differentially private {SQL} with bounded user contribution.
+\newblock In {\em Proceedings on Privacy Enhancing Technologies (PoPETs)},
+  volume 2020(2), pages 230--250, 2020.
+
+\bibitem{dpsqlp2024}
+Bing Zhang, Vadym Doroshenko, Peter Kairouz, Thomas Steinke, Abhradeep~Guha
+  Thakurta, Ziyin Ma, Himani Apte, and Jodi Spacek.
+\newblock Differentially private stream processing at scale.
+\newblock {\em arXiv preprint}, 2024.
+
+\end{thebibliography}

@@ -17,6 +17,8 @@
 \author{}
 \date{}
 
+\bibliographystyle{plain}
+
 \begin{document}
 \maketitle
 \vspace{-1.2cm}
@@ -34,7 +36,12 @@ can answer it \emph{without a human first supplying constants that depend on the
 \item \textbf{How much can one user contribute to one group?} A clipping bound. Set it too low and
 you destroy the signal; too high and you drown it in noise.
 \item \textbf{How many groups can one user touch?} \texttt{max\_partitions\_contributed}, called
-$\Cu$ here. A required input in Google DP, with no default.
+$\Cu$ here. A required input in Google DP, with no default. Wilson et
+al.~\cite{wilson2020} do provide a mechanism for inferring bounds automatically (their
+\textsc{ApproxBounds}, \S5.1.1) --- but it infers the \emph{value} range $[L,U]$, and their
+aggregate signatures are correspondingly \texttt{ANON\_SUM(col, L, U)}. $\Cu$ appears only as
+``an engine-defined constant'' in their sensitivity theorem, with the paper stating: \emph{``For the
+rest of this paper, we assume that contribution bounds are specified as literals in each query.''}
 \end{itemize}
 
 Our system rewrites ordinary SQL into a private plan automatically. An analyst writes a query; they
@@ -491,6 +498,70 @@ findings survive: reusing the bound-selection histogram costs $736\times$ on the
 dedicated count (a free statistic is not free when it is the wrong statistic), and blocking the
 conjunction by a unit-determined key component is a valid way to shrink any per-query AND.
 
+\section{Related work}\label{sec:related}
+
+\paragraph{The primitive is standard.} Steps 3--4 are an exponential-mechanism
+quantile~\cite{mcsherry2007}, originating with Smith~\cite{smith2011} and formalised with exactly
+this rank-distance utility by Gillenwater et al.~\cite{gillenwater2021}, who also prove its
+sensitivity is $1$. It ships in SmartNoise and IBM diffprivlib. \textbf{We claim nothing here}, and
+in particular the observation that the exponential mechanism needs only \emph{score} sensitivity
+rather than the sensitivity of the underlying statistic is the defining property of that mechanism,
+not an insight.
+
+\paragraph{The principle is published.} Amin et al.~\cite{amin2019} prove that the optimal
+contribution cap \emph{is} a quantile of the per-user contribution distribution and state
+explicitly that it must itself be computed privately, citing the DP quantile literature. They leave
+instantiating it as an open question. Their $x_i$ is records per user --- a volume bound.
+
+\paragraph{What is selected elsewhere is a different parameter.} The literature contains three
+distinct per-user bounds, all called ``contribution bounds'', and the distinction is not cosmetic:
+for SUM queries a user may have $\ell_0 = 3$ and $\ell_1 = 10^6$.
+
+\begin{center}\small
+\begin{tabular}{lll}
+\toprule
+bound & meaning & Google's name \\
+\midrule
+$\ell_0$ & how many distinct groups one user may touch & \verb|max_partitions_contributed| ($\Cu$) \\
+$\ell_\infty$ & within one group & \verb|max_contributions_per_partition| \\
+$\ell_1$ & one user's total across all groups & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The two closest works select the others. \cite{click2024} (\S4.4--4.5) uses the \emph{identical} EM
+quantile with the \emph{identical} utility function, and even freezes the result with a
+sparse-vector refresh --- but its Theorem 4.2 sums $r_i^2/\sigma_i^2$ over all $n$ days with no cap
+on how many days a user spans, and its Definition 4.1 is ``Bounded \emph{Per-day} Contributions'':
+$r_i$ is an $\ell_\infty$ bound, and that mechanism has no $\ell_0$ bound at all. Liu et
+al.~\cite{liu2023} do use the exponential mechanism to select a bound that constrains $\ell_0$ --- but
+as a by-product of $\ell_1$ item-sampling (\texttt{rand-clip} draws $\min(\|N\|_1, C)$ items, so
+``each $\|h_i\|_r \le C$ for $r = 0,1,2,\infty$''), only for their unbounded-domain sparse-vector
+algorithm, and in a COUNT setting where $\ell_0 = \ell_1$ numerically. Their score is expected
+release error at sensitivity $5C_m/2$, not a rank distance at sensitivity $1$. Google's
+DP-SQLP~\cite{dpsqlp2024} recommends the ``99th percentile of per-user records… chosen in a DP way''
+--- records again.
+
+\paragraph{The nearest analogue in learning} is adaptive clipping~\cite{andrew2021}, which clips to
+a privately estimated quantile of the gradient-norm distribution, tracked online rather than by
+exponential mechanism. Same idea one parameter over: an $\ell_2$ magnitude bound, not a span bound.
+
+\paragraph{What appears to be open.} No DP SQL engine selects the cross-group span bound
+automatically. Wilson et al.~\cite{wilson2020} take it as a literal; Plume~\cite{plume2022} reports
+that \emph{``tuning the contribution bound $L$ can be critical to achieving good performance''} and
+tunes it by hand; Google's library removed its defaults deliberately; PipelineDP documents
+non-private experimentation. \textbf{The defensible claim is therefore a systems one} --- first
+end-to-end automatic private selection of $\ell_0$ inside a SQL compiler, instantiating Amin et
+al.'s open question --- \textbf{together with the calibration results of \S3}, which are what a
+practitioner actually needs and which no prior work reports.
+
+\paragraph{Adjacent.} Reuse of a released bound is free by post-processing; caching DP
+\emph{answers} across a workload is Turbo~\cite{turbo2023}. Tumult~\cite{tumult2022} ships
+DP-derived-then-reused partition sets, which is prior art for the frozen key set discussed in
+\S\ref{sec:other}. Partition selection itself~\cite{gopi2020,desfontaines2022} is a separate
+channel; \cite{desfontaines2022} in particular publishes the Gaussian/Laplace crossover that our own
+measurement in \S\ref{sec:other} independently rediscovered.
+
 \section{Future work}
 
 \begin{enumerate}
@@ -527,5 +598,7 @@ dataset, which none of the three used here provides.
 \item \textbf{The smooth-sensitivity path is untested.} A preliminary port \emph{lost}, because
 that value channel is independently broken --- releasing more groups makes it worse.
 \end{enumerate}
+
+\bibliography{refs}
 
 \end{document}
