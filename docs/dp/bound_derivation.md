@@ -2643,6 +2643,59 @@ i.e. 2x spacing — coarser than the 1.3x error basin — and reported ours gett
 grid is `C_v x U` and therefore finer by construction. Any oracle-bound comparison needs spacing
 below ~1.2x.
 
+## Dandan's 17 Aug questions: low-support prevalence, and frozen vs per-query C_u
+
+**Q(2): are low-support groups common?** Not on TPC-H — and that is the point. Support = distinct
+PUs per group; tau at `C_e`=1, `eps_eta`=0.4 is ~34, so anything under ~34 can never pass:
+
+| query | groups | min | p1 | p5 | median | <10 | <34 | <100 |
+|---|---|---|---|---|---|---|---|---|
+| tpch price mo\|nation | 2,095 | **1** | 465 | 1,279 | 2,779 | 1% | 1% | 1% |
+| tpch price month | 84 | **32** | 10,233 | 34,540 | 69,976 | 0% | 1% | 1% |
+| tpch price day | 2,526 | 8 | 118 | 592 | 1,092 | 0% | 0% | 1% |
+| tpch price mo\|prio | 420 | **1** | 119 | 1,726 | 4,268 | 1% | 1% | 1% |
+| so posts month | 190 | 1 | 2 | 5 | 658 | 11% | 13% | 13% |
+| so posts day | 5,107 | 1 | 2 | 9 | 35 | 6% | **47%** | 100% |
+| so comments month | 182 | 1 | 1 | 3 | 512 | 9% | 9% | 10% |
+| cb hits region | 3,238 | 1 | 1 | 1 | 3 | 65% | **79%** | 87% |
+| cb hits date\|region | 7,564 | 1 | 1 | 1 | 3 | 73% | **86%** | 92% |
+
+**Her expectation was right about TPC-H and it still does not save the mechanism.** Only ~1% of
+groups are low-support there — but the AND requires *zero*, and 1% of 2,095 groups is ~20 groups.
+`tpch month` is the single case with a genuinely healthy minimum (32), and it is exactly the one
+query where All-or-Frozen fires. On StackOverflow and ClickBench low support is instead the
+*majority* (47-86% below tau). So the correct statement is not "small groups are common" but
+**"the AND needs none, and one is enough"**.
+
+**Q(1): frozen vs per-query `C_u`.** Frozen = the EM run once on the unfiltered query (giving
+`C_u` = 48); per-query = the EM re-run on each query, paying `eps_N + eps_C` = 0.01 every time:
+
+| query | PUs | `k_u` p50 | p95 | per-q `C_u` | frozen | per-query | best |
+|---|---|---|---|---|---|---|---|
+| PU-side: acctbal>=8000 | 181,532 | 30 | 48 | 48 | **12.36%** | 12.56% | 12.48% |
+| PU-side: acctbal>=9500 | 45,320 | 30 | 48 | 53 | **85.14%** | 87.16% | 82.02% |
+| PU-side: acctbal>=9900 | 9,182 | 30 | 48 | 57 | 100.0% | 99.99% | 99.98% |
+| GRP-side: ship>=1998 | 821,108 | **4** | **8** | **8** | 2.52% | **1.38%** | 0.68% |
+| GRP-side: nation<5 | 199,738 | 30 | 48 | 48 | **2.31%** | 2.40% | 2.48% |
+
+**Her hypothesis is right for one kind of filter and wrong for the other, and the distinction is
+statically decidable.** A filter on the *privacy unit* removes users, but the survivors still touch
+the same number of groups — so the `k_u` distribution is **identical** (p50=30, p95=48) even at
+`acctbal>=9900`, which leaves 9,182 of 1,000,000 customers. Per-query selection returns essentially
+the same value and is slightly *worse*, because it pays the EM every time. A filter that removes
+*groups* collapses `k_u` (p50 30 -> 4, p95 48 -> 8), and there per-query wins clearly: **2.52% ->
+1.38%, 1.8x**.
+
+The refined test is not "does the WHERE touch the grouping key" — `nation<5` does, yet behaves
+like a PU-side filter, because nation is *functionally determined by the customer*, so restricting
+nations removes whole customers rather than shrinking anyone's `k_u`. The rule is:
+
+> **Re-run the `C_u` selection when the filter constrains a grouping-key component that is NOT
+> functionally determined by the privacy unit. Otherwise reuse the frozen value and skip the EM.**
+
+That is the *same* PU-determined-key-component test used for pruning `G_fix` and for blocking the
+All-or-Frozen AND — one static analysis serves all three.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
