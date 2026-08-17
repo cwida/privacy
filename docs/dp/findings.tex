@@ -93,17 +93,66 @@ or flatters one side by fixing a parameter the other gets to optimise.
 
 \section{The mechanism}
 
-Let $\ku = |\{g : u \text{ contributes to } g\}|$ and $F_d(r) = |\{u : \ku \le r\}|$. Choose a
-target fraction $p$ and release $\Cu$ as the $p$-quantile of the $\ku$ distribution, privately:
+\begin{quote}
+\textbf{Core idea.} The bound we need is a property of one \emph{distribution} --- how many groups
+each user touches. Rather than measuring that distribution privately and reading a bound off it, we
+turn the problem into a \emph{choice among candidate bounds}, scored by a quantity that a single
+user can move by at most one. Choosing is far cheaper than measuring, and the asymmetry of the
+error curve tells us which way to lean when the choice is imperfect.
+\end{quote}
+
+\subsection{In words}
+
+Ask each user how many groups they appear in. On a monthly sales query one customer might appear in
+30 months, another in 3, a few in 70. Lay those counts out as a distribution and $\Cu$ is a cut
+point on it: choose it, and every user above the line has their extra groups discarded.
+
+The mechanism sets that cut point at a \emph{quantile} --- ``pick $\Cu$ so that $95\%$ of users are
+left untouched'' --- and it does so privately, because the distribution is itself sensitive data.
+Three design choices make this work.
+
+\paragraph{Aim at a rank, not a value.} Rather than asking ``what is the largest $\ku$?'', which one
+user can move arbitrarily, we ask ``at what cut point do we reach $95\%$ of users?''. That target is
+a \emph{count} of users, and one user changes any count by at most one. The bound is thus pinned to
+a robust feature of the distribution, not to its most extreme member.
+
+\paragraph{Choose, do not measure.} The obvious approach is to release the whole distribution
+noisily and then read the quantile off it. That is expensive: one user with $\ku = 1$ shifts every
+cumulative count at once, so publishing the full curve requires noise proportional to its length.
+Instead we never publish the curve. We \emph{score} each candidate cut point by how close it lands
+to the target rank, and draw one candidate at random with better candidates exponentially more
+likely. Only the winner is released. Since each individual candidate's score moves by at most one
+when a user is added or removed, the whole selection costs the same as measuring a single count ---
+about $1\%$ of the query's budget in practice.
+
+\paragraph{Deliberately overshoot.} A quantile is only a proxy for the bound that actually minimises
+error, so the two will not coincide. That is tolerable because the error curve is lopsided:
+undershooting discards real user data and costs up to $35\times$, while overshooting merely adds
+noise and costs at most $2\times$ (\S\ref{sec:asym}). The target fraction $p$ is therefore set high
+--- $0.95$ or $0.99$ rather than the $0.7$ one might first reach for --- so the mechanism errs on
+the safe side of a curve that punishes one direction far more than the other.
+
+Because the resulting bound depends only on the shape of the $\ku$ distribution, and that shape is
+stable under filters on the user (\S\ref{sec:freeze}), the released value can be frozen and reused
+across many later queries at no further cost.
+
+\subsection{Formally}
+
+Let $\ku = |\{g : u \text{ contributes to } g\}|$ and $F_d(r) = |\{u : \ku \le r\}|$, the number of
+users whose group count is at most $r$. Given a public upper bound $K \ge \ku$ and a target
+fraction $p$:
 
 \begin{enumerate}
-\item Release $\tilde N = N + \mathrm{Lap}(1/\epsilon_N)$, the unit count, at cost
-$(\epsilon_N, 0)$.
-\item Form a conservative target rank $T = p\tilde N + (p/\epsilon_N)\ln(1/2\beta_N)$, the margin
-ensuring $T \ge pN$ with probability $1-\beta_N$.
-\item Score each candidate $r \in \{1,\dots,K\}$ by $q(d,r) = -|F_d(r) - T|$.
-\item Sample by exponential mechanism, $\Pr[\hat\Cu = r] \propto \exp(\epsilon_C\, q(d,r)/2)$,
-at cost $(\epsilon_C, 0)$.
+\item Release $\tilde N = N + \mathrm{Lap}(1/\epsilon_N)$, the number of users, at cost
+$(\epsilon_N, 0)$. Its sensitivity is $1$.
+\item Form a conservative target rank $T = p\tilde N + (p/\epsilon_N)\ln(1/2\beta_N)$; the margin
+ensures $T \ge pN$ with probability $1-\beta_N$, so noise in $\tilde N$ does not silently pull the
+target below its intended quantile.
+\item Score each candidate $r \in \{1,\dots,K\}$ by $q(d,r) = -|F_d(r) - T|$: a candidate scores
+well when the number of users it leaves untruncated is close to the target.
+\item Sample by exponential mechanism, $\Pr[\hat\Cu = r] \propto \exp(\epsilon_C\, q(d,r)/2)$, at
+cost $(\epsilon_C, 0)$. The histogram, the cumulative counts and the scores all remain internal;
+only $\hat\Cu$ is released.
 \end{enumerate}
 
 Total $(\epsilon_N + \epsilon_C, 0)$-DP by adaptive sequential composition. $\hat\Cu$ is then
@@ -111,8 +160,8 @@ frozen and reused as public metadata.
 
 \subsection{Why the score sensitivity is $1$, not $K$}
 
-This is what makes the mechanism cheap. Removing one unit with $\ku = k$ shifts $K-k+1$ cumulative
-counts \emph{simultaneously}, so \emph{releasing} the vector $(F(1),\dots,F(K))$ would have $\ell_1$
+This is what makes step 4 cheap. Removing one user with $\ku = k$ shifts $K-k+1$ cumulative counts
+\emph{simultaneously}, so \emph{releasing} the vector $(F(1),\dots,F(K))$ would have $\ell_1$
 sensitivity up to $K$. But the exponential mechanism never releases that vector --- it scores each
 candidate separately, and what matters is $\Delta q = \max_r |q(d,r) - q(d',r)|$. Verified by
 explicit construction:
@@ -152,7 +201,7 @@ penalty vs oracle $\Cu$ & \textbf{1.00$\times$} & 1.00$\times$ & 1.04$\times$ & 
 
 \textbf{About $1\%$ of $\epsilon$ is the right budget.}
 
-\subsection{The target fraction matters, and $p = 0.7$ is too low}
+\subsection{The target fraction matters, and $p = 0.7$ is too low}\label{sec:asym}
 
 Penalty is error at the selected $\Cu$ over error at that query's best $\Cu$, so $1.00\times$ equals
 an oracle that already knew the answer:
@@ -231,7 +280,7 @@ $\Ce$, $\Cv$ separate & 17.75$\times$ & 2.91$\times$ & 2.91$\times$ & \textbf{1.
 \textbf{Recommendation: $p \approx 0.95$ with a shared $\Cu$, $p \approx 0.99$ with separate
 bounds. Not $0.7$.}
 
-\subsection{Freeze once, or re-select per query?}
+\subsection{Freeze once, or re-select per query?}\label{sec:freeze}
 
 A single frozen $\Cu$ suffices for filters on the \emph{privacy unit}; only group-removing filters
 justify re-selection. Frozen $\Cu = 48$ from the unfiltered query; per-query re-runs the mechanism
