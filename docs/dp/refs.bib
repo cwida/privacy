@@ -102,10 +102,16 @@
   pages     = {813--822},
   year      = {2011},
   doi       = {10.1145/1993636.1993743},
-  annote    = {NOT personally verified -- ACM blocked automated access. Cited as the origin of the
-               exponential-mechanism approach to DP quantile estimation, per Gillenwater et al.
-               Whether the exact rank-distance utility appears here or was formalised later is
-               unconfirmed; cite carefully.}
+  annote    = {The PAPER ITSELF is still unverified -- ACM blocks automated access and the arXiv
+               preprint 0809.4794 ("Efficient, Differentially Private Point Estimators") is a
+               different, earlier work containing no quantile or exponential-mechanism material.
+               What IS verified, by reading Gillenwater et al.'s PDF directly: they write "Smith
+               (2011) introduced the basic IndExp algorithm for estimating one quantile, and it has
+               since been incorporated into the SmartNoise and IBM differential privacy libraries",
+               and their reference list resolves that to this STOC 2011 paper. So the attribution
+               is second-hand but from a peer-reviewed source that builds directly on it. Cite as
+               the origin of the approach; do NOT claim the exact rank-distance utility appears
+               verbatim in Smith without checking the PDF by hand.}
 }
 
 @inproceedings{gillenwater2021,
@@ -117,10 +123,11 @@
   pages     = {3713--3722},
   publisher = {PMLR},
   year      = {2021},
-  annote    = {Metadata VERIFIED against PMLR's BibTeX. The CLAIM is taken on trust from the
-               prior-art search, which quoted it verbatim: states the utility and proves its L1
-               sensitivity is 1 in Lemma 7, attributes single-quantile IndExp to Smith 2011, and
-               notes it ships in SmartNoise and IBM diffprivlib.}
+  annote    = {FULLY VERIFIED from the PDF: Lemma 7 states "u defined above has L1 sensitivity
+               Delta_u = 1"; Sec 5.1 attributes the single-quantile IndExp algorithm to Smith
+               (2011) and notes it ships in SmartNoise and IBM diffprivlib. This is the citation
+               to lead with for the primitive, since it is the one that states the utility and
+               proves the sensitivity explicitly.}
 }
 
 @inproceedings{mcsherry2007,
