@@ -65,8 +65,8 @@ budget to make it.
 
 \subsection{Where the budget goes}
 
-A grouped DP query has three channels, and every idea in this document buys one of them at the
-expense of another:
+A grouped DP query spends privacy budget on three things, and every idea in this document buys one
+of them at the expense of another:
 
 \begin{enumerate}
 \item \textbf{Bound selection} ($\epsilon_b$): how large is one user's contribution?
@@ -78,6 +78,16 @@ count of contributing users clears a threshold $\tau$.
 
 The third is what the analyst wants; the first two are overhead. \textbf{Reducing that overhead, or
 removing the need for it, is the whole game.}
+
+\paragraph{How the baseline actually divides it.} Google DP charges these separately, though not as
+three co-equal shares. Privacy on Beam splits the top level \emph{two} ways --- \texttt{count.go}
+exposes \texttt{AggregationEpsilon} and \texttt{PartitionSelectionEpsilon} as distinct fields,
+consumed by distinct calls --- and bound selection sits \emph{inside} the aggregation:
+\texttt{ApproxBounds} is constructed with its own \texttt{epsilon}
+(\texttt{ApproxBounds(double epsilon, \ldots)}, \texttt{SetEpsilon}) taken from the aggregation's
+share. We model all three as a single three-way split $(\epsilon_b, \epsilon_\eta, \epsilon_v)$ and
+tune it jointly for every arm, which is at least as favourable to the baseline as its own
+two-level structure, since a nested split cannot beat a free one.
 
 \subsection{The baseline}
 
