@@ -1,78 +1,96 @@
 % Citations for docs/dp/findings.tex
-% VERIFIED = I read the primary source myself and checked the claim attributed to it.
-% CITED     = bibliographic details taken from a search; claim not personally verified.
+%
+% Metadata for every preprint below was pulled from the arXiv API, and the two ICML entries from
+% PMLR's own BibTeX. The `annote' field records what I verified in the paper myself versus what is
+% taken on trust from a prior-art search; annote is not printed by the plain bibliography style.
+%
+% Note: PMLR's own v97 entry for Amin et al. misspells two authors ("Munoz" without the accent,
+% "Vassilvtiskii"). Corrected here.
 
 % ---------------------------------------------------------------- the baseline
 
-@inproceedings{wilson2020,
+@article{wilson2020,
   author    = {Royce J. Wilson and Celia Yuxin Zhang and William Lam and
                Damien Desfontaines and Daniel Simmons-Marengo and Bryant Gipson},
   title     = {Differentially Private {SQL} with Bounded User Contribution},
-  booktitle = {Proceedings on Privacy Enhancing Technologies (PoPETs)},
-  volume    = {2020(2)},
+  journal   = {Proceedings on Privacy Enhancing Technologies},
+  volume    = {2020},
+  number    = {2},
   pages     = {230--250},
   year      = {2020},
   eprint    = {1909.01917},
   archivePrefix = {arXiv},
-  annote    = {VERIFIED: treats the cross-partition bound as a query literal, and spends
-               budget only on VALUE bounds via ApproxBounds}
+  annote    = {VERIFIED by reading the paper: automatic bound inference exists (ApproxBounds,
+               Sec 5.1.1) but infers the VALUE range, hence signatures ANON_SUM(col, L, U). C_u is
+               "an engine-defined constant", and "we assume that contribution bounds are specified
+               as literals in each query". No automatic selection of C_u anywhere, including
+               future work.}
 }
 
 % ------------------------------------------- prior art for the selection idea
 
 @inproceedings{amin2019,
-  author    = {Kareem Amin and Alex Kulesza and Andres Mu{\~n}oz Medina and Sergei Vassilvitskii},
+  author    = {Kareem Amin and Alex Kulesza and Andr{\'e}s Mu{\~n}oz Medina and
+               Sergei Vassilvitskii},
   title     = {Bounding User Contributions: A Bias-Variance Trade-off in Differential Privacy},
-  booktitle = {International Conference on Machine Learning (ICML)},
-  pages     = {263--271},
+  booktitle = {Proceedings of the 36th International Conference on Machine Learning},
+  series    = {Proceedings of Machine Learning Research},
   volume    = {97},
-  series    = {PMLR},
+  pages     = {263--271},
+  publisher = {PMLR},
   year      = {2019},
-  annote    = {The optimal cap IS a quantile of the per-user contribution distribution, and must
-               itself be computed privately; instantiation left as an open question. Their x_i is
-               records per user, i.e. a VOLUME bound}
+  annote    = {Metadata VERIFIED against PMLR's BibTeX (author spellings corrected). The CLAIM is
+               taken on trust from the prior-art search, not personally verified: that they prove
+               the optimal cap is a quantile of the per-user contribution distribution, state it
+               must be computed privately, and leave instantiation open. Their x_i is records per
+               user, a VOLUME bound.}
 }
 
 @inproceedings{liu2023,
-  author    = {Yuhan Liu and Ananda Theertha Suresh and Wennan Zhu and Peter Kairouz and Marco Gruteser},
-  title     = {Algorithms for bounding contribution for histogram estimation under user-level privacy},
+  author    = {Yuhan Liu and Ananda Theertha Suresh and Wennan Zhu and Peter Kairouz and
+               Marco Gruteser},
+  title     = {Algorithms for bounding contribution for histogram estimation under user-level
+               privacy},
   booktitle = {International Conference on Machine Learning (ICML)},
   year      = {2023},
   eprint    = {2206.03008},
   archivePrefix = {arXiv},
-  annote    = {VERIFIED: Algorithm 4 uses the exponential mechanism to select the bound, with score
-               = expected error and sensitivity 5C_m/2. rand-clip samples min(||N||_1, C) items so
-               one parameter bounds every norm ("each ||h_i||_r <= C for r = 0,1,2,inf"), hence it
-               DOES bound l0 -- but as a by-product of l1 item sampling, only for the
-               unbounded-domain sparse-vector algorithm, and in a COUNT setting where l0 = l1}
+  annote    = {VERIFIED by reading the paper: Algorithm 4 uses the exponential mechanism to select
+               the bound, with score = expected error and sensitivity 5C_m/2. rand-clip samples
+               min(l1 norm, C) items so one parameter bounds every norm ("each ||h_i||_r <= C for
+               r = 0,1,2,inf"), hence it DOES bound l0 -- but as a by-product of l1 item sampling,
+               only for the unbounded-domain sparse-vector algorithm, and in a COUNT setting where
+               l0 = l1 numerically.}
 }
 
 @article{click2024,
-  author    = {Anonymous},
+  author    = {Yingtai Xiao and Jian Du and Shikun Zhang and Wanrong Zhang and Qiang Yan and
+               Danfeng Zhang and Daniel Kifer},
   title     = {Click Without Compromise: Online Advertising Measurement via Per User
                Differential Privacy},
-  journal   = {arXiv preprint},
+  journal   = {arXiv preprint arXiv:2406.02463},
   year      = {2024},
   eprint    = {2406.02463},
   archivePrefix = {arXiv},
-  annote    = {VERIFIED: Sections 4.4--4.5 use the EM quantile with the identical utility function
-               u(X,o) = -||{x <= o}| - p*k|, and freeze-with-SVT-refresh. BUT Theorem 4.2 sums
-               r_i^2/sigma_i^2 over all n days with NO cap on how many days a user spans, and
-               Definition 4.1 is "Bounded Per-day Contributions" -- so r_i is an l-inf per-group
-               bound, NOT l0. Different parameter, same primitive}
+  annote    = {Authors VERIFIED via the arXiv API. Content VERIFIED by reading the paper: Sec
+               4.4-4.5 use the EM quantile with the identical utility u(X,o) = -||{x <= o}| - p*k|,
+               and freeze-with-SVT-refresh. BUT Theorem 4.2 gives Delta_2 =
+               sqrt(sum_i r_i^2/sigma_i^2) summed over all n days with NO cap on how many days a
+               user spans, and Definition 4.1 is "Bounded Per-day Contributions". So r_i is an
+               l-infinity per-group bound, NOT l0. Same primitive, different parameter.}
 }
 
 @article{dpsqlp2024,
   author    = {Bing Zhang and Vadym Doroshenko and Peter Kairouz and Thomas Steinke and
-               Abhradeep Guha Thakurta and Ziyin Ma and Himani Apte and Jodi Spacek},
+               Abhradeep Thakurta and Ziyin Ma and Eidan Cohen and Himani Apte and Jodi Spacek},
   title     = {Differentially Private Stream Processing at Scale},
-  journal   = {arXiv preprint},
-  year      = {2024},
+  journal   = {arXiv preprint arXiv:2303.18086},
+  year      = {2023},
   eprint    = {2303.18086},
   archivePrefix = {arXiv},
-  annote    = {Recommends picking the bound at the 99th percentile of per-user RECORDS, "which can
-               be chosen in a DP way" -- a volume bound, recommended in prose rather than
-               instantiated}
+  annote    = {Authors VERIFIED via the arXiv API. Quote taken on trust from the prior-art search:
+               recommends the 99th percentile of per-user RECORDS, "which can be chosen in a DP
+               way" -- a volume bound, recommended in prose rather than instantiated.}
 }
 
 % ------------------------------------------------------- the DP quantile primitive
@@ -80,31 +98,39 @@
 @inproceedings{smith2011,
   author    = {Adam Smith},
   title     = {Privacy-preserving statistical estimation with optimal convergence rates},
-  booktitle = {ACM Symposium on Theory of Computing (STOC)},
+  booktitle = {Proceedings of the 43rd Annual ACM Symposium on Theory of Computing (STOC)},
   pages     = {813--822},
   year      = {2011},
-  annote    = {Origin of the exponential-mechanism approach to DP quantile estimation}
+  doi       = {10.1145/1993636.1993743},
+  annote    = {NOT personally verified -- ACM blocked automated access. Cited as the origin of the
+               exponential-mechanism approach to DP quantile estimation, per Gillenwater et al.
+               Whether the exact rank-distance utility appears here or was formalised later is
+               unconfirmed; cite carefully.}
 }
 
 @inproceedings{gillenwater2021,
   author    = {Jennifer Gillenwater and Matthew Joseph and Alex Kulesza},
   title     = {Differentially Private Quantiles},
-  booktitle = {International Conference on Machine Learning (ICML)},
+  booktitle = {Proceedings of the 38th International Conference on Machine Learning},
+  series    = {Proceedings of Machine Learning Research},
   volume    = {139},
-  series    = {PMLR},
+  pages     = {3713--3722},
+  publisher = {PMLR},
   year      = {2021},
-  annote    = {VERIFIED via quotation: states the utility u(X,o) = ||{x <= o}| - qn| and proves its
-               L1 sensitivity is 1 (Lemma 7); attributes the single-quantile IndExp approach to
-               Smith 2011 and notes it ships in SmartNoise and IBM diffprivlib}
+  annote    = {Metadata VERIFIED against PMLR's BibTeX. The CLAIM is taken on trust from the
+               prior-art search, which quoted it verbatim: states the utility and proves its L1
+               sensitivity is 1 in Lemma 7, attributes single-quantile IndExp to Smith 2011, and
+               notes it ships in SmartNoise and IBM diffprivlib.}
 }
 
 @inproceedings{mcsherry2007,
   author    = {Frank McSherry and Kunal Talwar},
   title     = {Mechanism Design via Differential Privacy},
-  booktitle = {IEEE Symposium on Foundations of Computer Science (FOCS)},
+  booktitle = {48th Annual IEEE Symposium on Foundations of Computer Science (FOCS)},
   pages     = {94--103},
   year      = {2007},
-  annote    = {The exponential mechanism}
+  doi       = {10.1109/FOCS.2007.66},
+  annote    = {The exponential mechanism. Standard citation, not independently verified.}
 }
 
 % --------------------------------------------- adaptive clipping in learning
@@ -116,9 +142,9 @@
   year      = {2021},
   eprint    = {1905.03871},
   archivePrefix = {arXiv},
-  annote    = {Clips to a privately estimated quantile of the gradient-norm distribution, tracked
-               online by geometric update rather than by the exponential mechanism. Same idea one
-               parameter over: an l2 MAGNITUDE bound, not a span bound}
+  annote    = {Authors VERIFIED via the arXiv API. Clips to a privately estimated quantile of the
+               gradient-norm distribution, tracked online by geometric update rather than by the
+               exponential mechanism -- an l2 MAGNITUDE bound, not a span bound.}
 }
 
 % ------------------------------------------------------- partition selection
@@ -126,13 +152,15 @@
 @article{desfontaines2022,
   author    = {Damien Desfontaines and James Voss and Bryant Gipson and Chinmoy Mandayam},
   title     = {Differentially private partition selection},
-  journal   = {Proceedings on Privacy Enhancing Technologies (PoPETs)},
-  volume    = {2022(1)},
+  journal   = {Proceedings on Privacy Enhancing Technologies},
+  volume    = {2022},
+  number    = {1},
   pages     = {339--352},
   year      = {2022},
-  annote    = {VERIFIED via quotation: recommends weighted Gaussian thresholding for kappa >= 4,
-               with the crossover at kappa = 3 stable across eps and delta -- which is the result
-               our own Gaussian-votes measurement independently rediscovered}
+  annote    = {Recommends weighted Gaussian thresholding for kappa >= 4, with the crossover at
+               kappa = 3 stable across eps and delta -- the result our own Gaussian-votes
+               measurement independently rediscovered. Quoted verbatim in the prior-art search;
+               PDF cached locally at scratchpad/partsel.txt.}
 }
 
 @inproceedings{gopi2020,
@@ -143,8 +171,10 @@
   year      = {2020},
   eprint    = {2002.09745},
   archivePrefix = {arXiv},
-  annote    = {States the l1 = Delta_0 / l2 = sqrt(Delta_0) sensitivity pairing as a
-               "straight-forward" known baseline, with Gaussian noise as a benchmark}
+  annote    = {Authors VERIFIED via the arXiv API. States the l1 = Delta_0 / l2 = sqrt(Delta_0)
+               sensitivity pairing as a "straight-forward" known baseline with Gaussian noise as a
+               benchmark. Delta_0 is a per-user SET SIZE cap, i.e. l0-shaped -- but fixed, not
+               privately selected.}
 }
 
 % ------------------------------------------------------- production systems
@@ -153,12 +183,13 @@
   author    = {Kareem Amin and Jennifer Gillenwater and Matthew Joseph and Alex Kulesza and
                Sergei Vassilvitskii},
   title     = {Plume: Differential Privacy at Scale},
-  journal   = {arXiv preprint},
+  journal   = {arXiv preprint arXiv:2201.11603},
   year      = {2022},
   eprint    = {2201.11603},
   archivePrefix = {arXiv},
-  annote    = {"In practice, tuning the contribution bound L can be critical to achieving good
-               performance" -- hand-tuned, i.e. evidence that the parameter is a real burden}
+  annote    = {Authors VERIFIED via the arXiv API. Quote taken on trust: "In practice, tuning the
+               contribution bound L can be critical to achieving good performance" -- evidence the
+               parameter is a real burden, hand-tuned in production.}
 }
 
 @article{tumult2022,
@@ -168,22 +199,25 @@
                Ruchit Shrestha},
   title     = {Tumult Analytics: a robust, easy-to-use, scalable, and expressive framework for
                differential privacy},
-  journal   = {arXiv preprint},
+  journal   = {arXiv preprint arXiv:2212.04133},
   year      = {2022},
   eprint    = {2212.04133},
   archivePrefix = {arXiv},
-  annote    = {Ships get_groups + KeySet, i.e. DP-derived-then-reused partition sets -- prior art
-               for the frozen partition set idea}
+  annote    = {Authors VERIFIED via the arXiv API. Ships get_groups + KeySet, i.e. DP-derived-
+               then-reused partition sets -- prior art for the frozen partition set idea. NOTE the
+               paper itself does not describe KeySet; that is in the library tutorials, so cite
+               the docs if the claim is load-bearing.}
 }
 
 @inproceedings{turbo2023,
   author    = {Kelly Kostopoulou and Pierre Tholoniat and Asaf Cidon and Roxana Geambasu and
                Mathias L{\'e}cuyer},
   title     = {Turbo: Effective Caching in Differentially-Private Databases},
-  booktitle = {ACM Symposium on Operating Systems Principles (SOSP)},
+  booktitle = {Proceedings of the 29th ACM Symposium on Operating Systems Principles (SOSP)},
   year      = {2023},
   eprint    = {2306.16163},
   archivePrefix = {arXiv},
-  annote    = {Caches prior DP results to answer future linear queries free -- caches ANSWERS, not
-               metadata such as a contribution bound or a key set}
+  annote    = {Authors VERIFIED via the arXiv API. Caches prior DP results to answer future linear
+               queries free -- caches ANSWERS, not metadata such as a contribution bound or a key
+               set.}
 }
