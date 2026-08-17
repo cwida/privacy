@@ -14,34 +14,13 @@
 \newcommand{\Ce}{C_e}
 \newcommand{\ku}{k_u}
 
-\title{\vspace{-1.5cm}Automatic contribution bounding for grouped DP queries:\\
-\large what we tried, what worked, and what did not}
+\title{\vspace{-1.5cm}Automatic contribution bounding for grouped DP queries}
 \author{}
 \date{}
 
 \begin{document}
 \maketitle
 \vspace{-1.2cm}
-
-\begin{abstract}
-\noindent
-We evaluate four ideas for making user-level differential privacy automatic for grouped SQL
-aggregates: an $\ell_1$ per-unit norm clip replacing cell clipping plus contribution truncation;
-a frozen partition set reused across queries; exponential-mechanism selection of the contribution
-bound $\Cu$; and All-or-Frozen histogram thresholding. Measured against Google DP as published
-(Wilson et al., PoPETs 2020) across 14 queries on three datasets, the combined stack is
-$1.9\times$ better in median and up to $9.6\times$ on queries where partition selection binds.
-The gain is \emph{conditional}: it requires privacy units to touch many groups, and we identify
-a regime where the baseline wins by up to $1.27\times$. Two privacy bugs were found in our own
-mechanism and fixed; one is demonstrated by an explicit adversary at $47\times$ the charged
-$\delta$. All headline numbers moved substantially during evaluation, and \S\ref{sec:method}
-argues that the methodology is the most transferable contribution.
-\end{abstract}
-
-\paragraph{Roadmap.} \S1 motivates the problem and fixes the baseline. \S2 states the four ideas.
-\S3 measures utility and establishes the scope condition. \S4 covers automatic $\Cu$ selection,
-\S5 the one idea that does not work. \S6 is privacy validation, including two bugs we found in our
-own mechanism. \S7 is methodology, \S8 prior art, \S9 recommendations.
 
 \section{Motivation}
 
