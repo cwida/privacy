@@ -2742,6 +2742,60 @@ cheap and public-ish to estimate. A system could choose between norm clipping an
 query from the `k_u` histogram it already builds for `C_u` selection — bimodality favours
 truncation, concentration favours the norm clip.
 
+## FIFTEEN `k_u` DISTRIBUTIONS — and an ApproxBounds bug found on the way
+
+`attacks/ku_families.py`. Same PU count, group count and cell-value distribution throughout; only
+the **shape of `k_u`** varies.
+
+| `k_u` family | med | mean | max | harm | google | ours | ratio | winner |
+|---|---|---|---|---|---|---|---|---|
+| constant(1) | 1 | 1.0 | 1 | 1.0 | 1.32% | 1.30% | 1.02x | tie |
+| **constant(5)** | 5 | 5.0 | 5 | 5.0 | 1.46% | 1.84% | **0.79x** | **GOOGLE** |
+| constant(20) | 20 | 20.0 | 20 | 20.0 | 1.69% | 1.10% | 1.54x | ours |
+| constant(60) | 60 | 60.0 | 60 | 60.0 | 1.77% | 1.09% | 1.63x | ours |
+| uniform(1,10) | 5 | 5.5 | 10 | 3.4 | 3.74% | 1.52% | **2.45x** | ours |
+| uniform(1,60) | 30 | 30.5 | 60 | 12.6 | 3.20% | 2.36% | 1.36x | ours |
+| uniform(1,200) | 100 | 100.4 | 200 | 33.0 | 3.21% | 2.77% | 1.16x | ours |
+| zipf(1.3) | 6 | 49.5 | 200 | 2.7 | 6.52% | 5.04% | 1.30x | ours |
+| **zipf(2.0)** | 1 | 4.2 | 200 | 1.4 | 23.03% | 32.57% | **0.71x** | **GOOGLE** |
+| zipf(3.0) | 1 | 1.4 | 200 | 1.1 | 7.22% | 6.64% | 1.09x | ours |
+| lognormal(0.6) | 12 | 14.1 | 127 | 9.4 | 5.16% | 5.20% | 0.99x | tie |
+| lognormal(1.4) | 12 | 27.8 | 200 | 4.8 | 11.80% | 9.45% | 1.25x | ours |
+| **bimodal(0.005,100)** | 1 | 1.5 | 100 | 1.0 | 30.06% | 33.79% | **0.89x** | **GOOGLE** |
+| **bimodal(0.02,100)** | 1 | 3.0 | 100 | 1.0 | 33.50% | 49.06% | **0.68x** | **GOOGLE** |
+| **bimodal(0.05,60)** | 1 | 3.9 | 60 | 1.1 | 16.72% | 18.35% | **0.91x** | **GOOGLE** |
+
+**Google wins 5 of 15, we win 8, 2 ties.** Two things stand out and neither was predicted by the
+earlier "concentrated `k_u`" story:
+
+**1. There is a LEVEL threshold, not just a shape condition.** `constant(5)` is *perfectly*
+concentrated — max/median = 1 — and Google still wins 0.79x, while `constant(20)` and
+`constant(60)` lose 1.5-1.6x. Sweeping constant `k_u` finds the crossover near **7**: at k_u = 1, 3,
+5 Google wins (0.94x, 0.81x, 0.68x) and from k_u = 10 upward we win (1.70x, 1.53x, 1.63x). So the
+l1 clip needs privacy units to touch **roughly ten or more groups** before it pays, even when every
+unit is identical. Below that, Google's ability to trade truncation for a smaller bound is simply
+a knob we do not have.
+
+**2. No simple statistic predicts the winner.** Median, max/median and harmonic mean all overlap
+across the win and loss sets — `zipf(2.0)` (median 1, max 200) loses while `zipf(3.0)` (median 1,
+max 200) wins, differing only in how *many* PUs sit in the tail. The honest summary is two rules,
+not one formula: **`k_u` above ~10 for most units favours the norm clip; a bimodal shape with a
+non-trivial whale fraction favours truncation.**
+
+### An ApproxBounds bug in the harness, found by this sweep
+
+`constant(5)` initially reported **B = 2** — the fallback value — because 20,000 PUs with norms all
+near 500 split across two log2 bins straddling the boundary, and *neither* half cleared the
+count threshold. My `approx_bounds` lacked **Wilson et al.'s relaxation loop**, which retries with
+a laxer threshold (multiplying the failure probability by 10 while it stays under 1e-6) precisely
+for this case. Without it, a tightly concentrated distribution can silently destroy its own bound.
+
+Fixed: the loop is now implemented, and the last-resort fallback returns the top occupied bin
+rather than `2^1`. Effect on this sweep was modest (constant(5) 0.67x -> 0.79x, zipf(1.3) 1.10x ->
+1.30x) and the qualitative picture is unchanged. Real-data results are unaffected — TPC-H,
+StackOverflow and ClickBench all have norm distributions spread over many bins, so no bin-count
+threshold was ever missed there. **But any future synthetic or pre-binned data could have hit it.**
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
