@@ -2940,6 +2940,51 @@ repeated releases against the same frozen state (composition over N queries), an
 knows the other PUs' data exactly, reconstruction rather than membership, or an adversary
 targeting `G_fix` itself across refreshes.
 
+## ATTACKS ON THE FROZEN-STATE DESIGN — all four pass, and one near-miss was MC noise
+
+`attacks/mia_frozen_repeated.py`. Generic DP analysis does not cover what the persistent table
+adds: reuse, refreshes, and an attacker who knows everything but the target.
+
+**B1 — repeated releases sharing one frozen `G_fix`. Reuse itself leaks nothing.**
+
+| queries | composed `eps_v` | attacker advantage | bound |
+|---|---|---|---|
+| 1 | 0.6 | 0.2585 | 0.2913 |
+| 2 | 1.2 | 0.2872 | 0.5370 |
+| 5 | 3.0 | 0.3890 | 0.9051 |
+| 10 | 6.0 | 0.5116 | 0.9951 |
+
+Advantage tracks the **composed `eps_v` of the value releases only**. Reusing one `G_fix` across
+all of them adds nothing, which is exactly the property the design needs and the reason the
+amortisation is sound.
+
+**B2 — omniscient adversary (knows every other PU exactly, subtracts the known part).** Advantage
+0.2589 at a target contributing `B`, and **0.2590 at a target contributing 4B** — because the clip
+caps it at `B` regardless. Omniscience buys nothing beyond the `eps_v` bound. This is the clearest
+demonstration of what the l1 clip is actually for.
+
+**B3 — reconstruction rather than membership.** Posterior sd of the target's value given the
+release is 1,167 against a prior sd of 1,183 — a **1.01x** narrowing. The attacker learns
+something (that is what `eps` buys) but the value is not recovered.
+
+**B4 — `G_fix` refreshes compose linearly, and must be budgeted.** Re-releasing the frozen set `R`
+times gives the attacker `R` independent chances at a target's singleton group. Exactly:
+
+```
+Pr[exposed] = 1 - (1-p)^R  <=  R*p  <=  R*delta_0
+```
+
+so linear composition is a valid bound — confirmed exactly at R = 1..50, ratio 1.000 throughout.
+**A frozen set refreshed on a schedule must budget `R*delta_0`, not `delta_0`.** That is the
+concrete accounting answer to Dandan's update/batching question: batching does not change the cost
+of any single refresh, it reduces `R`.
+
+**A near-miss worth recording as method.** The simulation first reported R=10 leaking 1.40e-05
+against a budgeted 1.0e-05 — an apparent violation. It was Monte Carlo noise: six independent runs
+of 500k trials gave 4.0e-06 to 1.4e-05 around an expected 1.0e-05, because only ~5 hits occur per
+run. **At `delta` = 1e-06 a simulation needs ~1e8 trials to resolve a 1.4x effect**, so any
+delta-scale claim in this document should be checked exactly rather than by MC.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
