@@ -3121,6 +3121,57 @@ any cross-group contribution at realistic eps.** That has to be repaired before 
 selection is worth anything on that path, and it is the same pincer found earlier when the
 Gaussian-votes port lost end-to-end.
 
+## PRIOR ART FOR C_u SELECTION, CORRECTED BY READING THE PAPERS MYSELF
+
+An agent search concluded the EM selection of `C_u` was fully pre-empted, with verbatim quotes. On
+re-reading the two closest papers directly, **the decisive claim is wrong**: those papers select a
+*different parameter*. The distinction is the standard DP norm taxonomy (Wilson et al.):
+
+| parameter | meaning | Google's name |
+|---|---|---|
+| **l0** | how many distinct GROUPS one user may touch | `max_partitions_contributed` = our `C_u` |
+| **l-inf** | how much one user may contribute WITHIN one group | `max_contributions_per_partition` |
+| **l1** | one user's total across all groups | (our `B`, in the clip work) |
+
+**"Click Without Compromise" (arXiv 2406.02463) selects l-inf, not l0.** Their Theorem 4.2 gives
+`Delta_2(f) = sqrt(r_1^2/sigma_1^2 + ... + r_n^2/sigma_n^2)` — a sum over **all n days with no
+truncation of how many days a user appears in**. Their Definition 4.1 is "Bounded **Per-day**
+Contributions", and the text says *"a natural way to reduce sensitivity is to limit the number of
+contributions a user can make **daily**"*. So `r_i` is a per-group magnitude bound; their mechanism
+has **no l0 bound at all**. They do use the identical EM quantile with the identical utility function
+and the same Smith-2011/Gillenwater lineage — but pointed at a different knob.
+
+**Liu et al. (ICML 2023, arXiv 2206.03008) do bound l0, but incidentally and only where it
+coincides with l1.** Their `rand-clip(N, C)` samples `min{||N||_1, C}` items without replacement, so
+one parameter bounds every norm at once — hence *"each ||h_i||_r <= C for r = 0, 1, 2, inf"*. Three
+qualifications: it is needed only for their **unbounded-domain** sparse-vector algorithm (for bounded
+domains they *"do not require bounded l0 norms"*); the setting is histogram/COUNT estimation, where a
+user contributing 1 per group has l0 = l1 so the two parameters are the same object; and their
+selection score is expected release error with **sensitivity 5C_m/2**, not a rank-distance quantile
+with sensitivity 1.
+
+**The other two hits are also volume bounds, not span bounds.** Amin et al. (ICML 2019) prove the
+optimal cap is a quantile of the per-user contribution distribution and must be computed privately
+— but their `x_i` is records per user, and they leave instantiation as an open question. Google's
+DP-SQLP (VLDB 2024) recommends *"the 99th percentile of per-user records… chosen in a DP way"* —
+records again.
+
+**So the corrected picture:** every prior work privately selects a bound on per-user *volume*
+(records, contributions, l1). Nobody selects the *cross-group span* l0 as its own parameter against
+its own quantile, except Liu et al. incidentally in a COUNT setting where l0 = l1. For SUM queries
+the two are unrelated — a user can have l0 = 3 and l1 = 10^6 — so the distinction is not cosmetic.
+
+**What is still not ours, and must not be claimed:** the EM quantile itself (Smith 2011, textbook,
+shipped in SmartNoise and diffprivlib); the `Delta_q <= 1` observation (Gillenwater's Lemma 7, and
+the defining property of the exponential mechanism); and the general principle that a contribution
+bound should be a privately-estimated quantile (Amin et al., explicitly).
+
+**Methodological note, and it is the point of this section.** The agent had correct verbatim quotes
+and still reached the wrong verdict, because *"contribution bound"* names different parameters in
+different papers and the quotes do not disambiguate it. Only the sensitivity expressions do —
+whether the bound appears once per group in a sum, or as a cap on the number of groups. **A
+prior-art verdict on a parameter must be checked against the sensitivity formula, not the prose.**
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
