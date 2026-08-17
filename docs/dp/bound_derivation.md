@@ -2895,6 +2895,51 @@ DP as published and 1.3x-2.3x against the best Google-shaped mechanism I could b
 scope it is a wash or a small loss.** The scope condition is not a caveat bolted on afterwards —
 it is measurable in advance from the `k_u` histogram.
 
+## AN ACTUAL ADVERSARY — 4M trials against the full stack
+
+`attacks/mia_full_stack.py`. Everything before this verified *sensitivity* by neighbour
+construction. This runs an attacker end to end: D and D' differ in one target PU, the attacker sees
+one release and guesses which world it came from. Advantage = `Pr[say D'|D'] - Pr[say D'|D]`, which
+for an eps-DP release cannot exceed `(e^eps-1)/(e^eps+1)`.
+
+**A1 — value channel, worst-case target** (concentrates its entire budget in one group, then the
+attacker thresholds that group's released value):
+
+| B | attacker advantage | bound at `eps_v`=0.6 |
+|---|---|---|
+| 512 | 0.2587 | 0.2913 |
+| 4,096 | 0.2597 | 0.2913 |
+| 65,536 | 0.2585 | 0.2913 |
+
+Under the bound, and **scale-free**: identical advantage across a 128x range of B, because the
+target's contribution and the noise both scale with B. That is the correct signature — the l1 clip
+converts an unbounded contribution into one whose leakage depends on `eps_v` alone.
+
+**A2 — key set with the vote-support gate.** Target creates a group only it occupies; attacker
+says D' iff that group is released. Leak 2.5e-07 to 1.0e-06 against a charged `delta` = 1e-06, at
+every `C_e` tested. Within budget.
+
+**A3 — key set WITHOUT the gate: the adversary reproduces the delta bug empirically.**
+
+| `C_e` | `k_u` | leak, no gate | leak, gated | charged | over by |
+|---|---|---|---|---|---|
+| 1 | 30 | 2.10e-05 | 1.00e-06 | 1e-06 | **21.0x** |
+| 1 | 72 | 4.70e-05 | 1.25e-06 | 1e-06 | **47.0x** |
+| 2 | 72 | 2.88e-05 | 1.25e-06 | 1e-06 | 28.8x |
+| 5 | 72 | 1.27e-05 | 1.75e-06 | 1e-06 | 12.8x |
+
+The excess **grows with `k_u` and shrinks with `C_e`**, exactly as the union-bound analysis
+predicted. Mechanism: the target holds values in `k_u` groups but votes in only `C_e` of them, so
+the `k_u - C_e` unvoted groups each get an independent chance to clear tau on noise alone — chances
+tau's union bound never covered. **This is the first demonstration of that bug by an attacker
+rather than by inference from the accounting, and it confirms the gate is mandatory, not
+cosmetic.**
+
+**What this does not cover:** a single-target membership test under one release. Not tested —
+repeated releases against the same frozen state (composition over N queries), an attacker who
+knows the other PUs' data exactly, reconstruction rather than membership, or an adversary
+targeting `G_fix` itself across refreshes.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
