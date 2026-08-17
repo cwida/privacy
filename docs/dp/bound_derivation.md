@@ -2491,6 +2491,63 @@ simply becomes more inert.
 adjacency question is answered, the mechanism is measured across 8 queries and 3 datasets, the
 root cause is proven, and three repairs have been explored. Nothing material remains open.
 
+## SECTION 1 (EM selection of C_u): it works, costs 1% of budget, and is robust
+
+`attacks/em_cu.py`. Unlike section 2, this one holds up on every axis tested.
+
+**A. Her `Delta_q <= 1` argument is correct, and verified by construction.** The subtlety she
+identifies is real: removing one PU with `k_u` = k shifts `K-k+1` cumulative counts simultaneously,
+so *releasing* the vector `(F(1)..F(K))` would have l1 sensitivity up to `K`. But the EM scores each
+candidate separately, so what matters is `max_r |q(d,r) - q(d',r)|`:
+
+| removed PU | cumulative counts changed | l1 change | **max_r \|dq\|** |
+|---|---|---|---|
+| `k_u`=1 | 80 of 80 | 80 | **1.0** |
+| `k_u`=30 | 51 of 80 | 51 | **1.0** |
+| `k_u`=70 | 11 of 80 | 11 | **1.0** |
+
+The l1 of the histogram is a red herring exactly as she says.
+
+**B. The EM finds the target essentially deterministically, for ~1% of the budget.** With ~180k
+PUs, `F` jumps by thousands between adjacent candidates, so the score is sharply peaked:
+
+| `eps_N + eps_C` | EM pick, 15 draws | penalty |
+|---|---|---|
+| **0.010** | **37-37** | **1.00x** |
+| 0.025 | 37-37 | 1.00x |
+| 0.100 | 37-37 | 1.04x |
+| 0.250 | 37-37 | 1.16x |
+
+All 15 draws agree at every budget; spending *more* only hurts, because it is taken from the query.
+**Optimal EM budget is ~0.01, i.e. 1% of eps.**
+
+**C. And the p-quantile is a good target — which I did not expect.** I had worried it was the wrong
+statistic, since the error-optimal `C_v` swings 21-55 across filters while the `k_u` quantiles sit
+flat. It does not matter, because the error curve is flat near its optimum:
+
+| filter | EM pick | best `C_v` | err@EM | err@best | penalty |
+|---|---|---|---|---|---|
+| acctbal>=8000 | 37 | 34 | 13.72% | 13.59% | **1.01x** |
+| acctbal>=9500 | 37 | 13 | 89.46% | 83.44% | **1.07x** |
+| mktseg=AUTOMOBILE | 37 | 55 | 13.30% | 12.89% | **1.03x** |
+| acctbal<0 | 37 | 34 | 22.49% | 21.07% | **1.07x** |
+
+Even a 3x miss (37 against a best of 13) costs 7%.
+
+**Choice of p barely matters, above a floor:** 0.5 -> 1.02x, 0.7 -> 1.02x, 0.9 -> 1.03x,
+0.95 -> 1.08x, 0.99 -> 1.08x. Only **p = 0.3 fails, at 2.67x**, because it lands below the safe
+zone. That is precisely the asymmetry measured independently in `cu_automatic.py` — under-estimating
+`C_u` costs up to 38x, over-estimating at most 1.7x — so **her choice of p = 0.7 is well-motivated,
+and the guidance is to err high.**
+
+**Freezing is sound here, unlike the optimum itself.** The `k_u` quantiles are *identical* across
+all four filters (p50=30, p70=37, p90=45, p99=53), confirming her stability premise for the
+quantity her mechanism actually estimates.
+
+**Verdict: recommend section 1.** Sound argument, near-free, robust to `p`, and freezable. Its
+scope is systems that use `C_u`-based truncation — our l1 clip has no `C_v` to select, but her
+All-or-Frozen histogram needs one, and so does Google's value channel.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
