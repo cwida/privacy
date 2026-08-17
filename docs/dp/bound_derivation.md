@@ -2598,6 +2598,51 @@ skip the frozen path entirely, which is statically decidable.
 comments/month, 92.70% -> 100.0% on posts/day) — the heavy-tailed `k_u` case where the quantile
 chases the tail, exactly as the p-sweep predicted.
 
+## Are the bounds post-processing? No — and a third of the TPC-H gain is bound selection
+
+**The bounds are not free.** `U` (Google's per-cell bound) and `B` (our per-PU norm bound) both
+come from ApproxBounds, a DP release costing `eps_b`. That is why a three-way budget split exists
+at all. Once released, *using* a bound is post-processing, but obtaining it is not.
+
+So: how much of the measured gain is the clipping geometry, and how much is ApproxBounds simply
+serving one arm better than the other? Giving BOTH arms oracle bounds (best `U` / best `B` on a
+1.19x-spaced grid, `eps_b` -> 0 so the saved budget goes to the values):
+
+| query | DP bounds | | | oracle bounds | | |
+|---|---|---|---|---|---|---|
+| | g-best | ours | ratio | g-best | ours | ratio |
+| tpch SUM price / mo\|nation | 14.09% | 3.95% | **3.57x** | 8.81% | 3.92% | **2.25x** |
+| so COUNT posts / month | 34.48% | 36.53% | 0.94x | 30.92% | 30.45% | 1.02x |
+| cb COUNT hits / region | 6.20% | 5.76% | 1.08x | 5.91% | 5.61% | 1.05x |
+
+**On TPC-H the advantage drops 3.57x -> 2.25x under oracle bounds.** Google gains 1.6x from a
+perfect bound (14.09% -> 8.81%) while we gain essentially nothing (3.95% -> 3.92%). So the honest
+decomposition of the TPC-H gain is:
+
+- **~2.25x from the clipping geometry**, which survives perfect bounds on both sides
+- **~1.6x from ApproxBounds serving Google's per-cell `U` worse than our per-PU `B`**
+
+That second factor is real but it is a different claim. It has a cause: ApproxBounds is a
+max-finder, and the error-optimal per-cell bound is roughly half the maximum, so it is ~2x
+suboptimal for `U` by construction. For our `B` it happens to land at 0.96x of the optimum,
+because two offsets cancel. **Ours is less sensitive to the bound-selection mechanism than
+Google's is** — which is the same parameter-robustness theme as the `C_u` result, not a
+sharper clip.
+
+On StackOverflow and ClickBench the ratio barely moves (0.94 -> 1.02, 1.08 -> 1.05): ties either
+way, so nothing there depends on bound quality.
+
+**Which number to report:** the benchmark's 1.88x median is against Google *as published*, which
+uses ApproxBounds — that is the real system and the right comparison. But the decomposition
+belongs alongside it, because a reviewer with an oracle-bounds baseline will find 2.25x on TPC-H,
+not 3.57x.
+
+**Grid caveat, learned the hard way:** a first version of this used a 5-point grid spanning 16x,
+i.e. 2x spacing — coarser than the 1.3x error basin — and reported ours getting *worse* under
+"oracle" bounds. That was a grid artifact, and it biased the test toward Google, whose effective
+grid is `C_v x U` and therefore finer by construction. Any oracle-bound comparison needs spacing
+below ~1.2x.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
