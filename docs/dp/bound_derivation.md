@@ -3267,6 +3267,47 @@ McSherry and Talwar [MT07]"*) and presents `PrivateQuantile` (Algorithm 2) *"for
 known construction, writing the output density directly with no named utility and no sensitivity
 lemma. The `u(X,o)` form and `Delta_u = 1` were formalised later by Gillenwater et al. (Lemma 7).
 
+## JOINT QUANTILES (Dandan, 19 Aug): a real saving, but not on this statistic
+
+`attacks/joint_quantiles.py`. Gillenwater et al. release `m` quantiles jointly at l1 sensitivity 2
+rather than splitting eps `m` ways at sensitivity 1 — a factor of `m/2` in effective budget per
+quantile. Her suggestion is to use that for multiple candidate contribution bounds. Measured on
+real TPC-H `k_u`, the minimum eps **per quantile** for the EM to return the exact answer:
+
+| candidate range `K` | p50 | p95 | p99 |
+|---|---|---|---|
+| 72 (the true max) | 0.0005 | 0.002 | 0.005 |
+| 256 | 0.0005 | 0.002 | 0.01 |
+| 4096 | 0.0005 | 0.005 | 0.01 |
+
+**Everything is recoverable at 0.005--0.01 per quantile, so at our 0.01 total budget a naive
+`eps/m` split already lands on the exact answer and the joint machinery changes nothing here.** It
+would matter for a flatter statistic — a value bound, where adjacent candidates score almost
+equally — or at an order of magnitude less budget.
+
+**A correction to my own first pass.** I initially reported that the candidate range `K` mattered by
+100x. That came from a synthetic `uniform(1,60)` where 140 candidates sit above the data's maximum,
+all scoring the same mediocre value; at small eps their *combined* mass (0.50) beats the sharp peak
+(0.49) and the draw drifts high. Real `k_u` has a tail, so no such block of equally-useless
+candidates exists and the true effect is about **2x**, as above. The synthetic case is still worth
+knowing — it is a genuine failure mode of the EM when the candidate set is much wider than the
+data's support — but it is not what happens here.
+
+**A second artifact worth recording.** On a point-mass distribution (`constant(20)`, every unit at
+exactly 20) the EM returns a uniform random candidate. `F` jumps from 0 to `N` in one step, so no
+candidate sits at the target rank and *every* candidate scores `-N/2` identically. Not a code bug
+and not reachable on real data, but it shows the score is only informative where the CDF passes
+near the target.
+
+**What I could not do: turn the curve into a mechanism-selection rule.** The `k_u` shape decides
+which mechanism wins (worth 0.68x--6x), so a privately released quantile curve ought to let the
+system choose. A two-quantile rule ("ours if p50 >= 10; truncation if p99 >= 10*p50") gets only
+7 of 13 families right, and the failures are not noise — `constant(5)` (p50 = p99 = 5) and
+`zipf(1.3)` (p50 = 6, p99 = 200) are misclassified from the true quantiles, before any privacy is
+applied. **Two quantiles are not a sufficient statistic for the decision.** That is an argument for
+releasing more of the curve, which is Dandan's point, but I do not have a rule that works and
+should not claim one.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
