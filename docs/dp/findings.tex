@@ -489,14 +489,27 @@ independently measured $\ku \approx 4.3$ with the same invariance, which is a re
 
 \paragraph{All-or-Frozen thresholding.} Replace $K$ per-group release tests with one global AND,
 saving $\approx(\Cu/\epsilon_B)\log\Cu$ on the threshold. The privacy analysis is correct --- we
-reproduced the predicted gap to the digit --- but the rule essentially never fires. Any valid
-threshold satisfies $\Pr[1+\mathrm{Lap}\ge\tau] \le \delta$, so $\tau \gg 1$ and a group holding a
-single unit can never pass; five of eight tested queries have minimum support exactly $1$. But
-single-unit groups are precisely why partition selection exists. \textbf{The mechanism requires a
-query with no singleton group, and such a query does not need partition selection at all.} Two
-findings survive: reusing the bound-selection histogram costs $736\times$ on the threshold versus a
-dedicated count (a free statistic is not free when it is the wrong statistic), and blocking the
-conjunction by a unit-determined key component is a valid way to shrink any per-query AND.
+reproduced the predicted threshold gap to the digit --- but the conjunction essentially never fires.
+
+The decisive test is not about the proposal's design choices. At matched $\Cu$ we substituted
+\emph{Google's own} statistic (a noised distinct-unit count) into the conjunction: per-group release
+succeeds for 98.8\% of groups under either statistic, and the AND is $0.0\%$ under \emph{both}. The
+conjunction fails on its own terms, independently of which statistic feeds it and of $\Cu$. The
+cause is the minimum: an AND over thousands of groups is decided by the smallest, and five of seven
+tested queries contain a group with a single privacy unit --- which no valid threshold can pass,
+since $\Pr[1+\mathrm{Lap}\ge\tau]\le\delta$ forces $\tau\gg1$. Single-unit groups are precisely why
+partition selection exists.
+
+\textbf{A correction we owe the record.} We previously reported that reusing the bound-selection
+histogram, rather than building a dedicated count, costs $736\times$ on the threshold, and drew from
+it the moral that ``a free statistic is not free when it is the wrong statistic''. That comparison
+was confounded: it changed the budget ($8\times$), the sensitivity $\Cu{=}72\to\Ce{=}1$
+($72\times$) and the statistic all at once. Like-for-like the statistic is worth $1.28\times$, and at
+matched $\Cu$ the proposal's threshold is \emph{below} Google's ($0.99$--$1.28\times$ across
+settings) because the AND avoids dividing $\delta$ by $\Cu$. The reuse was never the defect. What
+survives is narrower: blocking the conjunction by a unit-determined key component is a valid way to
+shrink any per-query AND, and the max-bin statistic is genuinely weaker than a count on fine
+groupings, where it runs at $\approx0.32\times$ the group's support.
 
 \section{Related work}\label{sec:related}
 
@@ -547,42 +560,44 @@ DP-SQLP~\cite{dpsqlp2024} recommends the ``99th percentile of per-user recordsâ€
 a privately estimated quantile of the gradient-norm distribution, tracked online rather than by
 exponential mechanism. Same idea one parameter over: an $\ell_2$ magnitude bound, not a span bound.
 
-\paragraph{One system does select $\ell_0$ privately, and it is the closest prior art.}
-PipelineDP ships an experimental \texttt{PrivateL0Calculator}~\cite{pipelinedp_l0} whose docstring
-reads \emph{``Calculates differentially-private l0 bound (i.e.\ max\_partitions\_contributed)''}
-and which applies an exponential mechanism over candidate bounds. \textbf{The mechanism is
-therefore not new.} Two differences remain, and only the first is substantive:
+\paragraph{Two works already select $\ell_0$ privately.} PipelineDP ships an experimental
+\texttt{PrivateL0Calculator}~\cite{pipelinedp_l0} --- \emph{``Calculates differentially-private l0
+bound (i.e.\ max\_partitions\_contributed)''} --- applying an exponential mechanism over candidate
+bounds, scored by a bias/variance objective
+$-\tfrac12 P\sigma - \tfrac12 \sum_u \max(\min(k_u, B) - k, 0)$ rather than by rank, and restricted
+by its own docstring to \emph{``COUNT and PRIVACY\_ID\_COUNT aggregations''}.
+
+More directly, Cheu et al.~\cite{genai2025} (Google, October 2025) write:
+
+\begin{quote}
+``Another approach is to apply a quantile-finding algorithm (Durfee, 2023). For example,
+\textbf{max\_groups\_contributed can be set to, say, the 83rd percentile of the number of groups
+that a DP unit contributes to.}''
+\end{quote}
+
+That is private selection of the cross-group span bound as a quantile of the per-unit
+distinct-group-count distribution, under a \texttt{GROUP BY} surface syntax. Their motivation is
+also ours: \emph{``Previous iterations of federated analytics placed the responsibility of computing
+such queries on the data analyst. This a point of friction for on-boarding.''} \textbf{The mechanism
+is not new, and this document does not claim it.}
+
+\paragraph{What is left.} Three things, none of them the mechanism.
 
 \begin{itemize}
-\item \textbf{A different objective.} Their score is a bias/variance tradeoff,
-$\mathrm{score}(k) = -\tfrac12 P\sigma - \tfrac12 \sum_u \max(\min(k_u, B) - k, 0)$ --- noise
-impact plus dropped-data impact --- evaluated against the full contribution histogram. Ours targets
-a \emph{rank}. That is not merely cosmetic: their score needs $\sigma$, $P$ and a public upper
-bound $B$ as inputs, and its sensitivity depends on $B$, whereas a rank-distance score has
-sensitivity $1$ unconditionally. The preliminary stress probe in \S8 includes their objective, but
-a calibrated head-to-head across budgets, public-domain tightness and aggregates remains open.
-\item \textbf{Scope.} Their docstring restricts it to \emph{``COUNT and PRIVACY\_ID\_COUNT
-aggregations''}; per the accompanying documentation it is opt-in, Beam/Local only, requires a
-pre-supplied partition list, sits outside the budget accountant, and is not invoked by the default
-aggregation path.
+\item \textbf{Calibration.} They fix $k = 83$ for \emph{sample-complexity} reasons --- it minimises
+their tuning sample size --- not for utility. Our sweep (\S\ref{sec:asym}) finds the utility optimum
+at $p = 0.95$--$0.99$, that $p = 0.7$ costs $17.75\times$ worst-case, and that the right $p$ depends
+on whether $\Cu$ is shared with the partition-selection threshold. Their 83rd percentile sits
+between our best and worst settings, and nothing published says which side to err on.
+\item \textbf{Accounting.} They buy privacy by \emph{splitting the population} --- their guarantee
+rests on ``no DP unit is ingested by both autotuning and aggregation'' --- which discards a
+sub-population. We pay by composition at $\approx1\%$ of $\epsilon$. Which is preferable is an open
+empirical question.
+\item \textbf{Setting.} Theirs is one flat \texttt{GROUP BY} over pre-aggregated device uploads;
+ours is a relational engine where the per-unit group count is derived through joins. The
+freeze-versus-re-select rule (\S\ref{sec:freeze}) and the inversion under smooth sensitivity are
+not addressed anywhere we could find.
 \end{itemize}
-
-\paragraph{What is left.} Not the mechanism. What survives is (i) integration --- selection wired
-into a SQL compiler's default path and charged to one budget, so an analyst never supplies
-$\Cu$; (ii) the rank-based score and its unconditional sensitivity; and (iii) \textbf{the
-calibration results of \S3}, which are what a practitioner actually needs and which no prior work
-reports: the target fraction, its interaction with a shared $\Cu$, the freeze-versus-re-select
-rule, and the finding that the whole approach inverts under smooth sensitivity. Google's own Plume
-paper~\cite{plume2022} frames the general problem as open --- \emph{``tuning the contribution bound
-$L$ can be critical to achieving good performance''}, tuned there by hand --- and Wilson et
-al.~\cite{wilson2020} take $\Cu$ as a query literal.
-
-\paragraph{Adjacent.} Reuse of a released bound is free by post-processing; caching DP
-\emph{answers} across a workload is Turbo~\cite{turbo2023}. Tumult~\cite{tumult2022} ships
-DP-derived-then-reused partition sets, which is prior art for the frozen key set discussed in
-\S\ref{sec:other}. Partition selection itself~\cite{gopi2020,desfontaines2022} is a separate
-channel; \cite{desfontaines2022} in particular publishes the Gaussian/Laplace crossover that our own
-measurement in \S\ref{sec:other} independently rediscovered.
 
 \section{Future work}
 
