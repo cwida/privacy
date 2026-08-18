@@ -1,25 +1,11 @@
-"""Comprehensive evaluation of Dandan's All-or-Frozen thresholding (draft 15 Aug, section 2).
+"""SUPERSEDED by attacks/all_or_frozen_v2.py -- this version has TWO BUGS. Kept for the record.
 
-The question: can the all-or-nothing rule ever actually fire? Release the query-specific group set
-iff EVERY group passes a certification test, else fall back to the frozen set G_fix.
+  1. Support was computed with `FROM cells c JOIN bins b ON b.g = c.g GROUP BY c.g`, a fan-out
+     join that inflates count(*) by the number of occupied bins (~11x on TPC-H).
+  2. The dedicated-count variant scored raw distinct-PU counts with noise calibrated to C_e = 1
+     but never truncated any PU to C_e groups, so the sensitivity was k_u rather than 1.
 
-Three variants:
-  as-specified   certify by max over B=64 bins of the per-group VALUE histogram already built for
-                 automatic bounding, sensitivity C_u, noise Laplace(C_u/eps_B).
-  +repair A      certify by a DEDICATED per-group distinct-PU count at C_e=1, sensitivity 1.
-                 Stops paying the C_u sensitivity and the max-over-64-bins term.
-  +repair A+D    ... and take the AND per BLOCK, where a block is a value of a grouping-key
-                 component functionally determined by the PU (a customer has one nation). Every
-                 group a PU can create lies in one block, so the AND need only cover that block and
-                 a tiny group elsewhere cannot veto it.
-
-The decisive statistic needs no simulation: a group whose true support is below the threshold fails
-ALWAYS, so it vetoes its scope forever. Hence "min group support vs tau" decides the whole thing,
-and the Monte Carlo only confirms it.
-
-Everything is aggregated in SQL to per-group rows, so cost is one pass per query.
-
-    python3 attacks/all_or_frozen_full.py
+Both were found by Dandan. Do not re-run this for numbers; see all_or_frozen_v2.py.
 """
 
 import argparse

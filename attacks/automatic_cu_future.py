@@ -1,3 +1,9 @@
+"""NOT RUN, NOT VERIFIED. This file was produced by a background agent during the prior-art
+and future-work exploration; it was swept into a commit by `git add -A` and I have neither
+executed it nor checked its claims. Treat every number and assertion in it as unvalidated.
+Kept because the four questions it poses are the right ones for future work.
+"""
+
 """Mechanism-level PoC for automatic cross-group contribution bounds.
 
 This isolates four future-work questions without changing the SQL compiler:
