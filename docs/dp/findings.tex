@@ -547,14 +547,35 @@ DP-SQLP~\cite{dpsqlp2024} recommends the ``99th percentile of per-user recordsâ€
 a privately estimated quantile of the gradient-norm distribution, tracked online rather than by
 exponential mechanism. Same idea one parameter over: an $\ell_2$ magnitude bound, not a span bound.
 
-\paragraph{What appears to be open.} No DP SQL engine selects the cross-group span bound
-automatically. Wilson et al.~\cite{wilson2020} take it as a literal; Plume~\cite{plume2022} reports
-that \emph{``tuning the contribution bound $L$ can be critical to achieving good performance''} and
-tunes it by hand; Google's library removed its defaults deliberately; PipelineDP documents
-non-private experimentation. \textbf{The defensible claim is therefore a systems one} --- first
-end-to-end automatic private selection of $\ell_0$ inside a SQL compiler, instantiating Amin et
-al.'s open question --- \textbf{together with the calibration results of \S3}, which are what a
-practitioner actually needs and which no prior work reports.
+\paragraph{One system does select $\ell_0$ privately, and it is the closest prior art.}
+PipelineDP ships an experimental \texttt{PrivateL0Calculator}~\cite{pipelinedp_l0} whose docstring
+reads \emph{``Calculates differentially-private l0 bound (i.e.\ max\_partitions\_contributed)''}
+and which applies an exponential mechanism over candidate bounds. \textbf{The mechanism is
+therefore not new.} Two differences remain, and only the first is substantive:
+
+\begin{itemize}
+\item \textbf{A different objective.} Their score is a bias/variance tradeoff,
+$\mathrm{score}(k) = -\tfrac12 P\sigma - \tfrac12 \sum_u \max(\min(k_u, B) - k, 0)$ --- noise
+impact plus dropped-data impact --- evaluated against the full contribution histogram. Ours targets
+a \emph{rank}. That is not merely cosmetic: their score needs $\sigma$, $P$ and a public upper
+bound $B$ as inputs, and its sensitivity depends on $B$, whereas a rank-distance score has
+sensitivity $1$ unconditionally. The preliminary stress probe in \S8 includes their objective, but
+a calibrated head-to-head across budgets, public-domain tightness and aggregates remains open.
+\item \textbf{Scope.} Their docstring restricts it to \emph{``COUNT and PRIVACY\_ID\_COUNT
+aggregations''}; per the accompanying documentation it is opt-in, Beam/Local only, requires a
+pre-supplied partition list, sits outside the budget accountant, and is not invoked by the default
+aggregation path.
+\end{itemize}
+
+\paragraph{What is left.} Not the mechanism. What survives is (i) integration --- selection wired
+into a SQL compiler's default path and charged to one budget, so an analyst never supplies
+$\Cu$; (ii) the rank-based score and its unconditional sensitivity; and (iii) \textbf{the
+calibration results of \S3}, which are what a practitioner actually needs and which no prior work
+reports: the target fraction, its interaction with a shared $\Cu$, the freeze-versus-re-select
+rule, and the finding that the whole approach inverts under smooth sensitivity. Google's own Plume
+paper~\cite{plume2022} frames the general problem as open --- \emph{``tuning the contribution bound
+$L$ can be critical to achieving good performance''}, tuned there by hand --- and Wilson et
+al.~\cite{wilson2020} take $\Cu$ as a query literal.
 
 \paragraph{Adjacent.} Reuse of a released bound is free by post-processing; caching DP
 \emph{answers} across a workload is Turbo~\cite{turbo2023}. Tumult~\cite{tumult2022} ships
@@ -566,39 +587,83 @@ measurement in \S\ref{sec:other} independently rediscovered.
 \section{Future work}
 
 \begin{enumerate}
-\item \textbf{Settle prior art for the selection mechanism.} Our earlier sweep covered the four
-ideas in \S\ref{sec:other} and found four of five techniques already exist. The
-exponential-mechanism selection of $\Cu$ was proposed later and is going through that process now.
-The nearest neighbours to settle: Amin et al., ``Bounding User Contributions'' (ICML 2019);
-``Algorithms for bounding contribution for histogram estimation under user-level privacy''
-(arXiv:2206.03008); Andrew et al., ``Differentially Private Learning with Adaptive Clipping''
-(NeurIPS 2021), which estimates a norm quantile online under DP; and the DP-quantile literature
-generally, since steps 3--4 are an exponential-mechanism quantile. \textbf{This should be settled
-before any claim of novelty.}
+\item \textbf{Compiler-derived public candidate domains.} The proof requires a public
+$K \ge \max_u \ku$; using the observed maximum makes the output support data-dependent. A SQL
+compiler should derive a valid domain from grouping-column types, \texttt{CHECK} constraints,
+foreign keys, functional dependencies, public partition catalogues and bounded date ranges. The
+compiler must also expose when it cannot prove a useful bound. This is necessary for genuinely
+automatic selection: replacing one analyst-supplied $\Cu$ with an equally opaque $K$ is not enough.
 
-\item \textbf{Updates and refreshes.} Everything here assumes static data, and the frozen bound is
-the part most exposed to that assumption. What is established: $R$ re-releases of frozen metadata
-give an adversary $R$ independent chances, so $\Pr[\text{exposed}] = 1-(1-p)^R \le R\,\delta_0$
-(confirmed exactly at $R = 1..50$), and a unit \emph{arriving} between two releases is protected by
-the composed $\epsilon$ of the releases containing it. What follows is that batching updates does
-not make any single refresh cheaper --- it reduces how many refreshes are needed, which is the real
-argument for a minimum batch size.
+\item \textbf{Separate existence and value bounds.} Partition release and value release pay for
+different objects. A bound $C_e$ controls how many groups one unit may name and therefore the
+partition threshold $\tau$; a possibly different $C_v$ controls truncation bias and value noise.
+Selecting $(C_e,C_v)$ jointly may dominate the single \texttt{max\_partitions\_contributed} used by
+current interfaces. The open technical problem is a private joint score with a useful sensitivity
+bound, not the non-private grid search used in this report.
 
-What is open is when to refresh at all. A schedule pays $R\,\delta_0$ whether or not anything
-changed. Since the mechanism only needs the \emph{shape} of the $\ku$ distribution, and that shape
-proved stable under filters discarding $99\%$ of users (\S\ref{sec:freeze}), it is plausibly stable
-under ordinary data growth too --- but this is untested, and it is the assumption a deployment
-would rest on. The natural construction is drift-triggered rather than scheduled refresh: a
-sparse-vector monitor that pays per \emph{positive} answer rather than per check, so a frozen bound
-that is checked often and replaced rarely costs close to nothing. Testing that needs a temporal
-dataset, which none of the three used here provides.
+\item \textbf{Loss-aware selection for general aggregates.} PipelineDP's private $\ell_0$
+calculator is documented for \texttt{COUNT} and privacy-ID count. An automatic SQL system must
+handle \texttt{SUM}, \texttt{AVG} and multiple aggregates sharing one partition-selection channel.
+The score should predict downstream query loss, including clipping bias and aggregate noise, while
+remaining private; simply evaluating true query error on each candidate is an oracle, not a
+deployable selector. The smooth-sensitivity path needs its own objective: the preliminary port in
+this report shows that the Laplace calibration can invert there.
 
-\item \textbf{Implement it.} All results are simulation. Both safety modifications must land
-\emph{with} the mechanism, not after.
+\item \textbf{Joint bound and budget optimisation.} The deployed choice is not $\Cu$ alone but
+$(C_e,C_v,\epsilon_b,\epsilon_\eta,\epsilon_v)$. Our experiments tune these parameters with access
+to the private truth. Future work should replace that oracle with one accounted private selection
+step and determine whether the extra choice complexity consumes more privacy than it saves in
+query error.
 
-\item \textbf{The smooth-sensitivity path is untested.} A preliminary port \emph{lost}, because
-that value channel is independently broken --- releasing more groups makes it worse.
+\item \textbf{A workload-level bound catalogue.} A selected bound should carry its privacy-unit
+lineage, grouping lineage, predicate assumptions and privacy provenance. Static analysis can reuse
+it only when those obligations still hold; a filter on a privacy-unit attribute does not in general
+preserve the $\ku$ distribution. Where invariance cannot be proved, a sparse-vector-style drift
+monitor could refresh metadata only after a material change. Scheduled refresh remains the
+baseline: $R$ releases cost up to $R\delta_0$, whether or not the data changed.
+
+\item \textbf{Tail-robust private selection.} A dense public domain can contain thousands of
+candidates above the observed maximum. When those candidates have equal or nearly equal rank
+score, their combined probability can dominate the exponential mechanism even though each is
+individually poor. Candidate lattices, base measures or alternative ordered-selection mechanisms
+should be evaluated with a requirement that widening a valid public domain does not radically
+inflate the selected bound.
+
+\item \textbf{Privacy-certified compilation.} An \texttt{EXPLAIN PRIVACY} mode should report the
+adjacency relation, derived candidate domain, selected or reused $(C_e,C_v)$, sensitivity of every
+release, partition-selection threshold, metadata provenance and the complete budget split. This
+turns automatic selection into an auditable compiler decision rather than hidden preprocessing.
 \end{enumerate}
+
+\paragraph{Preliminary mechanism-only probe.} We added
+\texttt{attacks/automatic\_cu\_future.py} to test the non-compiler parts on privacy-ID
+\texttt{COUNT} over the real TPC-H \texttt{month|nation} incidence relation. The selector uses the
+public group-domain bound $K=2095$, not the observed maximum; utility configurations are chosen on
+four simulation draws and reported on twelve independent draws. ``Loss oracle'' therefore measures
+headroom, not a deployable private selector:
+
+\begin{center}\small
+\begin{tabular}{rrrrrr}
+\toprule
+units & observed max & original: $\Pr[\hat C>\max\ku]$ & direct+hybrid & shared oracle & separate oracle \\
+\midrule
+181,532 & 72 & 97.4\% & 4.5\% & 5.52\% & \textbf{3.82\%} \\
+45,320  & 66 & 99.2\% & 69.2\% & 78.48\% & \textbf{41.56\%} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Removing the noisy-$N$ margin and replacing the dense upper tail with a fixed hybrid lattice solve
+the large-population failure but not the smaller one: at $p=0.99$ and $0.008$ selection budget,
+candidate multiplicity still overwhelms the rank gap. Separate bounds show real headroom in both
+cases (1.45$\times$ and 1.89$\times$ over the shared loss oracle), which justifies pursuing a
+private joint score; the high absolute error in the smaller population also shows that automatic
+parameter selection cannot repair a partition-selection channel with inadequate support.
+
+All seven directions are system or calibration problems, not claims that the underlying
+exponential-mechanism quantile is new. The first integrated implementation should include the two
+safety modifications from \S\ref{sec:privacy} and must be evaluated through compiled SQL rather
+than simulation alone.
 
 \bibliography{refs}
 

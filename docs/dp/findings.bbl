@@ -68,6 +68,13 @@ Frank McSherry and Kunal Talwar.
 \newblock In {\em 48th Annual IEEE Symposium on Foundations of Computer Science
   (FOCS)}, pages 94--103, 2007.
 
+\bibitem{pipelinedp_l0}
+{PipelineDP contributors}.
+\newblock {PrivateL0Calculator}: differentially private selection of
+  \texttt{max\_partitions\_contributed}.
+\newblock \url{https://github.com/OpenMined/PipelineDP},
+  \texttt{pipeline\_dp/private\_contribution\_bounds.py}, 2023.
+
 \bibitem{smith2011}
 Adam Smith.
 \newblock Privacy-preserving statistical estimation with optimal convergence

@@ -3172,6 +3172,101 @@ different papers and the quotes do not disambiguate it. Only the sensitivity exp
 whether the bound appears once per group in a sum, or as a cap on the number of groups. **A
 prior-art verdict on a parameter must be checked against the sensitivity formula, not the prose.**
 
+## ALL-OR-FROZEN: DANDAN'S QUESTIONS FOUND TWO BUGS IN MY EXPERIMENT
+
+`attacks/all_or_frozen_v2.py`. Her 18 Aug questions were right on both counts.
+
+**Her Q4 is correct: I had the accounting wrong.** My "repair A" scored a dedicated distinct-PU
+count with noise calibrated to `C_e` = 1, but **never truncated any PU to `C_e` groups**. Without
+truncation one PU affects up to `k_u` group counts, so the sensitivity is `k_u`, not 1 — exactly her
+point. Corrected, each PU votes in at most `C_e` of its groups:
+
+| query | raw count (median) | truncated, `C_e`=1 | tau | AllPass |
+|---|---|---|---|---|
+| tpch month | 69,976 | **2,273** | 33.8 | 0.0% |
+| tpch month\|nation | 2,779 | **90** | 33.8 | 0.0% |
+| tpch month\|prio | 17,100 | **454** | 33.8 | 0.0% |
+
+Truncation divides the count by roughly `k_u/C_e` — a 30x factor my earlier numbers were missing.
+Raising `C_e` does not rescue it, because the threshold rises with it: at `C_e` = 37 the count is
+nearly untruncated (65,546 of 69,976) but tau is 1,548.8. AllPass is 0.0% at every `C_e` tested.
+
+**A second bug, found while checking her Q1.** The earlier profile computed support with
+`FROM cells c JOIN bins b ON b.g = c.g GROUP BY c.g` — a fan-out join, since `cells` has one row
+per (PU, group) and `bins` one per (group, bin). `count(*)` therefore returned
+`n_g x occupied_bins`, **inflating every support figure by ~11x**, and the "min support = 1" veto
+analysis derived from it was wrong. Corrected medians: 69,976 / 2,779 / 17,100.
+
+**Her Q1 answered: it is not the budget, it is two compounding multipliers.**
+
+| | factor |
+|---|---|
+| (a) sensitivity `C_u` = 37 on the reused histogram vs `C_e` = 1 on a dedicated count | **37.8x** on tau |
+| (b) the statistic is a max BIN count, not the group's support (one PU lands in one bin) | **~3.1x** (bin/support = 0.32) |
+
+`eps_B` = 0.5 here is generous — the tuned optimum for bound selection elsewhere in this document
+is 0.002 — so starving the budget is not the explanation. The reused histogram pays `C_u` for a
+statistic that is a third of the quantity it is being compared against.
+
+**Her Q2 is a fair correction to my framing.** I wrote that the mechanism "can only be used when it
+is not needed". Her point is that All-or-Frozen targets *output compactness*, not extra coverage:
+falling back to `G_fix` when a query contains low-support groups is intended behaviour, not
+failure. That is right, and my phrasing overstated the case. The measured objection is narrower and
+still stands: the AND fires ~0% of the time, so the compact branch is almost never taken and the
+compactness benefit is almost never realised.
+
+**Her Q3 tested: sound, but inert on these queries.**
+
+| query | \|G_Q\| | \|G_fix\| | intersection | new | min count in intersection | AND over G_Q | AND over intersection |
+|---|---|---|---|---|---|---|---|
+| tpch month | 84 | 84 | 84 | 0 | 1 | 0.0% | 0.0% |
+| tpch month\|nation | 2,095 | 2,085 | 2,084 | 11 | **0** | 0.0% | 0.0% |
+| tpch month\|prio | 420 | 420 | 420 | 0 | 0 | 0.0% | 0.0% |
+
+On PU-side filters `G_Q` is essentially a subset of `G_fix` (0--11 new groups), so restricting the
+AND to the intersection removes almost nothing. And the binding constraint is *inside* the
+intersection: its smallest truncated count is 0 or 1 against a threshold of 33.8 — a frozen group
+that survives filtering with no voting PU. The proposal would matter for a query whose filter
+*creates* groups outside `G_fix`, which none of these do.
+
+## PRIOR ART: GOOGLE PUBLISHED PRIVATE l0 SELECTION IN OCTOBER 2025
+
+`arXiv:2510.21684` (Cheu et al., Google), Section 5, verified by reading the PDF:
+
+> "Another approach is to apply a quantile-finding algorithm (Durfee, 2023). For example,
+> **max_groups_contributed can be set to, say, the 83rd percentile of the number of groups that a
+> DP unit contributes to.**"
+
+That is private selection of the l0 cross-group span bound, as a DP quantile of the per-unit
+distinct-group-count distribution, in a `GROUP BY` SQL surface syntax. **The mechanism claim is
+dead.** Their motivation is also ours nearly verbatim: *"Previous iterations of federated analytics
+placed the responsibility of computing such queries on the data analyst. This a point of friction
+for on-boarding."*
+
+Also found: **PipelineDP already ships `PrivateL0Calculator`** (verified from source via the GitHub
+API) — *"Calculates differentially-private l0 bound (i.e. max_partitions_contributed)"* — applying
+an exponential mechanism over candidate bounds with a bias/variance score
+`-0.5*P*sigma - 0.5*sum_u max(min(k_u,B) - k, 0)`, restricted to COUNT and PRIVACY_ID_COUNT.
+
+**What survives, and it is calibration rather than mechanism:**
+
+- They fix **k = 83** for *sample-complexity* reasons, not utility. Our sweep says the utility
+  optimum is **p = 0.95--0.99**, that p = 0.7 costs 17.75x worst-case, and that the right p depends
+  on whether `C_u` is shared with tau. That is an empirical calibration of a constant they set by a
+  different criterion.
+- They buy privacy by **splitting the population** (a disjoint Bernoulli sample, so "no DP unit is
+  ingested by both autotuning and aggregation"); we pay by composition, at ~1% of eps.
+- Their setting is one flat `GROUP BY` over pre-aggregated device uploads; ours is a relational
+  engine with joins, where the per-PU group count is a derived quantity.
+- The freeze-versus-re-select rule, and the finding that the whole approach **inverts** under smooth
+  sensitivity, are not addressed anywhere.
+
+**Also corrected: Smith 2011 does not contain the utility function.** Verified from the author's
+PDF: he attributes the method to McSherry & Talwar (*"an exponential-mechanism-based method due to
+McSherry and Talwar [MT07]"*) and presents `PrivateQuantile` (Algorithm 2) *"for completeness"* as a
+known construction, writing the output density directly with no named utility and no sensitivity
+lemma. The `u(X,o)` form and `Delta_u = 1` were formalised later by Gillenwater et al. (Lemma 7).
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this

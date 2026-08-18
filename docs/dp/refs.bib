@@ -93,6 +93,26 @@
                way" -- a volume bound, recommended in prose rather than instantiated.}
 }
 
+@misc{pipelinedp_l0,
+  author       = {{PipelineDP contributors}},
+  title        = {{PrivateL0Calculator}: differentially private selection of
+                  \texttt{max\_partitions\_contributed}},
+  howpublished = {\url{https://github.com/OpenMined/PipelineDP},
+                  \texttt{pipeline\_dp/private\_contribution\_bounds.py}},
+  year         = {2023},
+  annote       = {VERIFIED by reading the source via the GitHub API. This is the closest prior art
+                  for the MECHANISM: class docstring "Calculates differentially-private l0 bound
+                  (i.e. max_partitions_contributed)", and _calculate_l0 applies
+                  dp_computations.ExponentialMechanism over generate_possible_contribution_bounds.
+                  BUT the score is a bias/variance objective, not a quantile:
+                  score(k) = -0.5*P*std - 0.5*sum_uid max(min(#contributions(uid,D), B) - k, 0),
+                  i.e. noise impact plus dropped-data impact. Docstring says "Suitable only for
+                  COUNT and PRIVACY_ID_COUNT aggregations". Per the survey (not personally
+                  verified): experimental, Beam/Local only, needs a public upper bound and the
+                  partition list, sits outside the BudgetAccountant, and aggregate() never calls
+                  it.}
+}
+
 % ------------------------------------------------------- the DP quantile primitive
 
 @inproceedings{smith2011,
