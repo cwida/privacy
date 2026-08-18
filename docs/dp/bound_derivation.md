@@ -3308,6 +3308,68 @@ applied. **Two quantiles are not a sufficient statistic for the decision.** That
 releasing more of the curve, which is Dandan's point, but I do not have a rule that works and
 should not claim one.
 
+## RETRACTION: my criticism of the histogram reuse was wrong
+
+`attacks/verify.py`, `verify2.py`, `verify3.py`. Checking every All-or-Frozen claim against
+Dandan's Q1 -- she recalled that histogram thresholding was *not* much worse than Google's, and she
+was right.
+
+**1. My tau_AF implementation matches her closed form exactly** (ratio 1.0000 at four settings),
+so the threshold arithmetic was never in question.
+
+**2. At MATCHED `C_u`, her threshold is BELOW Google's -- exactly as she remembered.** Both
+mechanisms have the same noise scale `C_u/eps`, because a PU touches at most `C_u` groups either
+way. She takes a max over `B`=64 bins but needs only `rho <= delta`; Google reads one count but must
+divide `delta` across `C_u` groups. The AND saving outweighs the max-over-bins cost:
+
+| `C_u` | her tau_AF | her tau_PG | Google tau | AF/Google |
+|---|---|---|---|---|
+| 37 | 1,598.5 | 1,932.5 | 1,548.8 | 1.03 |
+| 72 | 3,110.6 | 3,880.4 | 3,132.8 | **0.99** |
+| 5 | 216.0 | 236.1 | 185.1 | 1.17 |
+| 1 | 43.2 | 43.2 | 33.8 | 1.28 |
+
+**RETRACTED: the "736x" figure.** I told her that reusing the bounding histogram costs 736x on the
+threshold versus a dedicated count. That compared her histogram at `C_u`=72 against a count at
+`C_e`=1 -- **two changes at once**, sensitivity and statistic. Like-for-like the ratio is 0.99--1.28x.
+The slogan I attached to it ("a free statistic is not free when it is the wrong statistic") was
+therefore unsupported, and what I labelled "repair A" was really *reduce `C_u`*, which is available
+to either statistic and has nothing to do with reuse.
+
+**3. The binding constraint is the AND, and it binds for Google's statistic too.** At matched
+`C_u`=37 on real data:
+
+| query | statistic | per-group pass | AND |
+|---|---|---|---|
+| tpch month | her max-bin | 98.8% | **0.0%** |
+| tpch month | Google count | 98.8% | **0.0%** |
+| tpch month\|prio | her max-bin | 96.4% | **0.0%** |
+| tpch month\|prio | Google count | 98.8% | **0.0%** |
+
+**Substituting Google's own statistic into the conjunction does not rescue it.** That is the
+cleanest statement available: the conjunction fails on its own terms, independently of which
+statistic feeds it and independently of `C_u`. Her design choices are sound; the AND is what does
+not survive contact with real group-size distributions.
+
+**4. Her statistic is genuinely weaker on fine groupings, and only there.** At `C_u`=1 with
+truncation applied to the histogram (her Q4, applied to her own design):
+
+| query | tau_AF | max-bin median | per-group pass | AND |
+|---|---|---|---|---|
+| tpch month | 43.2 | 738 | 98.8% | 0.0% |
+| tpch month\|prio | 43.2 | 152 | 96.4% | 0.0% |
+| tpch month\|nation | 43.2 | **31** | **2.4%** | 0.0% |
+
+On coarse groupings the max-bin clears the threshold comfortably. On `month|nation` the median
+max-bin is 31 against a threshold of 43.2, so the statistic itself fails -- this is the one place
+the `0.32 x support` ratio actually bites, and it is a fine-grouping effect rather than a general
+one.
+
+**Score so far: Dandan has been right three times** -- the missing truncation (Q4), the framing of
+the mechanism's purpose (Q2), and now the threshold comparison (Q1). Each of my errors made her
+proposal look worse than it is. The surviving objection is narrow and unchanged: the conjunction
+almost never fires, so the compact branch is almost never taken.
+
 ## Open threads — resume here
 
 Paused 13 Aug 2026, mid-investigation. Nothing in flight is uncommitted; the whole state is this
