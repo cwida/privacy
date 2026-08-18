@@ -1,3 +1,9 @@
+"""SUPERSEDED -- this harness truncates votes incorrectly. `keep` is built from indices into the
+pi-sorted arrays and then applied to the unsorted gi/val, so at C_u = 1 a PU can receive up to 9
+votes and 26.6% of PUs exceed the cap: a 9x epsilon violation in the vote channel. Numbers from
+it are unsafe. attacks/fineness_sweep.py was verified clean (0 PUs over cap) and supersedes it.
+"""
+
 import duckdb, numpy as np, itertools, sys
 EPS, DELTA = 1.0, 1e-6
 rng = np.random.default_rng(2026)
