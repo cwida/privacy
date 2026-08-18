@@ -113,6 +113,25 @@
                   it.}
 }
 
+@article{genai2025,
+  author    = {Albert Cheu and Artem Lagzdin and Brett McLarnon and Daniel Ramage and
+               Katharine Daly and Marco Gruteser and Peter Kairouz and Rakshita Tandon and
+               Stanislav Chiknavaryan and Timon Van Overveldt and Zoe Gong},
+  title     = {Toward provably private analytics and insights into {GenAI} use},
+  journal   = {arXiv preprint arXiv:2510.21684},
+  year      = {2025},
+  eprint    = {2510.21684},
+  archivePrefix = {arXiv},
+  annote    = {VERIFIED by reading the PDF: Sec 5 sets max_groups_contributed to a DP quantile
+               (the 83rd percentile) of the per-unit distinct-group-count distribution, via
+               Durfee's algorithm, under a GROUP BY surface syntax. Privacy is bought by SPLITTING
+               THE POPULATION ("no DP unit is ingested by both autotuning and aggregation"), not by
+               composition. k=83 is chosen for sample complexity, not utility. Author list
+               VERIFIED against the arXiv API on 18 Aug -- my first draft of this entry invented
+               first names from a surname-only report and added two authors (Doroshenko, Feldman)
+               who are not on the paper.}
+}
+
 % ------------------------------------------------------- the DP quantile primitive
 
 @inproceedings{smith2011,
