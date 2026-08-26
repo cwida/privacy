@@ -24,6 +24,7 @@
 #include "aggregates/as_clip_min_max.hpp"
 #include "aggregates/dp_approx_bounds.hpp"
 #include "aggregates/dp_laplace_noise.hpp"
+#include "aggregates/filterless_aggregate.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "parser/privacy_parser.hpp"
 #include "diff/pac_utility_diff.hpp"
@@ -108,6 +109,21 @@ static void ValidateDpSampleLanesSetting(ClientContext &, SetScope, Value &param
 
 static void ValidateDpSassMSetting(ClientContext &, SetScope, Value &parameter) {
 	ValidateDpSassM(parameter.GetValue<int64_t>());
+}
+
+static void ValidateFilterlessSampleBitsSetting(ClientContext &, SetScope, Value &parameter) {
+	ValidateFilterlessSampleBits(parameter.GetValue<int64_t>());
+}
+
+static void ValidateFilterlessClipSupportSetting(ClientContext &, SetScope, Value &parameter) {
+	if (parameter.IsNull()) {
+		return;
+	}
+	ValidateFilterlessClipSupport(parameter.GetValue<double>());
+}
+
+static void ValidateFilterlessFractionSetting(ClientContext &, SetScope, Value &parameter) {
+	ValidateFilterlessBoundsEpsilonFraction(parameter.GetValue<double>());
 }
 
 static double ComputePrivacyUnitCardinality(ClientContext &context) {
@@ -314,12 +330,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "Mutual information bound controlling privacy-utility tradeoff (default: 1/128). "
 	    "Lower values = more noise = more privacy. Set to 0 for deterministic (no noise) mode.",
 	    LogicalType::DOUBLE, Value::DOUBLE(1.0 / 128));
-	// Privacy mechanism selector — the single setting that picks the mechanism. The four modes
-	// are 'pac' (default), 'dp_standard', 'dp_elastic', and 'dp_sass'. The dp_* settings below
+	// Privacy mechanism selector — the single setting that picks the mechanism. The modes
+	// are 'pac' (default), 'dp_standard', 'dp_filterless', 'dp_elastic', and 'dp_sass'. The dp_* settings below
 	// tune the chosen mechanism; they do not select it.
-	db.config.AddExtensionOption("privacy_mode",
-	                             "Privacy mechanism: 'pac' (default), 'dp_standard', 'dp_elastic', or 'dp_sass'",
-	                             LogicalType::VARCHAR, Value("pac"));
+	db.config.AddExtensionOption(
+	    "privacy_mode",
+	    "Privacy mechanism: 'pac' (default), 'dp_standard', 'dp_filterless', 'dp_elastic', or 'dp_sass'",
+	    LogicalType::VARCHAR, Value("pac"));
 	db.config.AddExtensionOption(
 	    "dp_sample_lanes", "Number of sample lanes a privacy unit contributes in privacy_mode='dp_sass'",
 	    LogicalType::INTEGER, Value::INTEGER(DP_SAMPLE_DEFAULT_LANES), ValidateDpSampleLanesSetting);
@@ -335,11 +352,24 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "Use Google-compatible query-local ApproxBounds for SUM and AVG aggregates in "
 	                             "privacy_mode='dp_standard' instead of configured public bounds",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
-	// Differential privacy budget (ε), used by the dp_standard / dp_elastic / dp_sass modes.
-	db.config.AddExtensionOption("dp_epsilon",
-	                             "Differential privacy budget ε (used by dp_standard, dp_elastic, and dp_sass)",
-	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));
-	// Clipping bound for SUM/AVG, required when such an aggregate is present in any DP mode.
+	db.config.AddExtensionOption("dp_filterless_sample_bits",
+	                             "Number of high PU-hash bits required to be zero for filterless out-filter sampling",
+	                             LogicalType::INTEGER, Value::INTEGER(0), ValidateFilterlessSampleBitsSetting);
+	db.config.AddExtensionOption("dp_filterless_clip_support",
+	                             "Weighted PU support required for an exponential filterless clipping bin",
+	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE), ValidateFilterlessClipSupportSetting);
+	db.config.AddExtensionOption("dp_filterless_noise_bounds",
+	                             "Noise filterless clipping-bin support counts; required for a formal DP claim when "
+	                             "bounds depend on private contributions",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	db.config.AddExtensionOption("dp_filterless_bounds_epsilon_fraction",
+	                             "Fraction of aggregate epsilon reserved for private filterless bound selection",
+	                             LogicalType::DOUBLE, Value::DOUBLE(0.25), ValidateFilterlessFractionSetting);
+	// Differential privacy budget (ε), used by the dp_standard / dp_filterless / dp_elastic / dp_sass modes.
+	db.config.AddExtensionOption(
+	    "dp_epsilon", "Differential privacy budget ε (used by dp_standard, dp_filterless, dp_elastic, and dp_sass)",
+	    LogicalType::DOUBLE, Value::DOUBLE(1.0));
+	// Public clipping bound for SUM/AVG in the DP modes that use configured bounds.
 	// dp_standard/dp_sass bound each PU's total contribution; dp_elastic clips per tuple.
 	db.config.AddExtensionOption("dp_sum_bound",
 	                             "Clipping bound for SUM/AVG in DP modes, required when such an aggregate is present "
@@ -607,6 +637,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register dp_noise scalar function (value, scale) -> value + Lap(scale)
 	RegisterDpLaplaceNoiseFunction(loader);
 	RegisterDpApproxBoundsAggregateFunctions(loader);
+	RegisterFilterlessAggregateFunctions(loader);
 	RegisterDpSmoothMedianNoiseFunction(loader);
 	RegisterDpSassStabilityQueryFunction(loader);
 

@@ -49,8 +49,12 @@ def tau(eps_eta, delta_eta, cu):
     return np.inf if inner <= 0 else 1.0 - cu * np.log(inner) / eps_eta
 
 
-def approx_bounds(vals, eps_b, r, n_bins=46, p_success=1.0 - 1e-9):
+def approx_bounds(vals, eps_b, r, n_bins=46, p_success=1.0 - 1e-9, l1_sensitivity=1.0,
+                  failure_bound=None, max_failure=1e-6):
     """Google's ApproxBounds over log2 bins, WITH the relaxation loop.
+
+    `l1_sensitivity` scales the histogram noise when one PU can enter several bins.
+    `failure_bound`, when supplied, is a fixed public fallback rather than a data-dependent one.
 
     Wilson et al. retry with a laxer threshold when no bin clears, multiplying the failure
     probability by 10 each round while it stays under 1e-6. Without that retry a tightly
@@ -58,17 +62,22 @@ def approx_bounds(vals, eps_b, r, n_bins=46, p_success=1.0 - 1e-9):
     NEITHER clears, and the routine falls through to its 2^1 fallback -- which silently destroys
     the bound. That is not hypothetical: 20,000 PUs with norms all near 500 produced B = 2 here.
     """
+    if l1_sensitivity <= 0:
+        raise ValueError("l1_sensitivity must be positive")
+    effective_eps = eps_b / l1_sensitivity
     b = np.clip(np.floor(np.log2(np.maximum(vals, 1.0))).astype(int), 0, n_bins - 1)
     ub, cb = np.unique(b, return_counts=True)
-    noisy = cb + r.laplace(0, 1.0 / eps_b, size=len(ub))
+    noisy = cb + r.laplace(0, 1.0 / effective_eps, size=len(ub))
     fail = 1.0 - p_success
-    while fail <= 1e-6:
-        thr = -np.log(2.0 * (1.0 - (1.0 - fail) ** (1.0 / (2.0 * n_bins)))) / eps_b
+    while fail <= max_failure:
+        thr = -np.log(2.0 * (1.0 - (1.0 - fail) ** (1.0 / (2.0 * n_bins)))) / effective_eps
         ok = ub[noisy >= thr]
         if len(ok):
             return 2.0 ** (ok.max() + 1)
         fail *= 10.0
-    return 2.0 ** (ub.max() + 1)      # last resort: the top occupied bin, not 2^1
+    if failure_bound is not None:
+        return float(failure_bound)
+    return 2.0 ** (ub.max() + 1)      # legacy benchmark fallback: data-dependent, not a DP release
 
 
 class Cells:

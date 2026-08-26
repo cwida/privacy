@@ -58,13 +58,15 @@ void CompilePrivQuery(const PrivacyCompatibilityResult &check, OptimizerExtensio
 		CompilePacMechanism(check, input, plan, privacy_units, query, query_hash);
 	} else if (privacy_mode == "dp_standard") {
 		CompileDPStandardQuery(check, input, plan, privacy_units, query_hash);
+	} else if (privacy_mode == "dp_filterless") {
+		CompileDPFilterlessQuery(check, input, plan, privacy_units, query_hash);
 	} else if (privacy_mode == "dp_elastic") {
 		CompileDPElasticQuery(check, input, plan, privacy_units, query_hash);
 	} else if (privacy_mode == "dp_sass") {
 		CompileDPSampleMedianQuery(check, input, plan, privacy_units, query_hash);
 	} else {
 		throw InvalidInputException("unknown privacy_mode '" + privacy_mode +
-		                            "' (expected 'pac', 'dp_standard', 'dp_elastic', or 'dp_sass')");
+		                            "' (expected 'pac', 'dp_standard', 'dp_filterless', 'dp_elastic', or 'dp_sass')");
 	}
 }
 
