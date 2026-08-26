@@ -30,4 +30,10 @@ struct OptimizerExtensionInput;
 ColumnBinding PropagateSingleBinding(LogicalOperator &plan_root, idx_t source_table_index, ColumnBinding source_binding,
                                      const LogicalType &source_type, LogicalAggregate *target_agg);
 
+// General form used when a rewrite needs the binding at an operator below the final aggregate
+// (for example, to widen a WHERE filter before rows are discarded).
+ColumnBinding PropagateSingleBindingToOperator(LogicalOperator &plan_root, idx_t source_table_index,
+                                               ColumnBinding source_binding, const LogicalType &source_type,
+                                               LogicalOperator *target);
+
 } // namespace duckdb

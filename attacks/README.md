@@ -1,7 +1,8 @@
 # DP contribution-bounding experiments
 
 Harnesses behind `docs/dp/bound_derivation.md` (full chronological record, including superseded
-numbers) and `docs/dp/findings.pdf` (the cleaned-up write-up).
+numbers), `docs/dp/findings.pdf` (the cleaned-up write-up), and
+`docs/dp/filterless_value_bounds.md` (DP filterless bounds versus Google implicit DP).
 
 All scripts assume `duckdb.connect(config={'threads': 2})`, attach every `.db` READ_ONLY, and never
 write to one. Two of them have OOM-killed this machine; see **Resource limits** below.
@@ -10,13 +11,27 @@ write to one. Two of them have OOM-killed this machine; see **Resource limits** 
 
 | file | what it answers |
 |---|---|
-| `broad_benchmark.py` | headline utility, 14 queries x 3 datasets, vs Google DP as published |
+| `broad_benchmark.py` | reusable DP filterless bounds vs Google DP, including stable filtered cohorts |
+| `filterless_dp_attack.py` | billionaire filter-membership attack: filterless DP, Google implicit DP, unsafe max |
+| `filterless_one_lane_prototype.py` | simulated one-AS-lane metadata utility and worst-lane filter attack |
+| `filterless_complete_pu_poc.py` | complete-PU two-channel sampling with row filters, noisy bins, and TPC-H |
+| `filterless_sampling_benchmark.py` | sampled nonqualifying PU/group execution and HLL support error |
+| `filterless_three_way_benchmark.py` | current fixed-sample filterless utility and relational timing vs full filterless and Google-style DP |
+| `filterless_encoded_attack.py` | filter-change and database-update knife-edge attacks on the fixed-sample histogram |
 | `fineness_sweep.py` | the shared harness: `Cells`, `approx_bounds`, `google_values`, `tau` |
 | `ku_families.py` | which `k_u` distribution shape decides the winner (the scope condition) |
 | `em_cu_vs_manual.py` | automatic `C_u` selection vs what an analyst would supply |
 | `mia_full_stack.py` | membership-inference attacks; demonstrates the delta finding |
 
 ## By topic
+
+**Filterless DP bounds** — `filterless_dp_attack.py`; `broad_benchmark.py --datasets stable
+--trials 30` runs the low-cardinality filtered-cohort crossover workload.
+
+**One-lane filterless prototype** — `filterless_one_lane_prototype.py` simulates the existing AS
+hash-lane assignment, checks that the mean of all 64 inverse-probability lane estimates exactly
+recovers the full histogram, compares the safe hybrid with query-local exponential-bin selection,
+and runs the worst-selected-lane membership attack. It does not yet exercise a compiler rewrite.
 
 **l1 norm clip** — `fineness_sweep.py`, `geometry_matched.py`, `oracle_bounds.py`,
 `where_google_wins.py`, `ku_families.py`, `clip_geometry.py`, `dual_clip.py`, `attack_benchmark.py`

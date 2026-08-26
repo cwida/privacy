@@ -295,7 +295,7 @@ static void DpSassRecordStabilityFunction(DataChunk &args, ExpressionState &, Ve
 	}
 }
 
-static uint64_t GetDpNoiseSeed(ClientContext &context) {
+uint64_t GetDpNoiseSeed(ClientContext &context) {
 	Value seed_val;
 	uint64_t seed = 42;
 	if (context.TryGetCurrentSetting("privacy_seed", seed_val) && !seed_val.IsNull()) {
@@ -306,20 +306,46 @@ static uint64_t GetDpNoiseSeed(ClientContext &context) {
 	return (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
 }
 
-static double AddLaplaceNoise(double value, double scale, uint64_t seed, uint64_t nonce) {
+static void ValidateDpLaplaceScale(double scale) {
 	if (!std::isfinite(scale)) {
 		throw InvalidInputException("dp_noise: non-finite Laplace scale (sensitivity/ε overflow) — refusing to "
 		                            "release a value without noise");
 	}
+}
+
+static double AddDpLaplaceNoiseFromGenerator(double value, double scale, std::mt19937_64 &generator) {
 	if (scale <= 0.0) {
 		return value; // scale 0 = noise disabled / zero sensitivity → no noise
 	}
-	std::mt19937_64 gen(seed ^ (PAC_MAGIC_HASH * nonce));
 	std::uniform_real_distribution<double> uni(-0.5, 0.5);
-	double u = uni(gen);
+	double u = uni(generator);
 	double sign = (u < 0.0) ? -1.0 : 1.0;
 	double noise = -scale * sign * std::log(std::max(1e-300, 1.0 - 2.0 * std::abs(u)));
 	return value + noise;
+}
+
+double AddDpLaplaceNoise(double value, double scale, uint64_t seed, uint64_t nonce) {
+	ValidateDpLaplaceScale(scale);
+	if (scale <= 0.0) {
+		return value;
+	}
+	std::mt19937_64 generator(seed ^ (PAC_MAGIC_HASH * nonce));
+	return AddDpLaplaceNoiseFromGenerator(value, scale, generator);
+}
+
+void AddDpLaplaceNoiseBatch(const double *values, double *results, idx_t count, double scale, uint64_t seed,
+                            uint64_t nonce) {
+	ValidateDpLaplaceScale(scale);
+	if (scale <= 0.0) {
+		for (idx_t i = 0; i < count; i++) {
+			results[i] = values[i];
+		}
+		return;
+	}
+	std::mt19937_64 generator(seed ^ (PAC_MAGIC_HASH * nonce));
+	for (idx_t i = 0; i < count; i++) {
+		results[i] = AddDpLaplaceNoiseFromGenerator(values[i], scale, generator);
+	}
 }
 
 enum class DpSassNoiseChannel : uint64_t { ADDITIVE = 0, RATIO_NUMERATOR = 1, RATIO_DENOMINATOR = 2 };
@@ -351,7 +377,7 @@ static void DpLaplaceNoiseFunction(DataChunk &args, ExpressionState &state, Vect
 		TernaryExecutor::Execute<double, double, uint64_t, double>(
 		    args.data[0], args.data[1], args.data[2], result, count,
 		    [&](double value, double scale, uint64_t nonce) -> double {
-			    return AddLaplaceNoise(value, scale, seed, nonce);
+			    return AddDpLaplaceNoise(value, scale, seed, nonce);
 		    });
 		return;
 	}
@@ -359,7 +385,7 @@ static void DpLaplaceNoiseFunction(DataChunk &args, ExpressionState &state, Vect
 	uint64_t row_nonce = 0;
 	BinaryExecutor::Execute<double, double, double>(
 	    args.data[0], args.data[1], result, count,
-	    [&](double value, double scale) -> double { return AddLaplaceNoise(value, scale, seed, row_nonce++); });
+	    [&](double value, double scale) -> double { return AddDpLaplaceNoise(value, scale, seed, row_nonce++); });
 }
 
 void RegisterDpLaplaceNoiseFunction(ExtensionLoader &loader) {
@@ -592,7 +618,7 @@ static bool SmoothMedianNoiseRow(const list_entry_t &entry, const UnifiedVectorF
 		out = median;
 		return true;
 	}
-	out = AddLaplaceNoise(median, scale, seed, nonce);
+	out = AddDpLaplaceNoise(median, scale, seed, nonce);
 	return true;
 }
 
@@ -957,7 +983,7 @@ static void DpGuptMeanNoiseFunctionInternal(DataChunk &args, ExpressionState &st
 				result_validity.SetInvalid(i);
 				continue;
 			}
-			result_data[i] = noise_enabled ? AddLaplaceNoise(mean, scale, seed, nonce) : mean;
+			result_data[i] = noise_enabled ? AddDpLaplaceNoise(mean, scale, seed, nonce) : mean;
 		}
 	}
 }
@@ -1083,8 +1109,8 @@ static double ReleaseNonEmptyMean(const NonEmptyMeanStats &stats, double lower_b
 	    DpSassCellNoiseNonce(group_identity, aggregate_index, aggregate_count, DpSassNoiseChannel::RATIO_NUMERATOR);
 	uint64_t denominator_nonce =
 	    DpSassCellNoiseNonce(group_identity, aggregate_index, aggregate_count, DpSassNoiseChannel::RATIO_DENOMINATOR);
-	double noised_sum = AddLaplaceNoise(stats.shifted_sum, stats.numerator_noise_scale, seed, numerator_nonce);
-	double noised_count = AddLaplaceNoise(stats.valid_count, stats.denominator_noise_scale, seed, denominator_nonce);
+	double noised_sum = AddDpLaplaceNoise(stats.shifted_sum, stats.numerator_noise_scale, seed, numerator_nonce);
+	double noised_count = AddDpLaplaceNoise(stats.valid_count, stats.denominator_noise_scale, seed, denominator_nonce);
 	double released = empty_baseline + noised_sum / std::max(1.0, noised_count);
 	return std::max(lower_bound, std::min(upper_bound, released));
 }

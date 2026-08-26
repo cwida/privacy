@@ -89,6 +89,8 @@ def main():
     ap.add_argument("--delta0", type=float, default=1e-4)
     ap.add_argument("--n-queries", type=int, default=20)
     ap.add_argument("--trials", type=int, default=3)
+    ap.add_argument("--score-nonempty-only", action="store_true",
+                    help="do not charge public frozen groups whose filtered truth is zero")
     a = ap.parse_args()
 
     import duckdb
@@ -105,6 +107,8 @@ def main():
           f"eps_0={a.eps0}, delta_0={a.delta0:g} -> {len(gfix):,} groups")
     print(f"amortised over N={a.n_queries} queries, so the frozen arms run at "
           f"eps={EPS-amort:.3f} while the tau arms run at {EPS:.3f}\n")
+    if a.score_nonempty_only:
+        print("utility scope: filtered groups with nonzero truth; empty public groups are ignored\n")
     hdr = (f"{'filter':<22}{'groups':>8}{'in Gfix':>9}{'empty':>7}"
            f"{'goog-tau':>10}{'goog-froz':>11}{'ours-tau':>10}{'ours-froz':>11}{'vs goog':>9}")
     print(hdr)
@@ -146,7 +150,13 @@ def main():
                     v = vt[(t, ce)]
                     rel = (v + r.laplace(0, ce / (e_q * ee), size=c.K) >= thr) & (v > 0)
                 tot, sc = ((g_tot[cv], cv * U) if arm.startswith("goog") else (o_tot, B))
-                es.append(c.score(np.where(rel, tot + r.laplace(0, sc / (e_q * ev), size=c.K), 0.0)))
+                out = np.where(rel, tot + r.laplace(0, sc / (e_q * ev), size=c.K), 0.0)
+                if a.score_nonempty_only:
+                    keep = c.truth != 0
+                    es.append(float(np.sum(np.abs(out[keep] - c.truth[keep])) /
+                                    np.sum(np.abs(c.truth[keep]))))
+                else:
+                    es.append(c.score(out))
             return float(np.mean(es))
 
         best = {}
@@ -161,7 +171,10 @@ def main():
               flush=True)
         del c, cache
     print("\n'empty' = groups in G_fix absent from the filtered query; they are released anyway")
-    print("and contribute pure noise, which is what should eventually make freezing lose.")
+    if a.score_nonempty_only:
+        print("and are excluded from this Peter-scope utility metric.")
+    else:
+        print("and contribute pure noise, which is what should eventually make freezing lose.")
     print("'vs goog' compares ours-frozen against Google DP as published (goog-tau).")
 
 

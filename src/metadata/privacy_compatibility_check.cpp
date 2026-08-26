@@ -98,7 +98,8 @@ static bool ContainsRecursiveCTE(const LogicalOperator &op) {
 }
 
 static bool IsDPPrivacyMode(const string &privacy_mode) {
-	return privacy_mode == "dp_standard" || privacy_mode == "dp_elastic" || privacy_mode == "dp_sass";
+	return privacy_mode == "dp_standard" || privacy_mode == "dp_filterless" || privacy_mode == "dp_elastic" ||
+	       privacy_mode == "dp_sass";
 }
 
 static bool ContainsUnsupportedDPShape(const LogicalOperator &op, string &shape) {
