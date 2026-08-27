@@ -6,6 +6,13 @@ namespace duckdb {
 
 class ExtensionLoader;
 
+// Shared deterministic DP-noise helpers. Aggregate implementations capture the seed at bind time
+// and use a stable nonce per released cell.
+uint64_t GetDpNoiseSeed(ClientContext &context);
+double AddDpLaplaceNoise(double value, double scale, uint64_t seed, uint64_t nonce);
+void AddDpLaplaceNoiseBatch(const double *values, double *results, idx_t count, double scale, uint64_t seed,
+                            uint64_t nonce);
+
 struct DpSassStabilityQueryRecord {
 	int32_t aggregate_index;
 	vector<Value> stats;

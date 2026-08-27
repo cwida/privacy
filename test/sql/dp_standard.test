@@ -626,6 +626,162 @@ SELECT g, COUNT(*) FROM dp_standard_tiny_delta_events GROUP BY g;
 statement ok
 SET privacy_noise = true;
 
+# ---------------------------------------------------------------------------
+# Google-compatible query-local ApproxBounds for explicit SUM aggregates.
+# The upstream BoundedSum default spends half of each SUM's epsilon on bounds.
+# COUNT has no numeric value domain to infer, and AVG uses a separate bounded-
+# mean construction that this path deliberately rejects for now.
+# ---------------------------------------------------------------------------
+
+statement ok
+SET priv_rewrite = false;
+
+statement ok
+SET privacy_noise = false;
+
+# The per-PU floating accumulator is order-independent at AS precision, so
+# cancellation cannot erase the small contribution before bounding.
+query R
+SELECT priv_approx_sum(v)
+FROM (VALUES (1e16::DOUBLE), (1.0::DOUBLE), (-1e16::DOUBLE)) input(v);
+----
+1.000000
+
+# With noise disabled, the internal aggregate exposes the exact base-2 bin
+# choice. Values 3 and 10 select the symmetric bound [-16, 16].
+query IRRRII
+SELECT x.success, x.upper_bound, x.clipped_value, x.noise_scale,
+       x.selected_bin, x.contributions
+FROM (
+    SELECT dp_approx_bounds_sum_debug(v, 1.0, 1.0, 7::UBIGINT) AS x
+    FROM (VALUES (3.0::DOUBLE), (10.0::DOUBLE)) input(v)
+);
+----
+true	16.000000	13.000000	32.000000	1026	2
+
+# With private histogram noise enabled, a strongly supported value-100 bin
+# selects 128 on the first upstream threshold attempt.
+statement ok
+SET privacy_noise = true;
+
+query IRII
+SELECT x.success, x.upper_bound, x.attempts, x.contributions
+FROM (
+    SELECT dp_approx_bounds_sum_debug(100.0::DOUBLE, 1.0, 1.0, 9::UBIGINT) AS x
+    FROM range(1000)
+);
+----
+true	128.000000	1	1000
+
+statement ok
+SET privacy_noise = false;
+
+statement error
+SET dp_approx_bounds_epsilon_fraction = 1.0;
+----
+dp_approx_bounds_epsilon_fraction must be between 0 and 1
+
+statement ok
+SET dp_approx_bounds_epsilon_fraction = 0.5;
+
+statement ok
+SET priv_rewrite = true;
+
+statement ok
+SET privacy_mode = 'dp_standard';
+
+statement ok
+SET dp_standard_auto_bounds = true;
+
+statement ok
+SET dp_sum_bound = NULL;
+
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET dp_epsilon = 1.0;
+
+# The existing join has per-PU sums 0,5,...,45. ApproxBounds selects 64, so
+# automatic clipping is inert and the exact query-local total is 2250.
+query R
+SELECT SUM(amount) FROM orders;
+----
+2250.000000
+
+# WHERE is evaluated before the per-PU cells used by ApproxBounds.
+query R
+SELECT SUM(amount) FROM orders WHERE amount = 9;
+----
+450.000000
+
+# AVG must not silently fall back to configured public bounds in auto mode.
+statement error
+SELECT AVG(amount) FROM orders;
+----
+bounded-mean construction
+
+# A well-supported bin succeeds with private histogram noise.
+statement ok
+CREATE TABLE approx_bounds_users AS
+SELECT i::BIGINT AS uid, 100.0::DOUBLE AS amount, (i % 2)::INTEGER AS g
+FROM range(1000) t(i);
+
+statement ok
+ALTER TABLE approx_bounds_users ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE approx_bounds_users SET PU;
+
+statement ok
+ALTER PU TABLE approx_bounds_users ADD PROTECTED (amount);
+
+statement ok
+SET privacy_noise = true;
+
+query I
+SELECT SUM(amount) IS NOT NULL FROM approx_bounds_users;
+----
+true
+
+# Insufficient query-local support is an observable NULL rather than a public
+# fallback bound. This mirrors ApproxBounds' NotEnoughData status in SQL form.
+query I
+SELECT SUM(id) IS NULL FROM u WHERE id < 5;
+----
+true
+
+# Grouped automatic SUM composes its bound histogram and value release with
+# private partition selection. Each group has ample support.
+statement ok
+SET dp_delta = 0.000001;
+
+statement ok
+SET dp_max_groups_contributed = 1.0;
+
+query II rowsort
+SELECT g, SUM(amount) IS NOT NULL
+FROM approx_bounds_users
+GROUP BY g;
+----
+0	true
+1	true
+
+# Disabling auto bounds restores the fixed-public-bound contract.
+statement ok
+SET dp_standard_auto_bounds = false;
+
+statement ok
+SET dp_delta = NULL;
+
+statement error
+SELECT SUM(id) FROM u;
+----
+dp_standard: dp_sum_bound must be set
+
+statement ok
+SET privacy_noise = true;
+
 # A SUM-only list setting left in the session is irrelevant to a COUNT-only query.
 statement ok
 SET privacy_noise = false;

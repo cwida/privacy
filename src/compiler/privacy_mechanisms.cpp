@@ -1380,18 +1380,30 @@ static unique_ptr<Expression> FoldFilterIntoValue(const BoundAggregateExpression
 	return std::move(case_expr);
 }
 
+static unique_ptr<Expression> BuildDpApproxBoundsNonce(OptimizerExtensionInput &input, LogicalAggregate *agg,
+                                                       idx_t aggregate_pos) {
+	unique_ptr<Expression> nonce = make_uniq<BoundConstantExpression>(
+	    Value::UBIGINT(PAC_MAGIC_HASH ^ (static_cast<uint64_t>(agg->aggregate_index) * PAC_MAGIC_HASH) ^
+	                   static_cast<uint64_t>(aggregate_pos + 1)));
+	for (auto &group : agg->groups) {
+		auto group_hash = input.optimizer.BindScalarFunction("hash", group->Copy());
+		nonce = input.optimizer.BindScalarFunction("xor", std::move(nonce), std::move(group_hash));
+	}
+	return nonce;
+}
+
 // Returns the per-aggregate sensitivity vector (one entry per current agg->expression) and sets
 // `per_pu_out` true when a per-PU pre-aggregation was inserted (so support counts PU groups).
 static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                          LogicalAggregate *agg, const PrivacyCompatibilityResult &check,
                                          const DPFKChain &chain, const string &mech, const vector<AvgInfo> &avg_infos,
-                                         bool &per_pu_out) {
+                                         bool &per_pu_out, bool auto_bounds, double auto_bounds_epsilon) {
 	bool has_sum = AggregateContainsSum(agg);
 	bool has_count = AggregateContainsCount(agg);
 	per_pu_out = true;
 
 	double count_bound = has_count ? GetRequiredDpBound(input.context, "dp_count_bound", mech) : 0.0;
-	vector<double> sum_bounds = has_sum
+	vector<double> sum_bounds = has_sum && !auto_bounds
 	                                ? GetDpSumContributionBounds(input.context, mech, agg, avg_infos, true, count_bound)
 	                                : vector<double>(agg->expressions.size(), 0.0);
 	int64_t group_bound =
@@ -1439,8 +1451,13 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 			lower_exprs.push_back(BindPlainAggregate(
 			    input, aggr.function.name, FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/false)));
 		} else { // sum
-			lower_exprs.push_back(BindPlainAggregate(
-			    input, "sum", FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/true)));
+			auto value = FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/true);
+			if (auto_bounds && (value->return_type.InternalType() == PhysicalType::FLOAT ||
+			                    value->return_type.InternalType() == PhysicalType::DOUBLE)) {
+				lower_exprs.push_back(BindPlainAggregate(input, "priv_approx_sum", std::move(value)));
+			} else {
+				lower_exprs.push_back(BindPlainAggregate(input, "sum", std::move(value)));
+			}
 		}
 	}
 
@@ -1464,6 +1481,19 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 			auto clipped = ClipToBounds(input, std::move(lower_ref), mm_lower, mm_upper, lower_type);
 			agg->expressions[i] = BindPlainAggregate(input, min_max_name, std::move(clipped));
 			sens.push_back(mm_range * static_cast<double>(group_bound));
+		} else if (auto_bounds && !is_count[i]) {
+			vector<unique_ptr<Expression>> children;
+			children.push_back(
+			    BoundCastExpression::AddCastToType(input.context, std::move(lower_ref), LogicalType::DOUBLE));
+			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(auto_bounds_epsilon)));
+			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(static_cast<double>(group_bound))));
+			children.push_back(BuildDpApproxBoundsNonce(input, agg, i));
+			agg->expressions[i] = BindAggregateLocal(input, "dp_approx_bounds_sum", std::move(children));
+			// dp_approx_bounds_sum performs both private bound selection and value noise. The shared
+			// projection must pass it through instead of adding a second Laplace draw.
+			sens.push_back(0.0);
+			PRIVACY_DEBUG_PRINT("[dp_standard] ApproxBounds SUM rewrite: eps=" + std::to_string(auto_bounds_epsilon) +
+			                    " C_u=" + std::to_string(group_bound));
 		} else {
 			double bound = is_count[i] ? count_bound : sum_bounds[i];
 			double lo = is_count[i] ? 0.0 : -bound; // counts are non-negative
@@ -2728,10 +2758,12 @@ static vector<double> ClipAndComputeSensitivities(OptimizerExtensionInput &input
                                                   LogicalAggregate *agg, const PrivacyCompatibilityResult &check,
                                                   const DPFKChain &chain, const string &mech, DPSensitivityKind kind,
                                                   const vector<AvgInfo> &avg_infos, double epsilon, bool &per_pu,
-                                                  double self_join_factor) {
+                                                  double self_join_factor, bool auto_bounds,
+                                                  double auto_bounds_epsilon) {
 	if (kind == DPSensitivityKind::GLOBAL) {
 		// Standard DP: per-PU contribution clipping → sensitivity = the bound (data-independent).
-		return ApplyPerPuClipping(input, plan, agg, check, chain, mech, avg_infos, per_pu);
+		return ApplyPerPuClipping(input, plan, agg, check, chain, mech, avg_infos, per_pu, auto_bounds,
+		                          auto_bounds_epsilon);
 	}
 	// Elastic DP: per-row clipping + smooth elastic sensitivity from the join max-frequencies.
 	per_pu = false;
@@ -2877,10 +2909,15 @@ static void CompileDPLaplaceQuery(const PrivacyCompatibilityResult &check, Optim
 
 	auto fk_chain = ExtractDPFKChain(plan, privacy_units, check, allow_self_joins);
 	auto *agg = CheckDPAggregates(plan, mech);
+	bool auto_bounds = mech == "dp_standard" && GetBooleanSetting(input.context, "dp_standard_auto_bounds", false);
 
 	// Rewrite AVG(x) → SUM(x) + COUNT(*) before bound/clipping checks.
 	// Each AVG uses ε/2 per component so the combined cost is still ε-DP.
 	idx_t avg_count = CountAvgAggregates(agg);
+	if (auto_bounds && avg_count > 0) {
+		throw NotImplementedException(
+		    "dp_standard automatic bounds: AVG requires Google's bounded-mean construction and is not implemented yet");
+	}
 	AvgBounds avg_bounds;
 	const AvgBounds *avg_bounds_ptr = nullptr;
 	if (avg_count > 0) {
@@ -2891,6 +2928,8 @@ static void CompileDPLaplaceQuery(const PrivacyCompatibilityResult &check, Optim
 	auto avg_infos = RewriteAvgAggregates(input, agg, use_bounded_mean, avg_bounds_ptr);
 	idx_t n_original_aggs = agg->expressions.size() - avg_infos.size();
 	idx_t n_groups = agg->groups.size();
+	double auto_bounds_epsilon =
+	    auto_bounds ? epsilon / static_cast<double>(n_original_aggs + (n_groups > 0 ? 1 : 0)) : 0.0;
 
 	// Capture the desired final output type of each DP aggregate *before* clipping. Standard-DP
 	// per-PU clipping rewrites e.g. COUNT→SUM(clipped count), changing the type; the noise
@@ -2909,7 +2948,7 @@ static void CompileDPLaplaceQuery(const PrivacyCompatibilityResult &check, Optim
 
 	bool per_pu = false;
 	auto agg_sens = ClipAndComputeSensitivities(input, plan, agg, check, fk_chain, mech, kind, avg_infos, epsilon,
-	                                            per_pu, self_join_factor);
+	                                            per_pu, self_join_factor, auto_bounds, auto_bounds_epsilon);
 
 	FinalizeDPLaplace(input, plan, agg, fk_chain, mech, avg_infos, agg_sens, output_types, n_original_aggs, n_groups,
 	                  epsilon, noise_enabled, per_pu, true);

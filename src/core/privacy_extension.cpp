@@ -22,6 +22,7 @@
 #include "aggregates/as_clip_sum.hpp"
 #include "aggregates/as_min_max.hpp"
 #include "aggregates/as_clip_min_max.hpp"
+#include "aggregates/dp_approx_bounds.hpp"
 #include "aggregates/dp_laplace_noise.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "parser/privacy_parser.hpp"
@@ -107,6 +108,10 @@ static void ValidateDpSampleLanesSetting(ClientContext &, SetScope, Value &param
 
 static void ValidateDpSassMSetting(ClientContext &, SetScope, Value &parameter) {
 	ValidateDpSassM(parameter.GetValue<int64_t>());
+}
+
+static void ValidateDpApproxBoundsFractionSetting(ClientContext &, SetScope, Value &parameter) {
+	ValidateDpApproxBoundsEpsilonFraction(parameter.GetValue<double>());
 }
 
 static double ComputePrivacyUnitCardinality(ClientContext &context) {
@@ -330,6 +335,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "When true, dp_sass SUM/COUNT sample answers are rescaled to full-dataset-estimator "
 	                             "scale before release. When false, they remain on raw subsample-answer scale.",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	db.config.AddExtensionOption("dp_standard_auto_bounds",
+	                             "Use Google-compatible query-local ApproxBounds for explicit SUM aggregates in "
+	                             "privacy_mode='dp_standard' instead of configured dp_sum_bound values",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	db.config.AddExtensionOption("dp_approx_bounds_epsilon_fraction",
+	                             "Fraction of each dp_standard SUM budget reserved for ApproxBounds; Google's "
+	                             "bounded-sum default is 0.5",
+	                             LogicalType::DOUBLE, Value::DOUBLE(0.5), ValidateDpApproxBoundsFractionSetting);
 	// Differential privacy budget (ε), used by the dp_standard / dp_elastic / dp_sass modes.
 	db.config.AddExtensionOption("dp_epsilon",
 	                             "Differential privacy budget ε (used by dp_standard, dp_elastic, and dp_sass)",
@@ -599,6 +612,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register dp_noise scalar function (value, scale) -> value + Lap(scale)
 	RegisterDpLaplaceNoiseFunction(loader);
+	RegisterDpApproxBoundsAggregateFunctions(loader);
 	RegisterDpSmoothMedianNoiseFunction(loader);
 	RegisterDpSassStabilityQueryFunction(loader);
 
