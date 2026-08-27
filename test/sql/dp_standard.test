@@ -647,6 +647,22 @@ FROM (VALUES (1e16::DOUBLE), (1.0::DOUBLE), (-1e16::DOUBLE)) input(v);
 ----
 1.000000
 
+# Contributions outside the fixed-point fast path retain their magnitude, and cancellation still
+# happens before the small term is added.
+query R
+SELECT priv_approx_sum(v)
+FROM (VALUES (1e100::DOUBLE), (1.0::DOUBLE), (-1e100::DOUBLE)) input(v);
+----
+1.000000
+
+# NaN is ignored and infinity is mapped to the largest finite value, so neither input becomes a
+# data-dependent query error.
+query II
+SELECT priv_approx_sum(v) = 2.0, priv_approx_sum(w) > 1e300
+FROM (VALUES ('nan'::DOUBLE, 2.0::DOUBLE), (2.0::DOUBLE, 'inf'::DOUBLE)) input(v, w);
+----
+true	true
+
 # Automatic bounded mean enforces the public per-PU contribution cap before
 # values reach its histogram, normalized sum, or count.
 query I
@@ -656,24 +672,44 @@ FROM (VALUES (1.0::DOUBLE), (2.0::DOUBLE), (3.0::DOUBLE)) input(v);
 2
 
 # With noise disabled, the internal aggregate exposes the exact base-2 bin
-# choice. Values 3 and 10 select Google's asymmetric bounds [2, 16].
+# choice. ApproxBounds initially selects [2, 16], then bounded SUM relaxes it to
+# [-16, 16] without changing sensitivity.
 query IRRRRII
 SELECT x.success, x.lower_bound, x.upper_bound, x.clipped_value, x.noise_scale,
        x.selected_bin, x.contributions
 FROM (
-    SELECT dp_approx_bounds_sum_debug(v, 1.0, 1.0, 7::UBIGINT) AS x
+    SELECT dp_approx_bounds_sum_debug(v, 1.0, 1.0, 2.2250738585072014e-308, 2047::UBIGINT) AS x
     FROM (VALUES (3.0::DOUBLE), (10.0::DOUBLE)) input(v)
 );
 ----
-true	2.000000	16.000000	13.000000	32.000000	1026	2
+true	-16.000000	16.000000	13.000000	32.000000	1026	2
+
+# Integral inputs use scale 1 and 64 bins instead of paying a threshold for the complete DOUBLE
+# domain. The selected and relaxed bounds are otherwise identical.
+query IRRRRII
+SELECT x.success, x.lower_bound, x.upper_bound, x.clipped_value, x.noise_scale,
+       x.selected_bin, x.contributions
+FROM (
+    SELECT dp_approx_bounds_sum_debug(v, 1.0, 1.0, 1.0, 64::UBIGINT) AS x
+    FROM (VALUES (3.0::DOUBLE), (10.0::DOUBLE)) input(v)
+);
+----
+true	-16.000000	16.000000	13.000000	32.000000	4	2
 
 # Google bounded mean uses the same private bounds for a midpoint-normalized
 # sum and count. With noise disabled, mean([3, 10]) is exact.
 query R
-SELECT dp_approx_bounds_mean(values, 1.0, 1.0, 2.0, 11::UBIGINT)
+SELECT dp_approx_bounds_mean(values, 1.0, 1.0, 2.0, 2.2250738585072014e-308, 2047::UBIGINT)
 FROM (VALUES ([3.0::DOUBLE, 10.0::DOUBLE])) input(values);
 ----
 6.500000
+
+# Equal integral bounds are widened before normalization, avoiding a zero-range mean.
+query R
+SELECT dp_approx_bounds_mean(values, 1.0, 1.0, 2.0, 1.0, 64::UBIGINT)
+FROM (VALUES ([0.0::DOUBLE, 0.0::DOUBLE])) input(values);
+----
+0.000000
 
 # With private histogram noise enabled, a strongly supported value-100 bin
 # selects 128 on the first upstream threshold attempt.
@@ -683,7 +719,8 @@ SET privacy_noise = true;
 query IRII
 SELECT x.success, x.upper_bound, x.attempts, x.contributions
 FROM (
-    SELECT dp_approx_bounds_sum_debug(100.0::DOUBLE, 1.0, 1.0, 9::UBIGINT) AS x
+    SELECT dp_approx_bounds_sum_debug(100.0::DOUBLE, 1.0, 1.0, 2.2250738585072014e-308,
+                                      2047::UBIGINT) AS x
     FROM range(1000)
 );
 ----

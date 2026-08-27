@@ -67,6 +67,11 @@ set(EXTENSION_SOURCES
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
+if(WIN32)
+    target_link_libraries(${EXTENSION_NAME} PUBLIC bcrypt)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} PUBLIC bcrypt)
+endif()
+
 install(
   TARGETS ${EXTENSION_NAME}
   EXPORT "${DUCKDB_EXPORT_SET}"

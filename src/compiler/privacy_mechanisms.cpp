@@ -1,5 +1,6 @@
 #include "compiler/privacy_mechanisms.hpp"
 #include "aggregates/as_aggregate.hpp"
+#include "aggregates/dp_approx_bounds.hpp"
 #include "utils/privacy_helpers.hpp"
 #include "compiler/privacy_compiler.hpp"
 #include "compiler/privacy_compiler_helpers.hpp"
@@ -1393,18 +1394,6 @@ static unique_ptr<Expression> FoldFilterIntoValue(const BoundAggregateExpression
 	return std::move(case_expr);
 }
 
-static unique_ptr<Expression> BuildDpApproxBoundsNonce(OptimizerExtensionInput &input, LogicalAggregate *agg,
-                                                       idx_t aggregate_pos) {
-	unique_ptr<Expression> nonce = make_uniq<BoundConstantExpression>(
-	    Value::UBIGINT(PAC_MAGIC_HASH ^ (static_cast<uint64_t>(agg->aggregate_index) * PAC_MAGIC_HASH) ^
-	                   static_cast<uint64_t>(aggregate_pos + 1)));
-	for (auto &group : agg->groups) {
-		auto group_hash = input.optimizer.BindScalarFunction("hash", group->Copy());
-		nonce = input.optimizer.BindScalarFunction("xor", std::move(nonce), std::move(group_hash));
-	}
-	return nonce;
-}
-
 // Returns the per-aggregate sensitivity vector (one entry per current agg->expression) and sets
 // `per_pu_out` true when a per-PU pre-aggregation was inserted (so support counts PU groups).
 static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
@@ -1448,6 +1437,7 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 	auto pu_key = BuildPerPuGroupExpression(input, plan, agg, check, chain, mech);
 	vector<bool> is_count;
 	is_count.reserve(n);
+	vector<DpApproxBoundsParameters> bounds_parameters(n, GetDpApproxBoundsParameters(LogicalType::DOUBLE));
 	vector<unique_ptr<Expression>> lower_exprs;
 	lower_exprs.reserve(n);
 	for (idx_t i = 0; i < n; i++) {
@@ -1473,6 +1463,7 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 			    input, aggr.function.name, FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/false)));
 		} else if (avg_sum_info && avg_sum_info->IsAutomaticBoundsMean()) {
 			auto value = FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/false);
+			bounds_parameters[i] = GetDpApproxBoundsParameters(value->return_type);
 			vector<unique_ptr<Expression>> children;
 			children.push_back(
 			    BoundCastExpression::AddCastToType(input.context, std::move(value), LogicalType::DOUBLE));
@@ -1480,6 +1471,7 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 			lower_exprs.push_back(BindAggregateLocal(input, "dp_bounded_value_list", std::move(children)));
 		} else { // sum
 			auto value = FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/true);
+			bounds_parameters[i] = GetDpApproxBoundsParameters(value->return_type);
 			if (auto_bounds && (value->return_type.InternalType() == PhysicalType::FLOAT ||
 			                    value->return_type.InternalType() == PhysicalType::DOUBLE)) {
 				lower_exprs.push_back(BindPlainAggregate(input, "priv_approx_sum", std::move(value)));
@@ -1517,25 +1509,32 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(static_cast<double>(group_bound))));
 			children.push_back(
 			    make_uniq<BoundConstantExpression>(Value::DOUBLE(static_cast<double>(automatic_mean_count_bound))));
-			children.push_back(BuildDpApproxBoundsNonce(input, agg, i));
+			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(bounds_parameters[i].scale)));
+			children.push_back(make_uniq<BoundConstantExpression>(
+			    Value::UBIGINT(static_cast<uint64_t>(bounds_parameters[i].num_bins))));
 			agg->expressions[i] = BindAggregateLocal(input, "dp_approx_bounds_mean", std::move(children));
 			sens.push_back(0.0);
 			PRIVACY_DEBUG_PRINT("[dp_standard] ApproxBounds AVG rewrite: eps=" + std::to_string(auto_bounds_epsilon) +
-			                    " max_contributions=" + std::to_string(automatic_mean_count_bound) +
-			                    " C_u=" + std::to_string(group_bound));
+			                    " max_contributions=" + std::to_string(automatic_mean_count_bound) + " C_u=" +
+			                    std::to_string(group_bound) + " scale=" + std::to_string(bounds_parameters[i].scale) +
+			                    " bins=" + std::to_string(bounds_parameters[i].num_bins));
 		} else if (auto_bounds && !is_count[i]) {
 			vector<unique_ptr<Expression>> children;
 			children.push_back(
 			    BoundCastExpression::AddCastToType(input.context, std::move(lower_ref), LogicalType::DOUBLE));
 			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(auto_bounds_epsilon)));
 			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(static_cast<double>(group_bound))));
-			children.push_back(BuildDpApproxBoundsNonce(input, agg, i));
+			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(bounds_parameters[i].scale)));
+			children.push_back(make_uniq<BoundConstantExpression>(
+			    Value::UBIGINT(static_cast<uint64_t>(bounds_parameters[i].num_bins))));
 			agg->expressions[i] = BindAggregateLocal(input, "dp_approx_bounds_sum", std::move(children));
 			// dp_approx_bounds_sum performs both private bound selection and value noise. The shared
 			// projection must pass it through instead of adding a second Laplace draw.
 			sens.push_back(0.0);
 			PRIVACY_DEBUG_PRINT("[dp_standard] ApproxBounds SUM rewrite: eps=" + std::to_string(auto_bounds_epsilon) +
-			                    " C_u=" + std::to_string(group_bound));
+			                    " C_u=" + std::to_string(group_bound) +
+			                    " scale=" + std::to_string(bounds_parameters[i].scale) +
+			                    " bins=" + std::to_string(bounds_parameters[i].num_bins));
 		} else {
 			double bound = is_count[i] ? count_bound : sum_bounds[i];
 			double lo = is_count[i] ? 0.0 : -bound; // counts are non-negative
@@ -1602,19 +1601,9 @@ static LogicalFilter *ApplySupportFilter(OptimizerExtensionInput &input, unique_
 	unique_ptr<Expression> support_expr =
 	    BoundCastExpression::AddCastToType(input.context, std::move(support_ref), LogicalType::DOUBLE);
 	if (noise_scale > 0.0 && std::isfinite(noise_scale)) {
-		unique_ptr<Expression> nonce = make_uniq<BoundConstantExpression>(
-		    Value::UBIGINT(PAC_MAGIC_HASH ^ (static_cast<uint64_t>(agg->aggregate_index) * PAC_MAGIC_HASH) ^
-		                   static_cast<uint64_t>(support_pos + 1)));
-		for (idx_t gi = 0; gi < agg->groups.size(); gi++) {
-			unique_ptr<Expression> group_ref =
-			    make_uniq<BoundColumnRefExpression>(agg->types[gi], ColumnBinding(agg->group_index, gi));
-			auto group_hash = input.optimizer.BindScalarFunction("hash", std::move(group_ref));
-			nonce = input.optimizer.BindScalarFunction("xor", std::move(nonce), std::move(group_hash));
-		}
 		vector<unique_ptr<Expression>> noise_children;
 		noise_children.push_back(std::move(support_expr));
 		noise_children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(noise_scale)));
-		noise_children.push_back(std::move(nonce));
 		support_expr = BindScalarLocal(input, "dp_noise", std::move(noise_children));
 	}
 	auto threshold_const = make_uniq<BoundConstantExpression>(Value::DOUBLE(threshold));
@@ -1755,18 +1744,9 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 		unique_ptr<Expression> value_expr =
 		    BoundCastExpression::AddCastToType(input.context, std::move(col_ref), LogicalType::DOUBLE);
 		auto scale_expr = make_uniq<BoundConstantExpression>(Value::DOUBLE(scale));
-		unique_ptr<Expression> nonce = make_uniq<BoundConstantExpression>(Value::UBIGINT(
-		    PAC_MAGIC_HASH ^ (static_cast<uint64_t>(agg_idx) * PAC_MAGIC_HASH) ^ static_cast<uint64_t>(ai + 1)));
-		for (idx_t gi = 0; gi < n_groups; gi++) {
-			unique_ptr<Expression> group_ref =
-			    make_uniq<BoundColumnRefExpression>(agg_types[gi], ColumnBinding(group_idx, gi));
-			auto group_hash = input.optimizer.BindScalarFunction("hash", std::move(group_ref));
-			nonce = input.optimizer.BindScalarFunction("xor", std::move(nonce), std::move(group_hash));
-		}
 		vector<unique_ptr<Expression>> noise_children;
 		noise_children.push_back(std::move(value_expr));
 		noise_children.push_back(std::move(scale_expr));
-		noise_children.push_back(std::move(nonce));
 		unique_ptr<Expression> noised = BindScalarLocal(input, "dp_noise", std::move(noise_children));
 		if (has_min_max) {
 			if (IsMinMaxAggregate(agg->expressions[ai]->Cast<BoundAggregateExpression>())) {

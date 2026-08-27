@@ -1,18 +1,28 @@
 #include "aggregates/dp_laplace_noise.hpp"
 #include "aggregates/as_aggregate.hpp"
 #include "privacy_debug.hpp"
+#include "duckdb/common/bit_utils.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/function/scalar_function.hpp"
-#include "duckdb/common/vector_operations/ternary_executor.hpp"
 #include "duckdb/common/vector_operations/unary_executor.hpp"
 #include "duckdb/common/exception.hpp"
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cmath>
+#include <cstring>
 #include <limits>
-#include <random>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <stdlib.h>
+#elif defined(__linux__)
+#include <sys/random.h>
+#elif defined(_WIN32)
+#include <windows.h>
+#include <bcrypt.h>
+#endif
 
 namespace duckdb {
 
@@ -295,17 +305,6 @@ static void DpSassRecordStabilityFunction(DataChunk &args, ExpressionState &, Ve
 	}
 }
 
-uint64_t GetDpNoiseSeed(ClientContext &context) {
-	Value seed_val;
-	uint64_t seed = 42;
-	if (context.TryGetCurrentSetting("privacy_seed", seed_val) && !seed_val.IsNull()) {
-		seed = uint64_t(seed_val.GetValue<int64_t>());
-	} else {
-		seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(context.ActiveTransaction().GetActiveQuery());
-	}
-	return (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
-}
-
 static void ValidateDpLaplaceScale(double scale) {
 	if (!std::isfinite(scale)) {
 		throw InvalidInputException("dp_noise: non-finite Laplace scale (sensitivity/ε overflow) — refusing to "
@@ -313,28 +312,171 @@ static void ValidateDpLaplaceScale(double scale) {
 	}
 }
 
-static double AddDpLaplaceNoiseFromGenerator(double value, double scale, std::mt19937_64 &generator) {
+// Google-style granular Laplace sampling uses a geometric distribution on a power-of-two lattice.
+// Keeping both the input and noise on that lattice avoids the holes in floating-point output space
+// that an inverse-CDF implementation can otherwise reveal.
+class SecureDpRandom {
+public:
+	uint64_t Next() {
+		if (next == BUFFER_WORDS) {
+			Refill();
+		}
+		return buffer[next++];
+	}
+
+private:
+	static constexpr idx_t BUFFER_WORDS = 8192;
+	array<uint64_t, BUFFER_WORDS> buffer;
+	idx_t next = BUFFER_WORDS;
+
+	void Refill() {
+#if defined(__APPLE__)
+		// arc4random_buf is backed by the operating-system CSPRNG and cannot silently fall back to a
+		// predictable generator.
+		arc4random_buf(buffer.data(), sizeof(buffer));
+#elif defined(__linux__)
+		// Read the complete buffer. An interrupted getrandom call is retried; any other failure aborts
+		// the release rather than substituting a time- or query-derived seed.
+		auto output = reinterpret_cast<uint8_t *>(buffer.data());
+		size_t remaining = sizeof(buffer);
+		while (remaining > 0) {
+			auto read_count = getrandom(output, remaining, 0);
+			if (read_count < 0 && errno == EINTR) {
+				continue;
+			}
+			if (read_count <= 0) {
+				throw IOException("dp_noise: operating-system entropy source failed");
+			}
+			output += static_cast<size_t>(read_count);
+			remaining -= static_cast<size_t>(read_count);
+		}
+#elif defined(_WIN32)
+		auto status = BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(buffer.data()),
+		                              static_cast<ULONG>(sizeof(buffer)), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+		if (status < 0) {
+			throw IOException("dp_noise: operating-system entropy source failed");
+		}
+#else
+		// A deterministic fallback would invalidate the formal guarantee. Unsupported platforms fail
+		// closed until they provide an audited operating-system CSPRNG integration.
+		throw NotImplementedException("dp_noise: secure operating-system randomness is not supported on this platform");
+#endif
+		next = 0;
+	}
+};
+
+static SecureDpRandom &GetSecureDpRandom() {
+	// Each execution thread owns a buffer, so sampling needs no shared lock while every refill still
+	// obtains fresh entropy from the operating system.
+	static thread_local SecureDpRandom random;
+	return random;
+}
+
+static uint64_t SampleLeadingZeroGeometric() {
+	uint64_t result = 1;
+	uint64_t random = 0;
+	while (random == 0 && result < 1023) {
+		random = GetSecureDpRandom().Next();
+		result += CountZeros<uint64_t>::Leading(random);
+	}
+	return result;
+}
+
+static double SecureUniformDouble() {
+	// Populate both the IEEE-754 exponent and mantissa from secure bits. Unlike mapping an integer to
+	// a fixed 53-bit grid, this reaches the full floating-point support near zero used by Bernoulli
+	// draws in the bitwise geometric sampler.
+	static_assert(std::numeric_limits<double>::is_iec559 && std::numeric_limits<double>::radix == 2,
+	              "granular DP noise requires IEEE-754 binary64");
+	constexpr idx_t MANTISSA_BITS = std::numeric_limits<double>::digits - 1;
+	constexpr uint64_t MANTISSA_MASK = (uint64_t(1) << MANTISSA_BITS) - 1;
+	uint64_t random = GetSecureDpRandom().Next();
+	uint64_t bits = random & MANTISSA_MASK;
+	uint64_t exponent_source = random >> MANTISSA_BITS;
+	uint64_t exponent = CountZeros<uint64_t>::Leading(exponent_source) - MANTISSA_BITS + 1;
+	if (exponent_source == 0) {
+		exponent += SampleLeadingZeroGeometric() - 1;
+	}
+	if (exponent < 1023) {
+		bits += (uint64_t(1023) - exponent) << MANTISSA_BITS;
+	}
+	double result;
+	memcpy(&result, &bits, sizeof(result));
+	return result;
+}
+
+static double NextPowerOfTwo(double value) {
+	int exponent;
+	double fraction = std::frexp(value, &exponent);
+	return fraction == 0.5 ? std::ldexp(1.0, exponent - 1) : std::ldexp(1.0, exponent);
+}
+
+static double RoundToGranularity(double value, double granularity) {
+	double remainder = std::fmod(value, granularity);
+	if (std::abs(remainder) > granularity / 2.0) {
+		return value - remainder + std::copysign(granularity, remainder);
+	}
+	if (std::abs(remainder) == granularity / 2.0) {
+		return value + granularity / 2.0;
+	}
+	return value - remainder;
+}
+
+class GranularLaplaceDistribution {
+public:
+	explicit GranularLaplaceDistribution(double scale) {
+		double unrounded = std::max(std::ldexp(scale, -40), std::numeric_limits<double>::denorm_min());
+		granularity = NextPowerOfTwo(unrounded);
+		// This ratio is evaluated in a form that cannot overflow when scale is near DOUBLE's maximum.
+		double lambda = 1.0 / (scale / granularity + 1.0);
+		for (idx_t bit = 0; bit < probabilities.size(); bit++) {
+			double exponent = std::ldexp(lambda, static_cast<int>(bit));
+			if (exponent > 100.0) {
+				break;
+			}
+			probabilities[probability_count++] = 1.0 / (std::exp(exponent) + 1.0);
+		}
+	}
+
+	double AddNoise(double value) const {
+		uint64_t magnitude;
+		bool positive;
+		do {
+			magnitude = SampleMagnitude();
+			positive = (GetSecureDpRandom().Next() & 1) != 0;
+			// Zero has only one sign. Retrying the negative zero draw gives the discrete distribution the
+			// same probability mass on both sides of the origin.
+		} while (magnitude == 0 && !positive);
+		double noise = static_cast<double>(magnitude) * granularity;
+		return RoundToGranularity(value, granularity) + (positive ? noise : -noise);
+	}
+
+private:
+	double granularity;
+	array<double, 63> probabilities;
+	idx_t probability_count = 0;
+
+	uint64_t SampleMagnitude() const {
+		uint64_t result = 0;
+		for (idx_t reverse = probability_count; reverse > 0; reverse--) {
+			idx_t bit = reverse - 1;
+			if (SecureUniformDouble() < probabilities[bit]) {
+				result |= uint64_t(1) << bit;
+			}
+		}
+		return result;
+	}
+};
+
+double AddDpLaplaceNoise(double value, double scale) {
+	ValidateDpLaplaceScale(scale);
 	if (scale <= 0.0) {
 		return value; // scale 0 = noise disabled / zero sensitivity → no noise
 	}
-	std::uniform_real_distribution<double> uni(-0.5, 0.5);
-	double u = uni(generator);
-	double sign = (u < 0.0) ? -1.0 : 1.0;
-	double noise = -scale * sign * std::log(std::max(1e-300, 1.0 - 2.0 * std::abs(u)));
-	return value + noise;
+	return GranularLaplaceDistribution(scale).AddNoise(value);
 }
 
-double AddDpLaplaceNoise(double value, double scale, uint64_t seed, uint64_t nonce) {
-	ValidateDpLaplaceScale(scale);
-	if (scale <= 0.0) {
-		return value;
-	}
-	std::mt19937_64 generator(seed ^ (PAC_MAGIC_HASH * nonce));
-	return AddDpLaplaceNoiseFromGenerator(value, scale, generator);
-}
-
-void AddDpLaplaceNoiseBatch(const double *values, double *results, idx_t count, double scale, uint64_t seed,
-                            uint64_t nonce) {
+void AddDpLaplaceNoiseBatch(const double *values, double *results, idx_t count, double scale) {
 	ValidateDpLaplaceScale(scale);
 	if (scale <= 0.0) {
 		for (idx_t i = 0; i < count; i++) {
@@ -342,78 +484,67 @@ void AddDpLaplaceNoiseBatch(const double *values, double *results, idx_t count, 
 		}
 		return;
 	}
-	std::mt19937_64 generator(seed ^ (PAC_MAGIC_HASH * nonce));
+	GranularLaplaceDistribution distribution(scale);
 	for (idx_t i = 0; i < count; i++) {
-		results[i] = AddDpLaplaceNoiseFromGenerator(values[i], scale, generator);
+		results[i] = distribution.AddNoise(values[i]);
 	}
 }
 
-enum class DpSassNoiseChannel : uint64_t { ADDITIVE = 0, RATIO_NUMERATOR = 1, RATIO_DENOMINATOR = 2 };
-
-static uint64_t DpSassCellNoiseNonce(uint64_t group_identity, uint64_t aggregate_index, uint64_t aggregate_count,
-                                     DpSassNoiseChannel channel) {
-	if (group_identity == 0 || aggregate_count == 0 || aggregate_index >= aggregate_count) {
-		throw InternalException("dp_sass: invalid aggregate-cell identity");
-	}
-	uint64_t group_offset = group_identity - 1;
-	if (group_offset > (std::numeric_limits<uint64_t>::max() - aggregate_index) / aggregate_count) {
-		throw InvalidInputException("dp_sass: aggregate-cell identity overflow");
-	}
-	uint64_t cell_index = group_offset * aggregate_count + aggregate_index;
-	constexpr uint64_t CHANNEL_COUNT = 3;
-	uint64_t channel_index = static_cast<uint64_t>(channel);
-	if (cell_index > (std::numeric_limits<uint64_t>::max() - channel_index) / CHANNEL_COUNT) {
-		throw InvalidInputException("dp_sass: aggregate-cell nonce overflow");
-	}
-	return cell_index * CHANNEL_COUNT + channel_index;
-}
-
-static void DpLaplaceNoiseFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &context = state.GetContext();
-	uint64_t seed = GetDpNoiseSeed(context);
+static void DpLaplaceNoiseFunction(DataChunk &args, ExpressionState &, Vector &result) {
 	auto count = args.size();
-
-	if (args.ColumnCount() == 3) {
-		TernaryExecutor::Execute<double, double, uint64_t, double>(
-		    args.data[0], args.data[1], args.data[2], result, count,
-		    [&](double value, double scale, uint64_t nonce) -> double {
-			    return AddDpLaplaceNoise(value, scale, seed, nonce);
-		    });
-		return;
+	UnifiedVectorFormat values;
+	UnifiedVectorFormat scales;
+	args.data[0].ToUnifiedFormat(count, values);
+	args.data[1].ToUnifiedFormat(count, scales);
+	auto value_data = UnifiedVectorFormat::GetData<double>(values);
+	auto scale_data = UnifiedVectorFormat::GetData<double>(scales);
+	// BinaryExecutor preserves a CONSTANT vector by invoking its callback once. Noise is volatile, so
+	// materialize a FLAT result and sample once per output row even when value and scale are constants.
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto result_data = FlatVector::GetData<double>(result);
+	auto &result_validity = FlatVector::Validity(result);
+	result_validity.Reset();
+	unique_ptr<GranularLaplaceDistribution> shared_distribution;
+	double shared_scale = 0.0;
+	bool constant_scale = args.data[1].GetVectorType() == VectorType::CONSTANT_VECTOR &&
+	                      scales.validity.RowIsValid(scales.sel->get_index(0));
+	if (constant_scale) {
+		shared_scale = scale_data[scales.sel->get_index(0)];
+		ValidateDpLaplaceScale(shared_scale);
+		if (shared_scale > 0.0) {
+			shared_distribution = make_uniq<GranularLaplaceDistribution>(shared_scale);
+		}
 	}
 
-	uint64_t row_nonce = 0;
-	BinaryExecutor::Execute<double, double, double>(
-	    args.data[0], args.data[1], result, count,
-	    [&](double value, double scale) -> double { return AddDpLaplaceNoise(value, scale, seed, row_nonce++); });
+	for (idx_t row = 0; row < count; row++) {
+		auto value_index = values.sel->get_index(row);
+		auto scale_index = scales.sel->get_index(row);
+		if (!values.validity.RowIsValid(value_index) || !scales.validity.RowIsValid(scale_index)) {
+			result_validity.SetInvalid(row);
+			continue;
+		}
+		if (constant_scale) {
+			result_data[row] =
+			    shared_distribution ? shared_distribution->AddNoise(value_data[value_index]) : value_data[value_index];
+		} else {
+			result_data[row] = AddDpLaplaceNoise(value_data[value_index], scale_data[scale_index]);
+		}
+	}
 }
 
 void RegisterDpLaplaceNoiseFunction(ExtensionLoader &loader) {
 	ScalarFunctionSet set("dp_noise");
-	set.AddFunction(ScalarFunction("dp_noise", {LogicalType::DOUBLE, LogicalType::DOUBLE}, LogicalType::DOUBLE,
-	                               DpLaplaceNoiseFunction));
-	set.AddFunction(ScalarFunction("dp_noise", {LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::UBIGINT},
-	                               LogicalType::DOUBLE, DpLaplaceNoiseFunction));
+	ScalarFunction function("dp_noise", {LogicalType::DOUBLE, LogicalType::DOUBLE}, LogicalType::DOUBLE,
+	                        DpLaplaceNoiseFunction);
+	// Every released cell needs an independent draw. VOLATILE prevents constant folding and common-
+	// subexpression elimination from reusing one draw across aggregate cells.
+	function.stability = FunctionStability::VOLATILE;
+	set.AddFunction(std::move(function));
 	CreateScalarFunctionInfo info(set);
 	FunctionDescription desc;
-	desc.description = "Adds Laplace(0, scale) noise to a value for elastic-sensitivity DP.";
+	desc.description = "Adds secure granular Laplace noise to a DP aggregate.";
 	info.descriptions.push_back(std::move(desc));
 	loader.RegisterFunction(std::move(info));
-}
-
-static double LaplaceNoise(double scale, uint64_t seed) {
-	if (!std::isfinite(scale)) {
-		throw InvalidInputException(
-		    "dp_sass: non-finite smooth-sensitivity Laplace scale — refusing to release without noise");
-	}
-	if (scale <= 0.0) {
-		return 0.0; // zero sensitivity (stable statistic) or noise disabled → no noise
-	}
-	std::mt19937_64 gen(seed);
-	std::uniform_real_distribution<double> uni(-0.5, 0.5);
-	double u = uni(gen);
-	double sign = (u < 0.0) ? -1.0 : 1.0;
-	return -scale * sign * std::log(std::max(1e-300, 1.0 - 2.0 * std::abs(u)));
 }
 
 static double MedianLocalSensitivity(const vector<double> &values, int changed_lanes) {
@@ -607,7 +738,7 @@ static bool SmoothMedianStatsRow(const list_entry_t &entry, const UnifiedVectorF
 static bool SmoothMedianNoiseRow(const list_entry_t &entry, const UnifiedVectorFormat &child_data,
                                  const PAC_FLOAT *child_values, double epsilon, double delta, int sample_lanes_raw,
                                  bool bounded, double lower_bound, double upper_bound, double empty_default,
-                                 bool noise_enabled, uint64_t seed, uint64_t nonce, double &out) {
+                                 bool noise_enabled, double &out) {
 	double median = 0.0;
 	double scale = 0.0;
 	if (!SmoothMedianStatsRow(entry, child_data, child_values, epsilon, delta, sample_lanes_raw, bounded, lower_bound,
@@ -618,20 +749,13 @@ static bool SmoothMedianNoiseRow(const list_entry_t &entry, const UnifiedVectorF
 		out = median;
 		return true;
 	}
-	out = AddDpLaplaceNoise(median, scale, seed, nonce);
+	out = AddDpLaplaceNoise(median, scale);
 	return true;
 }
 
 static void DpSmoothMedianNoiseFunctionInternal(DataChunk &args, ExpressionState &state, Vector &result,
                                                 bool emit_scale, bool record_scale = false) {
 	auto &context = state.GetContext();
-	Value seed_val;
-	uint64_t seed = (context.TryGetCurrentSetting("privacy_seed", seed_val) && !seed_val.IsNull())
-	                    ? uint64_t(seed_val.GetValue<int64_t>())
-	                    : uint64_t(std::random_device {}());
-	if (seed_val.IsNull()) {
-		seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(context.ActiveTransaction().GetActiveQuery());
-	}
 	bool noise_enabled = true;
 	Value noise_val;
 	if (context.TryGetCurrentSetting("privacy_noise", noise_val) && !noise_val.IsNull()) {
@@ -729,15 +853,9 @@ static void DpSmoothMedianNoiseFunctionInternal(DataChunk &args, ExpressionState
 			}
 		} else {
 			double released = 0.0;
-			uint64_t nonce = has_cell_identity
-			                     ? DpSassCellNoiseNonce(static_cast<uint64_t>(group_identities[group_identity_idx]),
-			                                            static_cast<uint64_t>(aggregate_indexes[aggregate_index_idx]),
-			                                            static_cast<uint64_t>(aggregate_counts[aggregate_count_idx]),
-			                                            DpSassNoiseChannel::ADDITIVE)
-			                     : list_entries[list_idx].offset;
 			if (SmoothMedianNoiseRow(entry, child_data, child_values, epsilon, delta,
 			                         sample_lanes_values[sample_lanes_idx], bounded, lower_bound, upper_bound,
-			                         empty_default, noise_enabled, seed, nonce, released)) {
+			                         empty_default, noise_enabled, released)) {
 				result_data[i] = released;
 			} else {
 				result_validity.SetInvalid(i);
@@ -767,13 +885,6 @@ static void DpSmoothMedianRecordNoiseScaleFunction(DataChunk &args, ExpressionSt
 //                         INTEGER lanes, DOUBLE lower, DOUBLE upper) -> DOUBLE
 static void DpAggregateFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &context = state.GetContext();
-	Value seed_val;
-	uint64_t seed = (context.TryGetCurrentSetting("privacy_seed", seed_val) && !seed_val.IsNull())
-	                    ? uint64_t(seed_val.GetValue<int64_t>())
-	                    : uint64_t(std::random_device {}());
-	if (seed_val.IsNull()) {
-		seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(context.ActiveTransaction().GetActiveQuery());
-	}
 	bool noise_enabled = true;
 	Value noise_val;
 	if (context.TryGetCurrentSetting("privacy_noise", noise_val) && !noise_val.IsNull()) {
@@ -821,8 +932,7 @@ static void DpAggregateFunction(DataChunk &args, ExpressionState &state, Vector 
 		double released = 0.0;
 		if (SmoothMedianNoiseRow(list_entries[list_idx], child_data, child_values, epsilons[eps_idx], deltas[delta_idx],
 		                         sample_lanes_values[sample_lanes_idx], /*bounded=*/true, lower_bound, upper_bound,
-		                         /*empty_default=*/(lower_bound + upper_bound) / 2.0, noise_enabled, seed,
-		                         list_entries[list_idx].offset, released)) {
+		                         /*empty_default=*/(lower_bound + upper_bound) / 2.0, noise_enabled, released)) {
 			result_data[i] = released;
 		} else {
 			result_validity.SetInvalid(i);
@@ -876,13 +986,6 @@ template <class STATS_ROW>
 static void DpGuptMeanNoiseFunctionInternal(DataChunk &args, ExpressionState &state, Vector &result, bool emit_scale,
                                             bool record_scale, const STATS_ROW &stats_row) {
 	auto &context = state.GetContext();
-	Value seed_val;
-	uint64_t seed = (context.TryGetCurrentSetting("privacy_seed", seed_val) && !seed_val.IsNull())
-	                    ? uint64_t(seed_val.GetValue<int64_t>())
-	                    : uint64_t(std::random_device {}());
-	if (seed_val.IsNull()) {
-		seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(context.ActiveTransaction().GetActiveQuery());
-	}
 	bool noise_enabled = true;
 	Value noise_val;
 	if (context.TryGetCurrentSetting("privacy_noise", noise_val) && !noise_val.IsNull()) {
@@ -969,12 +1072,6 @@ static void DpGuptMeanNoiseFunctionInternal(DataChunk &args, ExpressionState &st
 				result_validity.SetInvalid(i);
 			}
 		} else {
-			uint64_t nonce = has_cell_identity
-			                     ? DpSassCellNoiseNonce(static_cast<uint64_t>(group_identities[group_identity_idx]),
-			                                            static_cast<uint64_t>(aggregate_indexes[aggregate_index_idx]),
-			                                            static_cast<uint64_t>(aggregate_counts[aggregate_count_idx]),
-			                                            DpSassNoiseChannel::ADDITIVE)
-			                     : list_entries[list_idx].offset;
 			double mean = 0.0;
 			double scale = 0.0;
 			if (!stats_row(list_entries[list_idx], child_data, child_values, epsilons[eps_idx],
@@ -983,7 +1080,7 @@ static void DpGuptMeanNoiseFunctionInternal(DataChunk &args, ExpressionState &st
 				result_validity.SetInvalid(i);
 				continue;
 			}
-			result_data[i] = noise_enabled ? AddDpLaplaceNoise(mean, scale, seed, nonce) : mean;
+			result_data[i] = noise_enabled ? AddDpLaplaceNoise(mean, scale) : mean;
 		}
 	}
 }
@@ -1100,17 +1197,12 @@ static bool NonEmptyMeanStatsRow(const list_entry_t &entry, const UnifiedVectorF
 }
 
 static double ReleaseNonEmptyMean(const NonEmptyMeanStats &stats, double lower_bound, double upper_bound,
-                                  double empty_baseline, bool noise_enabled, uint64_t seed, uint64_t group_identity,
-                                  uint64_t aggregate_index, uint64_t aggregate_count) {
+                                  double empty_baseline, bool noise_enabled) {
 	if (!noise_enabled) {
 		return stats.mean;
 	}
-	uint64_t numerator_nonce =
-	    DpSassCellNoiseNonce(group_identity, aggregate_index, aggregate_count, DpSassNoiseChannel::RATIO_NUMERATOR);
-	uint64_t denominator_nonce =
-	    DpSassCellNoiseNonce(group_identity, aggregate_index, aggregate_count, DpSassNoiseChannel::RATIO_DENOMINATOR);
-	double noised_sum = AddDpLaplaceNoise(stats.shifted_sum, stats.numerator_noise_scale, seed, numerator_nonce);
-	double noised_count = AddDpLaplaceNoise(stats.valid_count, stats.denominator_noise_scale, seed, denominator_nonce);
+	double noised_sum = AddDpLaplaceNoise(stats.shifted_sum, stats.numerator_noise_scale);
+	double noised_count = AddDpLaplaceNoise(stats.valid_count, stats.denominator_noise_scale);
 	double released = empty_baseline + noised_sum / std::max(1.0, noised_count);
 	return std::max(lower_bound, std::min(upper_bound, released));
 }
@@ -1118,7 +1210,6 @@ static double ReleaseNonEmptyMean(const NonEmptyMeanStats &stats, double lower_b
 static void DpNonEmptyMeanNoiseFunctionInternal(DataChunk &args, ExpressionState &state, Vector &result,
                                                 bool record_scales) {
 	auto &context = state.GetContext();
-	uint64_t seed = GetDpNoiseSeed(context);
 	bool noise_enabled = true;
 	Value noise_val;
 	if (context.TryGetCurrentSetting("privacy_noise", noise_val) && !noise_val.IsNull()) {
@@ -1201,10 +1292,7 @@ static void DpNonEmptyMeanNoiseFunctionInternal(DataChunk &args, ExpressionState
 			if (aggregate_counts[aggregate_count_idx] <= 0 || group_identities[group_identity_idx] <= 0) {
 				throw InternalException("dp_nonempty_mean_noise: invalid aggregate-cell identity");
 			}
-			result_data[i] = ReleaseNonEmptyMean(stats, lower_bound, upper_bound, empty_baseline, noise_enabled, seed,
-			                                     static_cast<uint64_t>(group_identities[group_identity_idx]),
-			                                     static_cast<uint64_t>(aggregate_indexes[aggregate_index_idx]),
-			                                     static_cast<uint64_t>(aggregate_counts[aggregate_count_idx]));
+			result_data[i] = ReleaseNonEmptyMean(stats, lower_bound, upper_bound, empty_baseline, noise_enabled);
 		}
 		PRIVACY_DEBUG_PRINT("dp_sass nonempty-lane mean: valid=" + std::to_string(stats.valid_count) +
 		                    " numerator_scale=" + std::to_string(stats.numerator_noise_scale) +

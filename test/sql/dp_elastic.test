@@ -75,9 +75,15 @@ SELECT abs(dp_noise(100.0, 5.0) - 100.0) < 1000;
 ----
 true
 
+# DuckDB must not fold or reuse a DP draw when its inputs happen to be constants.
+query T
+SELECT stability FROM duckdb_functions() WHERE function_name = 'dp_noise';
+----
+VOLATILE
+
+# DP noise uses fresh secure randomness rather than a user-controlled nonce.
 query II
-SELECT dp_noise(100.0, 5.0, 1::UBIGINT) = dp_noise(100.0, 5.0, 1::UBIGINT),
-       dp_noise(100.0, 5.0, 1::UBIGINT) <> dp_noise(100.0, 5.0, 2::UBIGINT);
+SELECT isfinite(dp_noise(100.0, 5.0)), isfinite(dp_noise(100.0, 5.0));
 ----
 true	true
 

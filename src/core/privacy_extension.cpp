@@ -449,11 +449,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "Privacy failure probability δ for DP partition selection and smooth sensitivity. Use "
 	                             "SET dp_delta=<value> or PRAGMA refresh_dp_stats(<epsilon>).",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
-	// Set deterministic RNG seed for PAC functions (useful for tests)
-	db.config.AddExtensionOption("privacy_seed", "RNG seed for reproducible noised results", LogicalType::BIGINT);
-	// Enable/disable PAC noise application (useful for testing, since noise affects result determinism)
-	db.config.AddExtensionOption("privacy_noise", "Enable/disable PAC noise application (set to false for debugging)",
-	                             LogicalType::BOOLEAN);
+	// PAC experiments can be reproduced with a public seed. Formal DP mechanisms intentionally ignore
+	// this setting and draw fresh operating-system entropy for every release.
+	db.config.AddExtensionOption("privacy_seed", "RNG seed for reproducible PAC results", LogicalType::BIGINT);
+	// Internal test escape hatch shared by PAC and DP. A DP release has no privacy guarantee when this
+	// is false, so production configurations must leave it enabled.
+	db.config.AddExtensionOption(
+	    "privacy_noise", "[INTERNAL TESTING ONLY] Enable privacy noise; formal DP requires true", LogicalType::BOOLEAN);
 	db.config.AddExtensionOption("pac_sample_diversity_check",
 	                             "[INTERNAL] Reject PAC/AS aggregates that lack sample diversity", LogicalType::BOOLEAN,
 	                             Value::BOOLEAN(true));
