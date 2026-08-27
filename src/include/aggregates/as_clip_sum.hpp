@@ -82,6 +82,9 @@ struct PacClipSumIntState {
 	// GetLevel: route value to lowest level where shifted value fits in 8 bits
 	// ========================================================================
 	static inline int GetLevel(uint64_t abs_val) {
+		if (NUM_LEVELS == CLIP_NUM_LEVELS_64) {
+			return ClipSumLevel64(abs_val);
+		}
 		if (abs_val < 256) {
 			return 0;
 		}
