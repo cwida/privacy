@@ -77,7 +77,7 @@ FilterlessSettings GetFilterlessSettings(ClientContext &context) {
 
 struct FilterlessBin {
 	double support;
-	double answer_sum;
+	hugeint_t answer_sum;
 	uint64_t answer_count;
 };
 
@@ -135,6 +135,7 @@ struct FilterlessBindData : public FunctionData {
 	double max_groups;
 	bool has_explicit_config;
 	double input_scale;
+	bool approximate_values;
 
 	unique_ptr<FunctionData> Copy() const override {
 		return make_uniq<FilterlessBindData>(*this);
@@ -146,7 +147,7 @@ struct FilterlessBindData : public FunctionData {
 		       noise_bounds == other->noise_bounds && noise_enabled == other->noise_enabled &&
 		       epsilon == other->epsilon && bounds_fraction == other->bounds_fraction &&
 		       max_groups == other->max_groups && has_explicit_config == other->has_explicit_config &&
-		       input_scale == other->input_scale;
+		       input_scale == other->input_scale && approximate_values == other->approximate_values;
 	}
 };
 
@@ -171,7 +172,7 @@ static double EvaluateConstantDouble(ClientContext &context, const Expression &e
 }
 
 static unique_ptr<FunctionData> BindFilterless(ClientContext &context, vector<unique_ptr<Expression>> &arguments,
-                                               idx_t config_offset) {
+                                               idx_t config_offset, bool approximate_values) {
 	auto settings = GetFilterlessSettings(context);
 	bool noise_enabled = IsPacNoiseEnabled(context, true);
 	double epsilon = GetValidatedDpEpsilon(context, "dp_filterless");
@@ -203,26 +204,43 @@ static unique_ptr<FunctionData> BindFilterless(ClientContext &context, vector<un
 	result->max_groups = max_groups;
 	result->has_explicit_config = has_explicit_config;
 	result->input_scale = 1.0;
+	result->approximate_values = approximate_values;
 	return std::move(result);
 }
 
-static unique_ptr<FunctionData> BindFilterlessSumCount(ClientContext &context, AggregateFunction &,
-                                                       vector<unique_ptr<Expression>> &arguments) {
-	return BindFilterless(context, arguments, 4);
+static unique_ptr<FunctionData> BindFilterlessSum(ClientContext &context, AggregateFunction &,
+                                                  vector<unique_ptr<Expression>> &arguments) {
+	return BindFilterless(context, arguments, 4, true);
+}
+
+static unique_ptr<FunctionData> BindFilterlessCount(ClientContext &context, AggregateFunction &,
+                                                    vector<unique_ptr<Expression>> &arguments) {
+	return BindFilterless(context, arguments, 4, false);
 }
 
 static unique_ptr<FunctionData> BindFilterlessAvg(ClientContext &context, AggregateFunction &,
                                                   vector<unique_ptr<Expression>> &arguments) {
-	return BindFilterless(context, arguments, 6);
+	return BindFilterless(context, arguments, 6, true);
 }
 
-static idx_t BinIndex(double magnitude) {
-	if (magnitude == 0.0) {
+constexpr uint64_t FILTERLESS_MAX_SCALED_MAGNITUDE = uint64_t(1) << 60;
+
+static uint64_t AsScaledMagnitude(double value) {
+	auto scaled = ScaleFloatToInt64<double, CLIP_DOUBLE_SHIFT>(value);
+	// Use symmetric saturation so equal out-of-range positive and negative
+	// values cancel in the two-sided accumulator.
+	return scaled == INT64_MIN ? static_cast<uint64_t>(INT64_MAX) : static_cast<uint64_t>(std::abs(scaled));
+}
+
+static uint64_t ScaledMagnitude(double value) {
+	return std::min(AsScaledMagnitude(value), FILTERLESS_MAX_SCALED_MAGNITUDE);
+}
+
+static idx_t BinIndex(uint64_t scaled_magnitude) {
+	if (scaled_magnitude == 0) {
 		return 0;
 	}
-	auto scaled = ScaleFloatToInt64<double, CLIP_DOUBLE_SHIFT>(magnitude);
-	uint64_t bits = static_cast<uint64_t>(std::max<int64_t>(scaled, 0));
-	int bit_width = bits == 0 ? 1 : 64 - __builtin_clzll(bits);
+	int bit_width = 64 - __builtin_clzll(scaled_magnitude);
 	int index = (bit_width - 1) / CLIP_LEVEL_SHIFT;
 	return static_cast<idx_t>(std::min(index, CLIP_NUM_LEVELS_64 - 1));
 }
@@ -243,23 +261,28 @@ static FilterlessBin *EnsureBins(FilterlessBin *&bins, ArenaAllocator &allocator
 	return bins;
 }
 
-static FilterlessBin &GetBin(FilterlessComponentState &state, double value, ArenaAllocator &allocator) {
+static FilterlessBin &GetBin(FilterlessComponentState &state, double value, uint64_t scaled_magnitude,
+                             ArenaAllocator &allocator) {
 	bool negative = std::signbit(value) && value != 0.0;
-	auto index = BinIndex(std::abs(value));
+	auto index = BinIndex(scaled_magnitude);
 	return negative ? EnsureBins(state.negative, allocator)[index] : EnsureBins(state.positive, allocator)[index];
 }
 
 static void UpdateComponent(FilterlessComponentState &state, uint64_t pu_hash, bool active, bool answer_valid,
                             double answer_value, bool histogram_valid, double histogram_value,
-                            const FilterlessBindData &bind, ArenaAllocator &allocator) {
+                            const FilterlessBindData &bind, ArenaAllocator &allocator, bool approximate_values) {
 	if (active) {
 		state.active_contributions++;
 		if (answer_valid) {
 			if (!std::isfinite(answer_value)) {
 				throw InvalidInputException("filterless: filtered aggregate contribution must be finite");
 			}
-			auto &answer_bin = GetBin(state, answer_value, allocator);
-			answer_bin.answer_sum += answer_value;
+			auto magnitude = ScaledMagnitude(answer_value);
+			auto &answer_bin = GetBin(state, answer_value, magnitude, allocator);
+			if (approximate_values) {
+				magnitude = ClipApproximateMagnitude64(magnitude);
+			}
+			answer_bin.answer_sum = Hugeint::Add(answer_bin.answer_sum, Hugeint::Convert(magnitude));
 			answer_bin.answer_count++;
 		}
 	}
@@ -267,7 +290,8 @@ static void UpdateComponent(FilterlessComponentState &state, uint64_t pu_hash, b
 		if (!std::isfinite(histogram_value)) {
 			throw InvalidInputException("filterless: histogram aggregate contribution must be finite");
 		}
-		GetBin(state, histogram_value, allocator).support += bind.sample_weight;
+		auto magnitude = ScaledMagnitude(histogram_value);
+		GetBin(state, histogram_value, magnitude, allocator).support += bind.sample_weight;
 		state.sampled_contributions++;
 	}
 }
@@ -279,7 +303,7 @@ static void CombineBins(const FilterlessBin *source, FilterlessBin *&target, Are
 	auto target_bins = EnsureBins(target, allocator);
 	for (idx_t i = 0; i < CLIP_NUM_LEVELS_64; i++) {
 		target_bins[i].support += source[i].support;
-		target_bins[i].answer_sum += source[i].answer_sum;
+		target_bins[i].answer_sum = Hugeint::Add(target_bins[i].answer_sum, source[i].answer_sum);
 		target_bins[i].answer_count += source[i].answer_count;
 	}
 }
@@ -321,26 +345,43 @@ static int FindSupportedBin(const BIN_TYPE *bins, idx_t bin_count, const Filterl
 	return selected;
 }
 
-static double ClipComponent(const FilterlessComponentState &state, int negative_bin, int positive_bin,
-                            double negative_bound, double positive_bound) {
-	double result = 0.0;
+static hugeint_t ScaledBinUpperBound(int index) {
+	if (index < 0) {
+		return hugeint_t(0);
+	}
+	auto exponent = static_cast<uint64_t>((index + 1) * CLIP_LEVEL_SHIFT);
+	return Hugeint::Convert(uint64_t(1) << exponent);
+}
+
+static hugeint_t AddRepeatedBound(hugeint_t result, hugeint_t bound, uint64_t count, bool negative) {
+	if (count == 0) {
+		return result;
+	}
+	auto total = Hugeint::Multiply(bound, Hugeint::Convert(count));
+	return negative ? Hugeint::Subtract(result, total) : Hugeint::Add(result, total);
+}
+
+static double ClipComponent(const FilterlessComponentState &state, int negative_bin, int positive_bin) {
+	auto positive_bound = ScaledBinUpperBound(positive_bin);
+	auto negative_bound = ScaledBinUpperBound(negative_bin);
+	hugeint_t result(0);
 	for (int i = 0; i < CLIP_NUM_LEVELS_64; i++) {
 		if (state.positive) {
 			if (i <= positive_bin) {
-				result += state.positive[i].answer_sum;
+				result = Hugeint::Add(result, state.positive[i].answer_sum);
 			} else {
-				result += static_cast<double>(state.positive[i].answer_count) * positive_bound;
+				result = AddRepeatedBound(result, positive_bound, state.positive[i].answer_count, false);
 			}
 		}
 		if (state.negative) {
 			if (i <= negative_bin) {
-				result += state.negative[i].answer_sum;
+				result = Hugeint::Subtract(result, state.negative[i].answer_sum);
 			} else {
-				result -= static_cast<double>(state.negative[i].answer_count) * negative_bound;
+				result = AddRepeatedBound(result, negative_bound, state.negative[i].answer_count, true);
 			}
 		}
 	}
-	return result;
+	return Hugeint::Cast<double>(result) / CLIP_DOUBLE_SCALE;
 }
 
 static FilterlessResult FinalizeComponent(const FilterlessComponentState &state, const FilterlessBindData &bind,
@@ -357,7 +398,7 @@ static FilterlessResult FinalizeComponent(const FilterlessComponentState &state,
 	                                          histogram_epsilon, negative_support);
 	double positive_bound = BinUpperBound(positive_bin);
 	double negative_bound = BinUpperBound(negative_bin);
-	double clipped = ClipComponent(state, negative_bin, positive_bin, negative_bound, positive_bound);
+	double clipped = ClipComponent(state, negative_bin, positive_bin);
 	double scale = std::max(negative_bound, positive_bound) * bind.max_groups / value_epsilon;
 	return {-negative_bound,
 	        positive_bound,
@@ -474,14 +515,6 @@ static hugeint_t ExactClippingBound(int bin, const FilterlessBindData &bind) {
 	return result;
 }
 
-static hugeint_t AddRepeatedExactBound(hugeint_t result, hugeint_t bound, uint64_t count, bool negative) {
-	if (count == 0) {
-		return result;
-	}
-	auto total = Hugeint::Multiply(bound, Hugeint::Convert(count));
-	return negative ? Hugeint::Subtract(result, total) : Hugeint::Add(result, total);
-}
-
 static hugeint_t ClipExactComponent(const FilterlessExactComponentState &state, int negative_bin, int positive_bin,
                                     const FilterlessBindData &bind) {
 	auto positive_bound = ExactClippingBound(positive_bin, bind);
@@ -491,12 +524,11 @@ static hugeint_t ClipExactComponent(const FilterlessExactComponentState &state, 
 		if (state.positive) {
 			result = i <= positive_bin
 			             ? Hugeint::Add(result, state.positive[i].answer_sum)
-			             : AddRepeatedExactBound(result, positive_bound, state.positive[i].answer_count, false);
+			             : AddRepeatedBound(result, positive_bound, state.positive[i].answer_count, false);
 		}
 		if (state.negative) {
-			result = i <= negative_bin
-			             ? Hugeint::Add(result, state.negative[i].answer_sum)
-			             : AddRepeatedExactBound(result, negative_bound, state.negative[i].answer_count, true);
+			result = i <= negative_bin ? Hugeint::Add(result, state.negative[i].answer_sum)
+			                           : AddRepeatedBound(result, negative_bound, state.negative[i].answer_count, true);
 		}
 	}
 	return result;
@@ -609,7 +641,7 @@ static void UpdateFilterlessStateRow(FilterlessState &state, const FilterlessInp
 	auto active_index = input.active.sel->get_index(row);
 	UpdateComponent(state.component, input.pu_values[pu_index], input.active_values[active_index],
 	                input.ValueIsValid(0, row), input.ValueOrZero(0, row), input.ValueIsValid(1, row),
-	                input.ValueOrZero(1, row), bind, allocator);
+	                input.ValueOrZero(1, row), bind, allocator, bind.approximate_values);
 }
 
 static void UpdateFilterlessStateRow(FilterlessAvgState &state, const FilterlessInputVectors<4, double> &input,
@@ -618,10 +650,10 @@ static void UpdateFilterlessStateRow(FilterlessAvgState &state, const Filterless
 	auto active_index = input.active.sel->get_index(row);
 	UpdateComponent(state.sum_component, input.pu_values[pu_index], input.active_values[active_index],
 	                input.ValueIsValid(0, row), input.ValueOrZero(0, row), input.ValueIsValid(2, row),
-	                input.ValueOrZero(2, row), bind, allocator);
+	                input.ValueOrZero(2, row), bind, allocator, true);
 	UpdateComponent(state.count_component, input.pu_values[pu_index], input.active_values[active_index],
 	                input.ValueIsValid(1, row), input.ValueOrZero(1, row), input.ValueIsValid(3, row),
-	                input.ValueOrZero(3, row), bind, allocator);
+	                input.ValueOrZero(3, row), bind, allocator, false);
 }
 
 template <class INPUT_TYPE>
@@ -838,6 +870,80 @@ static void FilterlessExactFinalize(Vector &states, AggregateInputData &input, V
 	}
 }
 
+// Internal scalar form of the as_clip_sum magnitude accumulator. The compiler
+// uses it for the per-PU floating SUM below the filterless aggregate, so an
+// unstable ordinary DOUBLE SUM cannot erase small contributions before the
+// contribution bound is applied.
+struct FilterlessApproxSumState {
+	bool isset;
+	hugeint_t positive;
+	hugeint_t negative;
+};
+
+struct FilterlessApproxSumOperation {
+	template <class STATE>
+	static void Initialize(STATE &state) {
+		state.isset = false;
+		state.positive = hugeint_t(0);
+		state.negative = hugeint_t(0);
+	}
+
+	static hugeint_t ApproximateScaledValue(double value) {
+		return Hugeint::Convert(ClipApproximateMagnitude64(AsScaledMagnitude(value)));
+	}
+
+	template <class INPUT_TYPE, class STATE, class OP>
+	static void Operation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &) {
+		double value = static_cast<double>(input);
+		if (!std::isfinite(value)) {
+			throw InvalidInputException("filterless: per-PU SUM contribution must be finite");
+		}
+		state.isset = true;
+		auto scaled = ApproximateScaledValue(value);
+		if (std::signbit(value) && value != 0.0) {
+			state.negative = Hugeint::Add(state.negative, scaled);
+		} else {
+			state.positive = Hugeint::Add(state.positive, scaled);
+		}
+	}
+
+	template <class INPUT_TYPE, class STATE, class OP>
+	static void ConstantOperation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &, idx_t count) {
+		double value = static_cast<double>(input);
+		if (!std::isfinite(value)) {
+			throw InvalidInputException("filterless: per-PU SUM contribution must be finite");
+		}
+		state.isset = true;
+		auto total = Hugeint::Multiply(ApproximateScaledValue(value), Hugeint::Convert(count));
+		if (std::signbit(value) && value != 0.0) {
+			state.negative = Hugeint::Add(state.negative, total);
+		} else {
+			state.positive = Hugeint::Add(state.positive, total);
+		}
+	}
+
+	template <class STATE, class OP>
+	static void Combine(const STATE &source, STATE &target, AggregateInputData &) {
+		target.isset = target.isset || source.isset;
+		target.positive = Hugeint::Add(target.positive, source.positive);
+		target.negative = Hugeint::Add(target.negative, source.negative);
+	}
+
+	template <class RESULT_TYPE, class STATE>
+	static void Finalize(STATE &state, RESULT_TYPE &target, AggregateFinalizeData &finalize_data) {
+		if (!state.isset) {
+			finalize_data.ReturnNull();
+			return;
+		}
+		auto scaled = Hugeint::Subtract(state.positive, state.negative);
+		target = Hugeint::Cast<double>(scaled) / CLIP_DOUBLE_SCALE;
+	}
+
+	static bool IgnoreNull() {
+		return true;
+	}
+};
+
 static LogicalType FilterlessDebugType() {
 	child_list_t<LogicalType> children;
 	children.emplace_back("lower_bound", LogicalType::DOUBLE);
@@ -880,10 +986,11 @@ static AggregateFunction MakeFilterlessExactFunction(const string &name, const L
 		arguments.push_back(LogicalType::DOUBLE);
 		arguments.push_back(LogicalType::UBIGINT);
 	}
-	return AggregateFunction(
-	    name, std::move(arguments), return_type, FilterlessExactStateSize, FilterlessExactInitialize,
-	    FilterlessExactScatterUpdate<INPUT_TYPE>, FilterlessExactCombine, FilterlessExactFinalize<OUTPUT_TYPE, COUNT>,
-	    FunctionNullHandling::SPECIAL_HANDLING, FilterlessExactUpdate<INPUT_TYPE>, BindFilterlessSumCount);
+	return AggregateFunction(name, std::move(arguments), return_type, FilterlessExactStateSize,
+	                         FilterlessExactInitialize, FilterlessExactScatterUpdate<INPUT_TYPE>,
+	                         FilterlessExactCombine, FilterlessExactFinalize<OUTPUT_TYPE, COUNT>,
+	                         FunctionNullHandling::SPECIAL_HANDLING, FilterlessExactUpdate<INPUT_TYPE>,
+	                         COUNT ? BindFilterlessCount : BindFilterlessSum);
 }
 
 template <class INPUT_TYPE, class OUTPUT_TYPE, bool COUNT>
@@ -924,24 +1031,24 @@ static unique_ptr<FunctionData> BindFilterlessDecimalSum(ClientContext &context,
 	}
 	auto return_type = LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(input_type));
 	function = MakeFilterlessDecimalSumFunction(input_type, return_type, arguments.size() == 7);
-	auto result = BindFilterless(context, arguments, 4);
+	auto result = BindFilterless(context, arguments, 4, false);
 	auto &bind = result->Cast<FilterlessBindData>();
 	bind.input_scale = std::pow(10.0, DecimalType::GetScale(input_type));
 	return result;
 }
 
 static void AddSumCountOverloads(AggregateFunctionSet &set, const string &name, aggregate_finalize_t finalize,
-                                 const LogicalType &return_type) {
-	set.AddFunction(AggregateFunction(
-	    name, {LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::DOUBLE, LogicalType::DOUBLE}, return_type,
-	    FilterlessStateSize, FilterlessInitialize, FilterlessScatterUpdate, FilterlessCombine, finalize,
-	    FunctionNullHandling::SPECIAL_HANDLING, FilterlessUpdate, BindFilterlessSumCount));
-	set.AddFunction(AggregateFunction(
-	    name,
-	    {LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE,
-	     LogicalType::DOUBLE, LogicalType::UBIGINT},
-	    return_type, FilterlessStateSize, FilterlessInitialize, FilterlessScatterUpdate, FilterlessCombine, finalize,
-	    FunctionNullHandling::SPECIAL_HANDLING, FilterlessUpdate, BindFilterlessSumCount));
+                                 const LogicalType &return_type, bind_aggregate_function_t bind) {
+	set.AddFunction(
+	    AggregateFunction(name, {LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::DOUBLE, LogicalType::DOUBLE},
+	                      return_type, FilterlessStateSize, FilterlessInitialize, FilterlessScatterUpdate,
+	                      FilterlessCombine, finalize, FunctionNullHandling::SPECIAL_HANDLING, FilterlessUpdate, bind));
+	set.AddFunction(
+	    AggregateFunction(name,
+	                      {LogicalType::UBIGINT, LogicalType::BOOLEAN, LogicalType::DOUBLE, LogicalType::DOUBLE,
+	                       LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::UBIGINT},
+	                      return_type, FilterlessStateSize, FilterlessInitialize, FilterlessScatterUpdate,
+	                      FilterlessCombine, finalize, FunctionNullHandling::SPECIAL_HANDLING, FilterlessUpdate, bind));
 }
 
 static void AddAvgOverloads(AggregateFunctionSet &set, const string &name, aggregate_finalize_t finalize,
@@ -961,8 +1068,20 @@ static void AddAvgOverloads(AggregateFunctionSet &set, const string &name, aggre
 }
 
 void RegisterFilterlessAggregateFunctions(ExtensionLoader &loader) {
+	auto approx_sum =
+	    AggregateFunction::UnaryAggregate<FilterlessApproxSumState, double, double, FilterlessApproxSumOperation>(
+	        LogicalType::DOUBLE, LogicalType::DOUBLE);
+	approx_sum.name = "filterless_approx_sum";
+	CreateAggregateFunctionInfo approx_sum_info(approx_sum);
+	FunctionDescription approx_sum_description;
+	approx_sum_description.description =
+	    "[INTERNAL] Scalar AS magnitude sum used by dp_filterless per-PU pre-aggregation.";
+	approx_sum_info.descriptions.push_back(std::move(approx_sum_description));
+	loader.RegisterFunction(std::move(approx_sum_info));
+
 	AggregateFunctionSet sum_set("filterless_sum");
-	AddSumCountOverloads(sum_set, "filterless_sum", FilterlessFinalize<false, false>, LogicalType::DOUBLE);
+	AddSumCountOverloads(sum_set, "filterless_sum", FilterlessFinalize<false, false>, LogicalType::DOUBLE,
+	                     BindFilterlessSum);
 	AddFilterlessExactOverloads<int64_t, hugeint_t, false>(sum_set, "filterless_sum", LogicalType::BIGINT,
 	                                                       LogicalType::HUGEINT);
 	AddFilterlessExactOverloads<hugeint_t, hugeint_t, false>(sum_set, "filterless_sum", LogicalType::HUGEINT,
@@ -984,7 +1103,8 @@ void RegisterFilterlessAggregateFunctions(ExtensionLoader &loader) {
 	loader.RegisterFunction(std::move(sum_info));
 
 	AggregateFunctionSet count_set("filterless_count");
-	AddSumCountOverloads(count_set, "filterless_count", FilterlessFinalize<false, true>, LogicalType::DOUBLE);
+	AddSumCountOverloads(count_set, "filterless_count", FilterlessFinalize<false, true>, LogicalType::DOUBLE,
+	                     BindFilterlessCount);
 	AddFilterlessExactOverloads<int64_t, int64_t, true>(count_set, "filterless_count", LogicalType::BIGINT,
 	                                                    LogicalType::BIGINT);
 	CreateAggregateFunctionInfo count_info(count_set);
@@ -1004,11 +1124,13 @@ void RegisterFilterlessAggregateFunctions(ExtensionLoader &loader) {
 
 	auto debug_type = FilterlessDebugType();
 	AggregateFunctionSet sum_debug_set("filterless_sum_debug");
-	AddSumCountOverloads(sum_debug_set, "filterless_sum_debug", FilterlessFinalize<true, false>, debug_type);
+	AddSumCountOverloads(sum_debug_set, "filterless_sum_debug", FilterlessFinalize<true, false>, debug_type,
+	                     BindFilterlessSum);
 	loader.RegisterFunction(CreateAggregateFunctionInfo(sum_debug_set));
 
 	AggregateFunctionSet count_debug_set("filterless_count_debug");
-	AddSumCountOverloads(count_debug_set, "filterless_count_debug", FilterlessFinalize<true, true>, debug_type);
+	AddSumCountOverloads(count_debug_set, "filterless_count_debug", FilterlessFinalize<true, true>, debug_type,
+	                     BindFilterlessCount);
 	loader.RegisterFunction(CreateAggregateFunctionInfo(count_debug_set));
 
 	AggregateFunctionSet avg_debug_set("filterless_avg_debug");

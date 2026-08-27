@@ -355,6 +355,43 @@ WHERE amount < 100.0;
 ----
 100.000000	4	25.000000
 
+# Floating SUM and AVG numerators use the AS magnitude accumulator both in the
+# per-PU pre-aggregation and in the final filterless aggregate. The two PUs use
+# opposite row orders; ordinary DOUBLE SUM loses the 1.0 in both cases, while
+# the two-sided approximate accumulator preserves it. COUNT remains exact.
+statement ok
+CREATE TABLE filterless_approx_values (
+    uid BIGINT,
+    amount DOUBLE,
+    PRIVACY_LINK (uid) REFERENCES filterless_customers(uid)
+);
+
+statement ok
+INSERT INTO filterless_approx_values VALUES
+    (1, 1e16), (1, 1.0), (1, -1e16),
+    (2, -1e16), (2, 1.0), (2, 1e16);
+
+query RIR
+SELECT SUM(amount), COUNT(*), AVG(amount)
+FROM filterless_approx_values;
+----
+2.000000	6	0.333333
+
+# The top floating bin has a finite advertised clipping bound. Contributions
+# beyond the fixed-point AS range are symmetrically saturated and cannot pass
+# through that top bin above its bound.
+query RR
+SELECT x.upper_bound, x.clipped_value
+FROM (
+    SELECT filterless_sum_debug(pu, true, amount, amount) AS x
+    FROM (VALUES
+        (0::UBIGINT, 1e20::DOUBLE),
+        (2::UBIGINT, 1e20::DOUBLE)
+    ) input(pu, amount)
+);
+----
+8589934592.000000	17179869184.000000
+
 # Fine grouping: 30 and 40 fall into adjacent exponential bins. With support 2,
 # neither bin selects a SUM bound even though two PUs qualify.
 statement ok

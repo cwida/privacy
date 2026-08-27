@@ -3345,6 +3345,10 @@ static unique_ptr<Expression> BuildFilterlessLowerAggregate(OptimizerExtensionIn
 		}
 		return BindPlainAggregate(input, "count_star", nullptr);
 	}
+	auto input_type = aggregate.children[0]->return_type.InternalType();
+	if (input_type == PhysicalType::FLOAT || input_type == PhysicalType::DOUBLE) {
+		return BindPlainAggregate(input, "filterless_approx_sum", aggregate.children[0]->Copy());
+	}
 	return BindPlainAggregate(input, "sum", aggregate.children[0]->Copy());
 }
 
@@ -3438,8 +3442,8 @@ void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, Optimizer
 
 	auto logical_pu = BuildFilterlessLogicalPu(input, std::move(encoded_pu));
 	auto pre = InsertPuPreAggregation(input, agg, std::move(lower_expressions), std::move(logical_pu));
-	PRIVACY_DEBUG_PRINT(
-	    "[dp_filterless] pre-aggregated separate filtered-answer and fixed-sample histogram contributions");
+	PRIVACY_DEBUG_PRINT("[dp_filterless] pre-aggregated separate filtered-answer and fixed-sample histogram "
+	                    "contributions; floating SUM uses the scalar AS magnitude accumulator");
 	auto pre_input = ApplyFilterlessMaxGroups(input, agg, pre, component_count, max_groups);
 	double visible_cell_epsilon = epsilon / budget_units;
 	for (idx_t i = 0; i < component_count; i++) {
