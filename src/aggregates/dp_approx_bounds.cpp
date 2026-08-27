@@ -57,6 +57,7 @@ struct DpApproxBoundsState {
 struct DpApproxBoundsBindData : public FunctionData {
 	double epsilon;
 	double max_groups;
+	double max_contributions;
 	double bounds_fraction;
 	uint64_t seed;
 	bool noise_enabled;
@@ -68,8 +69,8 @@ struct DpApproxBoundsBindData : public FunctionData {
 	bool Equals(const FunctionData &other_p) const override {
 		auto other = dynamic_cast<const DpApproxBoundsBindData *>(&other_p);
 		return other && epsilon == other->epsilon && max_groups == other->max_groups &&
-		       bounds_fraction == other->bounds_fraction && seed == other->seed &&
-		       noise_enabled == other->noise_enabled;
+		       max_contributions == other->max_contributions && bounds_fraction == other->bounds_fraction &&
+		       seed == other->seed && noise_enabled == other->noise_enabled;
 	}
 };
 
@@ -81,33 +82,45 @@ struct DpApproxBoundsResult {
 	double noise_scale;
 	double threshold;
 	int32_t selected_bin;
+	int32_t lower_bin;
+	int32_t upper_bin;
 	int32_t attempts;
 	uint64_t contributions;
 };
 
-static double EvaluateConfig(ClientContext &context, const Expression &expression, const string &name) {
+static double EvaluateConfig(ClientContext &context, const Expression &expression, const string &function_name,
+                             const string &name) {
 	if (!expression.IsFoldable()) {
-		throw InvalidInputException("dp_approx_bounds_sum: %s must be a constant", name);
+		throw InvalidInputException(function_name + ": " + name + " must be a constant");
 	}
 	return ExpressionExecutor::EvaluateScalar(context, expression).GetValue<double>();
 }
 
-static unique_ptr<FunctionData> BindDpApproxBounds(ClientContext &context, AggregateFunction &,
+static unique_ptr<FunctionData> BindDpApproxBounds(ClientContext &context, AggregateFunction &function,
                                                    vector<unique_ptr<Expression>> &arguments) {
-	if (arguments.size() != 4) {
-		throw InternalException("dp_approx_bounds_sum: expected value, epsilon, max_groups, and nonce");
+	if (arguments.size() != 4 && arguments.size() != 5) {
+		throw InternalException(function.name + ": invalid internal argument count");
 	}
-	double epsilon = EvaluateConfig(context, *arguments[1], "epsilon");
-	double max_groups = EvaluateConfig(context, *arguments[2], "max groups");
+	double epsilon = EvaluateConfig(context, *arguments[1], function.name, "epsilon");
+	double max_groups = EvaluateConfig(context, *arguments[2], function.name, "max groups");
+	double max_contributions =
+	    arguments.size() == 5 ? EvaluateConfig(context, *arguments[3], function.name, "max contributions") : 1.0;
 	if (!std::isfinite(epsilon) || epsilon <= 0.0) {
-		throw InvalidInputException("dp_approx_bounds_sum: epsilon must be a positive finite number");
+		throw InvalidInputException(function.name + ": epsilon must be a positive finite number");
 	}
 	if (!std::isfinite(max_groups) || max_groups <= 0.0) {
-		throw InvalidInputException("dp_approx_bounds_sum: max groups must be a positive finite number");
+		throw InvalidInputException(function.name + ": max groups must be a positive finite number");
+	}
+	if (!std::isfinite(max_contributions) || max_contributions <= 0.0) {
+		throw InvalidInputException(function.name + ": max contributions must be a positive finite number");
+	}
+	if (arguments.size() == 5 && std::round(max_contributions) != max_contributions) {
+		throw InvalidInputException(function.name + ": max contributions must be integer-valued");
 	}
 	auto result = make_uniq<DpApproxBoundsBindData>();
 	result->epsilon = epsilon;
 	result->max_groups = max_groups;
+	result->max_contributions = max_contributions;
 	result->bounds_fraction = GetDpApproxBoundsEpsilonFraction(context);
 	result->seed = GetDpNoiseSeed(context);
 	result->noise_enabled = IsPacNoiseEnabled(context, true);
@@ -156,7 +169,7 @@ static idx_t BinIndex(double value) {
 
 static void SetNonce(DpApproxBoundsState &state, uint64_t nonce) {
 	if (state.nonce_set && state.nonce != nonce) {
-		throw InvalidInputException("dp_approx_bounds_sum: nonce must be constant within each aggregate group");
+		throw InvalidInputException("DP ApproxBounds: nonce must be constant within each aggregate group");
 	}
 	state.nonce = nonce;
 	state.nonce_set = true;
@@ -164,7 +177,7 @@ static void SetNonce(DpApproxBoundsState &state, uint64_t nonce) {
 
 static void UpdateState(DpApproxBoundsState &state, double value, uint64_t nonce, ArenaAllocator &allocator) {
 	if (!std::isfinite(value)) {
-		throw InvalidInputException("dp_approx_bounds_sum: contribution must be finite");
+		throw InvalidInputException("DP ApproxBounds: contribution must be finite");
 	}
 	SetNonce(state, nonce);
 	auto index = BinIndex(value);
@@ -250,14 +263,51 @@ static double LaplaceThreshold(double success_probability, double scale) {
 	return -scale * std::log(2.0 * upper_tail_probability);
 }
 
-static int FindSelectedBin(const double *positive, const double *negative, double threshold) {
-	int selected = -1;
-	for (idx_t i = 0; i < DP_APPROX_BOUNDS_NUM_BINS; i++) {
-		if (positive[i] >= threshold || negative[i] >= threshold) {
-			selected = static_cast<int>(i);
+static double BinLowerMagnitude(idx_t index) {
+	return index == 0 ? 0.0 : BinUpperBound(index - 1);
+}
+
+static bool FindBounds(const double *positive, const double *negative, double threshold, DpApproxBoundsResult &result) {
+	result.lower_bin = -1;
+	result.upper_bin = -1;
+	for (idx_t reverse = DP_APPROX_BOUNDS_NUM_BINS; reverse > 0; reverse--) {
+		idx_t i = reverse - 1;
+		if (negative[i] >= threshold) {
+			result.lower_bound = -BinUpperBound(i);
+			result.lower_bin = static_cast<int32_t>(i);
+			break;
 		}
 	}
-	return selected;
+	if (result.lower_bin < 0) {
+		for (idx_t i = 0; i < DP_APPROX_BOUNDS_NUM_BINS; i++) {
+			if (positive[i] >= threshold) {
+				result.lower_bound = BinLowerMagnitude(i);
+				result.lower_bin = static_cast<int32_t>(i);
+				break;
+			}
+		}
+	}
+
+	for (idx_t reverse = DP_APPROX_BOUNDS_NUM_BINS; reverse > 0; reverse--) {
+		idx_t i = reverse - 1;
+		if (positive[i] >= threshold) {
+			result.upper_bound = BinUpperBound(i);
+			result.upper_bin = static_cast<int32_t>(i);
+			break;
+		}
+	}
+	if (result.upper_bin < 0) {
+		for (idx_t i = 0; i < DP_APPROX_BOUNDS_NUM_BINS; i++) {
+			if (negative[i] >= threshold) {
+				result.upper_bound = -BinLowerMagnitude(i);
+				result.upper_bin = static_cast<int32_t>(i);
+				break;
+			}
+		}
+	}
+
+	result.selected_bin = std::max(result.lower_bin, result.upper_bin);
+	return result.lower_bin >= 0 && result.upper_bin >= 0;
 }
 
 static uint64_t CountContributions(const DpApproxBoundsState &state) {
@@ -273,15 +323,37 @@ static uint64_t CountContributions(const DpApproxBoundsState &state) {
 	return result;
 }
 
-static long double ClipBins(const DpApproxBoundsBin *bins, int selected_bin, double bound) {
-	if (!bins) {
-		return 0.0;
-	}
+static long double ComputeClampedSum(const DpApproxBoundsState &state, double lower, double upper) {
 	long double result = 0.0;
+	idx_t positive_lower_bin = lower > 0.0 ? BinIndex(lower) : 0;
+	idx_t positive_upper_bin = upper > 0.0 ? BinIndex(upper) : 0;
+	idx_t negative_lower_bin = lower < 0.0 ? BinIndex(-lower) : 0;
+	idx_t negative_upper_bin = upper < 0.0 ? BinIndex(-upper) : 0;
 	for (idx_t i = 0; i < DP_APPROX_BOUNDS_NUM_BINS; i++) {
-		result += i <= static_cast<idx_t>(selected_bin)
-		              ? bins[i].magnitude_sum
-		              : static_cast<long double>(bins[i].count) * static_cast<long double>(bound);
+		if (state.positive) {
+			auto &bin = state.positive[i];
+			if (upper <= 0.0) {
+				result += static_cast<long double>(bin.count) * upper;
+			} else if (lower > 0.0 && i <= positive_lower_bin) {
+				result += static_cast<long double>(bin.count) * lower;
+			} else if (i > positive_upper_bin) {
+				result += static_cast<long double>(bin.count) * upper;
+			} else {
+				result += bin.magnitude_sum;
+			}
+		}
+		if (state.negative) {
+			auto &bin = state.negative[i];
+			if (lower >= 0.0) {
+				result += static_cast<long double>(bin.count) * lower;
+			} else if (i > negative_lower_bin) {
+				result += static_cast<long double>(bin.count) * lower;
+			} else if (upper < 0.0 && i <= negative_upper_bin) {
+				result += static_cast<long double>(bin.count) * upper;
+			} else {
+				result -= bin.magnitude_sum;
+			}
+		}
 	}
 	return result;
 }
@@ -289,6 +361,8 @@ static long double ClipBins(const DpApproxBoundsBin *bins, int selected_bin, dou
 static DpApproxBoundsResult FinalizeState(const DpApproxBoundsState &state, const DpApproxBoundsBindData &bind) {
 	DpApproxBoundsResult result {};
 	result.selected_bin = -1;
+	result.lower_bin = -1;
+	result.upper_bin = -1;
 	result.contributions = CountContributions(state);
 	if (result.contributions == 0) {
 		return result;
@@ -304,10 +378,10 @@ static DpApproxBoundsResult FinalizeState(const DpApproxBoundsState &state, cons
 	if (!bind.noise_enabled) {
 		result.threshold = 1.0;
 		result.attempts = 1;
-		result.selected_bin = FindSelectedBin(positive, negative, result.threshold);
+		FindBounds(positive, negative, result.threshold, result);
 	} else {
 		double bounds_epsilon = bind.epsilon * bind.bounds_fraction;
-		double histogram_scale = bind.max_groups / bounds_epsilon;
+		double histogram_scale = bind.max_groups * bind.max_contributions / bounds_epsilon;
 		uint64_t nonce = state.nonce_set ? state.nonce : 0;
 		AddDpLaplaceNoiseBatch(positive, positive, DP_APPROX_BOUNDS_NUM_BINS, histogram_scale, bind.seed, nonce * 8192);
 		AddDpLaplaceNoiseBatch(negative, negative, DP_APPROX_BOUNDS_NUM_BINS, histogram_scale, bind.seed,
@@ -316,9 +390,9 @@ static DpApproxBoundsResult FinalizeState(const DpApproxBoundsState &state, cons
 		double success_probability = 1.0 - DP_APPROX_BOUNDS_INITIAL_FAILURE_PROBABILITY;
 		for (int attempt = 1; attempt <= DP_APPROX_BOUNDS_MAX_ATTEMPTS; attempt++) {
 			result.threshold = LaplaceThreshold(success_probability, histogram_scale);
-			result.selected_bin = FindSelectedBin(positive, negative, result.threshold);
+			bool found = FindBounds(positive, negative, result.threshold, result);
 			result.attempts = attempt;
-			if (result.selected_bin >= 0) {
+			if (found) {
 				break;
 			}
 			double failure_probability = 1.0 - success_probability;
@@ -329,18 +403,223 @@ static DpApproxBoundsResult FinalizeState(const DpApproxBoundsState &state, cons
 		}
 	}
 
-	if (result.selected_bin < 0) {
+	if (result.lower_bin < 0 || result.upper_bin < 0) {
 		return result;
 	}
 	result.success = true;
-	result.upper_bound = BinUpperBound(static_cast<idx_t>(result.selected_bin));
-	result.lower_bound = -result.upper_bound;
-	auto positive_sum = ClipBins(state.positive, result.selected_bin, result.upper_bound);
-	auto negative_sum = ClipBins(state.negative, result.selected_bin, result.upper_bound);
-	result.clipped_value = static_cast<double>(positive_sum - negative_sum);
+	result.clipped_value = static_cast<double>(ComputeClampedSum(state, result.lower_bound, result.upper_bound));
 	double value_epsilon = bind.epsilon * (1.0 - bind.bounds_fraction);
-	result.noise_scale = result.upper_bound * bind.max_groups / value_epsilon;
+	double max_magnitude = std::max(std::abs(result.lower_bound), std::abs(result.upper_bound));
+	result.noise_scale = max_magnitude * bind.max_groups * bind.max_contributions / value_epsilon;
 	return result;
+}
+
+struct DpBoundedValueListBindData : public FunctionData {
+	idx_t max_values;
+
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<DpBoundedValueListBindData>(*this);
+	}
+
+	bool Equals(const FunctionData &other_p) const override {
+		auto other = dynamic_cast<const DpBoundedValueListBindData *>(&other_p);
+		return other && max_values == other->max_values;
+	}
+};
+
+struct DpBoundedValueListState {
+	double *values;
+	uint64_t *scores;
+	idx_t size;
+};
+
+static unique_ptr<FunctionData> BindDpBoundedValueList(ClientContext &context, AggregateFunction &,
+                                                       vector<unique_ptr<Expression>> &arguments) {
+	if (arguments.size() != 2 || !arguments[1]->IsFoldable()) {
+		throw InvalidInputException("dp_bounded_value_list: max values must be a constant");
+	}
+	auto value = ExpressionExecutor::EvaluateScalar(context, *arguments[1]);
+	auto max_values = value.GetValue<int64_t>();
+	if (max_values <= 0) {
+		throw InvalidInputException("dp_bounded_value_list: max values must be positive");
+	}
+	if (static_cast<uint64_t>(max_values) > NumericLimits<idx_t>::Maximum() / sizeof(double)) {
+		throw InvalidInputException("dp_bounded_value_list: max values is too large");
+	}
+	auto result = make_uniq<DpBoundedValueListBindData>();
+	result->max_values = static_cast<idx_t>(max_values);
+	return std::move(result);
+}
+
+static idx_t DpBoundedValueListStateSize(const AggregateFunction &) {
+	return sizeof(DpBoundedValueListState);
+}
+
+static void DpBoundedValueListInitialize(const AggregateFunction &, data_ptr_t state_p) {
+	memset(state_p, 0, sizeof(DpBoundedValueListState));
+}
+
+static uint64_t BoundedValueScore(double value) {
+	uint64_t bits;
+	memcpy(&bits, &value, sizeof(bits));
+	bits += 0x9e3779b97f4a7c15ULL;
+	bits = (bits ^ (bits >> 30)) * 0xbf58476d1ce4e5b9ULL;
+	bits = (bits ^ (bits >> 27)) * 0x94d049bb133111ebULL;
+	return bits ^ (bits >> 31);
+}
+
+static uint64_t BoundedValueBits(double value) {
+	uint64_t bits;
+	memcpy(&bits, &value, sizeof(bits));
+	return bits;
+}
+
+static bool BoundedValueLess(uint64_t left_score, double left_value, uint64_t right_score, double right_value) {
+	return left_score < right_score ||
+	       (left_score == right_score && BoundedValueBits(left_value) < BoundedValueBits(right_value));
+}
+
+static void SwapBoundedValues(DpBoundedValueListState &state, idx_t left, idx_t right) {
+	std::swap(state.values[left], state.values[right]);
+	std::swap(state.scores[left], state.scores[right]);
+}
+
+static void SiftBoundedValueUp(DpBoundedValueListState &state, idx_t child) {
+	while (child > 0) {
+		idx_t parent = (child - 1) / 2;
+		if (!BoundedValueLess(state.scores[parent], state.values[parent], state.scores[child], state.values[child])) {
+			break;
+		}
+		SwapBoundedValues(state, parent, child);
+		child = parent;
+	}
+}
+
+static void SiftBoundedValueDown(DpBoundedValueListState &state) {
+	idx_t parent = 0;
+	while (true) {
+		idx_t left = 2 * parent + 1;
+		if (left >= state.size) {
+			return;
+		}
+		idx_t worst = left;
+		idx_t right = left + 1;
+		if (right < state.size &&
+		    BoundedValueLess(state.scores[left], state.values[left], state.scores[right], state.values[right])) {
+			worst = right;
+		}
+		if (!BoundedValueLess(state.scores[parent], state.values[parent], state.scores[worst], state.values[worst])) {
+			return;
+		}
+		SwapBoundedValues(state, parent, worst);
+		parent = worst;
+	}
+}
+
+static void EnsureBoundedValueStorage(DpBoundedValueListState &state, idx_t max_values, ArenaAllocator &allocator) {
+	if (state.values) {
+		return;
+	}
+	state.values = reinterpret_cast<double *>(allocator.Allocate(sizeof(double) * max_values));
+	state.scores = reinterpret_cast<uint64_t *>(allocator.Allocate(sizeof(uint64_t) * max_values));
+}
+
+static void InsertBoundedValue(DpBoundedValueListState &state, double value, idx_t max_values,
+                               ArenaAllocator &allocator) {
+	// Match Google's numerical bounded-mean preprocessing: NaNs do not contribute,
+	// while infinities are represented by the largest finite value of the same sign.
+	if (std::isnan(value)) {
+		return;
+	}
+	if (std::isinf(value)) {
+		value = std::copysign(NumericLimits<double>::Maximum(), value);
+	}
+	EnsureBoundedValueStorage(state, max_values, allocator);
+	uint64_t score = BoundedValueScore(value);
+	if (state.size < max_values) {
+		idx_t inserted = state.size++;
+		state.values[inserted] = value;
+		state.scores[inserted] = score;
+		SiftBoundedValueUp(state, inserted);
+		return;
+	}
+	if (BoundedValueLess(score, value, state.scores[0], state.values[0])) {
+		state.values[0] = value;
+		state.scores[0] = score;
+		SiftBoundedValueDown(state);
+	}
+}
+
+template <class STATE_GETTER>
+static void UpdateBoundedValueRows(Vector inputs[], AggregateInputData &input, idx_t count, STATE_GETTER get_state) {
+	UnifiedVectorFormat values;
+	inputs[0].ToUnifiedFormat(count, values);
+	auto value_data = UnifiedVectorFormat::GetData<double>(values);
+	auto max_values = input.bind_data->Cast<DpBoundedValueListBindData>().max_values;
+	for (idx_t row = 0; row < count; row++) {
+		auto value_index = values.sel->get_index(row);
+		if (!values.validity.RowIsValid(value_index)) {
+			continue;
+		}
+		InsertBoundedValue(*get_state(row), value_data[value_index], max_values, input.allocator);
+	}
+}
+
+static void DpBoundedValueListUpdate(Vector inputs[], AggregateInputData &input, idx_t, data_ptr_t state_p,
+                                     idx_t count) {
+	auto state = reinterpret_cast<DpBoundedValueListState *>(state_p);
+	UpdateBoundedValueRows(inputs, input, count, [state](idx_t) { return state; });
+}
+
+static void DpBoundedValueListScatterUpdate(Vector inputs[], AggregateInputData &input, idx_t, Vector &states,
+                                            idx_t count) {
+	UnifiedVectorFormat state_data;
+	states.ToUnifiedFormat(count, state_data);
+	auto state_ptrs = UnifiedVectorFormat::GetData<DpBoundedValueListState *>(state_data);
+	UpdateBoundedValueRows(inputs, input, count, [&](idx_t row) { return state_ptrs[state_data.sel->get_index(row)]; });
+}
+
+static void DpBoundedValueListCombine(Vector &source, Vector &target, AggregateInputData &input, idx_t count) {
+	auto sources = FlatVector::GetData<DpBoundedValueListState *>(source);
+	auto targets = FlatVector::GetData<DpBoundedValueListState *>(target);
+	auto max_values = input.bind_data->Cast<DpBoundedValueListBindData>().max_values;
+	for (idx_t i = 0; i < count; i++) {
+		for (idx_t j = 0; j < sources[i]->size; j++) {
+			InsertBoundedValue(*targets[i], sources[i]->values[j], max_values, input.allocator);
+		}
+	}
+}
+
+static void DpBoundedValueListFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count,
+                                       idx_t offset) {
+	auto state_ptrs = FlatVector::GetData<DpBoundedValueListState *>(states);
+	auto entries = FlatVector::GetData<list_entry_t>(result);
+	auto &child = ListVector::GetEntry(result);
+	idx_t total = ListVector::GetListSize(result);
+	for (idx_t i = 0; i < count; i++) {
+		total += state_ptrs[i]->size;
+	}
+	ListVector::Reserve(result, total);
+	ListVector::SetListSize(result, total);
+	auto output = FlatVector::GetData<double>(child);
+	idx_t cursor = total;
+	for (idx_t i = count; i > 0; i--) {
+		auto *state = state_ptrs[i - 1];
+		cursor -= state->size;
+		entries[offset + i - 1].offset = cursor;
+		entries[offset + i - 1].length = state->size;
+		vector<idx_t> order(state->size);
+		for (idx_t j = 0; j < state->size; j++) {
+			order[j] = j;
+		}
+		std::sort(order.begin(), order.end(), [&](idx_t left, idx_t right) {
+			return BoundedValueLess(state->scores[left], state->values[left], state->scores[right],
+			                        state->values[right]);
+		});
+		for (idx_t j = 0; j < state->size; j++) {
+			output[cursor + j] = state->values[order[j]];
+		}
+	}
 }
 
 // Order-independent scalar form of the AS magnitude accumulator. The compiler
@@ -445,6 +724,95 @@ static void WriteDebug(Vector &result, idx_t row, const DpApproxBoundsResult &va
 	FlatVector::GetData<uint64_t>(*children[8])[row] = value.contributions;
 }
 
+template <class STATE_GETTER>
+static void UpdateMeanRows(Vector inputs[], AggregateInputData &input, idx_t count, STATE_GETTER get_state) {
+	UnifiedVectorFormat lists;
+	UnifiedVectorFormat nonces;
+	inputs[0].ToUnifiedFormat(count, lists);
+	inputs[4].ToUnifiedFormat(count, nonces);
+	auto entries = UnifiedVectorFormat::GetData<list_entry_t>(lists);
+	auto nonce_data = UnifiedVectorFormat::GetData<uint64_t>(nonces);
+	auto &child = ListVector::GetEntry(inputs[0]);
+	UnifiedVectorFormat values;
+	child.ToUnifiedFormat(ListVector::GetListSize(inputs[0]), values);
+	auto value_data = UnifiedVectorFormat::GetData<double>(values);
+	auto max_contributions = input.bind_data->Cast<DpApproxBoundsBindData>().max_contributions;
+	for (idx_t row = 0; row < count; row++) {
+		auto list_index = lists.sel->get_index(row);
+		auto nonce_index = nonces.sel->get_index(row);
+		if (!lists.validity.RowIsValid(list_index) || !nonces.validity.RowIsValid(nonce_index)) {
+			continue;
+		}
+		auto &entry = entries[list_index];
+		if (entry.length > static_cast<idx_t>(max_contributions)) {
+			throw InvalidInputException("dp_approx_bounds_mean: per-PU value list exceeds dp_count_bound");
+		}
+		auto *state = get_state(row);
+		SetNonce(*state, nonce_data[nonce_index]);
+		for (idx_t j = 0; j < entry.length; j++) {
+			auto value_index = values.sel->get_index(entry.offset + j);
+			if (!values.validity.RowIsValid(value_index)) {
+				continue;
+			}
+			UpdateState(*state, value_data[value_index], nonce_data[nonce_index], input.allocator);
+		}
+	}
+}
+
+static void DpApproxBoundsMeanUpdate(Vector inputs[], AggregateInputData &input, idx_t, data_ptr_t state_p,
+                                     idx_t count) {
+	auto state = reinterpret_cast<DpApproxBoundsState *>(state_p);
+	UpdateMeanRows(inputs, input, count, [state](idx_t) { return state; });
+}
+
+static void DpApproxBoundsMeanScatterUpdate(Vector inputs[], AggregateInputData &input, idx_t, Vector &states,
+                                            idx_t count) {
+	UnifiedVectorFormat state_data;
+	states.ToUnifiedFormat(count, state_data);
+	auto state_ptrs = UnifiedVectorFormat::GetData<DpApproxBoundsState *>(state_data);
+	UpdateMeanRows(inputs, input, count, [&](idx_t row) { return state_ptrs[state_data.sel->get_index(row)]; });
+}
+
+static double ClampMean(double value, double lower, double upper) {
+	return std::max(lower, std::min(upper, value));
+}
+
+static void DpApproxBoundsMeanFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+                                       idx_t offset) {
+	auto state_ptrs = FlatVector::GetData<DpApproxBoundsState *>(states);
+	auto &bind = input.bind_data->Cast<DpApproxBoundsBindData>();
+	auto result_data = FlatVector::GetData<double>(result);
+	for (idx_t i = 0; i < count; i++) {
+		auto bounds = FinalizeState(*state_ptrs[i], bind);
+		if (!bounds.success) {
+			FlatVector::Validity(result).SetInvalid(offset + i);
+			continue;
+		}
+		double range = bounds.upper_bound - bounds.lower_bound;
+		if (!(range > 0.0) || !std::isfinite(range)) {
+			throw InvalidInputException("dp_approx_bounds_mean: selected value range is not finite and positive");
+		}
+		double midpoint = bounds.lower_bound + range / 2.0;
+		double normalized_sum = bounds.clipped_value - static_cast<double>(bounds.contributions) * midpoint;
+		double component_epsilon = bind.epsilon * (1.0 - bind.bounds_fraction) / 2.0;
+		double contribution_sensitivity = bind.max_groups * bind.max_contributions;
+		double count_scale = contribution_sensitivity / component_epsilon;
+		double sum_scale = contribution_sensitivity * (range / 2.0) / component_epsilon;
+		double noised_count = static_cast<double>(bounds.contributions);
+		double noised_sum = normalized_sum;
+		if (bind.noise_enabled) {
+			uint64_t nonce = state_ptrs[i]->nonce_set ? state_ptrs[i]->nonce : 0;
+			noised_count = AddDpLaplaceNoise(noised_count, count_scale, bind.seed,
+			                                 nonce * 8192 + 2 * DP_APPROX_BOUNDS_NUM_BINS + 1);
+			noised_sum =
+			    AddDpLaplaceNoise(noised_sum, sum_scale, bind.seed, nonce * 8192 + 2 * DP_APPROX_BOUNDS_NUM_BINS + 2);
+		}
+		noised_count = std::max(1.0, noised_count);
+		result_data[offset + i] =
+		    ClampMean(midpoint + noised_sum / noised_count, bounds.lower_bound, bounds.upper_bound);
+	}
+}
+
 template <bool DEBUG>
 static void DpApproxBoundsFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
                                    idx_t offset) {
@@ -477,7 +845,32 @@ static AggregateFunction MakeDpApproxBoundsFunction(const string &name, const Lo
 	    FunctionNullHandling::SPECIAL_HANDLING, DpApproxBoundsUpdate, BindDpApproxBounds);
 }
 
+static AggregateFunction MakeDpBoundedValueListFunction() {
+	return AggregateFunction("dp_bounded_value_list", {LogicalType::DOUBLE, LogicalType::BIGINT},
+	                         LogicalType::LIST(LogicalType::DOUBLE), DpBoundedValueListStateSize,
+	                         DpBoundedValueListInitialize, DpBoundedValueListScatterUpdate, DpBoundedValueListCombine,
+	                         DpBoundedValueListFinalize, FunctionNullHandling::SPECIAL_HANDLING,
+	                         DpBoundedValueListUpdate, BindDpBoundedValueList);
+}
+
+static AggregateFunction MakeDpApproxBoundsMeanFunction() {
+	return AggregateFunction("dp_approx_bounds_mean",
+	                         {LogicalType::LIST(LogicalType::DOUBLE), LogicalType::DOUBLE, LogicalType::DOUBLE,
+	                          LogicalType::DOUBLE, LogicalType::UBIGINT},
+	                         LogicalType::DOUBLE, DpApproxBoundsStateSize, DpApproxBoundsInitialize,
+	                         DpApproxBoundsMeanScatterUpdate, DpApproxBoundsCombine, DpApproxBoundsMeanFinalize,
+	                         FunctionNullHandling::SPECIAL_HANDLING, DpApproxBoundsMeanUpdate, BindDpApproxBounds);
+}
+
 void RegisterDpApproxBoundsAggregateFunctions(ExtensionLoader &loader) {
+	auto bounded_values = MakeDpBoundedValueListFunction();
+	CreateAggregateFunctionInfo bounded_values_info(bounded_values);
+	FunctionDescription bounded_values_description;
+	bounded_values_description.description =
+	    "[INTERNAL] Deterministically caps one PU/group to a bounded list of numeric values.";
+	bounded_values_info.descriptions.push_back(std::move(bounded_values_description));
+	loader.RegisterFunction(std::move(bounded_values_info));
+
 	auto approx_sum = AggregateFunction::UnaryAggregate<DpApproxSumState, double, double, DpApproxSumOperation>(
 	    LogicalType::DOUBLE, LogicalType::DOUBLE);
 	approx_sum.name = "priv_approx_sum";
@@ -495,6 +888,14 @@ void RegisterDpApproxBoundsAggregateFunctions(ExtensionLoader &loader) {
 	    "[INTERNAL] Google-compatible query-local ApproxBounds followed by a bounded Laplace SUM.";
 	sum_info.descriptions.push_back(std::move(description));
 	loader.RegisterFunction(std::move(sum_info));
+
+	auto mean = MakeDpApproxBoundsMeanFunction();
+	CreateAggregateFunctionInfo mean_info(mean);
+	FunctionDescription mean_description;
+	mean_description.description =
+	    "[INTERNAL] Google-style ApproxBounds bounded mean over contribution-bounded per-PU value lists.";
+	mean_info.descriptions.push_back(std::move(mean_description));
+	loader.RegisterFunction(std::move(mean_info));
 
 	auto debug = MakeDpApproxBoundsFunction("dp_approx_bounds_sum_debug", DpApproxBoundsDebugType(),
 	                                        DpApproxBoundsFinalize<true>);

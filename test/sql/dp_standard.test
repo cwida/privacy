@@ -627,10 +627,10 @@ statement ok
 SET privacy_noise = true;
 
 # ---------------------------------------------------------------------------
-# Google-compatible query-local ApproxBounds for explicit SUM aggregates.
-# The upstream BoundedSum default spends half of each SUM's epsilon on bounds.
-# COUNT has no numeric value domain to infer, and AVG uses a separate bounded-
-# mean construction that this path deliberately rejects for now.
+# Google-compatible query-local ApproxBounds for SUM and AVG aggregates.
+# The upstream defaults spend half of each aggregate's epsilon on bounds. AVG
+# splits the remainder equally between its midpoint-normalized sum and count.
+# COUNT has no numeric value domain to infer.
 # ---------------------------------------------------------------------------
 
 statement ok
@@ -647,17 +647,33 @@ FROM (VALUES (1e16::DOUBLE), (1.0::DOUBLE), (-1e16::DOUBLE)) input(v);
 ----
 1.000000
 
+# Automatic bounded mean enforces the public per-PU contribution cap before
+# values reach its histogram, normalized sum, or count.
+query I
+SELECT list_count(dp_bounded_value_list(v, 2))
+FROM (VALUES (1.0::DOUBLE), (2.0::DOUBLE), (3.0::DOUBLE)) input(v);
+----
+2
+
 # With noise disabled, the internal aggregate exposes the exact base-2 bin
-# choice. Values 3 and 10 select the symmetric bound [-16, 16].
-query IRRRII
-SELECT x.success, x.upper_bound, x.clipped_value, x.noise_scale,
+# choice. Values 3 and 10 select Google's asymmetric bounds [2, 16].
+query IRRRRII
+SELECT x.success, x.lower_bound, x.upper_bound, x.clipped_value, x.noise_scale,
        x.selected_bin, x.contributions
 FROM (
     SELECT dp_approx_bounds_sum_debug(v, 1.0, 1.0, 7::UBIGINT) AS x
     FROM (VALUES (3.0::DOUBLE), (10.0::DOUBLE)) input(v)
 );
 ----
-true	16.000000	13.000000	32.000000	1026	2
+true	2.000000	16.000000	13.000000	32.000000	1026	2
+
+# Google bounded mean uses the same private bounds for a midpoint-normalized
+# sum and count. With noise disabled, mean([3, 10]) is exact.
+query R
+SELECT dp_approx_bounds_mean(values, 1.0, 1.0, 2.0, 11::UBIGINT)
+FROM (VALUES ([3.0::DOUBLE, 10.0::DOUBLE])) input(values);
+----
+6.500000
 
 # With private histogram noise enabled, a strongly supported value-100 bin
 # selects 128 on the first upstream threshold attempt.
@@ -715,11 +731,30 @@ SELECT SUM(amount) FROM orders WHERE amount = 9;
 ----
 450.000000
 
-# AVG must not silently fall back to configured public bounds in auto mode.
-statement error
+# Automatic AVG infers [0, 16], then releases the centered sum and count.
+query R
 SELECT AVG(amount) FROM orders;
 ----
-bounded-mean construction
+4.500000
+
+# Mixed automatic SUM/AVG releases retain their original output positions and
+# split the query budget once per user-visible aggregate.
+query RR
+SELECT SUM(amount), AVG(amount) FROM orders;
+----
+2250.000000	4.500000
+
+# Preserve DuckDB's fractional AVG type when the input is integral.
+query R
+SELECT AVG(id) FROM u;
+----
+49.500000
+
+# FILTER is applied before each PU's deterministic contribution cap.
+query R
+SELECT AVG(amount) FILTER (WHERE amount >= 5) FROM orders;
+----
+7.000000
 
 # A well-supported bin succeeds with private histogram noise.
 statement ok
@@ -744,6 +779,11 @@ SELECT SUM(amount) IS NOT NULL FROM approx_bounds_users;
 ----
 true
 
+query I
+SELECT AVG(amount) IS NOT NULL FROM approx_bounds_users;
+----
+true
+
 # Insufficient query-local support is an observable NULL rather than a public
 # fallback bound. This mirrors ApproxBounds' NotEnoughData status in SQL form.
 query I
@@ -751,7 +791,12 @@ SELECT SUM(id) IS NULL FROM u WHERE id < 5;
 ----
 true
 
-# Grouped automatic SUM composes its bound histogram and value release with
+query I
+SELECT AVG(id) IS NULL FROM u WHERE id < 5;
+----
+true
+
+# Grouped automatic SUM/AVG compose their bound histograms and value releases with
 # private partition selection. Each group has ample support.
 statement ok
 SET dp_delta = 0.000001;
@@ -761,6 +806,14 @@ SET dp_max_groups_contributed = 1.0;
 
 query II rowsort
 SELECT g, SUM(amount) IS NOT NULL
+FROM approx_bounds_users
+GROUP BY g;
+----
+0	true
+1	true
+
+query II rowsort
+SELECT g, AVG(amount) IS NOT NULL
 FROM approx_bounds_users
 GROUP BY g;
 ----

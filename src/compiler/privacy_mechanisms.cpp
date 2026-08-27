@@ -59,11 +59,13 @@ struct DPFKChain {
 
 struct AvgInfo {
 	idx_t sum_pos;           // position of the AVG->SUM in the rewritten aggregate (in-place)
-	idx_t count_pos;         // position of the appended COUNT(*) in the rewritten aggregate
+	idx_t count_pos;         // appended COUNT(*) position, or INVALID_INDEX for fused automatic bounded mean
 	double midpoint;         // added back after releasing the centered SUM / COUNT ratio
 	double normalized_bound; // per-row bound after midpoint centering: (upper - lower) / 2
 	double output_lower_bound = 0.0;
 	double output_upper_bound = 0.0;
+	bool automatic_bounds_mean = false;
+	LogicalType output_type;
 };
 
 struct AvgDomain {
@@ -109,10 +111,11 @@ static unique_ptr<Expression> BindAggregateLocal(OptimizerExtensionInput &input,
 static unique_ptr<Expression> ClipToBounds(OptimizerExtensionInput &input, unique_ptr<Expression> expr, double lo,
                                            double hi, const LogicalType &restore_type);
 
-// Replace each AVG(x) with SUM(x) in-place and append a COUNT(*) at the end.
-// Returns info pairing each (sum_pos, count_pos) for post-processing.
+// Replace each AVG(x) with SUM(x) in-place. Fixed-bound means also append COUNT(*);
+// automatic bounded means fuse their private sum and count into one aggregate.
 static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, LogicalAggregate *agg,
-                                            bool use_bounded_mean, const AvgBounds *avg_bounds = nullptr) {
+                                            bool use_bounded_mean, const AvgBounds *avg_bounds = nullptr,
+                                            bool automatic_bounds_mean = false) {
 	vector<AvgInfo> avg_infos;
 	idx_t n_original = agg->expressions.size();
 	idx_t avg_idx = 0;
@@ -121,12 +124,12 @@ static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, Logi
 		if (aggr.function.name != "avg") {
 			continue;
 		}
-		// Preserve `FILTER (WHERE ...)` from the original AVG: both the rewritten SUM
-		// and the appended COUNT(*) must apply the same predicate so the ratio matches
-		// the user-visible AVG semantics.
+		auto output_type = aggr.return_type;
+		// Preserve `FILTER (WHERE ...)` from the original AVG. For fixed-bound means,
+		// both the rewritten SUM and appended COUNT(*) receive the predicate.
 		auto arg = std::move(aggr.children[0]);
 		auto filter_for_sum = std::move(aggr.filter);
-		auto filter_for_count = filter_for_sum ? filter_for_sum->Copy() : nullptr;
+		auto filter_for_count = !automatic_bounds_mean && filter_for_sum ? filter_for_sum->Copy() : nullptr;
 		AvgDomain domain {0.0, 0.0};
 		if (avg_bounds) {
 			D_ASSERT(avg_idx < avg_bounds->domains.size());
@@ -148,9 +151,12 @@ static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, Logi
 		agg->expressions[i] = BindPlainAggregate(input, "sum", std::move(arg));
 		agg->expressions[i]->Cast<BoundAggregateExpression>().filter = std::move(filter_for_sum);
 
-		idx_t count_pos = agg->expressions.size();
-		agg->expressions.push_back(BindPlainAggregate(input, "count_star", nullptr));
-		agg->expressions.back()->Cast<BoundAggregateExpression>().filter = std::move(filter_for_count);
+		idx_t count_pos = DConstants::INVALID_INDEX;
+		if (!automatic_bounds_mean) {
+			count_pos = agg->expressions.size();
+			agg->expressions.push_back(BindPlainAggregate(input, "count_star", nullptr));
+			agg->expressions.back()->Cast<BoundAggregateExpression>().filter = std::move(filter_for_count);
+		}
 
 		AvgInfo info;
 		info.sum_pos = i;
@@ -159,6 +165,8 @@ static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, Logi
 		info.normalized_bound = normalized_bound;
 		info.output_lower_bound = domain.lower;
 		info.output_upper_bound = domain.upper;
+		info.automatic_bounds_mean = automatic_bounds_mean;
+		info.output_type = output_type;
 		avg_infos.push_back(info);
 		avg_idx++;
 	}
@@ -640,7 +648,7 @@ static const AvgInfo *FindAvgInfoForSumPos(const vector<AvgInfo> &avg_infos, idx
 
 static const AvgInfo *FindAvgInfoForCountPos(const vector<AvgInfo> &avg_infos, idx_t aggregate_pos) {
 	for (auto &info : avg_infos) {
-		if (info.count_pos == aggregate_pos) {
+		if (info.count_pos != DConstants::INVALID_INDEX && info.count_pos == aggregate_pos) {
 			return &info;
 		}
 	}
@@ -1403,6 +1411,13 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 	per_pu_out = true;
 
 	double count_bound = has_count ? GetRequiredDpBound(input.context, "dp_count_bound", mech) : 0.0;
+	int64_t automatic_mean_count_bound = 0;
+	for (auto &info : avg_infos) {
+		if (info.automatic_bounds_mean) {
+			automatic_mean_count_bound = GetRequiredDpIntegerBound(input.context, "dp_count_bound", mech);
+			break;
+		}
+	}
 	vector<double> sum_bounds = has_sum && !auto_bounds
 	                                ? GetDpSumContributionBounds(input.context, mech, agg, avg_infos, true, count_bound)
 	                                : vector<double>(agg->expressions.size(), 0.0);
@@ -1432,6 +1447,7 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 	lower_exprs.reserve(n);
 	for (idx_t i = 0; i < n; i++) {
 		auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
+		auto *avg_sum_info = FindAvgInfoForSumPos(avg_infos, i);
 		is_count.push_back(IsCountAggregate(aggr));
 		if (aggr.IsDistinct()) {
 			lower_exprs.push_back(agg->expressions[i]->Copy()); // filtered DISTINCT is rejected upstream
@@ -1450,6 +1466,13 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 			// Per-PU MIN/MAX partial. else_zero=false → filtered-out rows become NULL, which MIN/MAX skip.
 			lower_exprs.push_back(BindPlainAggregate(
 			    input, aggr.function.name, FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/false)));
+		} else if (avg_sum_info && avg_sum_info->automatic_bounds_mean) {
+			auto value = FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/false);
+			vector<unique_ptr<Expression>> children;
+			children.push_back(
+			    BoundCastExpression::AddCastToType(input.context, std::move(value), LogicalType::DOUBLE));
+			children.push_back(make_uniq<BoundConstantExpression>(Value::BIGINT(automatic_mean_count_bound)));
+			lower_exprs.push_back(BindAggregateLocal(input, "dp_bounded_value_list", std::move(children)));
 		} else { // sum
 			auto value = FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/true);
 			if (auto_bounds && (value->return_type.InternalType() == PhysicalType::FLOAT ||
@@ -1469,6 +1492,7 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 		// agg->expressions[i] still holds the original aggregate until overwritten below.
 		auto &orig = agg->expressions[i]->Cast<BoundAggregateExpression>();
 		bool pos_min_max = IsMinMaxAggregate(orig);
+		auto *avg_sum_info = FindAvgInfoForSumPos(avg_infos, i);
 		string min_max_name = pos_min_max ? orig.function.name : string();
 		auto lower_type = pre.lower_agg->types[pre.num_original_groups + 1 + i];
 		unique_ptr<Expression> lower_ref =
@@ -1481,6 +1505,19 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 			auto clipped = ClipToBounds(input, std::move(lower_ref), mm_lower, mm_upper, lower_type);
 			agg->expressions[i] = BindPlainAggregate(input, min_max_name, std::move(clipped));
 			sens.push_back(mm_range * static_cast<double>(group_bound));
+		} else if (avg_sum_info && avg_sum_info->automatic_bounds_mean) {
+			vector<unique_ptr<Expression>> children;
+			children.push_back(std::move(lower_ref));
+			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(auto_bounds_epsilon)));
+			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(static_cast<double>(group_bound))));
+			children.push_back(
+			    make_uniq<BoundConstantExpression>(Value::DOUBLE(static_cast<double>(automatic_mean_count_bound))));
+			children.push_back(BuildDpApproxBoundsNonce(input, agg, i));
+			agg->expressions[i] = BindAggregateLocal(input, "dp_approx_bounds_mean", std::move(children));
+			sens.push_back(0.0);
+			PRIVACY_DEBUG_PRINT("[dp_standard] ApproxBounds AVG rewrite: eps=" + std::to_string(auto_bounds_epsilon) +
+			                    " max_contributions=" + std::to_string(automatic_mean_count_bound) +
+			                    " C_u=" + std::to_string(group_bound));
 		} else if (auto_bounds && !is_count[i]) {
 			vector<unique_ptr<Expression>> children;
 			children.push_back(
@@ -1613,7 +1650,9 @@ static std::unordered_set<idx_t> BuildAvgComponentSet(const vector<AvgInfo> &avg
 	std::unordered_set<idx_t> avg_components;
 	for (auto &info : avg_infos) {
 		avg_components.insert(info.sum_pos);
-		avg_components.insert(info.count_pos);
+		if (info.count_pos != DConstants::INVALID_INDEX) {
+			avg_components.insert(info.count_pos);
+		}
 	}
 	return avg_components;
 }
@@ -1833,6 +1872,13 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 			// AVG: compute CAST(noised_sum AS DOUBLE) / CAST(noised_count AS DOUBLE)
 			const AvgInfo &info = *avg_info;
 			const auto &sum_type = noise_proj.proj_types[n_groups + info.sum_pos];
+			if (info.automatic_bounds_mean) {
+				auto mean_ref = make_uniq<BoundColumnRefExpression>(
+				    sum_type, ColumnBinding(noise_proj.proj_idx, n_groups + info.sum_pos));
+				proj_exprs.push_back(
+				    BoundCastExpression::AddCastToType(input.context, std::move(mean_ref), LogicalType::DOUBLE));
+				continue;
+			}
 			const auto &cnt_type = noise_proj.proj_types[n_groups + info.count_pos];
 
 			auto make_sum_dbl = [&]() {
@@ -2911,22 +2957,24 @@ static void CompileDPLaplaceQuery(const PrivacyCompatibilityResult &check, Optim
 	auto *agg = CheckDPAggregates(plan, mech);
 	bool auto_bounds = mech == "dp_standard" && GetBooleanSetting(input.context, "dp_standard_auto_bounds", false);
 
-	// Rewrite AVG(x) → SUM(x) + COUNT(*) before bound/clipping checks.
-	// Each AVG uses ε/2 per component so the combined cost is still ε-DP.
+	// Fixed-bound AVG becomes a centered SUM plus COUNT and splits its aggregate budget evenly.
+	// Automatic AVG is a fused Google-style bounded mean that spends half on ApproxBounds,
+	// then splits the remainder evenly between its normalized SUM and COUNT releases.
 	idx_t avg_count = CountAvgAggregates(agg);
-	if (auto_bounds && avg_count > 0) {
-		throw NotImplementedException(
-		    "dp_standard automatic bounds: AVG requires Google's bounded-mean construction and is not implemented yet");
-	}
 	AvgBounds avg_bounds;
 	const AvgBounds *avg_bounds_ptr = nullptr;
-	if (avg_count > 0) {
+	if (avg_count > 0 && !auto_bounds) {
 		avg_bounds = GetAvgBounds(input.context, mech, avg_count, /*allow_sass_legacy=*/false);
 		avg_bounds_ptr = &avg_bounds;
 	}
-	bool use_bounded_mean = avg_count > 0;
-	auto avg_infos = RewriteAvgAggregates(input, agg, use_bounded_mean, avg_bounds_ptr);
-	idx_t n_original_aggs = agg->expressions.size() - avg_infos.size();
+	bool use_bounded_mean = avg_count > 0 && !auto_bounds;
+	auto avg_infos = RewriteAvgAggregates(input, agg, use_bounded_mean, avg_bounds_ptr,
+	                                      /*automatic_bounds_mean=*/auto_bounds && avg_count > 0);
+	idx_t appended_avg_counts = 0;
+	for (auto &info : avg_infos) {
+		appended_avg_counts += info.count_pos != DConstants::INVALID_INDEX ? 1 : 0;
+	}
+	idx_t n_original_aggs = agg->expressions.size() - appended_avg_counts;
 	idx_t n_groups = agg->groups.size();
 	double auto_bounds_epsilon =
 	    auto_bounds ? epsilon / static_cast<double>(n_original_aggs + (n_groups > 0 ? 1 : 0)) : 0.0;
@@ -2939,6 +2987,11 @@ static void CompileDPLaplaceQuery(const PrivacyCompatibilityResult &check, Optim
 	output_types.reserve(agg->expressions.size());
 	for (idx_t i = 0; i < agg->expressions.size(); i++) {
 		output_types.push_back(agg->types[n_groups + i]);
+	}
+	for (auto &info : avg_infos) {
+		if (info.automatic_bounds_mean) {
+			output_types[info.sum_pos] = info.output_type;
+		}
 	}
 
 	// When privacy_noise=false the compilation pipeline still runs (clipping, FK chain)
