@@ -692,14 +692,6 @@ true	128.000000	1	1000
 statement ok
 SET privacy_noise = false;
 
-statement error
-SET dp_approx_bounds_epsilon_fraction = 1.0;
-----
-dp_approx_bounds_epsilon_fraction must be between 0 and 1
-
-statement ok
-SET dp_approx_bounds_epsilon_fraction = 0.5;
-
 statement ok
 SET priv_rewrite = true;
 

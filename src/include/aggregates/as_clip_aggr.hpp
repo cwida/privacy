@@ -25,23 +25,6 @@ constexpr int CLIP_DOUBLE_SHIFT = 27;                                           
 constexpr double CLIP_FLOAT_SCALE = static_cast<double>(1 << CLIP_FLOAT_SHIFT);   // 1048576.0
 constexpr double CLIP_DOUBLE_SCALE = static_cast<double>(1 << CLIP_DOUBLE_SHIFT); // 134217728.0
 
-// Route an unsigned magnitude to the factor-4 level used by as_clip_sum. Values
-// are represented by an 8-bit shifted magnitude inside that level.
-static inline int ClipSumLevel64(uint64_t magnitude) {
-	if (magnitude < 256) {
-		return 0;
-	}
-	int bit_pos = 63 - pac_clzll(magnitude);
-	return std::min((bit_pos - 4) >> 1, CLIP_NUM_LEVELS_64 - 1);
-}
-
-// Return the scalar value represented by as_clip_sum's magnitude accumulator.
-// Scalar consumers use this helper rather than duplicating AS's quantization.
-static inline uint64_t ClipApproximateMagnitude64(uint64_t magnitude) {
-	auto shift = static_cast<uint64_t>(ClipSumLevel64(magnitude) * CLIP_LEVEL_SHIFT);
-	return (magnitude >> shift) << shift;
-}
-
 // ============================================================================
 // Scale float/double to int64 with branchless clamping
 // ============================================================================

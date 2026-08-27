@@ -110,10 +110,6 @@ static void ValidateDpSassMSetting(ClientContext &, SetScope, Value &parameter) 
 	ValidateDpSassM(parameter.GetValue<int64_t>());
 }
 
-static void ValidateDpApproxBoundsFractionSetting(ClientContext &, SetScope, Value &parameter) {
-	ValidateDpApproxBoundsEpsilonFraction(parameter.GetValue<double>());
-}
-
 static double ComputePrivacyUnitCardinality(ClientContext &context) {
 	auto table_names = PrivacyMetadataManager::Get().GetAllTableNames();
 	vector<std::pair<string, PrivacyTableMetadata>> pu_tables;
@@ -339,10 +335,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "Use Google-compatible query-local ApproxBounds for SUM and AVG aggregates in "
 	                             "privacy_mode='dp_standard' instead of configured public bounds",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
-	db.config.AddExtensionOption("dp_approx_bounds_epsilon_fraction",
-	                             "Fraction of each dp_standard SUM or AVG budget reserved for ApproxBounds; "
-	                             "Google's default is 0.5",
-	                             LogicalType::DOUBLE, Value::DOUBLE(0.5), ValidateDpApproxBoundsFractionSetting);
 	// Differential privacy budget (ε), used by the dp_standard / dp_elastic / dp_sass modes.
 	db.config.AddExtensionOption("dp_epsilon",
 	                             "Differential privacy budget ε (used by dp_standard, dp_elastic, and dp_sass)",
