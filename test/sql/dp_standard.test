@@ -626,6 +626,244 @@ SELECT g, COUNT(*) FROM dp_standard_tiny_delta_events GROUP BY g;
 statement ok
 SET privacy_noise = true;
 
+# ---------------------------------------------------------------------------
+# Google-compatible query-local ApproxBounds for SUM and AVG aggregates.
+# The upstream defaults spend half of each aggregate's epsilon on bounds. AVG
+# splits the remainder equally between its midpoint-normalized sum and count.
+# COUNT has no numeric value domain to infer.
+# ---------------------------------------------------------------------------
+
+statement ok
+SET priv_rewrite = false;
+
+statement ok
+SET privacy_noise = false;
+
+# The per-PU floating accumulator is order-independent at AS precision, so
+# cancellation cannot erase the small contribution before bounding.
+query R
+SELECT priv_approx_sum(v)
+FROM (VALUES (1e16::DOUBLE), (1.0::DOUBLE), (-1e16::DOUBLE)) input(v);
+----
+1.000000
+
+# Contributions outside the fixed-point fast path retain their magnitude, and cancellation still
+# happens before the small term is added.
+query R
+SELECT priv_approx_sum(v)
+FROM (VALUES (1e100::DOUBLE), (1.0::DOUBLE), (-1e100::DOUBLE)) input(v);
+----
+1.000000
+
+# NaN is ignored and infinity is mapped to the largest finite value, so neither input becomes a
+# data-dependent query error.
+query II
+SELECT priv_approx_sum(v) = 2.0, priv_approx_sum(w) > 1e300
+FROM (VALUES ('nan'::DOUBLE, 2.0::DOUBLE), (2.0::DOUBLE, 'inf'::DOUBLE)) input(v, w);
+----
+true	true
+
+# Automatic bounded mean enforces the public per-PU contribution cap before
+# values reach its histogram, normalized sum, or count.
+query I
+SELECT list_count(dp_bounded_value_list(v, 2))
+FROM (VALUES (1.0::DOUBLE), (2.0::DOUBLE), (3.0::DOUBLE)) input(v);
+----
+2
+
+# With noise disabled, the internal aggregate exposes the exact base-2 bin
+# choice. ApproxBounds initially selects [2, 16], then bounded SUM relaxes it to
+# [-16, 16] without changing sensitivity.
+query IRRRRII
+SELECT x.success, x.lower_bound, x.upper_bound, x.clipped_value, x.noise_scale,
+       x.selected_bin, x.contributions
+FROM (
+    SELECT dp_approx_bounds_sum_debug(v, 1.0, 1.0, 2.2250738585072014e-308, 2047::UBIGINT) AS x
+    FROM (VALUES (3.0::DOUBLE), (10.0::DOUBLE)) input(v)
+);
+----
+true	-16.000000	16.000000	13.000000	32.000000	1026	2
+
+# Integral inputs use scale 1 and 64 bins instead of paying a threshold for the complete DOUBLE
+# domain. The selected and relaxed bounds are otherwise identical.
+query IRRRRII
+SELECT x.success, x.lower_bound, x.upper_bound, x.clipped_value, x.noise_scale,
+       x.selected_bin, x.contributions
+FROM (
+    SELECT dp_approx_bounds_sum_debug(v, 1.0, 1.0, 1.0, 64::UBIGINT) AS x
+    FROM (VALUES (3.0::DOUBLE), (10.0::DOUBLE)) input(v)
+);
+----
+true	-16.000000	16.000000	13.000000	32.000000	4	2
+
+# Google bounded mean uses the same private bounds for a midpoint-normalized
+# sum and count. With noise disabled, mean([3, 10]) is exact.
+query R
+SELECT dp_approx_bounds_mean(values, 1.0, 1.0, 2.0, 2.2250738585072014e-308, 2047::UBIGINT)
+FROM (VALUES ([3.0::DOUBLE, 10.0::DOUBLE])) input(values);
+----
+6.500000
+
+# Equal integral bounds are widened before normalization, avoiding a zero-range mean.
+query R
+SELECT dp_approx_bounds_mean(values, 1.0, 1.0, 2.0, 1.0, 64::UBIGINT)
+FROM (VALUES ([0.0::DOUBLE, 0.0::DOUBLE])) input(values);
+----
+0.000000
+
+# With private histogram noise enabled, a strongly supported value-100 bin
+# selects 128 on the first upstream threshold attempt.
+statement ok
+SET privacy_noise = true;
+
+query IRII
+SELECT x.success, x.upper_bound, x.attempts, x.contributions
+FROM (
+    SELECT dp_approx_bounds_sum_debug(100.0::DOUBLE, 1.0, 1.0, 2.2250738585072014e-308,
+                                      2047::UBIGINT) AS x
+    FROM range(1000)
+);
+----
+true	128.000000	1	1000
+
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET priv_rewrite = true;
+
+statement ok
+SET privacy_mode = 'dp_standard';
+
+statement ok
+SET dp_standard_auto_bounds = true;
+
+statement ok
+SET dp_sum_bound = NULL;
+
+statement ok
+SET privacy_noise = false;
+
+statement ok
+SET dp_epsilon = 1.0;
+
+# The existing join has per-PU sums 0,5,...,45. ApproxBounds selects 64, so
+# automatic clipping is inert and the exact query-local total is 2250.
+query R
+SELECT SUM(amount) FROM orders;
+----
+2250.000000
+
+# WHERE is evaluated before the per-PU cells used by ApproxBounds.
+query R
+SELECT SUM(amount) FROM orders WHERE amount = 9;
+----
+450.000000
+
+# Automatic AVG infers [0, 16], then releases the centered sum and count.
+query R
+SELECT AVG(amount) FROM orders;
+----
+4.500000
+
+# Mixed automatic SUM/AVG releases retain their original output positions and
+# split the query budget once per user-visible aggregate.
+query RR
+SELECT SUM(amount), AVG(amount) FROM orders;
+----
+2250.000000	4.500000
+
+# Preserve DuckDB's fractional AVG type when the input is integral.
+query R
+SELECT AVG(id) FROM u;
+----
+49.500000
+
+# FILTER is applied before each PU's deterministic contribution cap.
+query R
+SELECT AVG(amount) FILTER (WHERE amount >= 5) FROM orders;
+----
+7.000000
+
+# A well-supported bin succeeds with private histogram noise.
+statement ok
+CREATE TABLE approx_bounds_users AS
+SELECT i::BIGINT AS uid, 100.0::DOUBLE AS amount, (i % 2)::INTEGER AS g
+FROM range(1000) t(i);
+
+statement ok
+ALTER TABLE approx_bounds_users ADD PRIVACY_KEY (uid);
+
+statement ok
+ALTER TABLE approx_bounds_users SET PU;
+
+statement ok
+ALTER PU TABLE approx_bounds_users ADD PROTECTED (amount);
+
+statement ok
+SET privacy_noise = true;
+
+query I
+SELECT SUM(amount) IS NOT NULL FROM approx_bounds_users;
+----
+true
+
+query I
+SELECT AVG(amount) IS NOT NULL FROM approx_bounds_users;
+----
+true
+
+# Insufficient query-local support is an observable NULL rather than a public
+# fallback bound. This mirrors ApproxBounds' NotEnoughData status in SQL form.
+query I
+SELECT SUM(id) IS NULL FROM u WHERE id < 5;
+----
+true
+
+query I
+SELECT AVG(id) IS NULL FROM u WHERE id < 5;
+----
+true
+
+# Grouped automatic SUM/AVG compose their bound histograms and value releases with
+# private partition selection. Each group has ample support.
+statement ok
+SET dp_delta = 0.000001;
+
+statement ok
+SET dp_max_groups_contributed = 1.0;
+
+query II rowsort
+SELECT g, SUM(amount) IS NOT NULL
+FROM approx_bounds_users
+GROUP BY g;
+----
+0	true
+1	true
+
+query II rowsort
+SELECT g, AVG(amount) IS NOT NULL
+FROM approx_bounds_users
+GROUP BY g;
+----
+0	true
+1	true
+
+# Disabling auto bounds restores the fixed-public-bound contract.
+statement ok
+SET dp_standard_auto_bounds = false;
+
+statement ok
+SET dp_delta = NULL;
+
+statement error
+SELECT SUM(id) FROM u;
+----
+dp_standard: dp_sum_bound must be set
+
+statement ok
+SET privacy_noise = true;
+
 # A SUM-only list setting left in the session is irrelevant to a COUNT-only query.
 statement ok
 SET privacy_noise = false;

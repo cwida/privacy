@@ -41,6 +41,7 @@ set(EXTENSION_SOURCES
     src/aggregates/as_clip_sum.cpp
     src/aggregates/as_clip_min_max.cpp
     src/aggregates/dp_laplace_noise.cpp
+    src/aggregates/dp_approx_bounds.cpp
     src/table_functions/dp_sass_stability_query.cpp
     src/compiler/privacy_compiler.cpp
     src/compiler/privacy_mechanisms.cpp
@@ -65,6 +66,11 @@ set(EXTENSION_SOURCES
     src/utils/privacy_helpers.cpp)
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
+
+if(WIN32)
+    target_link_libraries(${EXTENSION_NAME} bcrypt)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} bcrypt)
+endif()
 
 install(
   TARGETS ${EXTENSION_NAME}

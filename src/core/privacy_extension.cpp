@@ -22,6 +22,7 @@
 #include "aggregates/as_clip_sum.hpp"
 #include "aggregates/as_min_max.hpp"
 #include "aggregates/as_clip_min_max.hpp"
+#include "aggregates/dp_approx_bounds.hpp"
 #include "aggregates/dp_laplace_noise.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "parser/privacy_parser.hpp"
@@ -330,6 +331,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "When true, dp_sass SUM/COUNT sample answers are rescaled to full-dataset-estimator "
 	                             "scale before release. When false, they remain on raw subsample-answer scale.",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	db.config.AddExtensionOption("dp_standard_auto_bounds",
+	                             "Use Google-compatible query-local ApproxBounds for SUM and AVG aggregates in "
+	                             "privacy_mode='dp_standard' instead of configured public bounds",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	// Differential privacy budget (ε), used by the dp_standard / dp_elastic / dp_sass modes.
 	db.config.AddExtensionOption("dp_epsilon",
 	                             "Differential privacy budget ε (used by dp_standard, dp_elastic, and dp_sass)",
@@ -444,11 +449,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             "Privacy failure probability δ for DP partition selection and smooth sensitivity. Use "
 	                             "SET dp_delta=<value> or PRAGMA refresh_dp_stats(<epsilon>).",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE));
-	// Set deterministic RNG seed for PAC functions (useful for tests)
-	db.config.AddExtensionOption("privacy_seed", "RNG seed for reproducible noised results", LogicalType::BIGINT);
-	// Enable/disable PAC noise application (useful for testing, since noise affects result determinism)
-	db.config.AddExtensionOption("privacy_noise", "Enable/disable PAC noise application (set to false for debugging)",
-	                             LogicalType::BOOLEAN);
+	// PAC experiments can be reproduced with a public seed. Formal DP mechanisms intentionally ignore
+	// this setting and draw fresh operating-system entropy for every release.
+	db.config.AddExtensionOption("privacy_seed", "RNG seed for reproducible PAC results", LogicalType::BIGINT);
+	// Internal test escape hatch shared by PAC and DP. A DP release has no privacy guarantee when this
+	// is false, so production configurations must leave it enabled.
+	db.config.AddExtensionOption(
+	    "privacy_noise", "[INTERNAL TESTING ONLY] Enable privacy noise; formal DP requires true", LogicalType::BOOLEAN);
 	db.config.AddExtensionOption("pac_sample_diversity_check",
 	                             "[INTERNAL] Reject PAC/AS aggregates that lack sample diversity", LogicalType::BOOLEAN,
 	                             Value::BOOLEAN(true));
@@ -599,6 +606,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register dp_noise scalar function (value, scale) -> value + Lap(scale)
 	RegisterDpLaplaceNoiseFunction(loader);
+	RegisterDpApproxBoundsAggregateFunctions(loader);
 	RegisterDpSmoothMedianNoiseFunction(loader);
 	RegisterDpSassStabilityQueryFunction(loader);
 

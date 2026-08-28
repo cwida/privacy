@@ -6,6 +6,11 @@ namespace duckdb {
 
 class ExtensionLoader;
 
+// Shared DP-noise helpers. Noise comes from fresh operating-system entropy and is sampled on a
+// power-of-two lattice so floating-point rounding does not expose the raw aggregate.
+double AddDpLaplaceNoise(double value, double scale);
+void AddDpLaplaceNoiseBatch(const double *values, double *results, idx_t count, double scale);
+
 struct DpSassStabilityQueryRecord {
 	int32_t aggregate_index;
 	vector<Value> stats;
@@ -29,7 +34,7 @@ void ClearDpSassNoiseScaleQueryRecords();
 vector<DpSassNoiseScaleQueryRecord> TakeDpSassNoiseScaleQueryRecords();
 
 // Registers `dp_noise(value DOUBLE, scale DOUBLE) -> DOUBLE`.
-// Returns value + Lap(scale) (location 0, scale = scale). Deterministic when `privacy_seed` is set.
+// Returns value plus granular Laplace noise with diversity `scale`.
 void RegisterDpLaplaceNoiseFunction(ExtensionLoader &loader);
 
 // Registers `dp_smooth_median_noise(counters, epsilon, delta, sample_lanes) -> DOUBLE`.
