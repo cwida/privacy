@@ -31,9 +31,6 @@ statement ok
 SET dp_filterless_sample_bits = 0;
 
 statement ok
-SET dp_filterless_noise_bounds = false;
-
-statement ok
 SET privacy_noise = false;
 
 # The aggregate functions remain directly callable for debugging. The filtered
@@ -546,17 +543,11 @@ SET threads = 1;
 statement ok
 SET privacy_noise = true;
 
-statement ok
-SET dp_filterless_noise_bounds = true;
-
 query I
 SELECT isfinite(SUM(decimal_amount)::DOUBLE)
 FROM filterless_exact_numeric;
 ----
 true
-
-statement ok
-SET dp_filterless_noise_bounds = false;
 
 statement ok
 SET privacy_noise = false;

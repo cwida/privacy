@@ -13,7 +13,6 @@ struct FilterlessSettings {
 	int sample_bits;
 	double sample_weight;
 	double clip_support;
-	bool noise_bounds;
 	double bounds_epsilon_fraction;
 };
 

@@ -9,9 +9,8 @@ scale. This prototype retains all qualifying rows plus a fixed hash sample of no
 Only that fixed sample supplies the unfiltered per-PU values used to estimate exponential clipping
 bins. Qualifying PUs outside the sample affect the answer but cannot affect the selected bound.
 
-This is a prototype, not yet a production DP mode. In particular, its default raw histogram matches
-Peter's proposal but does not support a formal DP claim. Setting `dp_filterless_noise_bounds=true`
-privatizes the histogram with an explicit budget split.
+This is a prototype, not yet a production DP mode. Unlike Peter's raw-histogram baseline, it always
+privatizes histogram support with an explicit budget split whenever privacy noise is enabled.
 
 ## Running query
 
@@ -91,14 +90,13 @@ or partition-selection noise; an identical query remains deterministic for a fix
 | `privacy_mode='dp_filterless'` | Enable the compiler rewrite. |
 | `dp_filterless_sample_bits=p` | Put PUs in the fixed histogram sample at `2^-p`; default 0 means sample all PUs. |
 | `dp_filterless_clip_support` | Required weighted support for a bin. There is no invented default. |
-| `dp_filterless_noise_bounds` | Noise bin supports before choosing a bound. Default false reproduces Peter's baseline. |
-| `dp_filterless_bounds_epsilon_fraction` | Fraction of each component's epsilon used by bound selection when bin noise is enabled. |
+| `dp_filterless_bounds_epsilon_fraction` | Fraction of each component's epsilon used by private bound selection. |
 | `dp_epsilon`, `dp_delta` | Query budget; grouped queries require delta for partition selection. |
 | `dp_max_groups_contributed` | Maximum output groups affected by one logical PU. |
 
 The factor-4 bin geometry and temporary marker bit are representation invariants shared with the
 existing PAC clipping machinery, not runtime policy choices. Sampling degree, support, budget
-split, and histogram noise are DuckDB settings.
+split are DuckDB settings; histogram support is always noised when privacy noise is enabled.
 
 ## Privacy status and attacks
 
@@ -106,12 +104,12 @@ For fixed `FROM`, join, aggregate, and `GROUP BY` expressions, changing only `WH
 the histogram: the same sampled PUs contribute the same unfiltered per-PU partials. This removes the
 filter attack in which an unsampled qualifying PU moved a bin from `T-1` to `T`.
 
-The raw histogram is nevertheless private-data-dependent. A database update affecting a sampled PU
-can change its bin and the selected bound. Filter independence is therefore not, by itself, a formal
-DP argument for releasing an unnoised data-dependent bound.
+The unsafe raw-histogram prototype is nevertheless private-data-dependent. A database update
+affecting a sampled PU can change its bin and the selected bound. Filter independence is therefore
+not, by itself, a formal DP argument for releasing an unnoised data-dependent bound.
 
-When bin noise is enabled, one sampled PU contributes weight `2^p` in each of at most `C_u` groups.
-Under add/remove adjacency, the implementation therefore uses histogram L1 sensitivity:
+One sampled PU contributes weight `2^p` in each of at most `C_u` groups. Under add/remove adjacency,
+the implementation therefore uses histogram L1 sensitivity:
 
 ```text
 2^p * C_u
@@ -125,7 +123,8 @@ and splits each aggregate component's epsilon between histogram selection and th
 full filterless execution (`p=0`) and the repository's Google-style DP simulation. The benchmark
 uses a static TPC-H SF1 database, epsilon 1, delta 1e-6, support 500, 32 trials, and eight fixed hash
 salts for the `p=6` sample. Google tunes `C_u` and its bound-budget fraction; the filterless arms
-tune `C_u` and use an unnoised histogram. Error is relative L1 against the uncapped truth.
+tune `C_u` and use an unnoised histogram. These historical results characterize the unsafe baseline,
+not the extension's current always-private bound selection. Error is relative L1 against the uncapped truth.
 
 | Query | Google | Full `p=0` | Sampled `p=6` |
 |---|---:|---:|---:|
@@ -170,11 +169,10 @@ Thus `p=6` reduces the unfiltered relational work by 2.3x-4.2x on the main TPC-H
 prune much: the synthetic billionaire inputs are about 1.0x full-filterless time.
 
 `attacks/filterless_encoded_attack.py` isolates the fixed-sample knife edge. Across `p=0,2,4,6`,
-changing only the filter gives 50.05%-50.39% scale-classification accuracy. Adding or removing a
-sampled PU at the support boundary changes the raw selected bound from 128 to 134,217,728 and gives
-99.95% accuracy. This is why the raw-histogram mode is filter-independent on a static database but
-is not a formal DP mechanism across updates; `dp_filterless_noise_bounds=true` is required for the
-DP-accounted variant.
+changing only the filter gives 50.05%-50.39% scale-classification accuracy. In the unsafe
+raw-histogram prototype, adding or removing a sampled PU at the support boundary changes the
+selected bound from 128 to 134,217,728 and gives 99.95% accuracy. The extension does not expose that
+prototype mode: it noises histogram support before selecting a bound.
 
 ## Current limitations
 

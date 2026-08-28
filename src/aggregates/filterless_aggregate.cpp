@@ -72,7 +72,7 @@ FilterlessSettings GetFilterlessSettings(ClientContext &context) {
 	ValidateFilterlessBoundsEpsilonFraction(bounds_fraction);
 
 	return {static_cast<int>(sample_bits), FilterlessSampleWeight(static_cast<int>(sample_bits)), clip_support,
-	        GetBooleanSetting(context, "dp_filterless_noise_bounds", false), bounds_fraction};
+	        bounds_fraction};
 }
 
 struct FilterlessBin {
@@ -128,7 +128,6 @@ struct FilterlessBindData : public FunctionData {
 	int sample_bits;
 	double sample_weight;
 	double clip_support;
-	bool noise_bounds;
 	bool noise_enabled;
 	double epsilon;
 	double bounds_fraction;
@@ -144,10 +143,10 @@ struct FilterlessBindData : public FunctionData {
 	bool Equals(const FunctionData &other_p) const override {
 		auto other = dynamic_cast<const FilterlessBindData *>(&other_p);
 		return other && sample_bits == other->sample_bits && clip_support == other->clip_support &&
-		       noise_bounds == other->noise_bounds && noise_enabled == other->noise_enabled &&
-		       epsilon == other->epsilon && bounds_fraction == other->bounds_fraction &&
-		       max_groups == other->max_groups && has_explicit_config == other->has_explicit_config &&
-		       input_scale == other->input_scale && approximate_values == other->approximate_values;
+		       noise_enabled == other->noise_enabled && epsilon == other->epsilon &&
+		       bounds_fraction == other->bounds_fraction && max_groups == other->max_groups &&
+		       has_explicit_config == other->has_explicit_config && input_scale == other->input_scale &&
+		       approximate_values == other->approximate_values;
 	}
 };
 
@@ -197,7 +196,6 @@ static unique_ptr<FunctionData> BindFilterless(ClientContext &context, vector<un
 	result->sample_bits = settings.sample_bits;
 	result->sample_weight = settings.sample_weight;
 	result->clip_support = settings.clip_support;
-	result->noise_bounds = settings.noise_bounds;
 	result->noise_enabled = noise_enabled;
 	result->epsilon = epsilon;
 	result->bounds_fraction = settings.bounds_epsilon_fraction;
@@ -321,7 +319,7 @@ static int FindSupportedBin(const BIN_TYPE *bins, idx_t bin_count, const Filterl
                             double histogram_epsilon, double &selected_support) {
 	D_ASSERT(bin_count <= FILTERLESS_EXACT_BIN_COUNT);
 	double histogram_sensitivity = bind.sample_weight * bind.max_groups;
-	double scale = bind.noise_bounds && bind.noise_enabled ? histogram_sensitivity / histogram_epsilon : 0.0;
+	double scale = bind.noise_enabled ? histogram_sensitivity / histogram_epsilon : 0.0;
 	int selected = -1;
 	selected_support = 0.0;
 	if (!bins) {
@@ -386,8 +384,8 @@ static double ClipComponent(const FilterlessComponentState &state, int negative_
 
 static FilterlessResult FinalizeComponent(const FilterlessComponentState &state, const FilterlessBindData &bind,
                                           uint64_t nonce_base, double epsilon, bool nonnegative) {
-	double histogram_epsilon = bind.noise_bounds ? epsilon * bind.bounds_fraction : epsilon;
-	double value_epsilon = bind.noise_bounds ? epsilon * (1.0 - bind.bounds_fraction) : epsilon;
+	double histogram_epsilon = epsilon * bind.bounds_fraction;
+	double value_epsilon = epsilon * (1.0 - bind.bounds_fraction);
 	double negative_support = 0.0;
 	double positive_support = 0.0;
 	int positive_bin =
@@ -542,8 +540,8 @@ struct FilterlessExactResult {
 static FilterlessExactResult FinalizeExactComponent(const FilterlessExactComponentState &state,
                                                     const FilterlessBindData &bind, uint64_t nonce_base, double epsilon,
                                                     bool nonnegative) {
-	double histogram_epsilon = bind.noise_bounds ? epsilon * bind.bounds_fraction : epsilon;
-	double value_epsilon = bind.noise_bounds ? epsilon * (1.0 - bind.bounds_fraction) : epsilon;
+	double histogram_epsilon = epsilon * bind.bounds_fraction;
+	double value_epsilon = epsilon * (1.0 - bind.bounds_fraction);
 	double ignored_support;
 	int positive_bin = FindSupportedBin(state.positive, FILTERLESS_EXACT_BIN_COUNT, bind, nonce_base, histogram_epsilon,
 	                                    ignored_support);
@@ -822,9 +820,8 @@ static void FilterlessAvgFinalize(Vector &states, AggregateInputData &input, Vec
 		                                     nonce * 2048 + 2 * CLIP_NUM_LEVELS_64 + 1, component_epsilon, true);
 		double noised_sum =
 		    bind.noise_enabled ? AddDpLaplaceNoise(sum.clipped_value, sum.noise_scale) : sum.clipped_value;
-		double noised_count = bind.noise_enabled
-		                          ? AddDpLaplaceNoise(denominator.clipped_value, denominator.noise_scale)
-		                          : denominator.clipped_value;
+		double noised_count = bind.noise_enabled ? AddDpLaplaceNoise(denominator.clipped_value, denominator.noise_scale)
+		                                         : denominator.clipped_value;
 		double average = noised_count > 0.0 ? noised_sum / noised_count : 0.0;
 		if (DEBUG) {
 			WriteAvgDebugResult(result, offset + i, sum, denominator, average);

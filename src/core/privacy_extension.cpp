@@ -358,10 +358,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("dp_filterless_clip_support",
 	                             "Weighted PU support required for an exponential filterless clipping bin",
 	                             LogicalType::DOUBLE, Value(LogicalType::DOUBLE), ValidateFilterlessClipSupportSetting);
-	db.config.AddExtensionOption("dp_filterless_noise_bounds",
-	                             "Noise filterless clipping-bin support counts; required for a formal DP claim when "
-	                             "bounds depend on private contributions",
-	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	db.config.AddExtensionOption("dp_filterless_bounds_epsilon_fraction",
 	                             "Fraction of aggregate epsilon reserved for private filterless bound selection",
 	                             LogicalType::DOUBLE, Value::DOUBLE(0.25), ValidateFilterlessFractionSetting);
