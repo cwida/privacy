@@ -261,7 +261,7 @@ static idx_t BinIndex(uint64_t scaled_magnitude) {
 	if (scaled_magnitude == 0) {
 		return 0;
 	}
-	int bit_width = 64 - __builtin_clzll(scaled_magnitude);
+	int bit_width = 64 - pac_clzll(scaled_magnitude);
 	int index = (bit_width - 1) / CLIP_LEVEL_SHIFT;
 	return static_cast<idx_t>(std::min(index, CLIP_NUM_LEVELS_64 - 1));
 }
@@ -844,7 +844,8 @@ static void FilterlessAvgFinalize(Vector &states, AggregateInputData &input, Vec
 		double component_epsilon = bind.epsilon / 2.0;
 		auto sum = FinalizeComponent(state_ptrs[i]->sum_component, bind, nonce * 2048, component_epsilon, false);
 		auto denominator = FinalizeComponent(state_ptrs[i]->count_component, bind,
-		                                     nonce * 2048 + 2 * CLIP_NUM_LEVELS_64 + 1, component_epsilon, true);
+		                                     nonce * 2048 + static_cast<uint64_t>(2 * CLIP_NUM_LEVELS_64 + 1),
+		                                     component_epsilon, true);
 		double noised_sum =
 		    bind.noise_enabled ? AddDpLaplaceNoise(sum.clipped_value, sum.noise_scale) : sum.clipped_value;
 		double noised_count = bind.noise_enabled ? AddDpLaplaceNoise(denominator.clipped_value, denominator.noise_scale)
