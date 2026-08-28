@@ -523,6 +523,18 @@ FROM (VALUES
 ----
 90071992547409.95	DECIMAL(38,2)
 
+# Exact DP aggregates use saturating post-processing at the public SQL return
+# type boundary. They never turn an oversized value or noise draw into an
+# observable query error.
+query I
+SELECT filterless_count(pu, true, answer_value, histogram_value)
+FROM (VALUES
+    (0::UBIGINT, 9223372036854775807::BIGINT, 9223372036854775807::BIGINT),
+    (2::UBIGINT, 9223372036854775807::BIGINT, 9223372036854775807::BIGINT)
+) input(pu, answer_value, histogram_value);
+----
+9223372036854775807
+
 # Exact states also merge without converting their bin sums to DOUBLE.
 statement ok
 SET threads = 4;
@@ -548,6 +560,24 @@ SELECT isfinite(SUM(decimal_amount)::DOUBLE)
 FROM filterless_exact_numeric;
 ----
 true
+
+# Even an extreme public epsilon cannot turn a large private bound/noise draw
+# into an observable overflow error. Results saturate at their SQL type limits.
+statement ok
+SET dp_epsilon = 1e-300;
+
+query III
+SELECT SUM(integer_amount) IS NOT NULL,
+       COUNT(*) IS NOT NULL,
+       SUM(decimal_amount) BETWEEN
+           -999999999999999999999999999999999999.99::DECIMAL(38, 2) AND
+            999999999999999999999999999999999999.99::DECIMAL(38, 2)
+FROM filterless_exact_numeric;
+----
+true	true	true
+
+statement ok
+SET dp_epsilon = 100.0;
 
 statement ok
 SET privacy_noise = false;

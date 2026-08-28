@@ -59,6 +59,10 @@ sample. The lower aggregate clears the marker bit and groups once by logical `(P
 8. COUNT follows the same path with nonnegative contributions. AVG is decomposed into SUM and
    `COUNT(value)` and receives half of the aggregate's budget per component.
 
+Noise has unbounded mathematical support, while SQL integer and DECIMAL types are finite. Exact
+numeric releases therefore saturate at the public return type's endpoints instead of exposing an
+overflow error. COUNT bound selection likewise excludes bins above the public BIGINT input range.
+
 For grouped queries, the prototype retains the existing Google-style mechanisms. It limits each
 logical PU to `dp_max_groups_contributed` groups, counts distinct qualifying logical PUs for
 partition selection, and applies the existing noised threshold. Sample-only PUs can influence

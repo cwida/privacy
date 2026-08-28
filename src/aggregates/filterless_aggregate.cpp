@@ -104,6 +104,11 @@ struct FilterlessAvgState {
 // With the shared 2^-27 anchor and factor-4 levels, 80 bins reach 2^133 and therefore cover
 // the complete signed HUGEINT / DECIMAL(38) domain without saturating the top bin.
 constexpr int FILTERLESS_EXACT_BIN_COUNT = 80;
+// COUNT partials are BIGINT. Converting INT64_MAX to DOUBLE rounds it to 2^63 and routes it to
+// bin 45, so higher bins are unreachable for this public input type and must not participate.
+constexpr int FILTERLESS_COUNT_BIN_COUNT = 46;
+// HUGEINT and DECIMAL(38) values reach at most bin 77 after DOUBLE-based bin indexing.
+constexpr int FILTERLESS_HUGEINT_BIN_COUNT = 78;
 
 struct FilterlessExactBin {
 	double support;
@@ -135,6 +140,9 @@ struct FilterlessBindData : public FunctionData {
 	bool has_explicit_config;
 	double input_scale;
 	bool approximate_values;
+	idx_t exact_bin_count;
+	hugeint_t exact_output_min;
+	hugeint_t exact_output_max;
 
 	unique_ptr<FunctionData> Copy() const override {
 		return make_uniq<FilterlessBindData>(*this);
@@ -146,7 +154,8 @@ struct FilterlessBindData : public FunctionData {
 		       noise_enabled == other->noise_enabled && epsilon == other->epsilon &&
 		       bounds_fraction == other->bounds_fraction && max_groups == other->max_groups &&
 		       has_explicit_config == other->has_explicit_config && input_scale == other->input_scale &&
-		       approximate_values == other->approximate_values;
+		       approximate_values == other->approximate_values && exact_bin_count == other->exact_bin_count &&
+		       exact_output_min == other->exact_output_min && exact_output_max == other->exact_output_max;
 	}
 };
 
@@ -163,6 +172,15 @@ struct FilterlessResult {
 	uint64_t sampled_contributions;
 };
 
+static double SaturatingNoiseScale(long double sensitivity, long double epsilon) {
+	if (sensitivity <= 0.0) {
+		return 0.0;
+	}
+	auto scale = sensitivity / epsilon;
+	return scale >= static_cast<long double>(std::numeric_limits<double>::max()) ? std::numeric_limits<double>::max()
+	                                                                             : static_cast<double>(scale);
+}
+
 static double EvaluateConstantDouble(ClientContext &context, const Expression &expression, const string &name) {
 	if (!expression.IsFoldable()) {
 		throw InvalidInputException("filterless: %s must be a constant", name);
@@ -171,7 +189,7 @@ static double EvaluateConstantDouble(ClientContext &context, const Expression &e
 }
 
 static unique_ptr<FunctionData> BindFilterless(ClientContext &context, vector<unique_ptr<Expression>> &arguments,
-                                               idx_t config_offset, bool approximate_values) {
+                                               idx_t config_offset, bool approximate_values, idx_t exact_bin_count) {
 	auto settings = GetFilterlessSettings(context);
 	bool noise_enabled = IsPacNoiseEnabled(context, true);
 	double epsilon = GetValidatedDpEpsilon(context, "dp_filterless");
@@ -203,22 +221,27 @@ static unique_ptr<FunctionData> BindFilterless(ClientContext &context, vector<un
 	result->has_explicit_config = has_explicit_config;
 	result->input_scale = 1.0;
 	result->approximate_values = approximate_values;
+	result->exact_bin_count = exact_bin_count;
+	result->exact_output_min = NumericLimits<hugeint_t>::Minimum();
+	result->exact_output_max = NumericLimits<hugeint_t>::Maximum();
 	return std::move(result);
 }
 
 static unique_ptr<FunctionData> BindFilterlessSum(ClientContext &context, AggregateFunction &,
                                                   vector<unique_ptr<Expression>> &arguments) {
-	return BindFilterless(context, arguments, 4, true);
+	idx_t bin_count = arguments[2]->return_type.InternalType() == PhysicalType::INT64 ? FILTERLESS_COUNT_BIN_COUNT
+	                                                                                  : FILTERLESS_HUGEINT_BIN_COUNT;
+	return BindFilterless(context, arguments, 4, true, bin_count);
 }
 
 static unique_ptr<FunctionData> BindFilterlessCount(ClientContext &context, AggregateFunction &,
                                                     vector<unique_ptr<Expression>> &arguments) {
-	return BindFilterless(context, arguments, 4, false);
+	return BindFilterless(context, arguments, 4, false, FILTERLESS_COUNT_BIN_COUNT);
 }
 
 static unique_ptr<FunctionData> BindFilterlessAvg(ClientContext &context, AggregateFunction &,
                                                   vector<unique_ptr<Expression>> &arguments) {
-	return BindFilterless(context, arguments, 6, true);
+	return BindFilterless(context, arguments, 6, true, FILTERLESS_HUGEINT_BIN_COUNT);
 }
 
 constexpr uint64_t FILTERLESS_MAX_SCALED_MAGNITUDE = uint64_t(1) << 60;
@@ -318,8 +341,10 @@ template <class BIN_TYPE>
 static int FindSupportedBin(const BIN_TYPE *bins, idx_t bin_count, const FilterlessBindData &bind, uint64_t,
                             double histogram_epsilon, double &selected_support) {
 	D_ASSERT(bin_count <= FILTERLESS_EXACT_BIN_COUNT);
-	double histogram_sensitivity = bind.sample_weight * bind.max_groups;
-	double scale = bind.noise_enabled ? histogram_sensitivity / histogram_epsilon : 0.0;
+	double scale =
+	    bind.noise_enabled
+	        ? SaturatingNoiseScale(static_cast<long double>(bind.sample_weight) * bind.max_groups, histogram_epsilon)
+	        : 0.0;
 	int selected = -1;
 	selected_support = 0.0;
 	if (!bins) {
@@ -397,7 +422,8 @@ static FilterlessResult FinalizeComponent(const FilterlessComponentState &state,
 	double positive_bound = BinUpperBound(positive_bin);
 	double negative_bound = BinUpperBound(negative_bin);
 	double clipped = ClipComponent(state, negative_bin, positive_bin);
-	double scale = std::max(negative_bound, positive_bound) * bind.max_groups / value_epsilon;
+	double scale = SaturatingNoiseScale(
+	    static_cast<long double>(std::max(negative_bound, positive_bound)) * bind.max_groups, value_epsilon);
 	return {-negative_bound,
 	        positive_bound,
 	        clipped,
@@ -543,14 +569,15 @@ static FilterlessExactResult FinalizeExactComponent(const FilterlessExactCompone
 	double histogram_epsilon = epsilon * bind.bounds_fraction;
 	double value_epsilon = epsilon * (1.0 - bind.bounds_fraction);
 	double ignored_support;
-	int positive_bin = FindSupportedBin(state.positive, FILTERLESS_EXACT_BIN_COUNT, bind, nonce_base, histogram_epsilon,
-	                                    ignored_support);
-	int negative_bin =
-	    nonnegative ? -1
-	                : FindSupportedBin(state.negative, FILTERLESS_EXACT_BIN_COUNT, bind,
-	                                   nonce_base + FILTERLESS_EXACT_BIN_COUNT, histogram_epsilon, ignored_support);
+	idx_t bin_count = bind.exact_bin_count;
+	int positive_bin =
+	    FindSupportedBin(state.positive, bin_count, bind, nonce_base, histogram_epsilon, ignored_support);
+	int negative_bin = nonnegative ? -1
+	                               : FindSupportedBin(state.negative, bin_count, bind, nonce_base + bin_count,
+	                                                  histogram_epsilon, ignored_support);
 	double bound = std::max(ExactBinUpperBound(negative_bin), ExactBinUpperBound(positive_bin));
-	return {ClipExactComponent(state, negative_bin, positive_bin, bind), bound * bind.max_groups / value_epsilon};
+	return {ClipExactComponent(state, negative_bin, positive_bin, bind),
+	        SaturatingNoiseScale(static_cast<long double>(bound) * bind.max_groups, value_epsilon)};
 }
 
 static idx_t FilterlessStateSize(const AggregateFunction &) {
@@ -835,7 +862,7 @@ template <class OUTPUT_TYPE>
 static OUTPUT_TYPE CastExactResult(hugeint_t value) {
 	OUTPUT_TYPE result;
 	if (!Hugeint::TryCast(value, result)) {
-		throw OutOfRangeException("filterless: exact aggregate result is outside the output type range");
+		return value < 0 ? NumericLimits<OUTPUT_TYPE>::Minimum() : NumericLimits<OUTPUT_TYPE>::Maximum();
 	}
 	return result;
 }
@@ -843,6 +870,29 @@ static OUTPUT_TYPE CastExactResult(hugeint_t value) {
 template <>
 hugeint_t CastExactResult<hugeint_t>(hugeint_t value) {
 	return value;
+}
+
+static hugeint_t SaturatingHugeintFromDouble(double value) {
+	if (std::isnan(value)) {
+		return hugeint_t(0);
+	}
+	hugeint_t result;
+	if (Hugeint::TryConvert(value, result)) {
+		return result;
+	}
+	return std::signbit(value) ? NumericLimits<hugeint_t>::Minimum() : NumericLimits<hugeint_t>::Maximum();
+}
+
+static hugeint_t SaturatingHugeintAdd(hugeint_t left, hugeint_t right) {
+	auto result = left;
+	if (Hugeint::TryAddInPlace(result, right)) {
+		return result;
+	}
+	return right < 0 ? NumericLimits<hugeint_t>::Minimum() : NumericLimits<hugeint_t>::Maximum();
+}
+
+static hugeint_t ClampExactResult(hugeint_t value, const FilterlessBindData &bind) {
+	return std::max(bind.exact_output_min, std::min(value, bind.exact_output_max));
 }
 
 template <class OUTPUT_TYPE, bool COUNT>
@@ -857,13 +907,10 @@ static void FilterlessExactFinalize(Vector &states, AggregateInputData &input, V
 		auto released = value.clipped_value;
 		if (bind.noise_enabled) {
 			double noise = AddDpLaplaceNoise(0.0, value.noise_scale);
-			hugeint_t scaled_noise;
-			if (!std::isfinite(noise) || !Hugeint::TryConvert(noise * bind.input_scale, scaled_noise)) {
-				throw OutOfRangeException("filterless: exact aggregate noise is outside the output type range");
-			}
-			released = Hugeint::Add(released, scaled_noise);
+			auto scaled_noise = SaturatingHugeintFromDouble(noise * bind.input_scale);
+			released = SaturatingHugeintAdd(released, scaled_noise);
 		}
-		result_data[offset + i] = CastExactResult<OUTPUT_TYPE>(released);
+		result_data[offset + i] = CastExactResult<OUTPUT_TYPE>(ClampExactResult(released, bind));
 	}
 }
 
@@ -1028,9 +1075,11 @@ static unique_ptr<FunctionData> BindFilterlessDecimalSum(ClientContext &context,
 	}
 	auto return_type = LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(input_type));
 	function = MakeFilterlessDecimalSumFunction(input_type, return_type, arguments.size() == 7);
-	auto result = BindFilterless(context, arguments, 4, false);
+	auto result = BindFilterless(context, arguments, 4, false, FILTERLESS_HUGEINT_BIN_COUNT);
 	auto &bind = result->Cast<FilterlessBindData>();
 	bind.input_scale = std::pow(10.0, DecimalType::GetScale(input_type));
+	bind.exact_output_max = Hugeint::Subtract(Hugeint::POWERS_OF_TEN[Decimal::MAX_WIDTH_DECIMAL], hugeint_t(1));
+	bind.exact_output_min = Hugeint::Negate(bind.exact_output_max);
 	return result;
 }
 
