@@ -20,7 +20,7 @@
 #elif defined(__linux__)
 #include <sys/random.h>
 #elif defined(_WIN32)
-#include <windows.h>
+#include "duckdb/common/windows.hpp"
 #include <bcrypt.h>
 #endif
 
