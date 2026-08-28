@@ -123,9 +123,6 @@ SET dp_sample_lanes = 8;
 # scalar takes sample_lanes explicitly so prepared statements and reused counters
 # do not observe a later setting change.
 statement ok
-SET privacy_noise = true;
-
-statement ok
 SET dp_sample_lanes = 1;
 
 query I
@@ -135,13 +132,10 @@ WITH vals AS (
 ), counters AS (
     SELECT list(v ORDER BY v) AS l FROM vals
 )
-SELECT abs(dp_smooth_median_noise(l, 10.0, 1e-6, 8)) > 10000.0
+SELECT dp_smooth_median_noise_scale(l, 10.0, 1e-6, 8)
 FROM counters;
 ----
-true
-
-statement ok
-SET privacy_noise = false;
+20000.0
 
 query I
 WITH vals AS (

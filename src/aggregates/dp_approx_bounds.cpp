@@ -886,7 +886,7 @@ static AggregateFunction MakeDpApproxBoundsMeanFunction() {
 }
 
 static void RegisterInternalAggregate(ExtensionLoader &loader, AggregateFunction function) {
-	loader.RegisterFunction(CreateAggregateFunctionInfo(function));
+	loader.RegisterFunction(CreateAggregateFunctionInfo(std::move(function)));
 }
 
 void RegisterDpApproxBoundsAggregateFunctions(ExtensionLoader &loader) {
