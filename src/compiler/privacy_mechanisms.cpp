@@ -122,8 +122,7 @@ static unique_ptr<Expression> ClipToBounds(OptimizerExtensionInput &input, uniqu
 // Replace each AVG(x) with SUM(x) in-place. Fixed-bound means also append COUNT(*);
 // automatic bounded means fuse their private sum and count into one aggregate.
 static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, LogicalAggregate *agg, AvgRewriteMode mode,
-                                            const AvgBounds *avg_bounds,
-                                            bool count_non_null_value = false) {
+                                            const AvgBounds *avg_bounds, bool count_non_null_value = false) {
 	vector<AvgInfo> avg_infos;
 	const bool fixed_bounds_mean = mode == AvgRewriteMode::FIXED_BOUNDS;
 	const bool automatic_bounds_mean = mode == AvgRewriteMode::AUTOMATIC_BOUNDS;
@@ -1602,7 +1601,7 @@ static optional_idx AddSupportAggregate(OptimizerExtensionInput &input, unique_p
 
 static LogicalFilter *ApplySupportFilter(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                          LogicalAggregate *agg, idx_t support_pos, double threshold,
-	                                     double noise_scale = 0.0) {
+                                         double noise_scale = 0.0) {
 	auto support_ref = make_uniq<BoundColumnRefExpression>(agg->types[agg->groups.size() + support_pos],
 	                                                       ColumnBinding(agg->aggregate_index, support_pos));
 	unique_ptr<Expression> support_expr =
