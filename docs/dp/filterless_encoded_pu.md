@@ -123,12 +123,13 @@ and splits each aggregate component's epsilon between histogram selection and th
 
 ## Sampling, utility, and execution results
 
-`attacks/filterless_three_way_benchmark.py` compares the current fixed-sample-only histogram with
-full filterless execution (`p=0`) and the repository's Google-style DP simulation. The benchmark
-uses a static TPC-H SF1 database, epsilon 1, delta 1e-6, support 500, 32 trials, and eight fixed hash
-salts for the `p=6` sample. Google tunes `C_u` and its bound-budget fraction; the filterless arms
-tune `C_u` and use an unnoised histogram. These historical results characterize the unsafe baseline,
-not the extension's current always-private bound selection. Error is relative L1 against the uncapped truth.
+The following historical benchmark compared a fixed-sample-only histogram with full filterless
+execution (`p=0`) and a Google-style DP simulation. It used a static TPC-H SF1 database, epsilon 1,
+delta 1e-6, support 500, 32 trials, and eight fixed hash salts for the `p=6` sample. Google tuned
+`C_u` and its bound-budget fraction; the filterless arms tuned `C_u` and used an unnoised histogram.
+These results characterize the unsafe baseline, not the extension's current always-private bound
+selection. Error is relative L1 against the uncapped truth. The exploratory utility harness was
+removed when the attack scripts were consolidated; these tables are retained as historical results.
 
 | Query | Google | Full `p=0` | Sampled `p=6` |
 |---|---:|---:|---:|
@@ -172,11 +173,12 @@ Thus `p=6` reduces the unfiltered relational work by 2.3x-4.2x on the main TPC-H
 1.65x-1.70x slower than filtered pre-aggregation. When nearly every PU qualifies, sampling cannot
 prune much: the synthetic billionaire inputs are about 1.0x full-filterless time.
 
-`attacks/filterless_encoded_attack.py` isolates the fixed-sample knife edge. Across `p=0,2,4,6`,
-changing only the filter gives 50.05%-50.39% scale-classification accuracy. In the unsafe
-raw-histogram prototype, adding or removing a sampled PU at the support boundary changes the
-selected bound from 128 to 134,217,728 and gives 99.95% accuracy. The extension does not expose that
-prototype mode: it noises histogram support before selecting a bound.
+`attacks/filterless_attacks.py` isolates the fixed-sample knife edge. Its filter-change experiment
+uses one fixed database and two predicates, so it is a channel diagnostic rather than a DP
+neighboring-database test. The sampled-PU update experiment uses add/remove adjacency. It compares
+the removed raw-histogram prototype, where the selected bound jumps from 128 to 134,217,728 and the
+worlds are almost perfectly distinguishable, with the extension's Laplace-noised histogram support.
+Only the latter should be compared with the stated epsilon-DP membership-accuracy ceiling.
 
 ## Current limitations
 

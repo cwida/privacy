@@ -413,10 +413,10 @@ one cover lane. Maintaining all 64 lanes also processes every nonqualifying PU o
 equivalent to the SQL plan that physically drops 63/64 of them. Reusing AS requires a dedicated
 rewrite and a separate performance/utility benchmark.
 
-#### One-lane end-to-end prototype
+#### Historical one-lane end-to-end prototype
 
-The narrow prototype now exists in `attacks/filterless_one_lane_prototype.py`. It simulates the
-existing AS hash-lane assignment but does not yet invoke a compiler rewrite or an AS aggregate. It
+The removed exploratory harness simulated the existing AS hash-lane assignment but did not invoke
+a compiler rewrite or an AS aggregate. It
 assumes each PU contributes one nonnegative value to one group (`C_u = 1`). Qualifying PUs enter
 the metadata with weight 1; nonqualifying PUs in the selected AS lane enter with weight 64. It builds a joint
 `(group, factor-4 value bin)` histogram, freezes metadata from a 20% predicate, and safely falls
@@ -470,8 +470,8 @@ mechanism invocation. Only a previously frozen noised result can be reused witho
 
 #### Corrected complete-PU bound channel
 
-`attacks/filterless_complete_pu_poc.py` tests a corrected two-channel rewrite for arbitrary row
-predicates. The physical scan still retains `X OR sampled`, but the bound histogram no longer
+The later, also removed, proof-of-concept harness tested a corrected two-channel rewrite for
+arbitrary row predicates. The physical scan still retains `X OR sampled`, but the bound histogram no longer
 combines exact qualifying partials with sampled nonqualifiers:
 
 ```text

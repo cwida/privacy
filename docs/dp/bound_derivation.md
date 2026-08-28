@@ -1,7 +1,8 @@
 # Deriving contribution bounds privately
 
-Two proposals for the same open problem, and what simulating them showed.
-Reproduce with `attacks/filterless_sim.py` (TPC-H, PU = `customer`, ε = 1, static data).
+Two proposals for the same open problem, and what historical simulations showed. The exploratory
+harnesses named throughout this chronological record have been removed; the maintained filterless
+privacy reproducer is `attacks/filterless_attacks.py`.
 
 ## PRIOR ART — four of the five already exist. Read before writing anything up.
 
@@ -3428,13 +3429,12 @@ file plus the scripts under `attacks/`.
 - `Δ̄₁`/`D_s` were invariant to grouping width on this data, suggesting one scalar per measure
   rather than per (measure, grouping) — worth confirming on more measures before relying on it.
 
-## Reproduce
+## Maintained attack reproducer
 
 ```bash
-python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --sweep --bucketed   # selectivity + rungs
-python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --knife              # threshold knife-edge
-python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --partition          # key-set channel
-python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --suite              # MIA on the fixed mechanism
-python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --rank               # Dandan, fact filters
-python3 attacks/filterless_sim.py --db tpch_sf1.db --sf 1 --rank --entity-filters
+python3 attacks/filterless_attacks.py
 ```
+
+The removed exploratory harnesses produced the historical utility tables in this document. The
+maintained script covers only the filter-change and sampled-PU add/remove attacks described in
+`docs/dp/filterless_encoded_pu.md`.
