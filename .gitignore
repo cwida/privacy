@@ -48,3 +48,15 @@ paper_rewrite_materials/
 # Stray local files
 /true
 .codex
+# LaTeX build artifacts
+docs/dp/*.aux
+docs/dp/*.bbl
+docs/dp/*.blg
+docs/dp/*.log
+docs/dp/*.out
+# Python caches
+__pycache__/
+*.pyc
+
+# ...but the findings document is a deliverable: keep it readable without a LaTeX run
+!docs/dp/findings.pdf

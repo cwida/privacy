@@ -1,11 +1,13 @@
 #include "compiler/privacy_mechanisms.hpp"
 #include "aggregates/as_aggregate.hpp"
 #include "aggregates/dp_approx_bounds.hpp"
+#include "aggregates/filterless_aggregate.hpp"
 #include "utils/privacy_helpers.hpp"
 #include "compiler/privacy_compiler.hpp"
 #include "compiler/privacy_compiler_helpers.hpp"
 #include "query_processing/privacy_plan_traversal.hpp"
 #include "query_processing/privacy_expression_builder.hpp"
+#include "query_processing/pac_projection_propagation.hpp"
 #include "privacy_debug.hpp"
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -120,7 +122,7 @@ static unique_ptr<Expression> ClipToBounds(OptimizerExtensionInput &input, uniqu
 // Replace each AVG(x) with SUM(x) in-place. Fixed-bound means also append COUNT(*);
 // automatic bounded means fuse their private sum and count into one aggregate.
 static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, LogicalAggregate *agg, AvgRewriteMode mode,
-                                            const AvgBounds *avg_bounds) {
+                                            const AvgBounds *avg_bounds, bool count_non_null_value = false) {
 	vector<AvgInfo> avg_infos;
 	const bool fixed_bounds_mean = mode == AvgRewriteMode::FIXED_BOUNDS;
 	const bool automatic_bounds_mean = mode == AvgRewriteMode::AUTOMATIC_BOUNDS;
@@ -134,6 +136,7 @@ static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, Logi
 		auto output_type = aggr.return_type;
 		// Preserve `FILTER (WHERE ...)` from the original AVG. For fixed-bound means,
 		// both the rewritten SUM and appended COUNT(*) receive the predicate.
+		auto count_arg = count_non_null_value ? aggr.children[0]->Copy() : nullptr;
 		auto arg = std::move(aggr.children[0]);
 		auto filter_for_sum = std::move(aggr.filter);
 		auto filter_for_count = !automatic_bounds_mean && filter_for_sum ? filter_for_sum->Copy() : nullptr;
@@ -161,7 +164,8 @@ static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, Logi
 		idx_t count_pos = DConstants::INVALID_INDEX;
 		if (!automatic_bounds_mean) {
 			count_pos = agg->expressions.size();
-			agg->expressions.push_back(BindPlainAggregate(input, "count_star", nullptr));
+			agg->expressions.push_back(count_non_null_value ? BindPlainAggregate(input, "count", std::move(count_arg))
+			                                                : BindPlainAggregate(input, "count_star", nullptr));
 			agg->expressions.back()->Cast<BoundAggregateExpression>().filter = std::move(filter_for_count);
 		}
 
@@ -1111,10 +1115,10 @@ static void EnsurePuAdjacentTableAvailable(OptimizerExtensionInput &input, uniqu
 	ReplaceNode(agg->children[0], *start_ref, current, &binder);
 }
 
-static unique_ptr<Expression> BuildPerPuGroupExpression(OptimizerExtensionInput &input,
-                                                        unique_ptr<LogicalOperator> &plan, LogicalAggregate *agg,
-                                                        const PrivacyCompatibilityResult &check, const DPFKChain &chain,
-                                                        const string &mech) {
+static unique_ptr<Expression> BuildPerPuExpressionAtOperator(OptimizerExtensionInput &input,
+                                                             unique_ptr<LogicalOperator> &plan, LogicalOperator *target,
+                                                             const PrivacyCompatibilityResult &check,
+                                                             const DPFKChain &chain, const string &mech) {
 	if (chain.tables.empty()) {
 		throw InternalException(mech + ": empty privacy-unit FK chain");
 	}
@@ -1136,7 +1140,7 @@ static unique_ptr<Expression> BuildPerPuGroupExpression(OptimizerExtensionInput 
 		key_columns = meta_it->second.pks;
 	}
 
-	LogicalGet *key_get = FindTableScanInSubtree(agg, key_table);
+	LogicalGet *key_get = FindTableScanInSubtree(target, key_table);
 	if (!key_get) {
 		throw InternalException(mech + ": could not find PU key source table '" + key_table +
 		                        "' below aggregate input");
@@ -1152,7 +1156,8 @@ static unique_ptr<Expression> BuildPerPuGroupExpression(OptimizerExtensionInput 
 		auto col_index = key_get->GetColumnIds()[proj_idx];
 		auto col_type = key_get->GetColumnType(col_index);
 		ColumnBinding source_binding(key_get->table_index, proj_idx);
-		auto propagated = PropagateSingleBinding(*plan, key_get->table_index, source_binding, col_type, agg);
+		auto propagated =
+		    PropagateSingleBindingToOperator(*plan, key_get->table_index, source_binding, col_type, target);
 		if (propagated.table_index == DConstants::INVALID_INDEX) {
 			throw InternalException(mech + ": could not propagate PU key column '" + key_column +
 			                        "' to aggregate input");
@@ -1166,8 +1171,9 @@ static unique_ptr<Expression> BuildPerPuGroupExpression(OptimizerExtensionInput 
 	return pu_group_expr;
 }
 
-static unique_ptr<Expression> BuildLowerGroupRef(LogicalAggregate *lower_agg, idx_t lower_group_index, idx_t column) {
-	return make_uniq<BoundColumnRefExpression>(lower_agg->types[column], ColumnBinding(lower_group_index, column));
+static unique_ptr<Expression> BuildRankSourceRef(const vector<LogicalType> &source_types, idx_t source_table_index,
+                                                 idx_t column) {
+	return make_uniq<BoundColumnRefExpression>(source_types[column], ColumnBinding(source_table_index, column));
 }
 
 static unique_ptr<Expression> BuildIsNullPredicate(unique_ptr<Expression> expr) {
@@ -1193,7 +1199,7 @@ struct RankCapSpec {
 // output (table index `src_group_index`). Using one window (rather than stacking several) keeps
 // every reference exactly one level above the source, which DuckDB's binding resolver requires.
 static unique_ptr<LogicalOperator> BuildRankCapFilter(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> child,
-                                                      LogicalAggregate *src, idx_t src_group_index,
+                                                      const vector<LogicalType> &source_types, idx_t source_table_index,
                                                       const vector<RankCapSpec> &specs) {
 	if (specs.empty()) {
 		return child;
@@ -1205,22 +1211,22 @@ static unique_ptr<LogicalOperator> BuildRankCapFilter(OptimizerExtensionInput &i
 	for (auto &spec : specs) {
 		auto rank = make_uniq<BoundWindowExpression>(spec.rank_type, LogicalType::BIGINT, nullptr, nullptr);
 		for (auto col : spec.partition_cols) {
-			rank->partitions.push_back(BuildLowerGroupRef(src, src_group_index, col));
+			rank->partitions.push_back(BuildRankSourceRef(source_types, source_table_index, col));
 		}
 		for (auto col : spec.keep_null_cols) {
 			rank->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST,
-			                          BuildIsNullPredicate(BuildLowerGroupRef(src, src_group_index, col)));
+			                          BuildIsNullPredicate(BuildRankSourceRef(source_types, source_table_index, col)));
 		}
 		if (spec.rank_type == ExpressionType::WINDOW_RANK_DENSE) {
 			for (auto col : spec.order_cols) {
 				rank->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST,
-				                          BuildLowerGroupRef(src, src_group_index, col));
+				                          BuildRankSourceRef(source_types, source_table_index, col));
 			}
 		} else {
 			vector<unique_ptr<Expression>> hash_children;
 			hash_children.reserve(spec.order_cols.size());
 			for (auto col : spec.order_cols) {
-				hash_children.push_back(BuildLowerGroupRef(src, src_group_index, col));
+				hash_children.push_back(BuildRankSourceRef(source_types, source_table_index, col));
 			}
 			auto hash_expr = BindScalarLocal(input, "hash", std::move(hash_children));
 			rank->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST, std::move(hash_expr));
@@ -1240,7 +1246,7 @@ static unique_ptr<LogicalOperator> BuildRankCapFilter(OptimizerExtensionInput &i
 		for (auto col : specs[i].keep_null_cols) {
 			keep_condition = make_uniq<BoundConjunctionExpression>(
 			    ExpressionType::CONJUNCTION_OR, std::move(keep_condition),
-			    BuildIsNullPredicate(BuildLowerGroupRef(src, src_group_index, col)));
+			    BuildIsNullPredicate(BuildRankSourceRef(source_types, source_table_index, col)));
 		}
 		keep_conditions.push_back(std::move(keep_condition));
 	}
@@ -1353,7 +1359,7 @@ static void ApplyMaxGroupsContributed(OptimizerExtensionInput &input, LogicalAgg
 	vector<RankCapSpec> specs;
 	specs.push_back(std::move(spec));
 	agg->children[0] =
-	    BuildRankCapFilter(input, std::move(agg->children[0]), pre.lower_agg, pre.lower_agg->group_index, specs);
+	    BuildRankCapFilter(input, std::move(agg->children[0]), pre.lower_agg->types, pre.lower_agg->group_index, specs);
 }
 
 // Standard (global-sensitivity) clipping. Bounds each privacy unit's total contribution to a
@@ -1434,7 +1440,7 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 
 	// Build plain per-PU lower aggregates mirroring each top aggregate.
 	EnsurePuAdjacentTableAvailable(input, plan, agg, check, chain, mech);
-	auto pu_key = BuildPerPuGroupExpression(input, plan, agg, check, chain, mech);
+	auto pu_key = BuildPerPuExpressionAtOperator(input, plan, agg, check, chain, mech);
 	vector<bool> is_count;
 	is_count.reserve(n);
 	vector<DpApproxBoundsParameters> bounds_parameters(n, GetDpApproxBoundsParameters(LogicalType::DOUBLE));
@@ -2310,7 +2316,7 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 		value_cap.cap = count_bound;
 		caps.push_back(std::move(value_cap));
 	}
-	distinct_rows = BuildRankCapFilter(input, std::move(distinct_rows), inner_agg_ptr, inner_gi, caps);
+	distinct_rows = BuildRankCapFilter(input, std::move(distinct_rows), inner_agg_ptr->types, inner_gi, caps);
 
 	optional_idx support_window_index;
 	if (apply_support_filter) {
@@ -2319,11 +2325,11 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 		auto rn =
 		    make_uniq<BoundWindowExpression>(ExpressionType::WINDOW_ROW_NUMBER, LogicalType::BIGINT, nullptr, nullptr);
 		for (idx_t gi = 0; gi < num_original_groups; gi++) {
-			rn->partitions.push_back(BuildLowerGroupRef(inner_agg_ptr, inner_gi, gi));
+			rn->partitions.push_back(BuildRankSourceRef(inner_agg_ptr->types, inner_gi, gi));
 		}
-		rn->partitions.push_back(BuildLowerGroupRef(inner_agg_ptr, inner_gi, pu_group_col));
+		rn->partitions.push_back(BuildRankSourceRef(inner_agg_ptr->types, inner_gi, pu_group_col));
 		vector<unique_ptr<Expression>> distinct_hash_children;
-		distinct_hash_children.push_back(BuildLowerGroupRef(inner_agg_ptr, inner_gi, distinct_col));
+		distinct_hash_children.push_back(BuildRankSourceRef(inner_agg_ptr->types, inner_gi, distinct_col));
 		auto distinct_hash = BindScalarLocal(input, "hash", std::move(distinct_hash_children));
 		rn->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST, std::move(distinct_hash));
 		rn->start = WindowBoundary::UNBOUNDED_PRECEDING;
@@ -2360,7 +2366,7 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 			lane_agg->groups.push_back(make_uniq<BoundColumnRefExpression>(agg->groups[gi]->return_type,
 			                                                               ColumnBinding(inner_group_index, gi)));
 		}
-		auto lane_source = BuildLowerGroupRef(inner_agg_ptr, inner_gi, pu_group_col);
+		auto lane_source = BuildRankSourceRef(inner_agg_ptr->types, inner_gi, pu_group_col);
 		auto lane_mask =
 		    make_uniq<BoundConstantExpression>(Value::UBIGINT(static_cast<uint64_t>(GetDpSassM(input.context) - 1)));
 		lane_agg->groups.push_back(
@@ -2998,6 +3004,494 @@ void CompileDPStandardQuery(const PrivacyCompatibilityResult &check, OptimizerEx
                             unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
                             const string &query_hash) {
 	CompileDPLaplaceQuery(check, input, plan, privacy_units, query_hash, "dp_standard", DPSensitivityKind::GLOBAL);
+}
+
+static void FindFilterlessInputFilters(LogicalOperator *op, vector<LogicalFilter *> &filters) {
+	if (!op) {
+		return;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
+		filters.push_back(&op->Cast<LogicalFilter>());
+	}
+	for (auto &child : op->children) {
+		FindFilterlessInputFilters(child.get(), filters);
+	}
+}
+
+static unique_ptr<Expression> CopyFilterlessPredicate(const LogicalFilter &filter) {
+	vector<unique_ptr<Expression>> predicates;
+	predicates.reserve(filter.expressions.size());
+	for (auto &predicate : filter.expressions) {
+		predicates.push_back(predicate->Copy());
+	}
+	return ConjoinPredicates(std::move(predicates));
+}
+
+static unique_ptr<Expression> BuildFilterlessSamplePredicate(OptimizerExtensionInput &input, const Expression &pu_hash,
+                                                             int sample_bits) {
+	if (sample_bits == 0) {
+		return make_uniq<BoundConstantExpression>(Value::BOOLEAN(true));
+	}
+	auto shift = make_uniq<BoundConstantExpression>(Value::INTEGER(64 - sample_bits));
+	auto prefix = input.optimizer.BindScalarFunction(">>", pu_hash.Copy(), std::move(shift));
+	return make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_EQUAL, std::move(prefix),
+	                                            make_uniq<BoundConstantExpression>(Value::UBIGINT(0)));
+}
+
+static unique_ptr<Expression> BuildFilterlessEncodedPu(OptimizerExtensionInput &input, const Expression &pu_hash,
+                                                       unique_ptr<Expression> active) {
+	auto clear_mask = make_uniq<BoundConstantExpression>(Value::UBIGINT(~uint64_t(1)));
+	auto logical_pu = input.optimizer.BindScalarFunction("&", pu_hash.Copy(), std::move(clear_mask));
+	// SQL WHERE treats NULL as non-qualifying. CASE mirrors that rule before the
+	// predicate is encoded in bit 0; casting NULL directly would erase sampled rows.
+	auto active_value = make_uniq<BoundCaseExpression>(LogicalType::BOOLEAN);
+	BoundCaseCheck active_check;
+	active_check.when_expr = std::move(active);
+	active_check.then_expr = make_uniq<BoundConstantExpression>(Value::BOOLEAN(true));
+	active_value->case_checks.push_back(std::move(active_check));
+	active_value->else_expr = make_uniq<BoundConstantExpression>(Value::BOOLEAN(false));
+	auto active_bit = BoundCastExpression::AddCastToType(input.context, std::move(active_value), LogicalType::UBIGINT);
+	auto encoded = input.optimizer.BindScalarFunction("|", std::move(logical_pu), std::move(active_bit));
+	encoded->alias = "dp_filterless_encoded_pu";
+	return encoded;
+}
+
+static vector<ColumnBinding> InsertFilterlessProjection(OptimizerExtensionInput &input,
+                                                        unique_ptr<LogicalOperator> &plan,
+                                                        LogicalOperator *insert_above,
+                                                        vector<unique_ptr<Expression>> extra_expressions) {
+	insert_above->ResolveOperatorTypes();
+	auto old_bindings = insert_above->GetColumnBindings();
+	auto old_types = insert_above->types;
+	if (old_bindings.size() != old_types.size()) {
+		throw InternalException("dp_filterless: input binding/type count mismatch");
+	}
+	vector<unique_ptr<Expression>> expressions;
+	expressions.reserve(old_bindings.size() + extra_expressions.size());
+	for (idx_t i = 0; i < old_bindings.size(); i++) {
+		expressions.push_back(make_uniq<BoundColumnRefExpression>(old_types[i], old_bindings[i]));
+	}
+	for (auto &expression : extra_expressions) {
+		expressions.push_back(std::move(expression));
+	}
+
+	idx_t projection_index = input.optimizer.binder.GenerateTableIndex();
+	auto projection = make_uniq<LogicalProjection>(projection_index, std::move(expressions));
+	auto *slot = FindOperatorSlotByPointer(plan, insert_above);
+	if (!slot) {
+		throw InternalException("dp_filterless: could not locate encoded-PU projection point");
+	}
+	projection->children.push_back(std::move(*slot));
+	projection->ResolveOperatorTypes();
+	auto *projection_ptr = projection.get();
+	*slot = std::move(projection);
+
+	ColumnBindingReplacer replacer;
+	for (idx_t i = 0; i < old_bindings.size(); i++) {
+		replacer.replacement_bindings.emplace_back(old_bindings[i], ColumnBinding(projection_index, i), old_types[i]);
+	}
+	replacer.stop_operator = projection_ptr;
+	replacer.VisitOperator(*plan);
+	vector<ColumnBinding> result;
+	result.reserve(extra_expressions.size());
+	for (idx_t i = 0; i < extra_expressions.size(); i++) {
+		result.emplace_back(projection_index, old_bindings.size() + i);
+	}
+	return result;
+}
+
+static unique_ptr<Expression> BuildFilterlessEncodedPuInput(OptimizerExtensionInput &input,
+                                                            unique_ptr<LogicalOperator> &plan, LogicalAggregate *agg,
+                                                            const PrivacyCompatibilityResult &check,
+                                                            const DPFKChain &chain, const string &mech,
+                                                            int sample_bits) {
+	vector<LogicalFilter *> filters;
+	FindFilterlessInputFilters(agg->children[0].get(), filters);
+	if (filters.size() > 1) {
+		throw InvalidInputException(
+		    "dp_filterless: queries with multiple input FILTER operators are not supported yet");
+	}
+	LogicalOperator *projection_child;
+	unique_ptr<Expression> encoded;
+	if (filters.empty()) {
+		auto pu_hash = BuildPerPuExpressionAtOperator(input, plan, agg, check, chain, mech);
+		projection_child = agg->children[0].get();
+		encoded = BuildFilterlessEncodedPu(input, *pu_hash, make_uniq<BoundConstantExpression>(Value::BOOLEAN(true)));
+		PRIVACY_DEBUG_PRINT("[dp_filterless] no WHERE filter; every retained contribution is active");
+	} else {
+		auto *filter = filters[0];
+		// The projection above the filter needs both predicate and PU-key columns. An empty
+		// projection map makes LogicalFilter pass all child bindings through.
+		filter->projection_map.clear();
+		filter->ResolveOperatorTypes();
+		auto original_predicate = CopyFilterlessPredicate(*filter);
+		if (!original_predicate) {
+			throw InternalException("dp_filterless: WHERE filter has no predicate");
+		}
+		if (original_predicate->IsVolatile()) {
+			throw InvalidInputException("dp_filterless: volatile WHERE predicates are not supported");
+		}
+		auto pu_hash = BuildPerPuExpressionAtOperator(input, plan, filter, check, chain, mech);
+		vector<unique_ptr<Expression>> materialized;
+		materialized.push_back(std::move(pu_hash));
+		materialized.push_back(std::move(original_predicate));
+		auto materialized_bindings =
+		    InsertFilterlessProjection(input, plan, filter->children[0].get(), std::move(materialized));
+		auto hash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, materialized_bindings[0]);
+		auto active_ref = make_uniq<BoundColumnRefExpression>(LogicalType::BOOLEAN, materialized_bindings[1]);
+		auto widened =
+		    make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_OR, active_ref->Copy(),
+		                                          BuildFilterlessSamplePredicate(input, *hash_ref, sample_bits));
+		filter->expressions.clear();
+		filter->expressions.push_back(std::move(widened));
+		filter->ResolveOperatorTypes();
+		encoded = BuildFilterlessEncodedPu(input, *hash_ref, std::move(active_ref));
+		projection_child = filter;
+		PRIVACY_DEBUG_PRINT("[dp_filterless] widened WHERE to X OR sampled(PU), sample_bits=" +
+		                    std::to_string(sample_bits));
+	}
+
+	vector<unique_ptr<Expression>> encoded_expression;
+	encoded_expression.push_back(std::move(encoded));
+	auto encoded_bindings = InsertFilterlessProjection(input, plan, projection_child, std::move(encoded_expression));
+	auto encoded_binding = encoded_bindings[0];
+	auto propagated =
+	    PropagateSingleBinding(*plan, encoded_binding.table_index, encoded_binding, LogicalType::UBIGINT, agg);
+	if (propagated.table_index == DConstants::INVALID_INDEX) {
+		throw InternalException("dp_filterless: could not propagate encoded PU to aggregate input");
+	}
+	return make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
+}
+
+struct FilterlessPreAggregationInput {
+	idx_t group_table_index;
+	idx_t aggregate_table_index;
+	idx_t group_count;
+	idx_t component_column_offset;
+	idx_t component_count;
+	vector<LogicalType> group_types;
+	vector<LogicalType> aggregate_types;
+
+	unique_ptr<Expression> GroupRef(idx_t index) const {
+		return make_uniq<BoundColumnRefExpression>(group_types[index], ColumnBinding(group_table_index, index));
+	}
+
+	unique_ptr<Expression> PuRef() const {
+		return make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, ColumnBinding(group_table_index, group_count));
+	}
+
+	unique_ptr<Expression> AggregateRef(idx_t index) const {
+		return make_uniq<BoundColumnRefExpression>(
+		    aggregate_types[index], ColumnBinding(aggregate_table_index, component_column_offset + index));
+	}
+
+	unique_ptr<Expression> AnswerRef(idx_t index) const {
+		return AggregateRef(index);
+	}
+
+	unique_ptr<Expression> HistogramRef(idx_t index) const {
+		return AggregateRef(component_count + index);
+	}
+
+	unique_ptr<Expression> ActiveCountRef() const {
+		return AggregateRef(2 * component_count);
+	}
+};
+
+static FilterlessPreAggregationInput BuildFilterlessPreAggregationInput(const PuPreAggregationInfo &pre,
+                                                                        idx_t component_count) {
+	FilterlessPreAggregationInput result;
+	result.group_table_index = pre.lower_agg->group_index;
+	result.aggregate_table_index = pre.lower_agg_index;
+	result.group_count = pre.num_original_groups;
+	result.component_column_offset = 0;
+	result.component_count = component_count;
+	for (idx_t i = 0; i < pre.num_original_groups; i++) {
+		result.group_types.push_back(pre.lower_agg->types[i]);
+	}
+	for (idx_t i = 0; i < 2 * component_count + 1; i++) {
+		result.aggregate_types.push_back(pre.lower_agg->types[pre.num_original_groups + 1 + i]);
+	}
+	return result;
+}
+
+static FilterlessPreAggregationInput ApplyFilterlessMaxGroups(OptimizerExtensionInput &input, LogicalAggregate *agg,
+                                                              const PuPreAggregationInfo &pre, idx_t component_count,
+                                                              int64_t max_groups) {
+	if (pre.num_original_groups == 0) {
+		return BuildFilterlessPreAggregationInput(pre, component_count);
+	}
+
+	// Flatten the lower aggregate's separate group/aggregate bindings into one projection. The
+	// lower aggregate already emits one row per logical (PU, SQL group), so dense rank directly
+	// caps the group set seen by both the answer and fixed-sample histogram channels.
+	idx_t lower_aggregate_count = 2 * component_count + 1;
+	idx_t projection_index = input.optimizer.binder.GenerateTableIndex();
+	vector<unique_ptr<Expression>> expressions;
+	expressions.reserve(pre.num_original_groups + 1 + lower_aggregate_count);
+	for (idx_t i = 0; i < pre.num_original_groups + 1; i++) {
+		expressions.push_back(
+		    make_uniq<BoundColumnRefExpression>(pre.lower_agg->types[i], ColumnBinding(pre.lower_agg->group_index, i)));
+	}
+	for (idx_t i = 0; i < lower_aggregate_count; i++) {
+		expressions.push_back(make_uniq<BoundColumnRefExpression>(pre.lower_agg->types[pre.num_original_groups + 1 + i],
+		                                                          ColumnBinding(pre.lower_agg_index, i)));
+	}
+	auto projection = make_uniq<LogicalProjection>(projection_index, std::move(expressions));
+	projection->children.push_back(std::move(agg->children[0]));
+	projection->ResolveOperatorTypes();
+	auto projection_types = projection->types;
+
+	idx_t logical_pu_column = pre.num_original_groups;
+	RankCapSpec spec;
+	spec.rank_type = ExpressionType::WINDOW_RANK_DENSE;
+	spec.partition_cols = {logical_pu_column};
+	spec.order_cols.reserve(pre.num_original_groups);
+	for (idx_t i = 0; i < pre.num_original_groups; i++) {
+		spec.order_cols.push_back(i);
+	}
+	spec.cap = max_groups;
+	vector<RankCapSpec> specs;
+	specs.push_back(std::move(spec));
+	agg->children[0] = BuildRankCapFilter(input, std::move(projection), projection_types, projection_index, specs);
+	agg->children[0]->ResolveOperatorTypes();
+
+	for (idx_t i = 0; i < pre.num_original_groups; i++) {
+		agg->groups[i] =
+		    make_uniq<BoundColumnRefExpression>(pre.lower_agg->types[i], ColumnBinding(projection_index, i));
+	}
+	FilterlessPreAggregationInput result;
+	result.group_table_index = projection_index;
+	result.aggregate_table_index = projection_index;
+	result.group_count = pre.num_original_groups;
+	result.component_column_offset = pre.num_original_groups + 1;
+	result.component_count = component_count;
+	for (idx_t i = 0; i < pre.num_original_groups; i++) {
+		result.group_types.push_back(pre.lower_agg->types[i]);
+	}
+	for (idx_t i = 0; i < lower_aggregate_count; i++) {
+		result.aggregate_types.push_back(pre.lower_agg->types[pre.num_original_groups + 1 + i]);
+	}
+	PRIVACY_DEBUG_PRINT("[dp_filterless] capped distinct groups per logical PU at " + std::to_string(max_groups));
+	return result;
+}
+
+static unique_ptr<Expression> BuildFilterlessNonce(OptimizerExtensionInput &input,
+                                                   const FilterlessPreAggregationInput &pre_input,
+                                                   idx_t component_index, uint64_t query_nonce) {
+	unique_ptr<Expression> nonce = make_uniq<BoundConstantExpression>(
+	    Value::UBIGINT(PAC_MAGIC_HASH ^ static_cast<uint64_t>(component_index + 1) ^ query_nonce));
+	for (idx_t i = 0; i < pre_input.group_count; i++) {
+		auto group_hash = input.optimizer.BindScalarFunction("hash", pre_input.GroupRef(i));
+		nonce = input.optimizer.BindScalarFunction("xor", std::move(nonce), std::move(group_hash));
+	}
+	return nonce;
+}
+
+static uint64_t FilterlessQueryNonce(const string &query_hash) {
+	uint64_t result = 0;
+	for (auto character : query_hash) {
+		uint64_t digit;
+		if (character >= '0' && character <= '9') {
+			digit = static_cast<uint64_t>(character - '0');
+		} else if (character >= 'a' && character <= 'f') {
+			digit = static_cast<uint64_t>(character - 'a' + 10);
+		} else if (character >= 'A' && character <= 'F') {
+			digit = static_cast<uint64_t>(character - 'A' + 10);
+		} else {
+			throw InternalException("dp_filterless: normalized query hash is not hexadecimal");
+		}
+		result = (result << 4) | digit;
+	}
+	return result;
+}
+
+static unique_ptr<Expression> BuildFilterlessActiveSupportKey(OptimizerExtensionInput &input,
+                                                              const FilterlessPreAggregationInput &pre_input) {
+	auto active_count = pre_input.ActiveCountRef();
+	auto is_active = make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_GREATERTHAN, std::move(active_count),
+	                                                      make_uniq<BoundConstantExpression>(Value::BIGINT(0)));
+	auto active_pu = make_uniq<BoundCaseExpression>(LogicalType::UBIGINT);
+	BoundCaseCheck check;
+	check.when_expr = std::move(is_active);
+	check.then_expr = pre_input.PuRef();
+	active_pu->case_checks.push_back(std::move(check));
+	active_pu->else_expr = make_uniq<BoundConstantExpression>(Value(LogicalType::UBIGINT));
+	return active_pu;
+}
+
+static unique_ptr<Expression> BuildFilterlessIsActive(OptimizerExtensionInput &input, const Expression &encoded_pu) {
+	auto active_bit = input.optimizer.BindScalarFunction("&", encoded_pu.Copy(),
+	                                                     make_uniq<BoundConstantExpression>(Value::UBIGINT(1)));
+	return make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_NOTEQUAL, std::move(active_bit),
+	                                            make_uniq<BoundConstantExpression>(Value::UBIGINT(0)));
+}
+
+static unique_ptr<Expression> BuildFilterlessLogicalPu(OptimizerExtensionInput &input,
+                                                       unique_ptr<Expression> encoded_pu) {
+	return input.optimizer.BindScalarFunction("&", std::move(encoded_pu),
+	                                          make_uniq<BoundConstantExpression>(Value::UBIGINT(~uint64_t(1))));
+}
+
+static unique_ptr<Expression> BuildFilterlessLowerAggregate(OptimizerExtensionInput &input,
+                                                            const BoundAggregateExpression &aggregate, bool is_count) {
+	if (is_count) {
+		if (aggregate.function.name == "count" && !aggregate.children.empty()) {
+			return BindPlainAggregate(input, "count", aggregate.children[0]->Copy());
+		}
+		return BindPlainAggregate(input, "count_star", nullptr);
+	}
+	auto input_type = aggregate.children[0]->return_type.InternalType();
+	if (input_type == PhysicalType::FLOAT || input_type == PhysicalType::DOUBLE) {
+		return BindPlainAggregate(input, "filterless_approx_sum", aggregate.children[0]->Copy());
+	}
+	return BindPlainAggregate(input, "sum", aggregate.children[0]->Copy());
+}
+
+void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
+                              unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
+                              const string &query_hash) {
+	PRIVACY_DEBUG_PRINT("[dp_filterless] CompileDPFilterlessQuery: start");
+	auto filterless_settings = GetFilterlessSettings(input.context);
+	uint64_t query_nonce = FilterlessQueryNonce(query_hash);
+	double epsilon = GetValidatedDpEpsilon(input.context, "dp_filterless");
+	bool allow_self_joins = ValidateDPSelfJoins(plan, "dp_filterless") > 1.0;
+	auto chain = ExtractDPFKChain(plan, privacy_units, check, allow_self_joins);
+	auto *agg = CheckDPAggregates(plan, "dp_filterless");
+	idx_t n_groups = agg->groups.size();
+	for (auto &expression : agg->expressions) {
+		auto &aggregate = expression->Cast<BoundAggregateExpression>();
+		if (aggregate.filter) {
+			throw NotImplementedException("dp_filterless: aggregate FILTER clauses are not implemented yet");
+		}
+	}
+
+	// Preserve the original visible aggregate count before AVG appends its COUNT(x) component.
+	idx_t original_aggregate_count = agg->expressions.size();
+	if (original_aggregate_count == 0) {
+		throw InvalidInputException("dp_filterless: query has no aggregate to privatize");
+	}
+	int64_t max_groups =
+	    n_groups > 0 ? GetRequiredDpIntegerBound(input.context, "dp_max_groups_contributed", "dp_filterless") : 1;
+	bool noise_enabled = IsPacNoiseEnabled(input.context, true);
+	double budget_units = static_cast<double>(original_aggregate_count) + (n_groups > 0 ? 1.0 : 0.0);
+	double tau = 0.0;
+	double support_noise_scale = 0.0;
+	if (n_groups > 0) {
+		double delta = 0.0;
+		if (!TryGetDpDelta(input.context, delta) || !std::isfinite(delta) || delta <= 0.0 || delta >= 0.5) {
+			throw InvalidInputException(
+			    "dp_filterless: grouped queries require dp_delta in (0, 0.5) for private partition selection");
+		}
+		double eps_eta = epsilon / budget_units;
+		double delta_eta = delta / budget_units;
+		tau = ComputeWilsonPartitionThreshold(eps_eta, delta_eta, static_cast<double>(max_groups));
+		double manual_threshold = 0.0;
+		if (TryGetPrivacyMinGroupCount(input.context, manual_threshold)) {
+			tau = std::max(tau, manual_threshold);
+		}
+		support_noise_scale = noise_enabled ? static_cast<double>(max_groups) / eps_eta : 0.0;
+		PRIVACY_DEBUG_PRINT("[dp_filterless] partition selection: eps_eta=" + std::to_string(eps_eta) +
+		                    " tau=" + std::to_string(tau) + " noise_scale=" + std::to_string(support_noise_scale));
+	}
+	EnsurePuAdjacentTableAvailable(input, plan, agg, check, chain, "dp_filterless");
+	auto encoded_pu =
+	    BuildFilterlessEncodedPuInput(input, plan, agg, check, chain, "dp_filterless", filterless_settings.sample_bits);
+	auto avg_infos = RewriteAvgAggregates(input, agg, AvgRewriteMode::PLAIN, nullptr,
+	                                      /*count_non_null_value=*/true);
+	idx_t component_count = agg->expressions.size();
+	auto avg_components = BuildAvgComponentSet(avg_infos);
+
+	agg->ResolveOperatorTypes();
+	vector<LogicalType> component_output_types;
+	component_output_types.reserve(component_count);
+	for (idx_t i = 0; i < component_count; i++) {
+		// AVG's internal SUM and COUNT remain DOUBLE until the ratio is formed, so
+		// Laplace noise is not truncated by an intermediate integer cast.
+		component_output_types.push_back(avg_components.count(i) ? LogicalType::DOUBLE : agg->types[n_groups + i]);
+	}
+
+	vector<bool> count_components;
+	vector<unique_ptr<Expression>> lower_expressions;
+	count_components.reserve(component_count);
+	lower_expressions.reserve(2 * component_count + 1);
+	vector<unique_ptr<Expression>> histogram_expressions;
+	histogram_expressions.reserve(component_count);
+	for (idx_t i = 0; i < component_count; i++) {
+		auto &aggregate = agg->expressions[i]->Cast<BoundAggregateExpression>();
+		bool is_count = IsCountAggregate(aggregate);
+		count_components.push_back(is_count);
+		auto answer_partial = BuildFilterlessLowerAggregate(input, aggregate, is_count);
+		answer_partial->Cast<BoundAggregateExpression>().filter = BuildFilterlessIsActive(input, *encoded_pu);
+		lower_expressions.push_back(std::move(answer_partial));
+		auto histogram_partial = BuildFilterlessLowerAggregate(input, aggregate, is_count);
+		histogram_partial->Cast<BoundAggregateExpression>().filter =
+		    BuildFilterlessSamplePredicate(input, *encoded_pu, filterless_settings.sample_bits);
+		histogram_expressions.push_back(std::move(histogram_partial));
+	}
+	for (auto &histogram_expression : histogram_expressions) {
+		lower_expressions.push_back(std::move(histogram_expression));
+	}
+	auto active_count = BindPlainAggregate(input, "count_star", nullptr);
+	active_count->Cast<BoundAggregateExpression>().filter = BuildFilterlessIsActive(input, *encoded_pu);
+	lower_expressions.push_back(std::move(active_count));
+
+	auto logical_pu = BuildFilterlessLogicalPu(input, std::move(encoded_pu));
+	auto pre = InsertPuPreAggregation(input, agg, std::move(lower_expressions), std::move(logical_pu));
+	PRIVACY_DEBUG_PRINT("[dp_filterless] pre-aggregated separate filtered-answer and fixed-sample histogram "
+	                    "contributions; floating SUM uses the scalar AS magnitude accumulator");
+	auto pre_input = ApplyFilterlessMaxGroups(input, agg, pre, component_count, max_groups);
+	double visible_cell_epsilon = epsilon / budget_units;
+	for (idx_t i = 0; i < component_count; i++) {
+		double component_epsilon = avg_components.count(i) ? visible_cell_epsilon / 2.0 : visible_cell_epsilon;
+		unique_ptr<Expression> answer_partial = pre_input.AnswerRef(i);
+		unique_ptr<Expression> histogram_partial = pre_input.HistogramRef(i);
+		auto is_active =
+		    make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_GREATERTHAN, pre_input.ActiveCountRef(),
+		                                         make_uniq<BoundConstantExpression>(Value::BIGINT(0)));
+		vector<unique_ptr<Expression>> children;
+		children.push_back(pre_input.PuRef());
+		children.push_back(std::move(is_active));
+		children.push_back(std::move(answer_partial));
+		children.push_back(std::move(histogram_partial));
+		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(component_epsilon)));
+		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(static_cast<double>(max_groups))));
+		children.push_back(BuildFilterlessNonce(input, pre_input, i, query_nonce));
+		agg->expressions[i] =
+		    BindAggregateLocal(input, count_components[i] ? "filterless_count" : "filterless_sum", std::move(children));
+		PRIVACY_DEBUG_PRINT("[dp_filterless] component " + std::to_string(i) +
+		                    (count_components[i] ? " COUNT" : " SUM") +
+		                    " epsilon=" + std::to_string(component_epsilon));
+	}
+	optional_idx support_pos;
+	LogicalOperator *projection_anchor = agg;
+	if (n_groups > 0) {
+		auto support_key = BuildFilterlessActiveSupportKey(input, pre_input);
+		agg->expressions.push_back(BindPlainAggregate(input, "count", std::move(support_key)));
+		support_pos = optional_idx(agg->expressions.size() - 1);
+	}
+	agg->ResolveOperatorTypes();
+	if (support_pos.IsValid()) {
+		projection_anchor = ApplySupportFilter(input, plan, agg, support_pos.GetIndex(), tau, support_noise_scale);
+	}
+
+	// Normalize the custom aggregate outputs onto one projection table and restore the
+	// component types expected by operators above the original aggregate.
+	vector<double> zero_scales(component_count, 0.0);
+	auto output_projection =
+	    WrapAggregateWithLaplace(input, plan, agg, projection_anchor, zero_scales, component_output_types);
+	if (!avg_infos.empty()) {
+		WrapAvgRatioProjection(input, plan, output_projection, avg_infos, n_groups, original_aggregate_count,
+		                       output_projection.proj_ptr, /*null_on_nonpositive_count=*/true);
+	}
+
+#if PRIVACY_DEBUG
+	PRIVACY_DEBUG_PRINT("=== PLAN AFTER dp_filterless TRANSFORMATION ===");
+	plan->Print();
+#endif
 }
 
 void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,

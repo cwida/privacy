@@ -100,12 +100,13 @@ static bool BindingInOutput(LogicalOperator &op, const ColumnBinding &binding) {
 	return false;
 }
 
-ColumnBinding PropagateSingleBinding(LogicalOperator &plan_root, idx_t source_table_index, ColumnBinding source_binding,
-                                     const LogicalType &source_type, LogicalAggregate *target_agg) {
+ColumnBinding PropagateSingleBindingToOperator(LogicalOperator &plan_root, idx_t source_table_index,
+                                               ColumnBinding source_binding, const LogicalType &source_type,
+                                               LogicalOperator *target) {
 	ColumnBinding invalid(DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
 
 	vector<PathEntry> path_ops;
-	if (!FindDirectPathToSource(target_agg, source_table_index, path_ops, true)) {
+	if (!FindDirectPathToSource(target, source_table_index, path_ops, true)) {
 #if PRIVACY_DEBUG
 		PRIVACY_DEBUG_PRINT("PropagateSingleBinding: No direct path from aggregate to source #" +
 		                    std::to_string(source_table_index));
@@ -221,6 +222,11 @@ ColumnBinding PropagateSingleBinding(LogicalOperator &plan_root, idx_t source_ta
 	}
 
 	return current;
+}
+
+ColumnBinding PropagateSingleBinding(LogicalOperator &plan_root, idx_t source_table_index, ColumnBinding source_binding,
+                                     const LogicalType &source_type, LogicalAggregate *target_agg) {
+	return PropagateSingleBindingToOperator(plan_root, source_table_index, source_binding, source_type, target_agg);
 }
 
 } // namespace duckdb

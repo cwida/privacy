@@ -15,6 +15,11 @@ void CompileDPStandardQuery(const PrivacyCompatibilityResult &check, OptimizerEx
                             unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
                             const string &query_hash);
 
+// dp_filterless: sampled filter-retention with exponential per-PU clipping bounds.
+void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
+                              unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
+                              const string &query_hash);
+
 // dp_elastic: smooth elastic-sensitivity Laplace, (ε,δ)-DP.
 void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
                            unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
