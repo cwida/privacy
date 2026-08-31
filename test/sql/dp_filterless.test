@@ -307,18 +307,6 @@ ORDER BY grp;
 ----
 100.000000
 
-# Because the lower aggregate has unique PU/group rows, DuckDB can optimize the
-# ROW_NUMBER <= C_u cap to a bounded per-PU arg_min instead of sorting a window.
-statement ok
-SET explain_output = 'physical_only';
-
-query II
-EXPLAIN SELECT grp, SUM(amount)
-FROM filterless_group_cap
-GROUP BY grp;
-----
-physical_plan	<REGEX>:[\s\S]*arg_min[\s\S]*
-
 statement ok
 SET dp_max_groups_contributed = 2;
 
@@ -330,6 +318,49 @@ ORDER BY grp;
 ----
 a	100.000000
 b	100.000000
+
+# Exercise a genuine top-k cap with more candidate groups than C_u. The private
+# query must retain exactly three contributions per PU across its released rows.
+statement ok
+SET dp_max_groups_contributed = 3;
+
+statement ok
+CREATE PU TABLE filterless_group_cap_three (
+    uid BIGINT,
+    grp BIGINT,
+    amount DOUBLE,
+    PRIVACY_KEY (uid),
+    PROTECTED (amount)
+);
+
+statement ok
+INSERT INTO filterless_group_cap_three
+SELECT uid, grp, 1.0
+FROM range(100) users(uid), range(10) groups(grp);
+
+statement ok
+CREATE TEMP TABLE filterless_group_cap_three_result AS
+SELECT grp, SUM(amount) AS total
+FROM filterless_group_cap_three
+GROUP BY grp;
+
+query IR
+SELECT COUNT(*), SUM(total)
+FROM filterless_group_cap_three_result;
+----
+10	300.000000
+
+# DuckDB should optimize ROW_NUMBER <= 3 into a bounded per-PU top-k aggregate
+# plus UNNEST, instead of sorting a window.
+statement ok
+SET explain_output = 'physical_only';
+
+query II
+EXPLAIN SELECT grp, SUM(amount)
+FROM filterless_group_cap_three
+GROUP BY grp;
+----
+physical_plan	<REGEX>:[\s\S]*UNNEST[\s\S]*arg_min_nulls_last[\s\S]*
 
 statement ok
 SET dp_max_groups_contributed = 1;
