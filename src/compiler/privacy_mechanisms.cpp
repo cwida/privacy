@@ -3226,8 +3226,9 @@ static FilterlessPreAggregationInput ApplyFilterlessMaxGroups(OptimizerExtension
 	}
 
 	// Flatten the lower aggregate's separate group/aggregate bindings into one projection. The
-	// lower aggregate already emits one row per logical (PU, SQL group), so dense rank directly
-	// caps the group set seen by both the answer and fixed-sample histogram channels.
+	// lower aggregate already emits exactly one row per logical (PU, SQL group), so ROW_NUMBER
+	// caps the group set without needing duplicate-aware DENSE_RANK. DuckDB can optimize this
+	// single hashed ordering into a bounded per-PU top-k aggregate.
 	idx_t lower_aggregate_count = 2 * component_count + 1;
 	idx_t projection_index = input.optimizer.binder.GenerateTableIndex();
 	vector<unique_ptr<Expression>> expressions;
@@ -3247,9 +3248,12 @@ static FilterlessPreAggregationInput ApplyFilterlessMaxGroups(OptimizerExtension
 
 	idx_t logical_pu_column = pre.num_original_groups;
 	RankCapSpec spec;
-	spec.rank_type = ExpressionType::WINDOW_RANK_DENSE;
+	spec.rank_type = ExpressionType::WINDOW_ROW_NUMBER;
 	spec.partition_cols = {logical_pu_column};
-	spec.order_cols.reserve(pre.num_original_groups);
+	spec.order_cols.reserve(pre.num_original_groups + 1);
+	// Include the PU in the stable hash so each PU gets its own deterministic group
+	// ordering instead of every PU systematically favoring the same group.
+	spec.order_cols.push_back(logical_pu_column);
 	for (idx_t i = 0; i < pre.num_original_groups; i++) {
 		spec.order_cols.push_back(i);
 	}
@@ -3275,7 +3279,8 @@ static FilterlessPreAggregationInput ApplyFilterlessMaxGroups(OptimizerExtension
 	for (idx_t i = 0; i < lower_aggregate_count; i++) {
 		result.aggregate_types.push_back(pre.lower_agg->types[pre.num_original_groups + 1 + i]);
 	}
-	PRIVACY_DEBUG_PRINT("[dp_filterless] capped distinct groups per logical PU at " + std::to_string(max_groups));
+	PRIVACY_DEBUG_PRINT("[dp_filterless] capped unique groups per logical PU with bounded row selection at " +
+	                    std::to_string(max_groups));
 	return result;
 }
 
