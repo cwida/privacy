@@ -3291,36 +3291,6 @@ static FilterlessPreAggregationInput ApplyFilterlessMaxGroups(OptimizerExtension
 	return result;
 }
 
-static unique_ptr<Expression> BuildFilterlessNonce(OptimizerExtensionInput &input,
-                                                   const FilterlessPreAggregationInput &pre_input,
-                                                   idx_t component_index, uint64_t query_nonce) {
-	unique_ptr<Expression> nonce = make_uniq<BoundConstantExpression>(
-	    Value::UBIGINT(PAC_MAGIC_HASH ^ static_cast<uint64_t>(component_index + 1) ^ query_nonce));
-	for (idx_t i = 0; i < pre_input.group_count; i++) {
-		auto group_hash = input.optimizer.BindScalarFunction("hash", pre_input.GroupRef(i));
-		nonce = input.optimizer.BindScalarFunction("xor", std::move(nonce), std::move(group_hash));
-	}
-	return nonce;
-}
-
-static uint64_t FilterlessQueryNonce(const string &query_hash) {
-	uint64_t result = 0;
-	for (auto character : query_hash) {
-		uint64_t digit;
-		if (character >= '0' && character <= '9') {
-			digit = static_cast<uint64_t>(character - '0');
-		} else if (character >= 'a' && character <= 'f') {
-			digit = static_cast<uint64_t>(character - 'a' + 10);
-		} else if (character >= 'A' && character <= 'F') {
-			digit = static_cast<uint64_t>(character - 'A' + 10);
-		} else {
-			throw InternalException("dp_filterless: normalized query hash is not hexadecimal");
-		}
-		result = (result << 4) | digit;
-	}
-	return result;
-}
-
 static unique_ptr<Expression> BuildFilterlessActiveSupportKey(OptimizerExtensionInput &input,
                                                               const FilterlessPreAggregationInput &pre_input) {
 	auto active_count = pre_input.ActiveCountRef();
@@ -3368,11 +3338,9 @@ static unique_ptr<Expression> BuildFilterlessLowerPair(OptimizerExtensionInput &
 }
 
 void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
-                              unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                              const string &query_hash) {
+                              unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units, const string &) {
 	PRIVACY_DEBUG_PRINT("[dp_filterless] CompileDPFilterlessQuery: start");
 	auto filterless_settings = GetFilterlessSettings(input.context);
-	uint64_t query_nonce = FilterlessQueryNonce(query_hash);
 	double epsilon = GetValidatedDpEpsilon(input.context, "dp_filterless");
 	bool allow_self_joins = ValidateDPSelfJoins(plan, "dp_filterless") > 1.0;
 	auto chain = ExtractDPFKChain(plan, privacy_units, check, allow_self_joins);
@@ -3419,15 +3387,13 @@ void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, Optimizer
 	auto avg_infos = RewriteAvgAggregates(input, agg, AvgRewriteMode::PLAIN, nullptr,
 	                                      /*count_non_null_value=*/true);
 	idx_t component_count = agg->expressions.size();
-	auto avg_components = BuildAvgComponentSet(avg_infos);
 
 	agg->ResolveOperatorTypes();
 	vector<LogicalType> component_output_types;
-	component_output_types.reserve(component_count);
-	for (idx_t i = 0; i < component_count; i++) {
-		// AVG's internal SUM and COUNT remain DOUBLE until the ratio is formed, so
-		// Laplace noise is not truncated by an intermediate integer cast.
-		component_output_types.push_back(avg_components.count(i) ? LogicalType::DOUBLE : agg->types[n_groups + i]);
+	component_output_types.reserve(original_aggregate_count);
+	for (idx_t i = 0; i < original_aggregate_count; i++) {
+		component_output_types.push_back(FindAvgInfoForSumPos(avg_infos, i) ? LogicalType::DOUBLE
+		                                                                    : agg->types[n_groups + i]);
 	}
 
 	vector<bool> count_components;
@@ -3451,27 +3417,39 @@ void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, Optimizer
 	                    "contributions; floating SUM uses the scalar AS magnitude accumulator");
 	auto pre_input = ApplyFilterlessMaxGroups(input, agg, pre, component_count, max_groups);
 	double visible_cell_epsilon = epsilon / budget_units;
-	for (idx_t i = 0; i < component_count; i++) {
-		double component_epsilon = avg_components.count(i) ? visible_cell_epsilon / 2.0 : visible_cell_epsilon;
-		unique_ptr<Expression> answer_partial = pre_input.AnswerRef(input, i);
-		unique_ptr<Expression> histogram_partial = pre_input.HistogramRef(input, i);
+	vector<unique_ptr<Expression>> upper_expressions;
+	upper_expressions.reserve(original_aggregate_count + (n_groups > 0 ? 1 : 0));
+	for (idx_t i = 0; i < original_aggregate_count; i++) {
 		auto is_active =
 		    make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_GREATERTHAN, pre_input.ActiveCountRef(),
 		                                         make_uniq<BoundConstantExpression>(Value::BIGINT(0)));
 		vector<unique_ptr<Expression>> children;
 		children.push_back(pre_input.PuRef());
 		children.push_back(std::move(is_active));
-		children.push_back(std::move(answer_partial));
-		children.push_back(std::move(histogram_partial));
-		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(component_epsilon)));
+		auto *avg_info = FindAvgInfoForSumPos(avg_infos, i);
+		if (avg_info) {
+			children.push_back(pre_input.AnswerRef(input, avg_info->sum_pos));
+			children.push_back(pre_input.AnswerRef(input, avg_info->count_pos));
+			children.push_back(pre_input.HistogramRef(input, avg_info->sum_pos));
+			children.push_back(pre_input.HistogramRef(input, avg_info->count_pos));
+			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(visible_cell_epsilon)));
+			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(static_cast<double>(max_groups))));
+			upper_expressions.push_back(BindAggregateLocal(input, "priv_filterless_avg", std::move(children)));
+			PRIVACY_DEBUG_PRINT("[dp_filterless] fused upper AVG " + std::to_string(i) +
+			                    " epsilon=" + std::to_string(visible_cell_epsilon));
+			continue;
+		}
+		children.push_back(pre_input.AnswerRef(input, i));
+		children.push_back(pre_input.HistogramRef(input, i));
+		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(visible_cell_epsilon)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(static_cast<double>(max_groups))));
-		children.push_back(BuildFilterlessNonce(input, pre_input, i, query_nonce));
-		agg->expressions[i] =
-		    BindAggregateLocal(input, count_components[i] ? "filterless_count" : "filterless_sum", std::move(children));
+		upper_expressions.push_back(BindAggregateLocal(
+		    input, count_components[i] ? "filterless_count" : "filterless_sum", std::move(children)));
 		PRIVACY_DEBUG_PRINT("[dp_filterless] component " + std::to_string(i) +
 		                    (count_components[i] ? " COUNT" : " SUM") +
-		                    " epsilon=" + std::to_string(component_epsilon));
+		                    " epsilon=" + std::to_string(visible_cell_epsilon));
 	}
+	agg->expressions = std::move(upper_expressions);
 	optional_idx support_pos;
 	LogicalOperator *projection_anchor = agg;
 	if (n_groups > 0) {
@@ -3486,13 +3464,8 @@ void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, Optimizer
 
 	// Normalize the custom aggregate outputs onto one projection table and restore the
 	// component types expected by operators above the original aggregate.
-	vector<double> zero_scales(component_count, 0.0);
-	auto output_projection =
-	    WrapAggregateWithLaplace(input, plan, agg, projection_anchor, zero_scales, component_output_types);
-	if (!avg_infos.empty()) {
-		WrapAvgRatioProjection(input, plan, output_projection, avg_infos, n_groups, original_aggregate_count,
-		                       output_projection.proj_ptr, /*null_on_nonpositive_count=*/true);
-	}
+	vector<double> zero_scales(original_aggregate_count, 0.0);
+	WrapAggregateWithLaplace(input, plan, agg, projection_anchor, zero_scales, component_output_types);
 
 #if PRIVACY_DEBUG
 	PRIVACY_DEBUG_PRINT("=== PLAN AFTER dp_filterless TRANSFORMATION ===");
