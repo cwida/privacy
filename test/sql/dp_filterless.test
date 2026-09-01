@@ -77,6 +77,36 @@ FROM (
 ----
 25.000000	100.000000	4.000000
 
+# The internal lower aggregates compute filtered-answer and sampled-histogram
+# partials together. NULL values retain SUM and COUNT's ordinary semantics.
+query RR
+SELECT x.answer, x.histogram
+FROM (
+    SELECT priv_filterless_approx_sum_pair(value, active, sampled) AS x
+    FROM (VALUES
+        (10.0::DOUBLE, true, true),
+        (20.0::DOUBLE, false, true),
+        (NULL::DOUBLE, true, true),
+        (30.0::DOUBLE, true, false)
+    ) input(value, active, sampled)
+);
+----
+40.000000	30.000000
+
+query II
+SELECT x.answer, x.histogram
+FROM (
+    SELECT priv_filterless_count_pair(countable, active, sampled) AS x
+    FROM (VALUES
+        (true, true, true),
+        (false, true, true),
+        (true, false, true),
+        (true, true, false)
+    ) input(countable, active, sampled)
+);
+----
+2	2
+
 # Sampling is deterministic from the high PU bits. At p=6, PU 0 is sampled and
 # receives weight 64; PUs with the high bit set are not sampled. Qualifying
 # non-sampled PUs enter the answer but not the histogram.
@@ -500,6 +530,32 @@ FROM filterless_sampled_events
 WHERE NOT qualifies;
 ----
 2000.000000	2	1000.000000
+
+# The compiler uses one paired lower aggregate per floating SUM/COUNT
+# component, instead of separate filtered and sampled aggregates.
+statement ok
+SET explain_output = 'physical_only';
+
+query II
+EXPLAIN SELECT SUM(amount), COUNT(*)
+FROM filterless_sampled_events
+WHERE qualifies;
+----
+physical_plan	<REGEX>:[\s\S]*priv_filterless_approx_sum_[\s\S]*pair[\s\S]*priv_filterless_count_pair[\s\S]*
+
+# COUNT(expr) fuses through an explicit non-NULL marker, while COUNT(*) still
+# counts active rows regardless of the expression's NULL value.
+statement ok
+INSERT INTO filterless_sampled_events VALUES
+    (0, true, NULL),
+    (89, true, NULL);
+
+query RIIR
+SELECT SUM(amount), COUNT(amount), COUNT(*), AVG(amount)
+FROM filterless_sampled_events
+WHERE qualifies;
+----
+10000.000000	2	4	5000.000000
 
 statement ok
 SET dp_filterless_sample_bits = 0;

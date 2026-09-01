@@ -937,9 +937,8 @@ struct FilterlessApproxSumOperation {
 		return Hugeint::Convert(ClipApproximateMagnitude64(AsScaledMagnitude(value)));
 	}
 
-	template <class INPUT_TYPE, class STATE, class OP>
-	static void Operation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &) {
-		double value = static_cast<double>(input);
+	template <class STATE>
+	static void AddValue(STATE &state, double value) {
 		if (!std::isfinite(value)) {
 			throw InvalidInputException("filterless: per-PU SUM contribution must be finite");
 		}
@@ -950,6 +949,11 @@ struct FilterlessApproxSumOperation {
 		} else {
 			state.positive = Hugeint::Add(state.positive, scaled);
 		}
+	}
+
+	template <class INPUT_TYPE, class STATE, class OP>
+	static void Operation(STATE &state, const INPUT_TYPE &input, AggregateUnaryInput &) {
+		AddValue(state, static_cast<double>(input));
 	}
 
 	template <class INPUT_TYPE, class STATE, class OP>
@@ -974,20 +978,191 @@ struct FilterlessApproxSumOperation {
 		target.negative = Hugeint::Add(target.negative, source.negative);
 	}
 
+	template <class STATE>
+	static double FinalizeValue(const STATE &state) {
+		auto scaled = Hugeint::Subtract(state.positive, state.negative);
+		return Hugeint::Cast<double>(scaled) / CLIP_DOUBLE_SCALE;
+	}
+
 	template <class RESULT_TYPE, class STATE>
 	static void Finalize(STATE &state, RESULT_TYPE &target, AggregateFinalizeData &finalize_data) {
 		if (!state.isset) {
 			finalize_data.ReturnNull();
 			return;
 		}
-		auto scaled = Hugeint::Subtract(state.positive, state.negative);
-		target = Hugeint::Cast<double>(scaled) / CLIP_DOUBLE_SCALE;
+		target = FinalizeValue(state);
 	}
 
 	static bool IgnoreNull() {
 		return true;
 	}
 };
+
+struct FilterlessApproxSumPairState {
+	FilterlessApproxSumState answer;
+	FilterlessApproxSumState histogram;
+};
+
+struct FilterlessCountPairState {
+	uint64_t answer;
+	uint64_t histogram;
+};
+
+static LogicalType FilterlessLowerPairType(const LogicalType &value_type) {
+	child_list_t<LogicalType> children;
+	children.emplace_back("answer", value_type);
+	children.emplace_back("histogram", value_type);
+	return LogicalType::STRUCT(std::move(children));
+}
+
+static idx_t FilterlessApproxSumPairStateSize(const AggregateFunction &) {
+	return sizeof(FilterlessApproxSumPairState);
+}
+
+static idx_t FilterlessCountPairStateSize(const AggregateFunction &) {
+	return sizeof(FilterlessCountPairState);
+}
+
+static void FilterlessApproxSumPairInitialize(const AggregateFunction &, data_ptr_t state_p) {
+	auto &state = *reinterpret_cast<FilterlessApproxSumPairState *>(state_p);
+	FilterlessApproxSumOperation::Initialize(state.answer);
+	FilterlessApproxSumOperation::Initialize(state.histogram);
+}
+
+static void FilterlessCountPairInitialize(const AggregateFunction &, data_ptr_t state_p) {
+	memset(state_p, 0, sizeof(FilterlessCountPairState));
+}
+
+template <class STATE, class VALUE_TYPE, class UPDATE, class STATE_GETTER>
+static void FilterlessLowerPairUpdateRows(Vector inputs[], idx_t count, STATE_GETTER get_state, UPDATE update) {
+	UnifiedVectorFormat value_data;
+	UnifiedVectorFormat active_data;
+	UnifiedVectorFormat sampled_data;
+	inputs[0].ToUnifiedFormat(count, value_data);
+	inputs[1].ToUnifiedFormat(count, active_data);
+	inputs[2].ToUnifiedFormat(count, sampled_data);
+	auto values = UnifiedVectorFormat::GetData<VALUE_TYPE>(value_data);
+	auto active = UnifiedVectorFormat::GetData<bool>(active_data);
+	auto sampled = UnifiedVectorFormat::GetData<bool>(sampled_data);
+	for (idx_t row = 0; row < count; row++) {
+		auto value_index = value_data.sel->get_index(row);
+		if (!value_data.validity.RowIsValid(value_index)) {
+			continue;
+		}
+		auto active_index = active_data.sel->get_index(row);
+		auto sampled_index = sampled_data.sel->get_index(row);
+		bool is_active = active_data.validity.RowIsValid(active_index) && active[active_index];
+		bool is_sampled = sampled_data.validity.RowIsValid(sampled_index) && sampled[sampled_index];
+		if (!is_active && !is_sampled) {
+			continue;
+		}
+		update(*get_state(row), values[value_index], is_active, is_sampled);
+	}
+}
+
+static void UpdateFilterlessApproxSumPair(FilterlessApproxSumPairState &state, double value, bool active,
+	                                      bool sampled) {
+	if (active) {
+		FilterlessApproxSumOperation::AddValue(state.answer, value);
+	}
+	if (sampled) {
+		FilterlessApproxSumOperation::AddValue(state.histogram, value);
+	}
+}
+
+static void UpdateFilterlessCountPair(FilterlessCountPairState &state, bool count_value, bool active, bool sampled) {
+	if (!count_value) {
+		return;
+	}
+	state.answer += static_cast<uint64_t>(active);
+	state.histogram += static_cast<uint64_t>(sampled);
+}
+
+static void FilterlessApproxSumPairUpdate(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p,
+	                                      idx_t count) {
+	auto state = reinterpret_cast<FilterlessApproxSumPairState *>(state_p);
+	FilterlessLowerPairUpdateRows<FilterlessApproxSumPairState, double>(
+	    inputs, count, [state](idx_t) { return state; }, UpdateFilterlessApproxSumPair);
+}
+
+static void FilterlessCountPairUpdate(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
+	auto state = reinterpret_cast<FilterlessCountPairState *>(state_p);
+	FilterlessLowerPairUpdateRows<FilterlessCountPairState, bool>(
+	    inputs, count, [state](idx_t) { return state; }, UpdateFilterlessCountPair);
+}
+
+template <class STATE, class VALUE_TYPE, class UPDATE>
+static void FilterlessLowerPairScatterUpdate(Vector inputs[], Vector &states, idx_t count, UPDATE update) {
+	UnifiedVectorFormat state_data;
+	states.ToUnifiedFormat(count, state_data);
+	auto state_ptrs = UnifiedVectorFormat::GetData<STATE *>(state_data);
+	FilterlessLowerPairUpdateRows<STATE, VALUE_TYPE>(
+	    inputs, count, [&](idx_t row) { return state_ptrs[state_data.sel->get_index(row)]; }, update);
+}
+
+static void FilterlessApproxSumPairScatterUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector &states,
+	                                             idx_t count) {
+	FilterlessLowerPairScatterUpdate<FilterlessApproxSumPairState, double>(inputs, states, count,
+	                                                                       UpdateFilterlessApproxSumPair);
+}
+
+static void FilterlessCountPairScatterUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector &states,
+	                                         idx_t count) {
+	FilterlessLowerPairScatterUpdate<FilterlessCountPairState, bool>(inputs, states, count, UpdateFilterlessCountPair);
+}
+
+static void FilterlessApproxSumPairCombine(Vector &source, Vector &target, AggregateInputData &input, idx_t count) {
+	auto sources = FlatVector::GetData<FilterlessApproxSumPairState *>(source);
+	auto targets = FlatVector::GetData<FilterlessApproxSumPairState *>(target);
+	for (idx_t i = 0; i < count; i++) {
+		FilterlessApproxSumOperation::Combine<FilterlessApproxSumState, FilterlessApproxSumOperation>(
+		    sources[i]->answer, targets[i]->answer, input);
+		FilterlessApproxSumOperation::Combine<FilterlessApproxSumState, FilterlessApproxSumOperation>(
+		    sources[i]->histogram, targets[i]->histogram, input);
+	}
+}
+
+static void FilterlessCountPairCombine(Vector &source, Vector &target, AggregateInputData &, idx_t count) {
+	auto sources = FlatVector::GetData<FilterlessCountPairState *>(source);
+	auto targets = FlatVector::GetData<FilterlessCountPairState *>(target);
+	for (idx_t i = 0; i < count; i++) {
+		targets[i]->answer += sources[i]->answer;
+		targets[i]->histogram += sources[i]->histogram;
+	}
+}
+
+static void FilterlessApproxSumPairFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count,
+	                                        idx_t offset) {
+	auto state_ptrs = FlatVector::GetData<FilterlessApproxSumPairState *>(states);
+	auto &children = StructVector::GetEntries(result);
+	auto answers = FlatVector::GetData<double>(*children[0]);
+	auto histograms = FlatVector::GetData<double>(*children[1]);
+	for (idx_t i = 0; i < count; i++) {
+		auto row = offset + i;
+		if (state_ptrs[i]->answer.isset) {
+			answers[row] = FilterlessApproxSumOperation::FinalizeValue(state_ptrs[i]->answer);
+		} else {
+			FlatVector::Validity(*children[0]).SetInvalid(row);
+		}
+		if (state_ptrs[i]->histogram.isset) {
+			histograms[row] = FilterlessApproxSumOperation::FinalizeValue(state_ptrs[i]->histogram);
+		} else {
+			FlatVector::Validity(*children[1]).SetInvalid(row);
+		}
+	}
+}
+
+static void FilterlessCountPairFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count,
+	                                    idx_t offset) {
+	auto state_ptrs = FlatVector::GetData<FilterlessCountPairState *>(states);
+	auto &children = StructVector::GetEntries(result);
+	auto answers = FlatVector::GetData<int64_t>(*children[0]);
+	auto histograms = FlatVector::GetData<int64_t>(*children[1]);
+	for (idx_t i = 0; i < count; i++) {
+		answers[offset + i] = static_cast<int64_t>(state_ptrs[i]->answer);
+		histograms[offset + i] = static_cast<int64_t>(state_ptrs[i]->histogram);
+	}
+}
 
 static LogicalType FilterlessDebugType() {
 	child_list_t<LogicalType> children;
@@ -1125,6 +1300,29 @@ void RegisterFilterlessAggregateFunctions(ExtensionLoader &loader) {
 	    "[INTERNAL] Scalar AS magnitude sum used by dp_filterless per-PU pre-aggregation.";
 	approx_sum_info.descriptions.push_back(std::move(approx_sum_description));
 	loader.RegisterFunction(std::move(approx_sum_info));
+
+	AggregateFunction approx_sum_pair(
+	    "priv_filterless_approx_sum_pair", {LogicalType::DOUBLE, LogicalType::BOOLEAN, LogicalType::BOOLEAN},
+	    FilterlessLowerPairType(LogicalType::DOUBLE), FilterlessApproxSumPairStateSize,
+	    FilterlessApproxSumPairInitialize, FilterlessApproxSumPairScatterUpdate, FilterlessApproxSumPairCombine,
+	    FilterlessApproxSumPairFinalize, FunctionNullHandling::SPECIAL_HANDLING, FilterlessApproxSumPairUpdate);
+	CreateAggregateFunctionInfo approx_sum_pair_info(approx_sum_pair);
+	FunctionDescription approx_sum_pair_description;
+	approx_sum_pair_description.description =
+	    "[INTERNAL] Fused filtered-answer and sampled-histogram approximate SUM partials.";
+	approx_sum_pair_info.descriptions.push_back(std::move(approx_sum_pair_description));
+	loader.RegisterFunction(std::move(approx_sum_pair_info));
+
+	AggregateFunction count_pair(
+	    "priv_filterless_count_pair", {LogicalType::BOOLEAN, LogicalType::BOOLEAN, LogicalType::BOOLEAN},
+	    FilterlessLowerPairType(LogicalType::BIGINT), FilterlessCountPairStateSize, FilterlessCountPairInitialize,
+	    FilterlessCountPairScatterUpdate, FilterlessCountPairCombine, FilterlessCountPairFinalize,
+	    FunctionNullHandling::SPECIAL_HANDLING, FilterlessCountPairUpdate);
+	CreateAggregateFunctionInfo count_pair_info(count_pair);
+	FunctionDescription count_pair_description;
+	count_pair_description.description = "[INTERNAL] Fused filtered-answer and sampled-histogram COUNT partials.";
+	count_pair_info.descriptions.push_back(std::move(count_pair_description));
+	loader.RegisterFunction(std::move(count_pair_info));
 
 	AggregateFunctionSet sum_set("filterless_sum");
 	AddSumCountOverloads(sum_set, "filterless_sum", FilterlessFinalize<false, false>, LogicalType::DOUBLE,
