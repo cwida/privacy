@@ -3166,12 +3166,6 @@ static unique_ptr<Expression> BuildFilterlessEncodedPuInput(OptimizerExtensionIn
 	return make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
 }
 
-struct FilterlessLowerComponentInput {
-	idx_t answer_column;
-	idx_t histogram_column;
-	bool paired;
-};
-
 struct FilterlessPreAggregationInput {
 	idx_t group_table_index;
 	idx_t aggregate_table_index;
@@ -3180,7 +3174,7 @@ struct FilterlessPreAggregationInput {
 	idx_t active_count_column;
 	vector<LogicalType> group_types;
 	vector<LogicalType> aggregate_types;
-	vector<FilterlessLowerComponentInput> components;
+	vector<idx_t> component_columns;
 
 	unique_ptr<Expression> GroupRef(idx_t index) const {
 		return make_uniq<BoundColumnRefExpression>(group_types[index], ColumnBinding(group_table_index, index));
@@ -3196,14 +3190,8 @@ struct FilterlessPreAggregationInput {
 	}
 
 	unique_ptr<Expression> ComponentRef(OptimizerExtensionInput &input, idx_t index, bool answer) const {
-		auto &component = components[index];
-		auto column = answer ? component.answer_column : component.histogram_column;
-		auto value = AggregateRef(column);
-		if (!component.paired) {
-			return value;
-		}
 		vector<unique_ptr<Expression>> children;
-		children.push_back(std::move(value));
+		children.push_back(AggregateRef(component_columns[index]));
 		children.push_back(make_uniq<BoundConstantExpression>(Value(answer ? "answer" : "histogram")));
 		return BindScalarLocal(input, "struct_extract", std::move(children));
 	}
@@ -3221,16 +3209,16 @@ struct FilterlessPreAggregationInput {
 	}
 };
 
-static FilterlessPreAggregationInput
-BuildFilterlessPreAggregationInput(const PuPreAggregationInfo &pre, vector<FilterlessLowerComponentInput> components,
-                                   idx_t active_count_column) {
+static FilterlessPreAggregationInput BuildFilterlessPreAggregationInput(const PuPreAggregationInfo &pre,
+                                                                        vector<idx_t> component_columns,
+                                                                        idx_t active_count_column) {
 	FilterlessPreAggregationInput result;
 	result.group_table_index = pre.lower_agg->group_index;
 	result.aggregate_table_index = pre.lower_agg_index;
 	result.group_count = pre.num_original_groups;
 	result.component_column_offset = 0;
 	result.active_count_column = active_count_column;
-	result.components = std::move(components);
+	result.component_columns = std::move(component_columns);
 	for (idx_t i = 0; i < pre.num_original_groups; i++) {
 		result.group_types.push_back(pre.lower_agg->types[i]);
 	}
@@ -3242,10 +3230,10 @@ BuildFilterlessPreAggregationInput(const PuPreAggregationInfo &pre, vector<Filte
 
 static FilterlessPreAggregationInput ApplyFilterlessMaxGroups(OptimizerExtensionInput &input, LogicalAggregate *agg,
                                                               const PuPreAggregationInfo &pre,
-                                                              vector<FilterlessLowerComponentInput> components,
+                                                              vector<idx_t> component_columns,
                                                               idx_t active_count_column, int64_t max_groups) {
 	if (pre.num_original_groups == 0) {
-		return BuildFilterlessPreAggregationInput(pre, std::move(components), active_count_column);
+		return BuildFilterlessPreAggregationInput(pre, std::move(component_columns), active_count_column);
 	}
 
 	// Flatten the lower aggregate's separate group/aggregate bindings into one projection. The
@@ -3296,7 +3284,7 @@ static FilterlessPreAggregationInput ApplyFilterlessMaxGroups(OptimizerExtension
 	result.group_count = pre.num_original_groups;
 	result.component_column_offset = pre.num_original_groups + 1;
 	result.active_count_column = active_count_column;
-	result.components = std::move(components);
+	result.component_columns = std::move(component_columns);
 	for (idx_t i = 0; i < pre.num_original_groups; i++) {
 		result.group_types.push_back(pre.lower_agg->types[i]);
 	}
@@ -3365,21 +3353,6 @@ static unique_ptr<Expression> BuildFilterlessLogicalPu(OptimizerExtensionInput &
 	                                          make_uniq<BoundConstantExpression>(Value::UBIGINT(~uint64_t(1))));
 }
 
-static unique_ptr<Expression> BuildFilterlessExactLowerSumAggregate(OptimizerExtensionInput &input,
-                                                                    const BoundAggregateExpression &aggregate) {
-	auto input_type = aggregate.children[0]->return_type.InternalType();
-	D_ASSERT(input_type != PhysicalType::FLOAT && input_type != PhysicalType::DOUBLE);
-	return BindPlainAggregate(input, "sum", aggregate.children[0]->Copy());
-}
-
-static bool CanFuseFilterlessLowerAggregate(const BoundAggregateExpression &aggregate, bool is_count) {
-	if (is_count) {
-		return true;
-	}
-	auto input_type = aggregate.children[0]->return_type.InternalType();
-	return input_type == PhysicalType::FLOAT || input_type == PhysicalType::DOUBLE;
-}
-
 static unique_ptr<Expression> BuildFilterlessLowerPair(OptimizerExtensionInput &input,
                                                        const BoundAggregateExpression &aggregate, bool is_count,
                                                        const Expression &encoded_pu, int sample_bits) {
@@ -3398,8 +3371,16 @@ static unique_ptr<Expression> BuildFilterlessLowerPair(OptimizerExtensionInput &
 	}
 	children.push_back(BuildFilterlessIsActive(input, encoded_pu));
 	children.push_back(BuildFilterlessSamplePredicate(input, encoded_pu, sample_bits));
-	return BindAggregateLocal(input, is_count ? "priv_filterless_count_pair" : "priv_filterless_approx_sum_pair",
-	                          std::move(children));
+	string function_name;
+	if (is_count) {
+		function_name = "priv_filterless_count_pair";
+	} else {
+		auto input_type = aggregate.children[0]->return_type.InternalType();
+		function_name = input_type == PhysicalType::FLOAT || input_type == PhysicalType::DOUBLE
+		                    ? "priv_filterless_approx_sum_pair"
+		                    : "priv_filterless_exact_sum_pair";
+	}
+	return BindAggregateLocal(input, function_name, std::move(children));
 }
 
 void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
@@ -3468,32 +3449,17 @@ void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, Optimizer
 	vector<bool> count_components;
 	vector<unique_ptr<Expression>> lower_expressions;
 	count_components.reserve(component_count);
-	lower_expressions.reserve(2 * component_count + 1);
-	vector<FilterlessLowerComponentInput> lower_components;
-	lower_components.reserve(component_count);
+	lower_expressions.reserve(component_count + 1);
+	vector<idx_t> lower_component_columns;
+	lower_component_columns.reserve(component_count);
 	for (idx_t i = 0; i < component_count; i++) {
 		auto &aggregate = agg->expressions[i]->Cast<BoundAggregateExpression>();
 		bool is_count = IsCountAggregate(aggregate);
 		count_components.push_back(is_count);
-		if (CanFuseFilterlessLowerAggregate(aggregate, is_count)) {
-			auto column = lower_expressions.size();
-			lower_expressions.push_back(
-			    BuildFilterlessLowerPair(input, aggregate, is_count, *encoded_pu, filterless_settings.sample_bits));
-			lower_components.push_back({column, column, true});
-			continue;
-		}
-
-		D_ASSERT(!is_count);
-		auto answer_column = lower_expressions.size();
-		auto answer_partial = BuildFilterlessExactLowerSumAggregate(input, aggregate);
-		answer_partial->Cast<BoundAggregateExpression>().filter = BuildFilterlessIsActive(input, *encoded_pu);
-		lower_expressions.push_back(std::move(answer_partial));
-		auto histogram_column = lower_expressions.size();
-		auto histogram_partial = BuildFilterlessExactLowerSumAggregate(input, aggregate);
-		histogram_partial->Cast<BoundAggregateExpression>().filter =
-		    BuildFilterlessSamplePredicate(input, *encoded_pu, filterless_settings.sample_bits);
-		lower_expressions.push_back(std::move(histogram_partial));
-		lower_components.push_back({answer_column, histogram_column, false});
+		auto column = lower_expressions.size();
+		lower_expressions.push_back(
+		    BuildFilterlessLowerPair(input, aggregate, is_count, *encoded_pu, filterless_settings.sample_bits));
+		lower_component_columns.push_back(column);
 	}
 	idx_t active_count_column = lower_expressions.size();
 	auto active_count = BindPlainAggregate(input, "count_star", nullptr);
@@ -3503,9 +3469,9 @@ void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, Optimizer
 	auto logical_pu = BuildFilterlessLogicalPu(input, std::move(encoded_pu));
 	auto pre = InsertPuPreAggregation(input, agg, std::move(lower_expressions), std::move(logical_pu));
 	PRIVACY_DEBUG_PRINT("[dp_filterless] pre-aggregated paired filtered-answer and fixed-sample histogram "
-	                    "contributions where supported; floating SUM uses the scalar AS magnitude accumulator");
+	                    "contributions; floating SUM uses the scalar AS magnitude accumulator");
 	auto pre_input =
-	    ApplyFilterlessMaxGroups(input, agg, pre, std::move(lower_components), active_count_column, max_groups);
+	    ApplyFilterlessMaxGroups(input, agg, pre, std::move(lower_component_columns), active_count_column, max_groups);
 	double visible_cell_epsilon = epsilon / budget_units;
 	for (idx_t i = 0; i < component_count; i++) {
 		double component_epsilon = avg_components.count(i) ? visible_cell_epsilon / 2.0 : visible_cell_epsilon;

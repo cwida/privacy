@@ -1008,6 +1008,26 @@ struct FilterlessCountPairState {
 	uint64_t histogram;
 };
 
+struct FilterlessExactSumPartialState {
+	bool isset;
+	hugeint_t value;
+
+	void Initialize() {
+		isset = false;
+		value = hugeint_t(0);
+	}
+
+	void Combine(const FilterlessExactSumPartialState &other) {
+		isset = isset || other.isset;
+		value = Hugeint::Add(value, other.value);
+	}
+};
+
+struct FilterlessExactSumPairState {
+	FilterlessExactSumPartialState answer;
+	FilterlessExactSumPartialState histogram;
+};
+
 static LogicalType FilterlessLowerPairType(const LogicalType &value_type) {
 	child_list_t<LogicalType> children;
 	children.emplace_back("answer", value_type);
@@ -1023,6 +1043,10 @@ static idx_t FilterlessCountPairStateSize(const AggregateFunction &) {
 	return sizeof(FilterlessCountPairState);
 }
 
+static idx_t FilterlessExactSumPairStateSize(const AggregateFunction &) {
+	return sizeof(FilterlessExactSumPairState);
+}
+
 static void FilterlessApproxSumPairInitialize(const AggregateFunction &, data_ptr_t state_p) {
 	auto &state = *reinterpret_cast<FilterlessApproxSumPairState *>(state_p);
 	FilterlessApproxSumOperation::Initialize(state.answer);
@@ -1031,6 +1055,12 @@ static void FilterlessApproxSumPairInitialize(const AggregateFunction &, data_pt
 
 static void FilterlessCountPairInitialize(const AggregateFunction &, data_ptr_t state_p) {
 	memset(state_p, 0, sizeof(FilterlessCountPairState));
+}
+
+static void FilterlessExactSumPairInitialize(const AggregateFunction &, data_ptr_t state_p) {
+	auto &state = *reinterpret_cast<FilterlessExactSumPairState *>(state_p);
+	state.answer.Initialize();
+	state.histogram.Initialize();
 }
 
 template <class STATE, class VALUE_TYPE, class UPDATE, class STATE_GETTER>
@@ -1078,6 +1108,43 @@ static void UpdateFilterlessCountPair(FilterlessCountPairState &state, bool coun
 	state.histogram += static_cast<uint64_t>(sampled);
 }
 
+template <class INPUT_TYPE>
+static void AddFilterlessExactInteger(hugeint_t &result, INPUT_TYPE value) {
+	// Match DuckDB's exact integer SUM accumulator: add the two's-complement low
+	// word and adjust the high word only on carry or borrow.
+	auto lower = static_cast<uint64_t>(value);
+	result.lower += lower;
+	int overflow = result.lower < lower;
+	int positive = value >= 0;
+	if (!(overflow ^ positive)) {
+		result.upper += -1 + 2 * positive;
+	}
+}
+
+template <>
+void AddFilterlessExactInteger(hugeint_t &result, hugeint_t value) {
+	result = Hugeint::Add(result, value);
+}
+
+template <class INPUT_TYPE>
+static void AddFilterlessExactSumPairValue(FilterlessExactSumPairState &state, INPUT_TYPE value, bool active,
+                                           bool sampled) {
+	if (active) {
+		state.answer.isset = true;
+		AddFilterlessExactInteger(state.answer.value, value);
+	}
+	if (sampled) {
+		state.histogram.isset = true;
+		AddFilterlessExactInteger(state.histogram.value, value);
+	}
+}
+
+template <class INPUT_TYPE>
+static void UpdateFilterlessExactSumPair(FilterlessExactSumPairState &state, INPUT_TYPE value, bool active,
+                                         bool sampled) {
+	AddFilterlessExactSumPairValue(state, value, active, sampled);
+}
+
 static void FilterlessApproxSumPairUpdate(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p,
                                           idx_t count) {
 	auto state = reinterpret_cast<FilterlessApproxSumPairState *>(state_p);
@@ -1089,6 +1156,14 @@ static void FilterlessCountPairUpdate(Vector inputs[], AggregateInputData &, idx
 	auto state = reinterpret_cast<FilterlessCountPairState *>(state_p);
 	FilterlessLowerPairUpdateRows<FilterlessCountPairState, bool>(
 	    inputs, count, [state](idx_t) { return state; }, UpdateFilterlessCountPair);
+}
+
+template <class INPUT_TYPE>
+static void FilterlessExactSumPairUpdate(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p,
+                                         idx_t count) {
+	auto state = reinterpret_cast<FilterlessExactSumPairState *>(state_p);
+	FilterlessLowerPairUpdateRows<FilterlessExactSumPairState, INPUT_TYPE>(
+	    inputs, count, [state](idx_t) { return state; }, UpdateFilterlessExactSumPair<INPUT_TYPE>);
 }
 
 template <class STATE, class VALUE_TYPE, class UPDATE>
@@ -1111,6 +1186,13 @@ static void FilterlessCountPairScatterUpdate(Vector inputs[], AggregateInputData
 	FilterlessLowerPairScatterUpdate<FilterlessCountPairState, bool>(inputs, states, count, UpdateFilterlessCountPair);
 }
 
+template <class INPUT_TYPE>
+static void FilterlessExactSumPairScatterUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector &states,
+                                                idx_t count) {
+	FilterlessLowerPairScatterUpdate<FilterlessExactSumPairState, INPUT_TYPE>(inputs, states, count,
+	                                                                          UpdateFilterlessExactSumPair<INPUT_TYPE>);
+}
+
 static void FilterlessApproxSumPairCombine(Vector &source, Vector &target, AggregateInputData &input, idx_t count) {
 	auto sources = FlatVector::GetData<FilterlessApproxSumPairState *>(source);
 	auto targets = FlatVector::GetData<FilterlessApproxSumPairState *>(target);
@@ -1128,6 +1210,15 @@ static void FilterlessCountPairCombine(Vector &source, Vector &target, Aggregate
 	for (idx_t i = 0; i < count; i++) {
 		targets[i]->answer += sources[i]->answer;
 		targets[i]->histogram += sources[i]->histogram;
+	}
+}
+
+static void FilterlessExactSumPairCombine(Vector &source, Vector &target, AggregateInputData &, idx_t count) {
+	auto sources = FlatVector::GetData<FilterlessExactSumPairState *>(source);
+	auto targets = FlatVector::GetData<FilterlessExactSumPairState *>(target);
+	for (idx_t i = 0; i < count; i++) {
+		targets[i]->answer.Combine(sources[i]->answer);
+		targets[i]->histogram.Combine(sources[i]->histogram);
 	}
 }
 
@@ -1161,6 +1252,27 @@ static void FilterlessCountPairFinalize(Vector &states, AggregateInputData &, Ve
 	for (idx_t i = 0; i < count; i++) {
 		answers[offset + i] = static_cast<int64_t>(state_ptrs[i]->answer);
 		histograms[offset + i] = static_cast<int64_t>(state_ptrs[i]->histogram);
+	}
+}
+
+static void FilterlessExactSumPairFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count,
+                                           idx_t offset) {
+	auto state_ptrs = FlatVector::GetData<FilterlessExactSumPairState *>(states);
+	auto &children = StructVector::GetEntries(result);
+	auto answers = FlatVector::GetData<hugeint_t>(*children[0]);
+	auto histograms = FlatVector::GetData<hugeint_t>(*children[1]);
+	for (idx_t i = 0; i < count; i++) {
+		auto row = offset + i;
+		if (state_ptrs[i]->answer.isset) {
+			answers[row] = state_ptrs[i]->answer.value;
+		} else {
+			FlatVector::Validity(*children[0]).SetInvalid(row);
+		}
+		if (state_ptrs[i]->histogram.isset) {
+			histograms[row] = state_ptrs[i]->histogram.value;
+		} else {
+			FlatVector::Validity(*children[1]).SetInvalid(row);
+		}
 	}
 }
 
@@ -1289,6 +1401,41 @@ static void AddAvgOverloads(AggregateFunctionSet &set, const string &name, aggre
 	    finalize, FunctionNullHandling::SPECIAL_HANDLING, FilterlessAvgUpdate, BindFilterlessAvg));
 }
 
+template <class INPUT_TYPE>
+static AggregateFunction MakeFilterlessExactSumPairFunction(const LogicalType &input_type,
+                                                            const LogicalType &return_type) {
+	auto function = AggregateFunction(
+	    "priv_filterless_exact_sum_pair", {input_type, LogicalType::BOOLEAN, LogicalType::BOOLEAN},
+	    FilterlessLowerPairType(return_type), FilterlessExactSumPairStateSize, FilterlessExactSumPairInitialize,
+	    FilterlessExactSumPairScatterUpdate<INPUT_TYPE>, FilterlessExactSumPairCombine, FilterlessExactSumPairFinalize,
+	    FunctionNullHandling::SPECIAL_HANDLING, FilterlessExactSumPairUpdate<INPUT_TYPE>);
+	function.SetOrderDependent(AggregateOrderDependent::NOT_ORDER_DEPENDENT);
+	return function;
+}
+
+static unique_ptr<FunctionData> BindFilterlessExactDecimalSumPair(ClientContext &, AggregateFunction &function,
+                                                                  vector<unique_ptr<Expression>> &arguments) {
+	auto input_type = arguments[0]->return_type;
+	auto return_type = LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(input_type));
+	switch (input_type.InternalType()) {
+	case PhysicalType::INT16:
+		function = MakeFilterlessExactSumPairFunction<int16_t>(input_type, return_type);
+		break;
+	case PhysicalType::INT32:
+		function = MakeFilterlessExactSumPairFunction<int32_t>(input_type, return_type);
+		break;
+	case PhysicalType::INT64:
+		function = MakeFilterlessExactSumPairFunction<int64_t>(input_type, return_type);
+		break;
+	case PhysicalType::INT128:
+		function = MakeFilterlessExactSumPairFunction<hugeint_t>(input_type, return_type);
+		break;
+	default:
+		throw InternalException("priv_filterless_exact_sum_pair: unsupported DECIMAL physical type");
+	}
+	return nullptr;
+}
+
 void RegisterFilterlessAggregateFunctions(ExtensionLoader &loader) {
 	auto approx_sum =
 	    AggregateFunction::UnaryAggregate<FilterlessApproxSumState, double, double, FilterlessApproxSumOperation>(
@@ -1323,6 +1470,30 @@ void RegisterFilterlessAggregateFunctions(ExtensionLoader &loader) {
 	count_pair_description.description = "[INTERNAL] Fused filtered-answer and sampled-histogram COUNT partials.";
 	count_pair_info.descriptions.push_back(std::move(count_pair_description));
 	loader.RegisterFunction(std::move(count_pair_info));
+
+	AggregateFunctionSet exact_sum_pair_set("priv_filterless_exact_sum_pair");
+	exact_sum_pair_set.AddFunction(
+	    MakeFilterlessExactSumPairFunction<bool>(LogicalType::BOOLEAN, LogicalType::HUGEINT));
+	exact_sum_pair_set.AddFunction(
+	    MakeFilterlessExactSumPairFunction<int8_t>(LogicalType::TINYINT, LogicalType::HUGEINT));
+	exact_sum_pair_set.AddFunction(
+	    MakeFilterlessExactSumPairFunction<int16_t>(LogicalType::SMALLINT, LogicalType::HUGEINT));
+	exact_sum_pair_set.AddFunction(
+	    MakeFilterlessExactSumPairFunction<int32_t>(LogicalType::INTEGER, LogicalType::HUGEINT));
+	exact_sum_pair_set.AddFunction(
+	    MakeFilterlessExactSumPairFunction<int64_t>(LogicalType::BIGINT, LogicalType::HUGEINT));
+	exact_sum_pair_set.AddFunction(
+	    MakeFilterlessExactSumPairFunction<hugeint_t>(LogicalType::HUGEINT, LogicalType::HUGEINT));
+	exact_sum_pair_set.AddFunction(AggregateFunction(
+	    {LogicalTypeId::DECIMAL, LogicalType::BOOLEAN, LogicalType::BOOLEAN},
+	    FilterlessLowerPairType(LogicalType(LogicalTypeId::DECIMAL)), nullptr, nullptr, nullptr, nullptr, nullptr,
+	    FunctionNullHandling::SPECIAL_HANDLING, nullptr, BindFilterlessExactDecimalSumPair));
+	CreateAggregateFunctionInfo exact_sum_pair_info(exact_sum_pair_set);
+	FunctionDescription exact_sum_pair_description;
+	exact_sum_pair_description.description =
+	    "[INTERNAL] Fused filtered-answer and sampled-histogram exact SUM partials.";
+	exact_sum_pair_info.descriptions.push_back(std::move(exact_sum_pair_description));
+	loader.RegisterFunction(std::move(exact_sum_pair_info));
 
 	AggregateFunctionSet sum_set("filterless_sum");
 	AddSumCountOverloads(sum_set, "filterless_sum", FilterlessFinalize<false, false>, LogicalType::DOUBLE,

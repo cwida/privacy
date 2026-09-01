@@ -107,6 +107,51 @@ FROM (
 ----
 2	2
 
+query IITT
+SELECT x.answer, x.histogram, typeof(x.answer), typeof(x.histogram)
+FROM (
+    SELECT priv_filterless_exact_sum_pair(value, active, sampled) AS x
+    FROM (VALUES
+        (9007199254740993::BIGINT, true, true),
+        (2::BIGINT, false, true),
+        (30::BIGINT, true, false),
+        (NULL::BIGINT, true, true)
+    ) input(value, active, sampled)
+);
+----
+9007199254741023	9007199254740995	HUGEINT	HUGEINT
+
+query RRTT
+SELECT x.answer, x.histogram, typeof(x.answer), typeof(x.histogram)
+FROM (
+    SELECT priv_filterless_exact_sum_pair(value, active, sampled) AS x
+    FROM (VALUES
+        (90071992547409.93::DECIMAL(38, 2), true, true),
+        (0.02::DECIMAL(38, 2), false, true),
+        (0.30::DECIMAL(38, 2), true, false),
+        (NULL::DECIMAL(38, 2), true, true)
+    ) input(value, active, sampled)
+);
+----
+90071992547410.23	90071992547409.95	DECIMAL(38,2)	DECIMAL(38,2)
+
+# Every exact SUM input accepted by filterless binds to an exact HUGEINT
+# partial; DECIMAL is bound separately above to retain its scale.
+query TTTTT
+SELECT typeof(b.answer), typeof(t.answer), typeof(s.answer), typeof(i.answer), typeof(h.answer)
+FROM (
+    SELECT priv_filterless_exact_sum_pair(b, true, true) AS b,
+           priv_filterless_exact_sum_pair(t, true, true) AS t,
+           priv_filterless_exact_sum_pair(s, true, true) AS s,
+           priv_filterless_exact_sum_pair(i, true, true) AS i,
+           priv_filterless_exact_sum_pair(h, true, true) AS h
+    FROM (VALUES
+        (true::BOOLEAN, 1::TINYINT, 1::SMALLINT, 1::INTEGER, 1::HUGEINT)
+    ) input(b, t, s, i, h)
+);
+----
+HUGEINT	HUGEINT	HUGEINT	HUGEINT	HUGEINT
+
 # Sampling is deterministic from the high PU bits. At p=6, PU 0 is sampled and
 # receives weight 64; PUs with the high bit set are not sampled. Qualifying
 # non-sampled PUs enter the answer but not the histogram.
@@ -531,8 +576,8 @@ WHERE NOT qualifies;
 ----
 2000.000000	2	1000.000000
 
-# The compiler uses one paired lower aggregate per floating SUM/COUNT
-# component, instead of separate filtered and sampled aggregates.
+# The compiler uses one paired lower aggregate per SUM/COUNT component,
+# instead of separate filtered and sampled aggregates.
 statement ok
 SET explain_output = 'physical_only';
 
@@ -604,6 +649,12 @@ statement ok
 INSERT INTO filterless_exact_numeric VALUES
     (1, 9007199254740993, 90071992547409.93),
     (2, 2, 0.02);
+
+query II
+EXPLAIN SELECT SUM(integer_amount), SUM(decimal_amount), COUNT(*)
+FROM filterless_exact_numeric;
+----
+physical_plan	<REGEX>:[\s\S]*priv_filterless_exact_sum_p[\s\S]*air[\s\S]*priv_filterless_count_pair[\s\S]*
 
 query IRTT
 SELECT SUM(integer_amount), SUM(decimal_amount),
