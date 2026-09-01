@@ -3223,7 +3223,7 @@ struct FilterlessPreAggregationInput {
 
 static FilterlessPreAggregationInput
 BuildFilterlessPreAggregationInput(const PuPreAggregationInfo &pre, vector<FilterlessLowerComponentInput> components,
-	                               idx_t active_count_column) {
+                                   idx_t active_count_column) {
 	FilterlessPreAggregationInput result;
 	result.group_table_index = pre.lower_agg->group_index;
 	result.aggregate_table_index = pre.lower_agg_index;
@@ -3241,9 +3241,9 @@ BuildFilterlessPreAggregationInput(const PuPreAggregationInfo &pre, vector<Filte
 }
 
 static FilterlessPreAggregationInput ApplyFilterlessMaxGroups(OptimizerExtensionInput &input, LogicalAggregate *agg,
-	                                                          const PuPreAggregationInfo &pre,
-	                                                          vector<FilterlessLowerComponentInput> components,
-	                                                          idx_t active_count_column, int64_t max_groups) {
+                                                              const PuPreAggregationInfo &pre,
+                                                              vector<FilterlessLowerComponentInput> components,
+                                                              idx_t active_count_column, int64_t max_groups) {
 	if (pre.num_original_groups == 0) {
 		return BuildFilterlessPreAggregationInput(pre, std::move(components), active_count_column);
 	}
@@ -3366,7 +3366,7 @@ static unique_ptr<Expression> BuildFilterlessLogicalPu(OptimizerExtensionInput &
 }
 
 static unique_ptr<Expression> BuildFilterlessExactLowerSumAggregate(OptimizerExtensionInput &input,
-	                                                                const BoundAggregateExpression &aggregate) {
+                                                                    const BoundAggregateExpression &aggregate) {
 	auto input_type = aggregate.children[0]->return_type.InternalType();
 	D_ASSERT(input_type != PhysicalType::FLOAT && input_type != PhysicalType::DOUBLE);
 	return BindPlainAggregate(input, "sum", aggregate.children[0]->Copy());
@@ -3381,8 +3381,8 @@ static bool CanFuseFilterlessLowerAggregate(const BoundAggregateExpression &aggr
 }
 
 static unique_ptr<Expression> BuildFilterlessLowerPair(OptimizerExtensionInput &input,
-	                                                   const BoundAggregateExpression &aggregate, bool is_count,
-	                                                   const Expression &encoded_pu, int sample_bits) {
+                                                       const BoundAggregateExpression &aggregate, bool is_count,
+                                                       const Expression &encoded_pu, int sample_bits) {
 	vector<unique_ptr<Expression>> children;
 	if (is_count) {
 		if (aggregate.function.name == "count" && !aggregate.children.empty()) {

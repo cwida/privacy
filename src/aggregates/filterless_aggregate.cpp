@@ -1061,7 +1061,7 @@ static void FilterlessLowerPairUpdateRows(Vector inputs[], idx_t count, STATE_GE
 }
 
 static void UpdateFilterlessApproxSumPair(FilterlessApproxSumPairState &state, double value, bool active,
-	                                      bool sampled) {
+                                          bool sampled) {
 	if (active) {
 		FilterlessApproxSumOperation::AddValue(state.answer, value);
 	}
@@ -1079,7 +1079,7 @@ static void UpdateFilterlessCountPair(FilterlessCountPairState &state, bool coun
 }
 
 static void FilterlessApproxSumPairUpdate(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p,
-	                                      idx_t count) {
+                                          idx_t count) {
 	auto state = reinterpret_cast<FilterlessApproxSumPairState *>(state_p);
 	FilterlessLowerPairUpdateRows<FilterlessApproxSumPairState, double>(
 	    inputs, count, [state](idx_t) { return state; }, UpdateFilterlessApproxSumPair);
@@ -1101,13 +1101,13 @@ static void FilterlessLowerPairScatterUpdate(Vector inputs[], Vector &states, id
 }
 
 static void FilterlessApproxSumPairScatterUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector &states,
-	                                             idx_t count) {
+                                                 idx_t count) {
 	FilterlessLowerPairScatterUpdate<FilterlessApproxSumPairState, double>(inputs, states, count,
 	                                                                       UpdateFilterlessApproxSumPair);
 }
 
 static void FilterlessCountPairScatterUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector &states,
-	                                         idx_t count) {
+                                             idx_t count) {
 	FilterlessLowerPairScatterUpdate<FilterlessCountPairState, bool>(inputs, states, count, UpdateFilterlessCountPair);
 }
 
@@ -1132,7 +1132,7 @@ static void FilterlessCountPairCombine(Vector &source, Vector &target, Aggregate
 }
 
 static void FilterlessApproxSumPairFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count,
-	                                        idx_t offset) {
+                                            idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<FilterlessApproxSumPairState *>(states);
 	auto &children = StructVector::GetEntries(result);
 	auto answers = FlatVector::GetData<double>(*children[0]);
@@ -1153,7 +1153,7 @@ static void FilterlessApproxSumPairFinalize(Vector &states, AggregateInputData &
 }
 
 static void FilterlessCountPairFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count,
-	                                    idx_t offset) {
+                                        idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<FilterlessCountPairState *>(states);
 	auto &children = StructVector::GetEntries(result);
 	auto answers = FlatVector::GetData<int64_t>(*children[0]);
