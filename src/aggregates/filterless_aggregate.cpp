@@ -928,15 +928,15 @@ struct FilterlessApproxSumState {
 // Use the same scaled-magnitude representation as PAC's approximate SUM so
 // cancellation cannot erase small per-PU contributions before clipping.
 struct FilterlessApproxSumPairOperation {
-	using INPUT_TYPE = double;
-	using STATE = FilterlessApproxSumState;
-	using RESULT_TYPE = double;
+	using input_t = double;
+	using state_t = FilterlessApproxSumState;
+	using result_t = double;
 
 	static hugeint_t ApproximateScaledValue(double value) {
 		return Hugeint::Convert(ClipApproximateMagnitude64(AsScaledMagnitude(value)));
 	}
 
-	static void Add(STATE &state, INPUT_TYPE value) {
+	static void Add(state_t &state, input_t value) {
 		if (!std::isfinite(value)) {
 			throw InvalidInputException("filterless: per-PU SUM contribution must be finite");
 		}
@@ -949,17 +949,17 @@ struct FilterlessApproxSumPairOperation {
 		}
 	}
 
-	static void Combine(const STATE &source, STATE &target) {
+	static void Combine(const state_t &source, state_t &target) {
 		target.isset = target.isset || source.isset;
 		target.positive = Hugeint::Add(target.positive, source.positive);
 		target.negative = Hugeint::Add(target.negative, source.negative);
 	}
 
-	static bool IsSet(const STATE &state) {
+	static bool IsSet(const state_t &state) {
 		return state.isset;
 	}
 
-	static RESULT_TYPE Finalize(const STATE &state) {
+	static result_t Finalize(const state_t &state) {
 		auto scaled = Hugeint::Subtract(state.positive, state.negative);
 		return Hugeint::Cast<double>(scaled) / CLIP_DOUBLE_SCALE;
 	}
@@ -977,48 +977,48 @@ struct FilterlessLowerPairState {
 };
 
 struct FilterlessCountPairOperation {
-	using INPUT_TYPE = bool;
-	using STATE = uint64_t;
-	using RESULT_TYPE = int64_t;
+	using input_t = bool;
+	using state_t = uint64_t;
+	using result_t = int64_t;
 
-	static void Add(STATE &state, INPUT_TYPE value) {
+	static void Add(state_t &state, input_t value) {
 		state += static_cast<uint64_t>(value);
 	}
 
-	static void Combine(const STATE &source, STATE &target) {
+	static void Combine(const state_t &source, state_t &target) {
 		target += source;
 	}
 
-	static bool IsSet(const STATE &) {
+	static bool IsSet(const state_t &) {
 		return true;
 	}
 
-	static RESULT_TYPE Finalize(const STATE &state) {
-		return static_cast<RESULT_TYPE>(state);
+	static result_t Finalize(const state_t &state) {
+		return static_cast<result_t>(state);
 	}
 };
 
 template <class INPUT>
 struct FilterlessExactSumPairOperation {
-	using INPUT_TYPE = INPUT;
-	using STATE = FilterlessExactSumPartialState;
-	using RESULT_TYPE = hugeint_t;
+	using input_t = INPUT;
+	using state_t = FilterlessExactSumPartialState;
+	using result_t = hugeint_t;
 
-	static void Add(STATE &state, INPUT_TYPE value) {
+	static void Add(state_t &state, input_t value) {
 		state.isset = true;
 		state.value = Hugeint::Add(state.value, ToHugeint(value));
 	}
 
-	static void Combine(const STATE &source, STATE &target) {
+	static void Combine(const state_t &source, state_t &target) {
 		target.isset = target.isset || source.isset;
 		target.value = Hugeint::Add(target.value, source.value);
 	}
 
-	static bool IsSet(const STATE &state) {
+	static bool IsSet(const state_t &state) {
 		return state.isset;
 	}
 
-	static RESULT_TYPE Finalize(const STATE &state) {
+	static result_t Finalize(const state_t &state) {
 		return state.value;
 	}
 };
@@ -1029,12 +1029,12 @@ static LogicalType FilterlessLowerPairType(const LogicalType &value_type) {
 
 template <class OPERATION>
 static idx_t FilterlessLowerPairStateSize(const AggregateFunction &) {
-	return sizeof(FilterlessLowerPairState<typename OPERATION::STATE>);
+	return sizeof(FilterlessLowerPairState<typename OPERATION::state_t>);
 }
 
 template <class OPERATION>
 static void FilterlessLowerPairInitialize(const AggregateFunction &, data_ptr_t state_p) {
-	memset(state_p, 0, sizeof(FilterlessLowerPairState<typename OPERATION::STATE>));
+	memset(state_p, 0, sizeof(FilterlessLowerPairState<typename OPERATION::state_t>));
 }
 
 template <class OPERATION, class STATE_GETTER>
@@ -1043,7 +1043,7 @@ static void FilterlessLowerPairUpdateRows(Vector inputs[], idx_t count, STATE_GE
 	inputs[0].ToUnifiedFormat(count, value_data);
 	inputs[1].ToUnifiedFormat(count, active_data);
 	inputs[2].ToUnifiedFormat(count, sampled_data);
-	auto values = UnifiedVectorFormat::GetData<typename OPERATION::INPUT_TYPE>(value_data);
+	auto values = UnifiedVectorFormat::GetData<typename OPERATION::input_t>(value_data);
 	auto active = UnifiedVectorFormat::GetData<bool>(active_data);
 	auto sampled = UnifiedVectorFormat::GetData<bool>(sampled_data);
 	for (idx_t row = 0; row < count; row++) {
@@ -1069,7 +1069,7 @@ static void FilterlessLowerPairUpdateRows(Vector inputs[], idx_t count, STATE_GE
 
 template <class OPERATION>
 static void FilterlessLowerPairUpdate(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
-	auto state = reinterpret_cast<FilterlessLowerPairState<typename OPERATION::STATE> *>(state_p);
+	auto state = reinterpret_cast<FilterlessLowerPairState<typename OPERATION::state_t> *>(state_p);
 	FilterlessLowerPairUpdateRows<OPERATION>(inputs, count, [state](idx_t) { return state; });
 }
 
@@ -1078,16 +1078,16 @@ static void FilterlessLowerPairScatterUpdate(Vector inputs[], AggregateInputData
                                              idx_t count) {
 	UnifiedVectorFormat state_data;
 	states.ToUnifiedFormat(count, state_data);
-	auto state_ptrs = UnifiedVectorFormat::GetData<FilterlessLowerPairState<typename OPERATION::STATE> *>(state_data);
+	auto state_ptrs = UnifiedVectorFormat::GetData<FilterlessLowerPairState<typename OPERATION::state_t> *>(state_data);
 	FilterlessLowerPairUpdateRows<OPERATION>(inputs, count,
 	                                         [&](idx_t row) { return state_ptrs[state_data.sel->get_index(row)]; });
 }
 
 template <class OPERATION>
 static void FilterlessLowerPairCombine(Vector &source, Vector &target, AggregateInputData &, idx_t count) {
-	using PAIR_STATE = FilterlessLowerPairState<typename OPERATION::STATE>;
-	auto sources = FlatVector::GetData<PAIR_STATE *>(source);
-	auto targets = FlatVector::GetData<PAIR_STATE *>(target);
+	using pair_state_t = FilterlessLowerPairState<typename OPERATION::state_t>;
+	auto sources = FlatVector::GetData<pair_state_t *>(source);
+	auto targets = FlatVector::GetData<pair_state_t *>(target);
 	for (idx_t i = 0; i < count; i++) {
 		OPERATION::Combine(sources[i]->answer, targets[i]->answer);
 		OPERATION::Combine(sources[i]->histogram, targets[i]->histogram);
@@ -1097,11 +1097,11 @@ static void FilterlessLowerPairCombine(Vector &source, Vector &target, Aggregate
 template <class OPERATION>
 static void FilterlessLowerPairFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count,
                                         idx_t offset) {
-	using PAIR_STATE = FilterlessLowerPairState<typename OPERATION::STATE>;
-	auto state_ptrs = FlatVector::GetData<PAIR_STATE *>(states);
+	using pair_state_t = FilterlessLowerPairState<typename OPERATION::state_t>;
+	auto state_ptrs = FlatVector::GetData<pair_state_t *>(states);
 	auto &children = StructVector::GetEntries(result);
-	auto answers = FlatVector::GetData<typename OPERATION::RESULT_TYPE>(*children[0]);
-	auto histograms = FlatVector::GetData<typename OPERATION::RESULT_TYPE>(*children[1]);
+	auto answers = FlatVector::GetData<typename OPERATION::result_t>(*children[0]);
+	auto histograms = FlatVector::GetData<typename OPERATION::result_t>(*children[1]);
 	for (idx_t i = 0; i < count; i++) {
 		auto row = offset + i;
 		if (OPERATION::IsSet(state_ptrs[i]->answer)) {
