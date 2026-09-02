@@ -5,6 +5,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/decimal.hpp"
 #include "duckdb/common/types/hugeint.hpp"
+#include "duckdb/common/types/uhugeint.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/function/function_binder.hpp"
@@ -467,10 +468,16 @@ static double ExactBinUpperBound(int index) {
 	return std::ldexp(1.0, (index + 1) * CLIP_LEVEL_SHIFT - CLIP_DOUBLE_SHIFT);
 }
 
+static hugeint_t WrappingHugeintAdd(hugeint_t left, hugeint_t right) {
+	// The signed overflow was already recorded by the caller. Add through the unsigned representation so the
+	// low 128-bit residue wraps without invoking signed overflow.
+	return static_cast<hugeint_t>(static_cast<uhugeint_t>(left) + static_cast<uhugeint_t>(right));
+}
+
 static void WideAdd(FilterlessWideValue &target, hugeint_t value) {
 	auto result = target.value;
 	if (!Hugeint::TryAddInPlace(result, value)) {
-		result = Hugeint::Add<false>(target.value, value);
+		result = WrappingHugeintAdd(target.value, value);
 		target.overflows += value < 0 ? -1 : 1;
 	}
 	target.value = result;
