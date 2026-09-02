@@ -77,6 +77,23 @@ FROM (
 ----
 25.000000	100.000000	4.000000
 
+# Every integer SUM input accepted by filterless binds to an exact HUGEINT
+# partial. End-to-end tests below cover values, NULLs, and DECIMAL scale.
+query TTTTT
+SELECT typeof(b.answer), typeof(t.answer), typeof(s.answer), typeof(i.answer), typeof(h.answer)
+FROM (
+    SELECT priv_filterless_sum_pair(b, true, true) AS b,
+           priv_filterless_sum_pair(t, true, true) AS t,
+           priv_filterless_sum_pair(s, true, true) AS s,
+           priv_filterless_sum_pair(i, true, true) AS i,
+           priv_filterless_sum_pair(h, true, true) AS h
+    FROM (VALUES
+        (true::BOOLEAN, 1::TINYINT, 1::SMALLINT, 1::INTEGER, 1::HUGEINT)
+    ) input(b, t, s, i, h)
+);
+----
+HUGEINT	HUGEINT	HUGEINT	HUGEINT	HUGEINT
+
 # Sampling is deterministic from the high PU bits. At p=6, PU 0 is sampled and
 # receives weight 64; PUs with the high bit set are not sampled. Qualifying
 # non-sampled PUs enter the answer but not the histogram.
@@ -120,29 +137,18 @@ ORDER BY world;
 0	128.000000	100.000000
 1	128.000000	228.000000
 
-# Explicit nonces are group identities supplied by the compiler. Accepting two
-# values in one aggregate group would make the release depend on row order.
-statement error
-SELECT filterless_sum(pu, true, contribution, contribution, 1.0, 1.0, nonce)
-FROM (VALUES
-    (1::UBIGINT, 50.0::DOUBLE, 1::UBIGINT),
-    (3::UBIGINT, 50.0::DOUBLE, 2::UBIGINT)
-) input(pu, contribution, nonce);
-----
-filterless: noise nonce must be constant within each aggregate group
-
 statement ok
 SET dp_filterless_sample_bits = 0;
 
 statement ok
 SET dp_filterless_clip_support = 2.0;
 
-# Exercise parallel aggregate combine, including the explicit nonce invariant.
+# Exercise parallel aggregate combine with explicit epsilon and C_u.
 statement ok
 SET threads = 4;
 
 query R
-SELECT filterless_sum((i::UBIGINT << 1), true, 50.0, 50.0, 100.0, 1.0, 7::UBIGINT)
+SELECT filterless_sum((i::UBIGINT << 1), true, 50.0, 50.0, 100.0, 1.0)
 FROM range(100000) t(i);
 ----
 5000000.000000
@@ -181,8 +187,9 @@ FROM filterless_people;
 ----
 228.000000	3	76.000000
 
-# Equivalent populations reached through different predicates use different
-# query nonces. Otherwise sticky noise would cancel across a filter attack.
+# Equivalent populations reached through different predicates receive fresh
+# secure noise. The filterless aggregate does not need a query nonce because
+# its release is intentionally non-sticky.
 statement ok
 SET dp_epsilon = 1.0;
 
@@ -501,6 +508,50 @@ WHERE NOT qualifies;
 ----
 2000.000000	2	1000.000000
 
+# The compiler uses one paired lower aggregate per SUM/COUNT component,
+# instead of separate filtered and sampled aggregates.
+statement ok
+SET explain_output = 'physical_only';
+
+query II
+EXPLAIN SELECT SUM(amount), COUNT(*)
+FROM filterless_sampled_events
+WHERE qualifies;
+----
+physical_plan	<REGEX>:[\s\S]*priv_filterless_sum_pair[\s\S]*priv_filterless_count_pair[\s\S]*
+
+# COUNT(expr) fuses through an explicit non-NULL marker, while COUNT(*) still
+# counts active rows regardless of the expression's NULL value.
+statement ok
+INSERT INTO filterless_sampled_events VALUES
+    (0, true, NULL),
+    (89, true, NULL);
+
+query RIIR
+SELECT SUM(amount), COUNT(amount), COUNT(*), AVG(amount)
+FROM filterless_sampled_events
+WHERE qualifies;
+----
+10000.000000	2	4	5000.000000
+
+# AVG keeps its SUM and exact COUNT components in one upper aggregate. The
+# lower paired partials remain separate because they are formed per logical PU.
+query II
+EXPLAIN SELECT AVG(amount)
+FROM filterless_sampled_events
+WHERE qualifies;
+----
+physical_plan	<REGEX>:[\s\S]*UNGROUPED_AGGREGATE[\s\S]*priv_filterless_avg[\s\S]*priv_filterless_sum_pair[\s\S]*priv_filterless_count_pair[\s\S]*
+
+# COUNT(expr) is zero when every qualifying value is NULL, so fused AVG keeps
+# SQL's NULL result instead of dividing by a synthetic denominator.
+query I
+SELECT AVG(amount) IS NULL
+FROM filterless_sampled_events
+WHERE amount IS NULL;
+----
+true
+
 statement ok
 SET dp_filterless_sample_bits = 0;
 
@@ -549,12 +600,27 @@ INSERT INTO filterless_exact_numeric VALUES
     (1, 9007199254740993, 90071992547409.93),
     (2, 2, 0.02);
 
+query II
+EXPLAIN SELECT SUM(integer_amount), SUM(decimal_amount), COUNT(*)
+FROM filterless_exact_numeric;
+----
+physical_plan	<REGEX>:[\s\S]*priv_filterless_sum_pair[\s\S]*priv_filterless_count_pair[\s\S]*
+
 query IRTT
 SELECT SUM(integer_amount), SUM(decimal_amount),
        typeof(SUM(integer_amount)), typeof(SUM(decimal_amount))
 FROM filterless_exact_numeric;
 ----
 9007199254740995	90071992547409.95	HUGEINT	DECIMAL(38,2)
+
+# The fused AVG accepts the exact HUGEINT/DECIMAL lower partials and only
+# converts the released ratio to AVG's public DOUBLE result.
+query RRTT
+SELECT AVG(integer_amount), AVG(decimal_amount),
+       typeof(AVG(integer_amount)), typeof(AVG(decimal_amount))
+FROM filterless_exact_numeric;
+----
+4503599627370498.000000	45035996273704.976562	DOUBLE	DOUBLE
 
 # The public SQL aggregate overload uses the same exact state as the compiler.
 query RT
