@@ -633,6 +633,123 @@ FROM (VALUES
 ----
 90071992547409.95	DECIMAL(38,2)
 
+# Exact partials keep positive and negative magnitudes separately after a
+# HUGEINT overflow. Cancellation therefore happens before the public result is
+# saturated, in both the lower per-PU aggregate and the upper DP aggregate.
+query R
+SELECT (priv_filterless_sum_pair(value, true, true)).answer
+FROM (VALUES
+    (99999999999999999999999999999999999999::DECIMAL(38, 0)),
+    (99999999999999999999999999999999999999::DECIMAL(38, 0)),
+    (-99999999999999999999999999999999999999::DECIMAL(38, 0)),
+    (-99999999999999999999999999999999999999::DECIMAL(38, 0)),
+    (1::DECIMAL(38, 0))
+) input(value);
+----
+1
+
+# The asymmetric HUGEINT range is handled without negating its minimum value.
+query R
+SELECT (priv_filterless_sum_pair(value, true, true)).answer
+FROM (VALUES
+    ('-170141183460469231731687303715884105728'::HUGEINT),
+    ('-170141183460469231731687303715884105728'::HUGEINT),
+    ('170141183460469231731687303715884105727'::HUGEINT),
+    ('170141183460469231731687303715884105727'::HUGEINT),
+    (2::HUGEINT)
+) input(value);
+----
+0
+
+# Force parallel local states and their combine path. Each same-sign subtotal
+# exceeds HUGEINT, but the exact mathematical result is representable.
+statement ok
+SET threads = 4;
+
+query R
+SELECT filterless_sum((i::UBIGINT << 1), true, value, value)
+FROM (
+    SELECT i,
+           CASE WHEN i < 5000
+                THEN 99999999999999999999999999999999999999::DECIMAL(38, 0)
+                WHEN i < 10000
+                THEN -99999999999999999999999999999999999999::DECIMAL(38, 0)
+                ELSE 1::DECIMAL(38, 0)
+           END AS value
+    FROM range(10001) t(i)
+);
+----
+1
+
+statement ok
+SET threads = 1;
+
+# Clipping can also overflow bound * contribution_count before opposite signs
+# cancel. The repeated-bound path uses the same wide exact arithmetic.
+query R
+SELECT filterless_sum(pu, true, answer, histogram)
+FROM (VALUES
+    (0::UBIGINT,
+     99999999999999999999999999999999999999::DECIMAL(38, 0),
+     42535295865117307932921825928971026432::DECIMAL(38, 0)),
+    (2::UBIGINT,
+     99999999999999999999999999999999999999::DECIMAL(38, 0),
+     42535295865117307932921825928971026432::DECIMAL(38, 0)),
+    (4::UBIGINT,
+     -99999999999999999999999999999999999999::DECIMAL(38, 0),
+     -42535295865117307932921825928971026432::DECIMAL(38, 0)),
+    (6::UBIGINT,
+     -99999999999999999999999999999999999999::DECIMAL(38, 0),
+     -42535295865117307932921825928971026432::DECIMAL(38, 0)),
+    (8::UBIGINT, 1::DECIMAL(38, 0), 1::DECIMAL(38, 0))
+) input(pu, answer, histogram);
+----
+1
+
+# Exercise the same overflow and cancellation through the full compiler plan:
+# repeated rows overflow in the lower per-PU aggregate, and distinct PUs then
+# overflow in the upper aggregate.
+statement ok
+CREATE PU TABLE filterless_overflow_users (
+    uid BIGINT,
+    PRIVACY_KEY (uid)
+);
+
+statement ok
+INSERT INTO filterless_overflow_users VALUES (1), (2), (3), (4), (5);
+
+statement ok
+CREATE TABLE filterless_overflow_values (
+    uid BIGINT,
+    amount DECIMAL(38, 0),
+    PRIVACY_LINK (uid) REFERENCES filterless_overflow_users(uid)
+);
+
+statement ok
+INSERT INTO filterless_overflow_values VALUES
+    (1, 99999999999999999999999999999999999999),
+    (1, 99999999999999999999999999999999999999),
+    (1, -99999999999999999999999999999999999999),
+    (1, -99999999999999999999999999999999999999),
+    (1, 1),
+    (2, 99999999999999999999999999999999999999),
+    (3, 99999999999999999999999999999999999999),
+    (4, -99999999999999999999999999999999999999),
+    (5, -99999999999999999999999999999999999999);
+
+query R
+SELECT SUM(amount)
+FROM filterless_overflow_values
+WHERE uid = 1;
+----
+1
+
+query R
+SELECT SUM(amount)
+FROM filterless_overflow_values;
+----
+1
+
 # Exact DP aggregates use saturating post-processing at the public SQL return
 # type boundary. They never turn an oversized value or noise draw into an
 # observable query error.

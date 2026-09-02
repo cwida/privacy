@@ -5,6 +5,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/decimal.hpp"
 #include "duckdb/common/types/hugeint.hpp"
+#include "duckdb/common/types/uhugeint.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/function/function_binder.hpp"
@@ -112,9 +113,25 @@ struct FilterlessExactBin {
 	uint64_t answer_count;
 };
 
+// A DuckDB relation cannot contain more than 2^64-1 rows, and one exact input has magnitude at most 2^127.
+// Three 64-bit limbs therefore hold every possible prefix sum exactly. The helpers below use the same bits as
+// either a two's-complement signed value or a non-negative magnitude.
+struct FilterlessWideValue {
+	uhugeint_t lower;
+	uint64_t upper;
+};
+
+struct FilterlessExactOverflowNode {
+	FilterlessWideValue magnitude;
+	FilterlessExactOverflowNode *next;
+	uint8_t bin_index;
+	bool negative;
+};
+
 struct FilterlessExactComponentState {
 	FilterlessExactBin *positive;
 	FilterlessExactBin *negative;
+	FilterlessExactOverflowNode *overflow_bins;
 	uint64_t active_contributions;
 	uint64_t sampled_contributions;
 };
@@ -451,6 +468,94 @@ static double ExactBinUpperBound(int index) {
 	return std::ldexp(1.0, (index + 1) * CLIP_LEVEL_SHIFT - CLIP_DOUBLE_SHIFT);
 }
 
+static uhugeint_t ExactMagnitude(hugeint_t value) {
+	auto bits = static_cast<uhugeint_t>(value);
+	return value < 0 ? Uhugeint::Negate(bits) : bits;
+}
+
+static void WideAddBits(FilterlessWideValue &target, const FilterlessWideValue &value) {
+	auto previous = target.lower;
+	target.lower = target.lower + value.lower;
+	target.upper += value.upper;
+	if (target.lower < previous) {
+		target.upper++;
+	}
+}
+
+static void WideSubtractBits(FilterlessWideValue &target, const FilterlessWideValue &value) {
+	auto previous = target.lower;
+	target.lower = target.lower - value.lower;
+	target.upper -= value.upper;
+	if (previous < value.lower) {
+		target.upper--;
+	}
+}
+
+static void WideAddSigned(FilterlessWideValue &target, hugeint_t value) {
+	FilterlessWideValue extended {static_cast<uhugeint_t>(value), value < 0 ? NumericLimits<uint64_t>::Maximum() : 0};
+	WideAddBits(target, extended);
+}
+
+static void WideAddMagnitude(FilterlessWideValue &target, const FilterlessWideValue &magnitude) {
+	D_ASSERT((target.upper & (uint64_t(1) << 63)) == 0);
+	WideAddBits(target, magnitude);
+	D_ASSERT((target.upper & (uint64_t(1) << 63)) == 0);
+}
+
+static void WideAddMagnitude(FilterlessWideValue &target, uhugeint_t magnitude) {
+	WideAddMagnitude(target, FilterlessWideValue {magnitude, 0});
+}
+
+static void WideAccumulateMagnitude(FilterlessWideValue &target, const FilterlessWideValue &magnitude, bool negative) {
+	if (negative) {
+		WideSubtractBits(target, magnitude);
+	} else {
+		WideAddBits(target, magnitude);
+	}
+}
+
+static hugeint_t WideFinalize(const FilterlessWideValue &value, hugeint_t minimum, hugeint_t maximum) {
+	bool negative = (value.upper & (uint64_t(1) << 63)) != 0;
+	auto magnitude = value;
+	if (negative) {
+		magnitude = {};
+		WideSubtractBits(magnitude, value);
+	}
+	auto limit = ExactMagnitude(negative ? minimum : maximum);
+	if (magnitude.upper != 0 || magnitude.lower > limit) {
+		return negative ? minimum : maximum;
+	}
+	if (negative && magnitude.lower == ExactMagnitude(minimum)) {
+		return minimum;
+	}
+	hugeint_t result;
+	if (!Uhugeint::TryCast(magnitude.lower, result)) {
+		return negative ? minimum : maximum;
+	}
+	return negative ? Hugeint::Negate(result) : result;
+}
+
+static void WideAddRepeated(FilterlessWideValue &target, hugeint_t value, uint64_t count, bool negative) {
+	D_ASSERT(value >= 0);
+	hugeint_t product;
+	if (Hugeint::TryMultiply(value, Hugeint::Convert(count), product)) {
+		WideAddSigned(target, negative ? Hugeint::Negate(product) : product);
+		return;
+	}
+
+	FilterlessWideValue addend {ExactMagnitude(value), 0};
+	while (count != 0) {
+		if ((count & 1) != 0) {
+			WideAccumulateMagnitude(target, addend, negative);
+		}
+		count >>= 1;
+		if (count != 0) {
+			auto doubled = addend;
+			WideAddMagnitude(addend, doubled);
+		}
+	}
+}
+
 static FilterlessExactBin *EnsureExactBins(FilterlessExactBin *&bins, ArenaAllocator &allocator) {
 	if (!bins) {
 		bins = reinterpret_cast<FilterlessExactBin *>(
@@ -460,12 +565,59 @@ static FilterlessExactBin *EnsureExactBins(FilterlessExactBin *&bins, ArenaAlloc
 	return bins;
 }
 
-static FilterlessExactBin &GetExactBin(FilterlessExactComponentState &state, hugeint_t value, double input_scale,
+static FilterlessExactBin &GetExactBin(FilterlessExactComponentState &state, bool negative, idx_t index,
                                        ArenaAllocator &allocator) {
-	bool negative = value < 0;
-	auto index = ExactBinIndex(value, input_scale);
 	return negative ? EnsureExactBins(state.negative, allocator)[index]
 	                : EnsureExactBins(state.positive, allocator)[index];
+}
+
+static FilterlessExactOverflowNode *FindExactOverflow(const FilterlessExactComponentState &state, bool negative,
+                                                      idx_t bin_index) {
+	for (auto node = state.overflow_bins; node; node = node->next) {
+		if (node->negative == negative && node->bin_index == bin_index) {
+			return node;
+		}
+	}
+	return nullptr;
+}
+
+static FilterlessExactOverflowNode &PromoteExactBin(FilterlessExactComponentState &state, FilterlessExactBin &bin,
+                                                    bool negative, idx_t bin_index, ArenaAllocator &allocator) {
+	auto node =
+	    reinterpret_cast<FilterlessExactOverflowNode *>(allocator.Allocate(sizeof(FilterlessExactOverflowNode)));
+	memset(node, 0, sizeof(FilterlessExactOverflowNode));
+	node->negative = negative;
+	D_ASSERT(bin_index < FILTERLESS_EXACT_BIN_COUNT);
+	node->bin_index = static_cast<uint8_t>(bin_index);
+	node->next = state.overflow_bins;
+	state.overflow_bins = node;
+	WideAddMagnitude(node->magnitude, ExactMagnitude(bin.answer_sum));
+	return *node;
+}
+
+static void AddExactBinValue(FilterlessExactComponentState &state, FilterlessExactBin &bin, bool negative,
+                             idx_t bin_index, hugeint_t value, ArenaAllocator &allocator) {
+	auto overflow = FindExactOverflow(state, negative, bin_index);
+	if (overflow) {
+		WideAddMagnitude(overflow->magnitude, ExactMagnitude(value));
+		return;
+	}
+	auto result = bin.answer_sum;
+	if (Hugeint::TryAddInPlace(result, value)) {
+		bin.answer_sum = result;
+		return;
+	}
+	auto &wide = PromoteExactBin(state, bin, negative, bin_index, allocator);
+	WideAddMagnitude(wide.magnitude, ExactMagnitude(value));
+}
+
+static void AddExactBinValue(FilterlessExactComponentState &state, FilterlessExactBin &bin, bool negative,
+                             idx_t bin_index, const FilterlessWideValue &value, ArenaAllocator &allocator) {
+	auto overflow = FindExactOverflow(state, negative, bin_index);
+	if (!overflow) {
+		overflow = &PromoteExactBin(state, bin, negative, bin_index, allocator);
+	}
+	WideAddMagnitude(overflow->magnitude, value);
 }
 
 static hugeint_t ToHugeint(hugeint_t value) {
@@ -489,34 +641,45 @@ static void UpdateExactComponent(FilterlessExactComponentState &state, bool acti
 		state.active_contributions++;
 		if (answer_valid) {
 			auto exact_answer = ToHugeint(answer_value);
-			auto &answer_bin = GetExactBin(state, exact_answer, input_scale, allocator);
-			answer_bin.answer_sum = Hugeint::Add(answer_bin.answer_sum, exact_answer);
+			bool negative = exact_answer < 0;
+			auto index = ExactBinIndex(exact_answer, input_scale);
+			auto &answer_bin = GetExactBin(state, negative, index, allocator);
+			AddExactBinValue(state, answer_bin, negative, index, exact_answer, allocator);
 			answer_bin.answer_count++;
 		}
 	}
 	if (sampled && histogram_valid) {
 		auto exact_histogram = ToHugeint(histogram_value);
-		GetExactBin(state, exact_histogram, input_scale, allocator).support += bind.sample_weight;
+		bool negative = exact_histogram < 0;
+		auto index = ExactBinIndex(exact_histogram, input_scale);
+		GetExactBin(state, negative, index, allocator).support += bind.sample_weight;
 		state.sampled_contributions++;
 	}
 }
 
-static void CombineExactBins(const FilterlessExactBin *source, FilterlessExactBin *&target, ArenaAllocator &allocator) {
+static void CombineExactBins(const FilterlessExactComponentState &source_state,
+                             FilterlessExactComponentState &target_state, const FilterlessExactBin *source,
+                             FilterlessExactBin *&target, bool negative, ArenaAllocator &allocator) {
 	if (!source) {
 		return;
 	}
 	auto target_bins = EnsureExactBins(target, allocator);
 	for (idx_t i = 0; i < FILTERLESS_EXACT_BIN_COUNT; i++) {
 		target_bins[i].support += source[i].support;
-		target_bins[i].answer_sum = Hugeint::Add(target_bins[i].answer_sum, source[i].answer_sum);
+		auto source_overflow = FindExactOverflow(source_state, negative, i);
+		if (source_overflow) {
+			AddExactBinValue(target_state, target_bins[i], negative, i, source_overflow->magnitude, allocator);
+		} else if (source[i].answer_count != 0) {
+			AddExactBinValue(target_state, target_bins[i], negative, i, source[i].answer_sum, allocator);
+		}
 		target_bins[i].answer_count += source[i].answer_count;
 	}
 }
 
 static void CombineExactComponent(const FilterlessExactComponentState &source, FilterlessExactComponentState &target,
                                   ArenaAllocator &allocator) {
-	CombineExactBins(source.positive, target.positive, allocator);
-	CombineExactBins(source.negative, target.negative, allocator);
+	CombineExactBins(source, target, source.positive, target.positive, false, allocator);
+	CombineExactBins(source, target, source.negative, target.negative, true, allocator);
 	target.active_contributions += source.active_contributions;
 	target.sampled_contributions += source.sampled_contributions;
 }
@@ -533,23 +696,38 @@ static hugeint_t ExactClippingBound(int bin, double input_scale) {
 	return result;
 }
 
-static hugeint_t ClipExactComponent(const FilterlessExactComponentState &state, int negative_bin, int positive_bin,
-                                    double input_scale) {
+static hugeint_t ClipExactComponent(const FilterlessExactComponentState &state, const FilterlessBindData &bind,
+                                    int negative_bin, int positive_bin, double input_scale) {
 	auto positive_bound = ExactClippingBound(positive_bin, input_scale);
 	auto negative_bound = ExactClippingBound(negative_bin, input_scale);
-	hugeint_t result(0);
+	FilterlessWideValue result {};
 	for (int i = 0; i < FILTERLESS_EXACT_BIN_COUNT; i++) {
 		if (state.positive) {
-			result = i <= positive_bin
-			             ? Hugeint::Add(result, state.positive[i].answer_sum)
-			             : AddRepeatedBound(result, positive_bound, state.positive[i].answer_count, false);
+			auto overflow = FindExactOverflow(state, false, i);
+			if (i <= positive_bin) {
+				if (overflow) {
+					WideAccumulateMagnitude(result, overflow->magnitude, false);
+				} else {
+					WideAddSigned(result, state.positive[i].answer_sum);
+				}
+			} else {
+				WideAddRepeated(result, positive_bound, state.positive[i].answer_count, false);
+			}
 		}
 		if (state.negative) {
-			result = i <= negative_bin ? Hugeint::Add(result, state.negative[i].answer_sum)
-			                           : AddRepeatedBound(result, negative_bound, state.negative[i].answer_count, true);
+			auto overflow = FindExactOverflow(state, true, i);
+			if (i <= negative_bin) {
+				if (overflow) {
+					WideAccumulateMagnitude(result, overflow->magnitude, true);
+				} else {
+					WideAddSigned(result, state.negative[i].answer_sum);
+				}
+			} else {
+				WideAddRepeated(result, negative_bound, state.negative[i].answer_count, true);
+			}
 		}
 	}
-	return result;
+	return WideFinalize(result, bind.exact_output_min, bind.exact_output_max);
 }
 
 struct FilterlessExactResult {
@@ -567,7 +745,7 @@ static FilterlessExactResult FinalizeExactComponent(const FilterlessExactCompone
 	int negative_bin =
 	    nonnegative ? -1 : FindSupportedBin(state.negative, bin_count, bind, histogram_epsilon, ignored_support);
 	double bound = std::max(ExactBinUpperBound(negative_bin), ExactBinUpperBound(positive_bin));
-	return {ClipExactComponent(state, negative_bin, positive_bin, input_scale),
+	return {ClipExactComponent(state, bind, negative_bin, positive_bin, input_scale),
 	        SaturatingNoiseScale(static_cast<long double>(bound) * bind.max_groups, value_epsilon)};
 }
 
@@ -1058,7 +1236,7 @@ struct FilterlessApproxSumPairOperation {
 		return Hugeint::Convert(ClipApproximateMagnitude64(AsScaledMagnitude(value)));
 	}
 
-	static void Add(state_t &state, input_t value) {
+	static void Add(state_t &state, input_t value, ArenaAllocator &) {
 		if (!std::isfinite(value)) {
 			throw InvalidInputException("filterless: per-PU SUM contribution must be finite");
 		}
@@ -1071,7 +1249,7 @@ struct FilterlessApproxSumPairOperation {
 		}
 	}
 
-	static void Combine(const state_t &source, state_t &target) {
+	static void Combine(const state_t &source, state_t &target, ArenaAllocator &) {
 		target.isset = target.isset || source.isset;
 		target.positive = Hugeint::Add(target.positive, source.positive);
 		target.negative = Hugeint::Add(target.negative, source.negative);
@@ -1088,9 +1266,64 @@ struct FilterlessApproxSumPairOperation {
 };
 
 struct FilterlessExactSumPartialState {
-	bool isset;
 	hugeint_t value;
+	// 0 is unset, 1 is inline, and every other value points to a rare wide overflow state.
+	uintptr_t storage;
 };
+
+constexpr uintptr_t FILTERLESS_EXACT_SUM_UNSET = 0;
+constexpr uintptr_t FILTERLESS_EXACT_SUM_INLINE = 1;
+
+static FilterlessWideValue *GetWideExactSum(const FilterlessExactSumPartialState &state) {
+	D_ASSERT(state.storage > FILTERLESS_EXACT_SUM_INLINE);
+	return reinterpret_cast<FilterlessWideValue *>(state.storage);
+}
+
+static FilterlessWideValue &PromoteExactSum(FilterlessExactSumPartialState &state, ArenaAllocator &allocator) {
+	auto wide = reinterpret_cast<FilterlessWideValue *>(allocator.Allocate(sizeof(FilterlessWideValue)));
+	memset(wide, 0, sizeof(FilterlessWideValue));
+	WideAddSigned(*wide, state.value);
+	state.storage = reinterpret_cast<uintptr_t>(wide);
+	D_ASSERT(state.storage > FILTERLESS_EXACT_SUM_INLINE);
+	return *wide;
+}
+
+static void AddExactSum(FilterlessExactSumPartialState &state, hugeint_t value, ArenaAllocator &allocator) {
+	if (state.storage == FILTERLESS_EXACT_SUM_UNSET) {
+		state.value = value;
+		state.storage = FILTERLESS_EXACT_SUM_INLINE;
+		return;
+	}
+	if (state.storage == FILTERLESS_EXACT_SUM_INLINE) {
+		auto result = state.value;
+		if (Hugeint::TryAddInPlace(result, value)) {
+			state.value = result;
+			return;
+		}
+		WideAddSigned(PromoteExactSum(state, allocator), value);
+		return;
+	}
+	WideAddSigned(*GetWideExactSum(state), value);
+}
+
+static void CombineExactSum(const FilterlessExactSumPartialState &source, FilterlessExactSumPartialState &target,
+                            ArenaAllocator &allocator) {
+	if (source.storage == FILTERLESS_EXACT_SUM_UNSET) {
+		return;
+	}
+	if (source.storage == FILTERLESS_EXACT_SUM_INLINE) {
+		AddExactSum(target, source.value, allocator);
+		return;
+	}
+	if (target.storage == FILTERLESS_EXACT_SUM_UNSET) {
+		target.value = hugeint_t(0);
+		target.storage = FILTERLESS_EXACT_SUM_INLINE;
+	}
+	if (target.storage == FILTERLESS_EXACT_SUM_INLINE) {
+		PromoteExactSum(target, allocator);
+	}
+	WideAddBits(*GetWideExactSum(target), *GetWideExactSum(source));
+}
 
 template <class PARTIAL_STATE>
 struct FilterlessLowerPairState {
@@ -1103,11 +1336,11 @@ struct FilterlessCountPairOperation {
 	using state_t = uint64_t;
 	using result_t = int64_t;
 
-	static void Add(state_t &state, input_t value) {
+	static void Add(state_t &state, input_t value, ArenaAllocator &) {
 		state += static_cast<uint64_t>(value);
 	}
 
-	static void Combine(const state_t &source, state_t &target) {
+	static void Combine(const state_t &source, state_t &target, ArenaAllocator &) {
 		target += source;
 	}
 
@@ -1120,28 +1353,34 @@ struct FilterlessCountPairOperation {
 	}
 };
 
-template <class INPUT>
+template <class INPUT, bool DECIMAL>
 struct FilterlessExactSumPairOperation {
 	using input_t = INPUT;
 	using state_t = FilterlessExactSumPartialState;
 	using result_t = hugeint_t;
 
-	static void Add(state_t &state, input_t value) {
-		state.isset = true;
-		state.value = Hugeint::Add(state.value, ToHugeint(value));
+	static void Add(state_t &state, input_t value, ArenaAllocator &allocator) {
+		AddExactSum(state, ToHugeint(value), allocator);
 	}
 
-	static void Combine(const state_t &source, state_t &target) {
-		target.isset = target.isset || source.isset;
-		target.value = Hugeint::Add(target.value, source.value);
+	static void Combine(const state_t &source, state_t &target, ArenaAllocator &allocator) {
+		CombineExactSum(source, target, allocator);
 	}
 
 	static bool IsSet(const state_t &state) {
-		return state.isset;
+		return state.storage != FILTERLESS_EXACT_SUM_UNSET;
 	}
 
 	static result_t Finalize(const state_t &state) {
-		return state.value;
+		if (state.storage == FILTERLESS_EXACT_SUM_INLINE) {
+			return state.value;
+		}
+		if (DECIMAL) {
+			auto maximum = Hugeint::Subtract(Hugeint::POWERS_OF_TEN[Decimal::MAX_WIDTH_DECIMAL], hugeint_t(1));
+			return WideFinalize(*GetWideExactSum(state), Hugeint::Negate(maximum), maximum);
+		}
+		return WideFinalize(*GetWideExactSum(state), NumericLimits<hugeint_t>::Minimum(),
+		                    NumericLimits<hugeint_t>::Maximum());
 	}
 };
 
@@ -1160,7 +1399,8 @@ static void FilterlessLowerPairInitialize(const AggregateFunction &, data_ptr_t 
 }
 
 template <class OPERATION, class STATE_GETTER>
-static void FilterlessLowerPairUpdateRows(Vector inputs[], idx_t count, STATE_GETTER get_state) {
+static void FilterlessLowerPairUpdateRows(Vector inputs[], idx_t count, ArenaAllocator &allocator,
+                                          STATE_GETTER get_state) {
 	UnifiedVectorFormat value_data, active_data, sampled_data;
 	inputs[0].ToUnifiedFormat(count, value_data);
 	inputs[1].ToUnifiedFormat(count, active_data);
@@ -1180,39 +1420,40 @@ static void FilterlessLowerPairUpdateRows(Vector inputs[], idx_t count, STATE_GE
 		if (is_active || is_sampled) {
 			auto state = get_state(row);
 			if (is_active) {
-				OPERATION::Add(state->answer, values[value_index]);
+				OPERATION::Add(state->answer, values[value_index], allocator);
 			}
 			if (is_sampled) {
-				OPERATION::Add(state->histogram, values[value_index]);
+				OPERATION::Add(state->histogram, values[value_index], allocator);
 			}
 		}
 	}
 }
 
 template <class OPERATION>
-static void FilterlessLowerPairUpdate(Vector inputs[], AggregateInputData &, idx_t, data_ptr_t state_p, idx_t count) {
+static void FilterlessLowerPairUpdate(Vector inputs[], AggregateInputData &input, idx_t, data_ptr_t state_p,
+                                      idx_t count) {
 	auto state = reinterpret_cast<FilterlessLowerPairState<typename OPERATION::state_t> *>(state_p);
-	FilterlessLowerPairUpdateRows<OPERATION>(inputs, count, [state](idx_t) { return state; });
+	FilterlessLowerPairUpdateRows<OPERATION>(inputs, count, input.allocator, [state](idx_t) { return state; });
 }
 
 template <class OPERATION>
-static void FilterlessLowerPairScatterUpdate(Vector inputs[], AggregateInputData &, idx_t, Vector &states,
+static void FilterlessLowerPairScatterUpdate(Vector inputs[], AggregateInputData &input, idx_t, Vector &states,
                                              idx_t count) {
 	UnifiedVectorFormat state_data;
 	states.ToUnifiedFormat(count, state_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<FilterlessLowerPairState<typename OPERATION::state_t> *>(state_data);
-	FilterlessLowerPairUpdateRows<OPERATION>(inputs, count,
+	FilterlessLowerPairUpdateRows<OPERATION>(inputs, count, input.allocator,
 	                                         [&](idx_t row) { return state_ptrs[state_data.sel->get_index(row)]; });
 }
 
 template <class OPERATION>
-static void FilterlessLowerPairCombine(Vector &source, Vector &target, AggregateInputData &, idx_t count) {
+static void FilterlessLowerPairCombine(Vector &source, Vector &target, AggregateInputData &input, idx_t count) {
 	using pair_state_t = FilterlessLowerPairState<typename OPERATION::state_t>;
 	auto sources = FlatVector::GetData<pair_state_t *>(source);
 	auto targets = FlatVector::GetData<pair_state_t *>(target);
 	for (idx_t i = 0; i < count; i++) {
-		OPERATION::Combine(sources[i]->answer, targets[i]->answer);
-		OPERATION::Combine(sources[i]->histogram, targets[i]->histogram);
+		OPERATION::Combine(sources[i]->answer, targets[i]->answer, input.allocator);
+		OPERATION::Combine(sources[i]->histogram, targets[i]->histogram, input.allocator);
 	}
 }
 
@@ -1434,11 +1675,11 @@ static AggregateFunction MakeFilterlessLowerPairFunction(const string &name, con
 	return function;
 }
 
-template <class INPUT_TYPE>
+template <class INPUT_TYPE, bool DECIMAL = false>
 static AggregateFunction MakeFilterlessExactSumPairFunction(const LogicalType &input_type,
                                                             const LogicalType &return_type) {
-	return MakeFilterlessLowerPairFunction<FilterlessExactSumPairOperation<INPUT_TYPE>>("priv_filterless_sum_pair",
-	                                                                                    input_type, return_type);
+	return MakeFilterlessLowerPairFunction<FilterlessExactSumPairOperation<INPUT_TYPE, DECIMAL>>(
+	    "priv_filterless_sum_pair", input_type, return_type);
 }
 
 static unique_ptr<FunctionData> BindFilterlessDecimalSumPair(ClientContext &, AggregateFunction &function,
@@ -1447,16 +1688,16 @@ static unique_ptr<FunctionData> BindFilterlessDecimalSumPair(ClientContext &, Ag
 	auto return_type = LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(input_type));
 	switch (input_type.InternalType()) {
 	case PhysicalType::INT16:
-		function = MakeFilterlessExactSumPairFunction<int16_t>(input_type, return_type);
+		function = MakeFilterlessExactSumPairFunction<int16_t, true>(input_type, return_type);
 		break;
 	case PhysicalType::INT32:
-		function = MakeFilterlessExactSumPairFunction<int32_t>(input_type, return_type);
+		function = MakeFilterlessExactSumPairFunction<int32_t, true>(input_type, return_type);
 		break;
 	case PhysicalType::INT64:
-		function = MakeFilterlessExactSumPairFunction<int64_t>(input_type, return_type);
+		function = MakeFilterlessExactSumPairFunction<int64_t, true>(input_type, return_type);
 		break;
 	case PhysicalType::INT128:
-		function = MakeFilterlessExactSumPairFunction<hugeint_t>(input_type, return_type);
+		function = MakeFilterlessExactSumPairFunction<hugeint_t, true>(input_type, return_type);
 		break;
 	default:
 		throw InternalException("priv_filterless_sum_pair: unsupported DECIMAL physical type");
