@@ -5,7 +5,6 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/decimal.hpp"
 #include "duckdb/common/types/hugeint.hpp"
-#include "duckdb/common/types/uhugeint.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/function/function_binder.hpp"
@@ -114,15 +113,15 @@ struct FilterlessExactBin {
 };
 
 // A DuckDB relation cannot contain more than 2^64-1 rows, and one exact input has magnitude at most 2^127.
-// Three 64-bit limbs therefore hold every possible prefix sum exactly. The helpers below use the same bits as
-// either a two's-complement signed value or a non-negative magnitude.
+// Three 64-bit limbs therefore hold every possible prefix sum exactly. Keep the low 128 bits in DuckDB's HUGEINT
+// and count signed overflows into the third limb.
 struct FilterlessWideValue {
-	uhugeint_t lower;
-	uint64_t upper;
+	hugeint_t value;
+	int64_t overflows;
 };
 
 struct FilterlessExactOverflowNode {
-	FilterlessWideValue magnitude;
+	FilterlessWideValue sum;
 	FilterlessExactOverflowNode *next;
 	uint8_t bin_index;
 	bool negative;
@@ -468,90 +467,43 @@ static double ExactBinUpperBound(int index) {
 	return std::ldexp(1.0, (index + 1) * CLIP_LEVEL_SHIFT - CLIP_DOUBLE_SHIFT);
 }
 
-static uhugeint_t ExactMagnitude(hugeint_t value) {
-	auto bits = static_cast<uhugeint_t>(value);
-	return value < 0 ? Uhugeint::Negate(bits) : bits;
-}
-
-static void WideAddBits(FilterlessWideValue &target, const FilterlessWideValue &value) {
-	auto previous = target.lower;
-	target.lower = target.lower + value.lower;
-	target.upper += value.upper;
-	if (target.lower < previous) {
-		target.upper++;
+static void WideAdd(FilterlessWideValue &target, hugeint_t value) {
+	auto result = target.value;
+	if (!Hugeint::TryAddInPlace(result, value)) {
+		result = Hugeint::Add<false>(target.value, value);
+		target.overflows += value < 0 ? -1 : 1;
 	}
+	target.value = result;
 }
 
-static void WideSubtractBits(FilterlessWideValue &target, const FilterlessWideValue &value) {
-	auto previous = target.lower;
-	target.lower = target.lower - value.lower;
-	target.upper -= value.upper;
-	if (previous < value.lower) {
-		target.upper--;
-	}
-}
-
-static void WideAddSigned(FilterlessWideValue &target, hugeint_t value) {
-	FilterlessWideValue extended {static_cast<uhugeint_t>(value), value < 0 ? NumericLimits<uint64_t>::Maximum() : 0};
-	WideAddBits(target, extended);
-}
-
-static void WideAddMagnitude(FilterlessWideValue &target, const FilterlessWideValue &magnitude) {
-	D_ASSERT((target.upper & (uint64_t(1) << 63)) == 0);
-	WideAddBits(target, magnitude);
-	D_ASSERT((target.upper & (uint64_t(1) << 63)) == 0);
-}
-
-static void WideAddMagnitude(FilterlessWideValue &target, uhugeint_t magnitude) {
-	WideAddMagnitude(target, FilterlessWideValue {magnitude, 0});
-}
-
-static void WideAccumulateMagnitude(FilterlessWideValue &target, const FilterlessWideValue &magnitude, bool negative) {
-	if (negative) {
-		WideSubtractBits(target, magnitude);
-	} else {
-		WideAddBits(target, magnitude);
-	}
+static void WideAdd(FilterlessWideValue &target, const FilterlessWideValue &value) {
+	target.overflows += value.overflows;
+	WideAdd(target, value.value);
 }
 
 static hugeint_t WideFinalize(const FilterlessWideValue &value, hugeint_t minimum, hugeint_t maximum) {
-	bool negative = (value.upper & (uint64_t(1) << 63)) != 0;
-	auto magnitude = value;
-	if (negative) {
-		magnitude = {};
-		WideSubtractBits(magnitude, value);
+	if (value.overflows != 0) {
+		return value.overflows < 0 ? minimum : maximum;
 	}
-	auto limit = ExactMagnitude(negative ? minimum : maximum);
-	if (magnitude.upper != 0 || magnitude.lower > limit) {
-		return negative ? minimum : maximum;
-	}
-	if (negative && magnitude.lower == ExactMagnitude(minimum)) {
-		return minimum;
-	}
-	hugeint_t result;
-	if (!Uhugeint::TryCast(magnitude.lower, result)) {
-		return negative ? minimum : maximum;
-	}
-	return negative ? Hugeint::Negate(result) : result;
+	return std::max(minimum, std::min(value.value, maximum));
 }
 
-static void WideAddRepeated(FilterlessWideValue &target, hugeint_t value, uint64_t count, bool negative) {
-	D_ASSERT(value >= 0);
+static void WideAddRepeated(FilterlessWideValue &target, hugeint_t value, uint64_t count) {
 	hugeint_t product;
 	if (Hugeint::TryMultiply(value, Hugeint::Convert(count), product)) {
-		WideAddSigned(target, negative ? Hugeint::Negate(product) : product);
+		WideAdd(target, product);
 		return;
 	}
 
-	FilterlessWideValue addend {ExactMagnitude(value), 0};
+	FilterlessWideValue addend {value, 0};
 	while (count != 0) {
 		if ((count & 1) != 0) {
-			WideAccumulateMagnitude(target, addend, negative);
+			WideAdd(target, addend);
 		}
 		count >>= 1;
 		if (count != 0) {
 			auto doubled = addend;
-			WideAddMagnitude(addend, doubled);
+			WideAdd(addend, doubled);
 		}
 	}
 }
@@ -591,7 +543,7 @@ static FilterlessExactOverflowNode &PromoteExactBin(FilterlessExactComponentStat
 	node->bin_index = static_cast<uint8_t>(bin_index);
 	node->next = state.overflow_bins;
 	state.overflow_bins = node;
-	WideAddMagnitude(node->magnitude, ExactMagnitude(bin.answer_sum));
+	WideAdd(node->sum, bin.answer_sum);
 	return *node;
 }
 
@@ -599,7 +551,7 @@ static void AddExactBinValue(FilterlessExactComponentState &state, FilterlessExa
                              idx_t bin_index, hugeint_t value, ArenaAllocator &allocator) {
 	auto overflow = FindExactOverflow(state, negative, bin_index);
 	if (overflow) {
-		WideAddMagnitude(overflow->magnitude, ExactMagnitude(value));
+		WideAdd(overflow->sum, value);
 		return;
 	}
 	auto result = bin.answer_sum;
@@ -608,7 +560,7 @@ static void AddExactBinValue(FilterlessExactComponentState &state, FilterlessExa
 		return;
 	}
 	auto &wide = PromoteExactBin(state, bin, negative, bin_index, allocator);
-	WideAddMagnitude(wide.magnitude, ExactMagnitude(value));
+	WideAdd(wide.sum, value);
 }
 
 static void AddExactBinValue(FilterlessExactComponentState &state, FilterlessExactBin &bin, bool negative,
@@ -617,7 +569,7 @@ static void AddExactBinValue(FilterlessExactComponentState &state, FilterlessExa
 	if (!overflow) {
 		overflow = &PromoteExactBin(state, bin, negative, bin_index, allocator);
 	}
-	WideAddMagnitude(overflow->magnitude, value);
+	WideAdd(overflow->sum, value);
 }
 
 static hugeint_t ToHugeint(hugeint_t value) {
@@ -668,7 +620,7 @@ static void CombineExactBins(const FilterlessExactComponentState &source_state,
 		target_bins[i].support += source[i].support;
 		auto source_overflow = FindExactOverflow(source_state, negative, i);
 		if (source_overflow) {
-			AddExactBinValue(target_state, target_bins[i], negative, i, source_overflow->magnitude, allocator);
+			AddExactBinValue(target_state, target_bins[i], negative, i, source_overflow->sum, allocator);
 		} else if (source[i].answer_count != 0) {
 			AddExactBinValue(target_state, target_bins[i], negative, i, source[i].answer_sum, allocator);
 		}
@@ -706,24 +658,24 @@ static hugeint_t ClipExactComponent(const FilterlessExactComponentState &state, 
 			auto overflow = FindExactOverflow(state, false, i);
 			if (i <= positive_bin) {
 				if (overflow) {
-					WideAccumulateMagnitude(result, overflow->magnitude, false);
+					WideAdd(result, overflow->sum);
 				} else {
-					WideAddSigned(result, state.positive[i].answer_sum);
+					WideAdd(result, state.positive[i].answer_sum);
 				}
 			} else {
-				WideAddRepeated(result, positive_bound, state.positive[i].answer_count, false);
+				WideAddRepeated(result, positive_bound, state.positive[i].answer_count);
 			}
 		}
 		if (state.negative) {
 			auto overflow = FindExactOverflow(state, true, i);
 			if (i <= negative_bin) {
 				if (overflow) {
-					WideAccumulateMagnitude(result, overflow->magnitude, true);
+					WideAdd(result, overflow->sum);
 				} else {
-					WideAddSigned(result, state.negative[i].answer_sum);
+					WideAdd(result, state.negative[i].answer_sum);
 				}
 			} else {
-				WideAddRepeated(result, negative_bound, state.negative[i].answer_count, true);
+				WideAddRepeated(result, Hugeint::Negate(negative_bound), state.negative[i].answer_count);
 			}
 		}
 	}
@@ -1282,7 +1234,7 @@ static FilterlessWideValue *GetWideExactSum(const FilterlessExactSumPartialState
 static FilterlessWideValue &PromoteExactSum(FilterlessExactSumPartialState &state, ArenaAllocator &allocator) {
 	auto wide = reinterpret_cast<FilterlessWideValue *>(allocator.Allocate(sizeof(FilterlessWideValue)));
 	memset(wide, 0, sizeof(FilterlessWideValue));
-	WideAddSigned(*wide, state.value);
+	WideAdd(*wide, state.value);
 	state.storage = reinterpret_cast<uintptr_t>(wide);
 	D_ASSERT(state.storage > FILTERLESS_EXACT_SUM_INLINE);
 	return *wide;
@@ -1300,10 +1252,10 @@ static void AddExactSum(FilterlessExactSumPartialState &state, hugeint_t value, 
 			state.value = result;
 			return;
 		}
-		WideAddSigned(PromoteExactSum(state, allocator), value);
+		WideAdd(PromoteExactSum(state, allocator), value);
 		return;
 	}
-	WideAddSigned(*GetWideExactSum(state), value);
+	WideAdd(*GetWideExactSum(state), value);
 }
 
 static void CombineExactSum(const FilterlessExactSumPartialState &source, FilterlessExactSumPartialState &target,
@@ -1322,7 +1274,7 @@ static void CombineExactSum(const FilterlessExactSumPartialState &source, Filter
 	if (target.storage == FILTERLESS_EXACT_SUM_INLINE) {
 		PromoteExactSum(target, allocator);
 	}
-	WideAddBits(*GetWideExactSum(target), *GetWideExactSum(source));
+	WideAdd(*GetWideExactSum(target), *GetWideExactSum(source));
 }
 
 template <class PARTIAL_STATE>
