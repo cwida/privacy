@@ -103,7 +103,7 @@ loudly rather than releasing something unproven:
 | `dp_sass_avg_lower/upper_bound`, `dp_sass_minmax_lower/upper_bound` | public output domain for `dp_sass` AVG / MIN-MAX | `L_i, Λ_i` |
 | `dp_minmax_lower/upper_bound` | public domain `[L,U]` for MIN/MAX under **`dp_standard`** (sensitivity = `U−L`) | `L_i, Λ_i` |
 | `privacy_noise` | `false` zeroes all noise (deterministic testing) | — |
-| `privacy_seed` | RNG seed for reproducible noise | — |
+| `privacy_seed` | PAC/SASS assignment seed only; DP noise always uses fresh OS randomness | — |
 | `privacy_min_group_count` | **`dp_elastic` only**: a raw admin support filter (not DP; see §10) | — |
 
 ### Recommended settings for benchmarks

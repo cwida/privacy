@@ -208,7 +208,7 @@ This gives a formal (ε,δ)-DP guarantee at the **user level** — neighboring d
 | Setting | Default | Mode | Description |
 |---------|---------|------|-------------|
 | `privacy_mode` | `pac` | both | Active privacy mechanism: `pac` or `dp_elastic` |
-| `privacy_seed` | random | both | Fix seed for reproducible results |
+| `privacy_seed` | random | pac / dp_sass | Fix PAC/SASS assignment; formal-DP noise always uses fresh secure randomness |
 | `privacy_noise` | `true` | both | Toggle noise injection |
 | `privacy_min_group_count` | `NULL` | both | Suppress GROUP BY cells below this count (PAC: low-SNR suppression; DP: τ-thresholding) |
 | `pac_mi` | `1/128` | pac | Mutual information bound (higher = less noise, more leakage) |

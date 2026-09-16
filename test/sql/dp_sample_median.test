@@ -943,8 +943,8 @@ SELECT AVG(v) FROM sass_sparse_lane_avg;
 ----
 100
 
-# Each released aggregate cell receives independent numerator/count noise. Separate list vectors
-# start at the same child offset, so this catches accidental nonce reuse across AVG expressions.
+# Each released aggregate cell receives independent fresh numerator/count noise. Separate list
+# vectors start at the same child offset, so this catches accidental draw reuse across AVG expressions.
 statement ok
 CREATE PU TABLE sass_multi_lane_avg_users(uid INTEGER, PRIVACY_KEY(uid));
 

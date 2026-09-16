@@ -29,6 +29,7 @@
 #include "parser/privacy_parser.hpp"
 #include "diff/pac_utility_diff.hpp"
 #include "table_functions/dp_sass_stability_query.hpp"
+#include "table_functions/privacy_ownership_bounds_debug.hpp"
 #include "query_processing/pac_topk_rewriter.hpp"
 #include "query_processing/pac_avg_rewriter.hpp"
 #include "privacy_debug.hpp"
@@ -636,6 +637,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterFilterlessAggregateFunctions(loader);
 	RegisterDpSmoothMedianNoiseFunction(loader);
 	RegisterDpSassStabilityQueryFunction(loader);
+	RegisterPrivacyOwnershipBoundsDebugFunction(loader);
 
 	// Register PAC parser extension
 	ParserExtension::Register(db.config, PrivacyParserExtension());

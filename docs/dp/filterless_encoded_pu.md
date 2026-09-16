@@ -83,9 +83,9 @@ FROM per_pu_partials;
 
 `filterless_sum_debug`, `filterless_count_debug`, and `filterless_avg_debug` return selected bounds,
 clipped values, noise scales, bin indices, and active/sample counts. The compiler uses overloads
-that also receive the component epsilon, `C_u`, and a stable group nonce. The nonce includes the
-normalized SQL hash, so different predicates do not accidentally reuse cancelable value, histogram,
-or partition-selection noise; an identical query remains deterministic for a fixed privacy seed.
+that also receive the component epsilon and `C_u`. Value, histogram, and partition-selection noise
+use independent fresh draws from operating-system entropy for every release; `privacy_seed` affects
+PAC only and does not make a filterless DP query deterministic.
 
 ## Settings
 

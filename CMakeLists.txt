@@ -44,7 +44,9 @@ set(EXTENSION_SOURCES
     src/aggregates/dp_approx_bounds.cpp
     src/aggregates/filterless_aggregate.cpp
     src/table_functions/dp_sass_stability_query.cpp
+    src/table_functions/privacy_ownership_bounds_debug.cpp
     src/compiler/privacy_compiler.cpp
+    src/compiler/dp_ownership_graph.cpp
     src/compiler/privacy_mechanisms.cpp
     src/compiler/privacy_compiler_helpers.cpp
     src/query_processing/pac_avg_rewriter.cpp

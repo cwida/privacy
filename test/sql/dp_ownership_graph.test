@@ -1,0 +1,355 @@
+# name: test/sql/dp_ownership_graph.test
+# description: Exact debug diagnostics for DP4SQL-style multi-owner graphs
+# group: [sql]
+
+require privacy
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+# ==============================================================================
+# One fact table with two ownership paths to the same privacy-unit table
+# ==============================================================================
+
+statement ok
+CREATE TABLE og_people(id INTEGER);
+
+statement ok
+INSERT INTO og_people VALUES (1), (2), (3), (4);
+
+statement ok
+ALTER TABLE og_people ADD PRIVACY_KEY(id);
+
+statement ok
+ALTER TABLE og_people SET PU;
+
+statement ok
+CREATE TABLE og_contracts(id INTEGER, buyer_id INTEGER, seller_id INTEGER);
+
+statement ok
+INSERT INTO og_contracts VALUES (1, 1, 2), (2, 1, 2), (3, 1, 3), (4, 4, 2);
+
+statement ok
+ALTER TABLE og_contracts ADD PRIVACY_KEY(id);
+
+statement ok
+ALTER TABLE og_contracts ADD PRIVACY_LINK(buyer_id) REFERENCES og_people(id);
+
+statement ok
+ALTER TABLE og_contracts ADD PRIVACY_LINK(seller_id) REFERENCES og_people(id);
+
+query TTTIIII
+SELECT local_columns::VARCHAR,
+       parent_table,
+       referenced_columns::VARCHAR,
+       observed_max_frequency,
+       child_max_owned_rows,
+       child_max_owners_per_row,
+       fact_graph_max_affected_pus
+FROM privacy_ownership_bounds_debug('og_contracts')
+ORDER BY local_columns::VARCHAR;
+----
+[buyer_id]	og_people	[id]	3	6	2	6
+[seller_id]	og_people	[id]	3	6	2	6
+
+# The exact graph contains edges 1-2, 1-3, and 2-4, so its maximum degree is 2.
+query I
+SELECT DISTINCT fact_observed_max_affected_pus
+FROM privacy_ownership_bounds_debug('og_contracts');
+----
+2
+
+# The function is deterministic, unnoised debug tooling.
+query I
+SELECT DISTINCT fact_observed_max_affected_pus
+FROM privacy_ownership_bounds_debug('og_contracts');
+----
+2
+
+# ==============================================================================
+# Multi-hop propagation: line fanout multiplies M but does not add owner paths
+# ==============================================================================
+
+statement ok
+CREATE TABLE og_lines(id INTEGER, contract_id INTEGER);
+
+statement ok
+INSERT INTO og_lines VALUES (1, 1), (2, 1), (3, 2), (4, 2), (5, 3), (6, 3), (7, 4), (8, 4);
+
+statement ok
+ALTER TABLE og_lines ADD PRIVACY_KEY(id);
+
+statement ok
+ALTER TABLE og_lines ADD PRIVACY_LINK(contract_id) REFERENCES og_contracts(id);
+
+query TTTIIIII
+SELECT child_table,
+       local_columns::VARCHAR,
+       parent_table,
+       observed_max_frequency,
+       child_max_owned_rows,
+       child_max_owners_per_row,
+       fact_graph_max_affected_pus,
+       fact_observed_max_affected_pus
+FROM privacy_ownership_bounds_debug('og_lines')
+ORDER BY child_table, local_columns::VARCHAR;
+----
+og_contracts	[buyer_id]	og_people	3	6	2	12	2
+og_contracts	[seller_id]	og_people	3	6	2	12	2
+og_lines	[contract_id]	og_contracts	2	12	2	12	2
+
+# ==============================================================================
+# Multiple paths that resolve to the same PU are deduplicated in the exact graph
+# ==============================================================================
+
+statement ok
+CREATE TABLE og_same_owner(id INTEGER, left_id INTEGER, right_id INTEGER);
+
+statement ok
+INSERT INTO og_same_owner VALUES (1, 1, 1), (2, 2, 2);
+
+statement ok
+ALTER TABLE og_same_owner ADD PRIVACY_KEY(id);
+
+statement ok
+ALTER TABLE og_same_owner ADD PRIVACY_LINK(left_id) REFERENCES og_people(id);
+
+statement ok
+ALTER TABLE og_same_owner ADD PRIVACY_LINK(right_id) REFERENCES og_people(id);
+
+query II
+SELECT DISTINCT fact_graph_max_affected_pus, fact_observed_max_affected_pus
+FROM privacy_ownership_bounds_debug('og_same_owner');
+----
+2	0
+
+# ==============================================================================
+# Single and composite ownership keys
+# ==============================================================================
+
+statement ok
+CREATE TABLE og_orders(id INTEGER, person_id INTEGER);
+
+statement ok
+INSERT INTO og_orders VALUES (1, 1), (2, 1), (3, 2);
+
+statement ok
+ALTER TABLE og_orders ADD PRIVACY_KEY(id);
+
+statement ok
+ALTER TABLE og_orders ADD PRIVACY_LINK(person_id) REFERENCES og_people(id);
+
+query III
+SELECT observed_max_frequency, fact_graph_max_affected_pus, fact_observed_max_affected_pus
+FROM privacy_ownership_bounds_debug('og_orders');
+----
+2	0	0
+
+statement ok
+CREATE TABLE og_composite_people(tenant INTEGER, id INTEGER);
+
+statement ok
+INSERT INTO og_composite_people VALUES (1, 1), (1, 2), (2, 1);
+
+statement ok
+ALTER TABLE og_composite_people ADD PRIVACY_KEY(tenant, id);
+
+statement ok
+ALTER TABLE og_composite_people SET PU;
+
+statement ok
+CREATE TABLE og_composite_facts(
+    batch INTEGER,
+    id INTEGER,
+    tenant INTEGER,
+    person_id INTEGER,
+    other_tenant INTEGER,
+    other_person_id INTEGER
+);
+
+statement ok
+INSERT INTO og_composite_facts VALUES
+    (1, 1, 1, 1, 1, 2),
+    (1, 2, 1, 1, 1, 2),
+    (2, 1, 2, 1, 2, 1);
+
+statement ok
+ALTER TABLE og_composite_facts ADD PRIVACY_KEY(batch, id);
+
+statement ok
+ALTER TABLE og_composite_facts ADD PRIVACY_LINK(tenant, person_id)
+    REFERENCES og_composite_people(tenant, id);
+
+statement ok
+ALTER TABLE og_composite_facts ADD PRIVACY_LINK(other_tenant, other_person_id)
+    REFERENCES og_composite_people(tenant, id);
+
+query TTIII
+SELECT local_columns::VARCHAR,
+       referenced_columns::VARCHAR,
+       observed_max_frequency,
+       fact_graph_max_affected_pus,
+       fact_observed_max_affected_pus
+FROM privacy_ownership_bounds_debug('og_composite_facts')
+ORDER BY local_columns::VARCHAR;
+----
+[other_tenant, other_person_id]	[tenant, id]	2	4	1
+[tenant, person_id]	[tenant, id]	2	4	1
+
+# Empty tables still have structural owner-path counts but zero observed row bounds.
+statement ok
+CREATE TABLE og_empty(id INTEGER, buyer_id INTEGER, seller_id INTEGER);
+
+statement ok
+ALTER TABLE og_empty ADD PRIVACY_KEY(id);
+
+statement ok
+ALTER TABLE og_empty ADD PRIVACY_LINK(buyer_id) REFERENCES og_people(id);
+
+statement ok
+ALTER TABLE og_empty ADD PRIVACY_LINK(seller_id) REFERENCES og_people(id);
+
+query III
+SELECT DISTINCT child_max_owned_rows, child_max_owners_per_row, fact_graph_max_affected_pus
+FROM privacy_ownership_bounds_debug('og_empty');
+----
+0	2	0
+
+# ==============================================================================
+# Invalid ownership metadata/data fails instead of silently dropping owners
+# ==============================================================================
+
+statement ok
+CREATE TABLE og_missing_key(id INTEGER, person_id INTEGER);
+
+statement ok
+INSERT INTO og_missing_key VALUES (1, 1);
+
+statement ok
+ALTER TABLE og_missing_key ADD PRIVACY_LINK(person_id) REFERENCES og_people(id);
+
+statement error
+SELECT * FROM privacy_ownership_bounds_debug('og_missing_key');
+----
+requires a PRIVACY_KEY
+
+statement ok
+CREATE TABLE og_null_link(id INTEGER, person_id INTEGER);
+
+statement ok
+INSERT INTO og_null_link VALUES (1, NULL);
+
+statement ok
+ALTER TABLE og_null_link ADD PRIVACY_KEY(id);
+
+statement ok
+ALTER TABLE og_null_link ADD PRIVACY_LINK(person_id) REFERENCES og_people(id);
+
+statement error
+SELECT * FROM privacy_ownership_bounds_debug('og_null_link');
+----
+contains NULL values
+
+statement ok
+CREATE TABLE og_orphan(id INTEGER, person_id INTEGER);
+
+statement ok
+INSERT INTO og_orphan VALUES (1, 99);
+
+statement ok
+ALTER TABLE og_orphan ADD PRIVACY_KEY(id);
+
+statement ok
+ALTER TABLE og_orphan ADD PRIVACY_LINK(person_id) REFERENCES og_people(id);
+
+statement error
+SELECT * FROM privacy_ownership_bounds_debug('og_orphan');
+----
+contains an orphaned reference
+
+statement ok
+CREATE TABLE og_nonunique_parent(id INTEGER, code INTEGER, person_id INTEGER);
+
+statement ok
+INSERT INTO og_nonunique_parent VALUES (1, 10, 1), (2, 10, 2);
+
+statement ok
+ALTER TABLE og_nonunique_parent ADD PRIVACY_KEY(id);
+
+statement ok
+ALTER TABLE og_nonunique_parent ADD PRIVACY_LINK(person_id) REFERENCES og_people(id);
+
+statement ok
+CREATE TABLE og_nonunique_fact(id INTEGER, parent_code INTEGER);
+
+statement ok
+INSERT INTO og_nonunique_fact VALUES (1, 10);
+
+statement ok
+ALTER TABLE og_nonunique_fact ADD PRIVACY_KEY(id);
+
+statement ok
+ALTER TABLE og_nonunique_fact ADD PRIVACY_LINK(parent_code) REFERENCES og_nonunique_parent(code);
+
+statement error
+SELECT * FROM privacy_ownership_bounds_debug('og_nonunique_fact');
+----
+is not unique
+
+statement ok
+CREATE TABLE og_cycle_a(id INTEGER, b_id INTEGER);
+
+statement ok
+CREATE TABLE og_cycle_b(id INTEGER, a_id INTEGER);
+
+statement ok
+ALTER TABLE og_cycle_a ADD PRIVACY_KEY(id);
+
+statement ok
+ALTER TABLE og_cycle_b ADD PRIVACY_KEY(id);
+
+statement ok
+ALTER TABLE og_cycle_a ADD PRIVACY_LINK(b_id) REFERENCES og_cycle_b(id);
+
+statement ok
+ALTER TABLE og_cycle_b ADD PRIVACY_LINK(a_id) REFERENCES og_cycle_a(id);
+
+statement error
+SELECT * FROM privacy_ownership_bounds_debug('og_cycle_a');
+----
+cycle detected
+
+statement ok
+CREATE TABLE og_other_people(id INTEGER);
+
+statement ok
+INSERT INTO og_other_people VALUES (1);
+
+statement ok
+ALTER TABLE og_other_people ADD PRIVACY_KEY(id);
+
+statement ok
+ALTER TABLE og_other_people SET PU;
+
+statement ok
+CREATE TABLE og_multiple_pu(id INTEGER, first_id INTEGER, second_id INTEGER);
+
+statement ok
+INSERT INTO og_multiple_pu VALUES (1, 1, 1);
+
+statement ok
+ALTER TABLE og_multiple_pu ADD PRIVACY_KEY(id);
+
+statement ok
+ALTER TABLE og_multiple_pu ADD PRIVACY_LINK(first_id) REFERENCES og_people(id);
+
+statement ok
+ALTER TABLE og_multiple_pu ADD PRIVACY_LINK(second_id) REFERENCES og_other_people(id);
+
+statement error
+SELECT * FROM privacy_ownership_bounds_debug('og_multiple_pu');
+----
+reaches multiple privacy units
+
+statement ok
+PRAGMA clear_privacy_metadata;
