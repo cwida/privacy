@@ -5,7 +5,8 @@ standalone executables.
 
 ## AS Performance
 
-The main benchmark compares DuckDB, SIMD-AS at `m=64`, a naive sampling implementation, and a simple-hash control.
+The main benchmark compares DuckDB, SIMD-AS at `m=64`, a naive repeated-query estimate, a simple-hash control,
+disjoint `GROUP BY sid`, and expanded overlapping-world execution.
 
 ```bash
 cmake --build build/release --target as_tpch_benchmark
@@ -22,6 +23,8 @@ The runner generates the configured TPC-H database when it is absent. Handwritte
 - `benchmark/tpch/tpch_as_queries/`
 - `benchmark/tpch/tpch_as_simple_hash_queries/`
 - `benchmark/tpch/tpch_naive_as_queries/`
+- `benchmark/tpch/tpch_grouped_sid_queries/`
+- `benchmark/tpch/tpch_expanded_world_queries/`
 
 The variable-`m` experiment uses the same runner and database:
 

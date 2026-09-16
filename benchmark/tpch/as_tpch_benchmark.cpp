@@ -168,6 +168,7 @@ struct ASTpchOptions {
 	string queries_dir = "benchmark";
 	string out_csv;
 	bool run_simple_hash = false;
+	bool run_grouped_baselines = false;
 	bool skip_naive = false;
 	int threads = 8;
 	vector<int> as_m_values = {64};
@@ -184,6 +185,7 @@ static ASTpchOptions LoadASTpchOptions(const string &config_path) {
 	options.queries_dir = JsonString(root, "queries_dir", options.queries_dir);
 	options.out_csv = JsonString(root, "out", options.out_csv);
 	options.run_simple_hash = JsonBool(root, "run_simple_hash", options.run_simple_hash);
+	options.run_grouped_baselines = JsonBool(root, "run_grouped_baselines", options.run_grouped_baselines);
 	options.skip_naive = JsonBool(root, "skip_naive", options.skip_naive);
 	options.threads = static_cast<int>(JsonNumber(root, "threads", options.threads));
 	options.as_m_values = JsonIntList(root, "as_ms", "as_m", options.as_m_values);
@@ -325,6 +327,40 @@ ORDER BY ALL)";
 	return false;
 }
 
+static void CreateLineitemEnhanced(Connection &con) {
+	Log("Creating lineitem_enhanced...");
+	{
+		auto chk = con.Query("SELECT 1 FROM lineitem_enhanced LIMIT 1;");
+		if (chk && !chk->HasError()) {
+			Log("lineitem_enhanced already exists, skipping.");
+		} else {
+			auto r3 = con.Query("CREATE TABLE IF NOT EXISTS lineitem_enhanced AS "
+			                    "SELECT l.l_orderkey, l.l_suppkey, l.l_linenumber,"
+			                    "  c.rowid AS c_rowid, s.s_name AS s_name,"
+			                    "  (l.l_receiptdate > l.l_commitdate) AS is_late,"
+			                    "  (o.o_orderstatus = 'F') AS is_orderstatus_f,"
+			                    "  (n.n_name = 'SAUDI ARABIA') AS is_nation_saudi_arabia "
+			                    "FROM lineitem l "
+			                    "JOIN orders o ON o.o_orderkey = l.l_orderkey "
+			                    "JOIN customer c ON c.c_custkey = o.o_custkey "
+			                    "JOIN supplier s ON s.s_suppkey = l.l_suppkey "
+			                    "JOIN nation n ON s.s_nationkey = n.n_nationkey "
+			                    "ORDER BY l.l_orderkey, l.l_linenumber;");
+			if (r3 && r3->HasError()) {
+				Log(string("lineitem_enhanced creation error: ") + r3->GetError());
+			} else {
+				Log("lineitem_enhanced ready.");
+			}
+		}
+	}
+
+	auto r4 = con.Query("CREATE INDEX IF NOT EXISTS idx_lineitem_enhanced_order_supp "
+	                    "ON lineitem_enhanced(l_orderkey, l_suppkey);");
+	if (r4 && r4->HasError()) {
+		Log(string("idx_lineitem_enhanced_order_supp creation error: ") + r4->GetError());
+	}
+}
+
 // Create all Naive-AS sampling tables once (customer-based, orders-based, q21 extras)
 // Uses IF NOT EXISTS so tables persist across runs on existing databases.
 static void NaiveASCreateTables(Connection &con) {
@@ -394,43 +430,71 @@ static void NaiveASCreateTables(Connection &con) {
 		}
 	}
 
-	Log("Creating lineitem_enhanced...");
-	{
-		auto chk = con.Query("SELECT 1 FROM lineitem_enhanced LIMIT 1;");
-		if (chk && !chk->HasError()) {
-			Log("lineitem_enhanced already exists, skipping.");
-		} else {
-			auto r3 = con.Query("CREATE TABLE IF NOT EXISTS lineitem_enhanced AS "
-			                    "SELECT l.l_orderkey, l.l_suppkey, l.l_linenumber,"
-			                    "  c.rowid AS c_rowid, s.s_name AS s_name,"
-			                    "  (l.l_receiptdate > l.l_commitdate) AS is_late,"
-			                    "  (o.o_orderstatus = 'F') AS is_orderstatus_f,"
-			                    "  (n.n_name = 'SAUDI ARABIA') AS is_nation_saudi_arabia "
-			                    "FROM lineitem l "
-			                    "JOIN orders o ON o.o_orderkey = l.l_orderkey "
-			                    "JOIN customer c ON c.c_custkey = o.o_custkey "
-			                    "JOIN supplier s ON s.s_suppkey = l.l_suppkey "
-			                    "JOIN nation n ON s.s_nationkey = n.n_nationkey "
-			                    "ORDER BY l.l_orderkey, l.l_linenumber;");
-			if (r3 && r3->HasError()) {
-				Log(string("lineitem_enhanced creation error: ") + r3->GetError());
-			} else {
-				Log("lineitem_enhanced ready.");
-			}
+	CreateLineitemEnhanced(con);
+}
+
+// WIP rebuttal experiment: these VerdictDB-style representation baselines still require
+// full semantic validation and reruns on the paper hardware before publication.
+static bool ConfigureGroupedWorldViews(Connection &con, bool overlapping) {
+	vector<string> statements;
+	if (overlapping) {
+		statements = {"CREATE OR REPLACE TEMP VIEW benchmark_customer_worlds AS "
+		              "SELECT c.*, samples.sample_id FROM customer c, range(64) AS samples(sample_id) "
+		              "WHERE (priv_hash(hash(c.c_custkey)) & (CAST(1 AS UBIGINT) << samples.sample_id)) <> 0",
+		              "CREATE OR REPLACE TEMP VIEW benchmark_order_worlds AS "
+		              "SELECT o.*, samples.sample_id FROM orders o, range(64) AS samples(sample_id) "
+		              "WHERE (priv_hash(hash(o.o_custkey)) & (CAST(1 AS UBIGINT) << samples.sample_id)) <> 0",
+		              "CREATE OR REPLACE TEMP VIEW benchmark_lineitem_worlds AS "
+		              "SELECT l.*, samples.sample_id FROM lineitem_enhanced l JOIN customer c ON c.rowid = l.c_rowid, "
+		              "range(64) AS samples(sample_id) "
+		              "WHERE (priv_hash(hash(c.c_custkey)) & (CAST(1 AS UBIGINT) << samples.sample_id)) <> 0"};
+	} else {
+		statements = {"CREATE OR REPLACE TEMP VIEW benchmark_customer_worlds AS "
+		              "SELECT customer.*, CAST(hash(c_custkey) % 64 AS INTEGER) AS sample_id FROM customer",
+		              "CREATE OR REPLACE TEMP VIEW benchmark_order_worlds AS "
+		              "SELECT orders.*, CAST(hash(o_custkey) % 64 AS INTEGER) AS sample_id FROM orders",
+		              "CREATE OR REPLACE TEMP VIEW benchmark_lineitem_worlds AS "
+		              "SELECT l.*, CAST(hash(c.c_custkey) % 64 AS INTEGER) AS sample_id "
+		              "FROM lineitem_enhanced l JOIN customer c ON c.rowid = l.c_rowid"};
+	}
+	for (auto &statement : statements) {
+		auto result = con.Query(statement);
+		if (result && result->HasError()) {
+			Log("Grouped baseline view setup error: " + result->GetError());
+			return false;
 		}
 	}
+	return true;
+}
 
-	auto r4 = con.Query("CREATE INDEX IF NOT EXISTS idx_lineitem_enhanced_order_supp "
-	                    "ON lineitem_enhanced(l_orderkey, l_suppkey);");
-	if (r4 && r4->HasError()) {
-		Log(string("idx_lineitem_enhanced_order_supp creation error: ") + r4->GetError());
+static double BenchmarkGroupedQuery(Connection &con, const string &sql, const string &label) {
+	auto warmup = con.Query(sql);
+	if (warmup && warmup->HasError()) {
+		Log(label + " warmup error: " + warmup->GetError());
+		return -1;
 	}
+	vector<double> times_ms;
+	for (int run = 1; run <= 5; ++run) {
+		auto start = std::chrono::steady_clock::now();
+		auto result = con.Query(sql);
+		auto end = std::chrono::steady_clock::now();
+		if (result && result->HasError()) {
+			Log(label + " run " + std::to_string(run) + " error: " + result->GetError());
+			return -1;
+		}
+		double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
+		times_ms.push_back(elapsed_ms);
+		Log(label + " run " + std::to_string(run) + " time (ms): " + FormatNumber(elapsed_ms));
+	}
+	return Median(times_ms);
 }
 
 int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv,
-                       bool run_simple_hash, int threads, const vector<int> &as_m_values, bool skip_naive) {
+                       bool run_simple_hash, int threads, const vector<int> &as_m_values, bool skip_naive,
+                       bool run_grouped_baselines) {
 	try {
 		Log(string("run_simple_hash flag: ") + (run_simple_hash ? string("true") : string("false")));
+		Log(string("run_grouped_baselines flag: ") + (run_grouped_baselines ? string("true") : string("false")));
 		Log(string("skip_naive flag: ") + (skip_naive ? string("true") : string("false")));
 		string actual_out = out_csv;
 		if (actual_out.empty()) {
@@ -510,6 +574,8 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 		string bitslice_dir = queries_dir + string("/tpch/tpch_as_queries");
 		string simple_hash_dir = queries_dir + string("/tpch/tpch_as_simple_hash_queries");
 		string naive_as_dir = queries_dir + string("/tpch/tpch_naive_as_queries");
+		string grouped_sid_dir = queries_dir + string("/tpch/tpch_grouped_sid_queries");
+		string expanded_world_dir = queries_dir + string("/tpch/tpch_expanded_world_queries");
 
 		// Discover all .sql files in the bitslice directory
 		auto query_entries = DiscoverQueryFiles(bitslice_dir);
@@ -529,11 +595,14 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 		// Cache baseline median per query number (avoid re-running for variants like q08-nolambda)
 		std::map<int, double> baseline_cache;
 
-		// Create sampling/helper tables only when Naive-AS is requested.
+		// Only Naive-AS uses materialized Bernoulli membership tables. Expanded-Worlds derives
+		// the same membership bits as SIMD-AS directly from priv_hash at query time.
 		if (!skip_naive) {
 			Log("Creating Naive-AS sampling tables (if not already present)...");
 			NaiveASCreateTables(con);
 			Log("Naive-AS sampling tables ready.");
+		} else if (run_grouped_baselines) {
+			CreateLineitemEnhanced(con);
 		}
 
 		for (auto &entry : query_entries) {
@@ -681,6 +750,33 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 				}
 			}
 
+			if (run_grouped_baselines) {
+				struct GroupedBaseline {
+					string mode;
+					string directory;
+					bool overlapping;
+				};
+				vector<GroupedBaseline> grouped_baselines = {
+				    {"Grouped-SID", grouped_sid_dir, false},
+				    {"Expanded-Worlds", expanded_world_dir, true},
+				};
+				for (auto &baseline : grouped_baselines) {
+					string query_file = FindQueryFile(baseline.directory, entry.query_number);
+					if (!FileExists(query_file)) {
+						Log(baseline.mode + " " + entry.label + ": no query file found at " + query_file +
+						    ", skipping");
+						continue;
+					}
+					string sql = ReadFileToString(query_file);
+					if (sql.empty() || !ConfigureGroupedWorldViews(con, baseline.overlapping)) {
+						csv << entry.label << "," << baseline.mode << ",64,-1\n";
+						continue;
+					}
+					double median_ms = BenchmarkGroupedQuery(con, sql, baseline.mode + " " + entry.label);
+					csv << entry.label << "," << baseline.mode << ",64," << FormatNumber(median_ms) << "\n";
+				}
+			}
+
 			// Naive-AS mode: run on a 50% random sample, multiply median by 64.
 			string naive_as_qfile = FindQueryFile(naive_as_dir, entry.query_number);
 			if (!skip_naive && FileExists(naive_as_qfile)) {
@@ -776,11 +872,14 @@ static void PrintUsageMain() {
 	          << "  db_path: DuckDB database file (default 'tpch.db')\n"
 	          << "  queries_dir: root directory containing AS SQL variants (default 'benchmark').\n"
 	          << "               subdirectories expected: 'tpch/tpch_as_queries' (bitslice), "
-	             "'tpch/tpch_as_simple_hash_queries' (simple hash), 'tpch/tpch_naive_as_queries' (Naive-AS)\n"
+	             "'tpch/tpch_as_simple_hash_queries' (simple hash), 'tpch/tpch_naive_as_queries' (Naive-AS),\n"
+	          << "               'tpch/tpch_grouped_sid_queries' (disjoint GROUP BY sid), "
+	             "'tpch/tpch_expanded_world_queries' (overlapping expanded worlds)\n"
 	          << "  out_csv: optional output CSV path (auto-named if omitted)\n"
 	          << "  --config <json>: load benchmark options from a JSON config\n"
 	          << "  --dry-run: validate options without opening the database\n"
 	          << "  --run-simple-hash: optional flag to run a simple hash AS variant as well\n"
+	          << "  --run-grouped-baselines: run Grouped-SID and Expanded-Worlds baselines\n"
 	          << "  --as-ms <csv>: AS sample counts to run, e.g. 64,512 (default 64)\n"
 	          << "  --skip-naive: skip Naive-AS setup and runs\n"
 	          << "  --threads=N: number of DuckDB threads (default 8)\n";
@@ -811,6 +910,8 @@ int main(int argc, char **argv) {
 				dry_run = true;
 			} else if (arg == "--run-simple-hash") {
 				options.run_simple_hash = true;
+			} else if (arg == "--run-grouped-baselines") {
+				options.run_grouped_baselines = true;
 			} else if (arg == "--skip-naive") {
 				options.skip_naive = true;
 			} else if (arg == "--as-ms" && i + 1 < argc) {
@@ -864,7 +965,7 @@ int main(int argc, char **argv) {
 		}
 		return duckdb::RunASTPCHBenchmark(options.db_path, options.queries_dir, options.scale_factor, options.out_csv,
 		                                  options.run_simple_hash, options.threads, options.as_m_values,
-		                                  options.skip_naive);
+		                                  options.skip_naive, options.run_grouped_baselines);
 	} catch (std::exception &ex) {
 		std::cerr << "error: " << ex.what() << "\n";
 		return 1;
