@@ -78,9 +78,10 @@ discovery and database initialization succeed.
 
 ### TPC-H AS performance
 
-The main SF30 benchmark measures DuckDB, SIMD-AS with `m=64`, the naive sampling implementation, and a simple-hash
-control used to isolate sampling-key join overhead. It creates `tpch_sf30_graviton.db` with DuckDB's TPC-H generator
-when the database is absent. Each reported runtime is the median of five hot executions after one warm execution.
+The main SF30 benchmark measures DuckDB, SIMD-AS with `m=64`, the naive repeated-query estimate, a simple-hash
+control used to isolate sampling-key join overhead, a disjoint `GROUP BY sid` baseline, and an expanded overlapping-
+world baseline. It creates `tpch_sf30_graviton.db` with DuckDB's TPC-H generator when the database is absent. Each
+reported runtime is the median of five hot executions after one warm execution.
 
 ```bash
 build/release/extension/privacy/as_tpch_benchmark \

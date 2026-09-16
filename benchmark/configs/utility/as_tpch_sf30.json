@@ -6,5 +6,6 @@
   "threads": 16,
   "as_ms": [64],
   "run_simple_hash": true,
+  "run_grouped_baselines": true,
   "skip_naive": false
 }
