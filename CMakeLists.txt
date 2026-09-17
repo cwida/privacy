@@ -103,7 +103,7 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
     add_executable(as_tpch_benchmark benchmark/tpch/as_tpch_benchmark.cpp)
     target_link_libraries(as_tpch_benchmark ${PRIVACY_LINK_LIBS})
 
-    # WIP rebuttal experiment: MEPS balanced repeated replication proof of concept
+    # WIP rebuttal experiment: four-way MEPS balanced repeated replication benchmark
     add_executable(meps_brr_poc benchmark/meps_brr/meps_brr_poc.cpp)
     target_link_libraries(meps_brr_poc ${PRIVACY_LINK_LIBS})
 

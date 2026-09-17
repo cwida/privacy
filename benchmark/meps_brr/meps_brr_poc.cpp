@@ -1,271 +1,352 @@
-// WIP rebuttal experiment: preliminary correctness/performance POC, not a publication-ready benchmark.
+// WIP real-data MEPS BRR benchmark. Replaces the original single-query POC.
+// Query definitions are contributions to a weighted total/ratio, not a general SQL rewriter.
 #include "duckdb.hpp"
-
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
-namespace duckdb {
-
-// AHRQ's standard MEPS BRR estimate for replicate r is
-// SUM(BRRr * 2 * PERWT * outcome). as_sum applies the same half-sample correction.
-static constexpr idx_t BRR_REPLICATES = 128;
-static constexpr idx_t LANES_PER_MASK = 64;
-
-struct MepsOptions {
-	string persons_path;
-	string replicates_path;
-	string value_column = "TOTEXP24";
-	string weight_column = "PERWT24F";
-	string id_column = "DUPERSID";
-	string panel_column = "PANEL";
+using namespace duckdb;
+using Clock = std::chrono::steady_clock;
+static double Ms(Clock::time_point start) {
+	return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+}
+static string Quote(const string &s) {
+	string out = "'";
+	for (char c : s)
+		out += c == '\'' ? "''" : string(1, c);
+	return out + "'";
+}
+static unique_ptr<MaterializedQueryResult> Query(Connection &con, const string &sql) {
+	auto r = con.Query(sql);
+	if (!r || r->HasError())
+		throw std::runtime_error(r ? r->GetError() : "No query result");
+	return r;
+}
+static string Read(const string &path) {
+	std::ifstream f(path);
+	if (!f)
+		throw std::runtime_error("Cannot read " + path);
+	std::ostringstream out;
+	out << f.rdbuf();
+	return out.str();
+}
+static void Require(Connection &con, const string &sql, const string &message) {
+	if (!Query(con, sql)->GetValue(0, 0).GetValue<bool>())
+		throw std::runtime_error(message);
+}
+struct Cell {
+	double point;
+	std::vector<double> replicates;
 };
-
-static string QuoteIdentifier(const string &identifier) {
-	string result = "\"";
-	for (auto c : identifier) {
-		result += c == '"' ? "\"\"" : string(1, c);
+using Results = std::map<string, Cell>;
+static double Estimate(const Value &n, const Value &d, bool ratio) {
+	if (n.IsNull() || (ratio && (d.IsNull() || d.GetValue<double>() == 0)))
+		throw std::runtime_error("Undefined replicate estimate (empty domain); do not silently drop it");
+	return n.GetValue<double>() / (ratio ? d.GetValue<double>() : 1.0);
+}
+static double StandardError(const Cell &c) {
+	// BRR with full-estimate centering (survey mse=TRUE), not Taylor linearization.
+	double ss = 0;
+	for (double x : c.replicates)
+		ss += (x - c.point) * (x - c.point);
+	return std::sqrt(ss / 128.0);
+}
+static Results NativeReference(Connection &con, const string &source, int threads, double &extract_ms) {
+	struct Group {
+		string metric;
+		bool ratio;
+		std::vector<double> numerator, denominator;
+		std::vector<uint64_t> lo, hi;
+		Cell result;
+	};
+	// Extraction is included in native analysis time, not hidden in setup.
+	auto extract_start = Clock::now();
+	auto input = Query(con, "SELECT metric,numerator,denominator,is_ratio,mask_lo,mask_hi FROM (" + source +
+	                            ") ORDER BY metric,person_id");
+	std::vector<Group> groups;
+	for (idx_t row = 0; row < input->RowCount(); row++) {
+		string metric = input->GetValue(0, row).ToString();
+		if (groups.empty() || groups.back().metric != metric)
+			groups.push_back(Group {
+			    metric, input->GetValue(3, row).GetValue<bool>(), {}, {}, {}, {}, {0, std::vector<double>(128)}});
+		auto &g = groups.back();
+		g.numerator.push_back(input->GetValue(1, row).GetValue<double>());
+		g.denominator.push_back(input->GetValue(2, row).GetValue<double>());
+		g.lo.push_back(input->GetValue(4, row).GetValue<uint64_t>());
+		g.hi.push_back(input->GetValue(5, row).GetValue<uint64_t>());
 	}
-	return result + "\"";
-}
-
-static string QuoteLiteral(const string &value) {
-	string result = "'";
-	for (auto c : value) {
-		result += c == '\'' ? "''" : string(1, c);
-	}
-	return result + "'";
-}
-
-static string ReadRelation(const string &path) {
-	if (path.size() >= 8 && path.substr(path.size() - 8) == ".parquet") {
-		return "read_parquet(" + QuoteLiteral(path) + ")";
-	}
-	return "read_csv_auto(" + QuoteLiteral(path) + ", header = true, sample_size = -1)";
-}
-
-static unique_ptr<MaterializedQueryResult> QueryOrThrow(Connection &con, const string &sql) {
-	auto result = con.Query(sql);
-	if (result->HasError()) {
-		throw std::runtime_error(result->GetError() + "\nSQL: " + sql);
-	}
-	return result;
-}
-
-static string BrrColumn(idx_t replicate) {
-	return "BRR" + std::to_string(replicate + 1);
-}
-
-static string MaskExpression(idx_t first_replicate) {
-	std::ostringstream sql;
-	for (idx_t lane = 0; lane < LANES_PER_MASK; lane++) {
-		if (lane > 0) {
-			sql << " | ";
+	extract_ms = Ms(extract_start);
+	for (auto &g : groups) {
+		double n = 0, d = 0;
+		for (idx_t i = 0; i < g.numerator.size(); i++) {
+			n += g.numerator[i];
+			d += g.denominator[i];
 		}
-		sql << "(CAST(COALESCE(" << QuoteIdentifier(BrrColumn(first_replicate + lane)) << ", 0) AS UBIGINT) << " << lane
-		    << ")";
+		g.result.point = n / (g.ratio ? d : 1.0);
 	}
-	return sql.str();
-}
-
-static void CreateSyntheticInputs(Connection &con) {
-	QueryOrThrow(con, R"(
-		CREATE TEMP TABLE persons_raw AS
-		SELECT CAST(i AS VARCHAR) AS DUPERSID,
-		       24 AS PANEL,
-		       400.0 + CAST(hash(i, 7) % 1600 AS DOUBLE) AS PERWT24F,
-		       CAST(hash(i, 11) % 5000000 AS DOUBLE) / 100.0 AS TOTEXP24
-		FROM range(1, 20001) AS people(i)
-	)");
-
-	std::ostringstream sql;
-	sql << "CREATE TEMP TABLE replicates_raw AS SELECT CAST(i AS VARCHAR) AS DUPERSID, 24 AS PANEL";
-	for (idx_t replicate = 0; replicate < BRR_REPLICATES; replicate++) {
-		sql << ", CAST((hash(i, " << replicate + 101 << ") & 1) AS UTINYINT) AS "
-		    << QuoteIdentifier(BrrColumn(replicate));
-	}
-	sql << " FROM range(1, 20001) AS people(i)";
-	QueryOrThrow(con, sql.str());
-}
-
-static void CreateFileInputs(Connection &con, const MepsOptions &options) {
-	QueryOrThrow(con, "CREATE TEMP VIEW persons_raw AS SELECT * FROM " + ReadRelation(options.persons_path));
-	QueryOrThrow(con, "CREATE TEMP VIEW replicates_raw AS SELECT * FROM " + ReadRelation(options.replicates_path));
-}
-
-static void CreateJoinedInput(Connection &con, const MepsOptions &options) {
-	const auto id = QuoteIdentifier(options.id_column);
-	const auto panel = QuoteIdentifier(options.panel_column);
-	std::ostringstream sql;
-	sql << "CREATE TEMP TABLE meps_brr AS SELECT "
-	    << "CAST(p." << id << " AS VARCHAR) AS person_id, "
-	    << "CAST(p." << panel << " AS BIGINT) AS panel, "
-	    << "CAST(p." << QuoteIdentifier(options.weight_column) << " AS DOUBLE) AS person_weight, "
-	    << "CAST(p." << QuoteIdentifier(options.value_column) << " AS DOUBLE) AS outcome";
-	for (idx_t replicate = 0; replicate < BRR_REPLICATES; replicate++) {
-		auto column = QuoteIdentifier(BrrColumn(replicate));
-		sql << ", CAST(COALESCE(r." << column << ", 0) AS UTINYINT) AS " << column;
-	}
-	sql << " FROM persons_raw p JOIN replicates_raw r"
-	    << " ON CAST(p." << id << " AS VARCHAR) = CAST(r." << id << " AS VARCHAR)"
-	    << " AND CAST(p." << panel << " AS BIGINT) = CAST(r." << panel << " AS BIGINT)"
-	    << " WHERE p." << QuoteIdentifier(options.weight_column) << " IS NOT NULL"
-	    << " AND p." << QuoteIdentifier(options.value_column) << " IS NOT NULL";
-	QueryOrThrow(con, sql.str());
-
-	QueryOrThrow(con, "ALTER TABLE meps_brr ADD COLUMN mask_lo UBIGINT");
-	QueryOrThrow(con, "ALTER TABLE meps_brr ADD COLUMN mask_hi UBIGINT");
-	QueryOrThrow(con, "UPDATE meps_brr SET mask_lo = " + MaskExpression(0) + ", mask_hi = " + MaskExpression(64));
-}
-
-static vector<double> ReadList(const Value &value) {
-	vector<double> result;
-	for (const auto &child : ListValue::GetChildren(value)) {
-		result.push_back(child.GetValue<double>());
-	}
-	return result;
-}
-
-static vector<double> RunSimd(Connection &con, double &elapsed_ms) {
-	auto start = std::chrono::steady_clock::now();
-	auto result = QueryOrThrow(con, R"(
-		SELECT as_sum(mask_lo, person_weight * outcome),
-		       as_sum(mask_hi, person_weight * outcome)
-		FROM meps_brr
-	)");
-	elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-
-	auto totals = ReadList(result->GetValue(0, 0));
-	auto high_totals = ReadList(result->GetValue(1, 0));
-	totals.insert(totals.end(), high_totals.begin(), high_totals.end());
-	return totals;
-}
-
-static vector<double> RunScalarOracle(Connection &con, double &elapsed_ms) {
-	std::ostringstream sql;
-	sql << "SELECT ";
-	for (idx_t replicate = 0; replicate < BRR_REPLICATES; replicate++) {
-		if (replicate > 0) {
-			sql << ", ";
+	// Replicate-major weighted reductions, parallelized over independent replicates.
+	// No map mutation and each worker writes distinct, preallocated result elements.
+	std::vector<std::thread> workers;
+	int count = std::min(threads, 128);
+	for (int worker = 0; worker < count; worker++)
+		workers.emplace_back([&, worker]() {
+			for (int rep = worker; rep < 128; rep += count)
+				for (auto &g : groups) {
+					double n = 0, d = 0;
+					const auto &mask = rep < 64 ? g.lo : g.hi;
+					for (idx_t i = 0; i < mask.size(); i++) {
+						double weight = 2.0 * ((mask[i] >> (rep % 64)) & 1);
+						n += weight * g.numerator[i];
+						d += weight * g.denominator[i];
+					}
+					g.result.replicates[rep] = n / (g.ratio ? d : 1.0);
+				}
+		});
+	for (auto &worker : workers)
+		worker.join();
+	Results out;
+	for (auto &g : groups) {
+		if (!std::isfinite(StandardError(g.result))) {
+			throw std::runtime_error("Non-finite native BRR standard error");
 		}
-		sql << "SUM(CASE WHEN " << QuoteIdentifier(BrrColumn(replicate))
-		    << " <> 0 THEN 2.0 * person_weight * outcome ELSE 0.0 END)";
+		out.emplace(g.metric, std::move(g.result));
 	}
-	sql << " FROM meps_brr";
-
-	auto start = std::chrono::steady_clock::now();
-	auto result = QueryOrThrow(con, sql.str());
-	elapsed_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-
-	vector<double> totals;
-	for (idx_t replicate = 0; replicate < BRR_REPLICATES; replicate++) {
-		totals.push_back(result->GetValue(replicate, 0).GetValue<double>());
+	return out;
+}
+static Results Analyze(Connection &con, const string &source, const string &mode, int threads, double &extract_ms) {
+	extract_ms = 0;
+	if (mode == "cpp_replicates")
+		return NativeReference(con, source, threads, extract_ms);
+	Results out;
+	const string from = " FROM (" + source + ") contributions ";
+	auto point = Query(con, "SELECT metric, sum(numerator), sum(denominator), bool_or(is_ratio)" + from +
+	                            "GROUP BY metric ORDER BY metric");
+	for (idx_t row = 0; row < point->RowCount(); row++) {
+		out.emplace(point->GetValue(0, row).ToString(), Cell {Estimate(point->GetValue(1, row), point->GetValue(2, row),
+		                                                               point->GetValue(3, row).GetValue<bool>()),
+		                                                      {}});
 	}
-	return totals;
-}
-
-static double ReadScalar(Connection &con, const string &sql) {
-	return QueryOrThrow(con, sql)->GetValue(0, 0).GetValue<double>();
-}
-
-static int RunPoc(const MepsOptions &options) {
-	DuckDB db(nullptr);
-	Connection con(db);
-	QueryOrThrow(con, "SET threads = 1");
-	QueryOrThrow(con, "SET pac_sample_diversity_check = false");
-	QueryOrThrow(con, "SET priv_rewrite = false");
-
-	if (options.persons_path.empty()) {
-		std::cout << "Using deterministic synthetic MEPS-shaped input.\n";
-		CreateSyntheticInputs(con);
+	if (mode == "asa") {
+		auto r = Query(con, "SELECT metric, as_sum(mask_lo,numerator), as_sum(mask_hi,numerator),"
+		                    "as_sum(mask_lo,denominator), as_sum(mask_hi,denominator), bool_or(is_ratio)" +
+		                        from + "GROUP BY metric ORDER BY metric");
+		for (idx_t row = 0; row < r->RowCount(); row++) {
+			auto &c = out.at(r->GetValue(0, row).ToString());
+			bool ratio = r->GetValue(5, row).GetValue<bool>();
+			for (idx_t block = 0; block < 2; block++) {
+				auto nv = r->GetValue(1 + block, row), dv = r->GetValue(3 + block, row);
+				const auto &n = ListValue::GetChildren(nv), &d = ListValue::GetChildren(dv);
+				if (n.size() != 64 || d.size() != 64)
+					throw std::runtime_error("Expected 64 lanes");
+				for (idx_t lane = 0; lane < 64; lane++)
+					c.replicates.push_back(Estimate(n[lane], d[lane], ratio));
+			}
+		}
+	} else if (mode == "repeated_sql") {
+		// One complete conventional aggregate query per official replicate.
+		for (int rep = 0; rep < 128; rep++) {
+			string selected =
+			    "((" + string(rep < 64 ? "mask_lo" : "mask_hi") + " >> " + std::to_string(rep % 64) + ") & 1) <> 0";
+			auto r = Query(con, "SELECT metric, sum(CASE WHEN " + selected +
+			                        " THEN 2.0*numerator ELSE 0 END), sum(CASE WHEN " + selected +
+			                        " THEN 2.0*denominator ELSE 0 END), bool_or(is_ratio)" + from +
+			                        "GROUP BY metric ORDER BY metric");
+			for (idx_t row = 0; row < r->RowCount(); row++) {
+				out.at(r->GetValue(0, row).ToString())
+				    .replicates.push_back(
+				        Estimate(r->GetValue(1, row), r->GetValue(2, row), r->GetValue(3, row).GetValue<bool>()));
+			}
+		}
 	} else {
-		std::cout << "Reading MEPS person file: " << options.persons_path << "\n"
-		          << "Reading MEPS BRR file:    " << options.replicates_path << "\n";
-		CreateFileInputs(con, options);
+		// Stronger baseline: one shared relational query, 128 ordinary conditional SUM pairs.
+		string sql = "SELECT metric, bool_or(is_ratio)";
+		for (int rep = 0; rep < 128; rep++) {
+			string selected =
+			    "((" + string(rep < 64 ? "mask_lo" : "mask_hi") + " >> " + std::to_string(rep % 64) + ") & 1) <> 0";
+			for (auto col : {"numerator", "denominator"})
+				sql += ", sum(CASE WHEN " + selected + " THEN 2.0*" + col + " ELSE 0 END)";
+		}
+		auto r = Query(con, sql + from + "GROUP BY metric ORDER BY metric");
+		for (idx_t row = 0; row < r->RowCount(); row++) {
+			auto &c = out.at(r->GetValue(0, row).ToString());
+			for (int rep = 0; rep < 128; rep++)
+				c.replicates.push_back(Estimate(r->GetValue(2 + 2 * rep, row), r->GetValue(3 + 2 * rep, row),
+				                                r->GetValue(1, row).GetValue<bool>()));
+		}
 	}
-	CreateJoinedInput(con, options);
-
-	auto rows = ReadScalar(con, "SELECT COUNT(*)::DOUBLE FROM meps_brr");
-	auto point_estimate = ReadScalar(con, "SELECT SUM(person_weight * outcome) FROM meps_brr");
-	double simd_ms;
-	double scalar_ms;
-	auto simd = RunSimd(con, simd_ms);
-	auto scalar = RunScalarOracle(con, scalar_ms);
-	if (simd.size() != BRR_REPLICATES || scalar.size() != BRR_REPLICATES) {
-		throw std::runtime_error("expected exactly 128 BRR estimates");
+	for (auto &entry : out) {
+		if (entry.second.replicates.size() != 128)
+			throw std::runtime_error("Incomplete replicate output");
+		if (!std::isfinite(StandardError(entry.second)))
+			throw std::runtime_error("Non-finite BRR standard error");
 	}
-
-	double max_absolute_error = 0;
-	double max_relative_error = 0;
-	double squared_deviation_sum = 0;
-	for (idx_t replicate = 0; replicate < BRR_REPLICATES; replicate++) {
-		auto absolute_error = std::abs(simd[replicate] - scalar[replicate]);
-		auto relative_error = absolute_error / std::max(1.0, std::abs(scalar[replicate]));
-		max_absolute_error = std::max(max_absolute_error, absolute_error);
-		max_relative_error = std::max(max_relative_error, relative_error);
-		auto deviation = simd[replicate] - point_estimate;
-		squared_deviation_sum += deviation * deviation;
-	}
-	auto standard_error = std::sqrt(squared_deviation_sum / static_cast<double>(BRR_REPLICATES));
-
-	std::cout << std::fixed << std::setprecision(3) << "Joined persons:       " << static_cast<uint64_t>(rows) << "\n"
-	          << "Full-sample estimate: " << point_estimate << "\n"
-	          << "BRR standard error:   " << standard_error << "\n"
-	          << "SIMD-ASA query:       " << simd_ms << " ms\n"
-	          << "Scalar oracle query:  " << scalar_ms << " ms\n"
-	          << "Max absolute error:   " << max_absolute_error << "\n"
-	          << std::scientific << "Max relative error:   " << max_relative_error << "\n";
-
-	// as_sum currently materializes FLOAT lanes, so agreement is checked at FLOAT precision.
-	if (max_relative_error > 1e-5) {
-		std::cerr << "FAIL: SIMD and scalar BRR estimates disagree beyond FLOAT tolerance.\n";
-		return 1;
-	}
-	std::cout << "PASS: all 128 SIMD lanes agree with scalar BRR totals at FLOAT precision.\n";
-	return 0;
+	return out;
 }
-
-} // namespace duckdb
-
-static void PrintUsage() {
-	std::cout << "Usage:\n"
-	          << "  meps_brr_poc\n"
-	          << "  meps_brr_poc <persons.csv|parquet> <brr.csv|parquet> [value-column] [weight-column]\n\n"
-	          << "The real-data mode expects DUPERSID and PANEL in both files, BRR1..BRR128 in the BRR file,\n"
-	          << "and defaults to the 2024 MEPS columns TOTEXP24 and PERWT24F. With no files, it runs a\n"
-	          << "deterministic synthetic fixture. This is a correctness POC, not the final benchmark.\n";
+static double Compare(const Results &actual, const Results &reference, double tolerance) {
+	if (actual.size() != reference.size())
+		throw std::runtime_error("Result group count differs");
+	double maximum = 0;
+	for (auto &entry : reference) {
+		const auto &a = actual.at(entry.first), &b = entry.second;
+		auto check = [&](double x, double y) {
+			if (!std::isfinite(x) || !std::isfinite(y))
+				throw std::runtime_error("Non-finite estimate");
+			double err = std::abs(x - y) / std::max(1.0, std::abs(y));
+			maximum = std::max(maximum, err);
+			if (err > tolerance)
+				throw std::runtime_error("Numerical tolerance exceeded for " + entry.first);
+		};
+		check(a.point, b.point);
+		for (int rep = 0; rep < 128; rep++)
+			check(a.replicates[rep], b.replicates[rep]);
+		check(StandardError(a), StandardError(b));
+	}
+	return maximum;
 }
-
 int main(int argc, char **argv) {
 	try {
-		if (argc == 2 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help")) {
-			PrintUsage();
-			return 0;
-		}
-		if (argc != 1 && (argc < 3 || argc > 5)) {
-			PrintUsage();
+		if (argc != 7) {
+			std::cerr << "Usage: meps_brr_poc DATA_DIR NEW_DB_PATH QUERY_DIR OUT_PREFIX THREADS REPETITIONS\n"
+			             "DATA_DIR contains persons.csv, events.csv, brr.csv from prepare.py.\n";
 			return 2;
 		}
-
-		duckdb::MepsOptions options;
-		if (argc >= 3) {
-			options.persons_path = argv[1];
-			options.replicates_path = argv[2];
+		string data = argv[1], db_path = argv[2], queries = argv[3], prefix = argv[4];
+		int threads = std::stoi(argv[5]), repetitions = std::stoi(argv[6]);
+		if (threads < 1 || repetitions < 1)
+			throw std::runtime_error("Threads and repetitions must be positive");
+		if (std::ifstream(db_path).good() || std::ifstream(prefix + "_timings.csv").good())
+			throw std::runtime_error("Use a new database and output prefix; refusing overwrite");
+		auto start = Clock::now();
+		DuckDB db(db_path.c_str());
+		Connection con(db);
+		Query(con, "SET threads=" + std::to_string(threads));
+		Query(con, "SET priv_rewrite=false");
+		Query(con, "SET pac_sample_diversity_check=false");
+		Query(con, "SET pac_mi=0");
+		for (auto table : {"persons_input", "events", "brr"}) {
+			string filename = string(table) == "persons_input" ? "persons" : table;
+			Query(con, "CREATE TABLE " + string(table) + " AS SELECT * FROM read_csv(" +
+			               Quote(data + "/" + filename + ".csv") + ", header=true, sample_size=-1)");
 		}
-		if (argc >= 4) {
-			options.value_column = argv[3];
+		double import_ms = Ms(start);
+		start = Clock::now();
+		Require(con, "SELECT count(*)=count(DISTINCT (person_id,panel)) FROM persons_input", "Duplicate person/panel");
+		Require(con, "SELECT count(*)=count(DISTINCT person_id) FROM persons_input",
+		        "Expected one survey year and unique person identifiers");
+		Require(con, "SELECT count(*)=count(DISTINCT (person_id,panel)) FROM brr", "Duplicate BRR person/panel");
+		Require(con, "SELECT count(*)=0 FROM persons_input p ANTI JOIN brr b USING(person_id,panel)",
+		        "Missing BRR linkage");
+		Require(con, "SELECT count(*)=0 FROM events e ANTI JOIN persons_input p USING(person_id)",
+		        "Event without a person");
+		Require(con,
+		        "SELECT count(*)=0 FROM persons_input WHERE weight IS NULL OR weight<0 OR "
+		        "expenditure IS NULL OR expenditure<0 OR age IS NULL OR age<0",
+		        "Invalid person input");
+		// AHRQ Exercise1a_OUTPUT.TXT reports 6,933 zero-expenditure observations
+		// and 33,259 positive-weight observations out of 34,655 for this 2016 workload.
+		Require(con,
+		        "SELECT count(*)=34655 AND count(*) FILTER(WHERE expenditure=0)=6933 "
+		        "AND count(*) FILTER(WHERE weight>0)=33259 FROM persons_input",
+		        "Input differs from published 2016 MEPS counts; check SAS zero decoding");
+		string invalid, lo, hi;
+		for (int rep = 0; rep < 128; rep++) {
+			string col = "BRR" + std::to_string(rep + 1);
+			invalid += (rep ? " OR " : "") + col + " IS NULL OR " + col + " NOT IN (0,1)";
+			auto &mask = rep < 64 ? lo : hi;
+			if (!mask.empty())
+				mask += " | ";
+			mask += "(" + col + "::UBIGINT << " + std::to_string(rep % 64) + ")";
 		}
-		if (argc >= 5) {
-			options.weight_column = argv[4];
+		Require(con, "SELECT count(*)=0 FROM brr WHERE " + invalid, "BRR flags must be non-null binary values");
+		Query(con, "CREATE TABLE persons AS SELECT p.*, (" + lo + ") AS mask_lo, (" + hi +
+		               ") AS mask_hi FROM persons_input p JOIN brr b USING(person_id,panel)");
+		Query(con, "CHECKPOINT");
+		double prep_ms = Ms(start);
+		std::ofstream timings(prefix + "_timings.csv"), estimates(prefix + "_estimates.csv"),
+		    replicates(prefix + "_replicates.csv");
+		if (!timings || !estimates || !replicates)
+			throw std::runtime_error("Cannot open output files");
+		timings << "query,mode,threads,run,analysis_ms,extract_ms,compute_ms,import_ms,prepare_ms,first_workflow_ms,"
+		           "max_relative_error\n";
+		estimates << "query,mode,metric,point_estimate,brr_standard_error\n";
+		replicates << "query,metric,replicate,estimate\n";
+		timings << std::setprecision(17);
+		estimates << std::setprecision(17);
+		replicates << std::setprecision(17);
+		std::vector<string> modes = {"cpp_replicates", "repeated_sql", "conditional_sql", "asa"};
+		std::vector<double> cold(modes.size(), import_ms + prep_ms);
+		auto published =
+		    Query(con, "SELECT * FROM read_csv(" + Quote(queries + "/expected_points.csv") + ", header=true)");
+		for (auto name : {"q01_expenditures", "q02_age_groups", "q03_event_expenditures", "q04_visits_per_person"}) {
+			string source = Read(queries + "/" + name + ".sql");
+			// All methods reuse the same joined/derived data, as survey software does.
+			// These total/ratio estimators permit exact per-person sufficient statistics.
+			start = Clock::now();
+			Query(con, "CREATE OR REPLACE TABLE analysis_input AS SELECT person_id, mask_lo, mask_hi, metric, "
+			           "sum(numerator)::DOUBLE AS numerator, sum(denominator)::DOUBLE AS denominator, "
+			           "bool_or(is_ratio) AS is_ratio FROM (" +
+			               source + ") GROUP BY ALL");
+			double query_prep_ms = Ms(start);
+			for (auto &total : cold)
+				total += query_prep_ms;
+			source = "SELECT * FROM analysis_input";
+			Results reference;
+			for (int run = 0; run < repetitions; run++) {
+				for (idx_t step = 0; step < modes.size(); step++) {
+					idx_t mode_idx = run == 0 ? step : (step + run) % modes.size();
+					const auto &mode = modes[mode_idx];
+					start = Clock::now();
+					double extract_ms;
+					auto result = Analyze(con, source, mode, threads, extract_ms);
+					double elapsed = Ms(start);
+					for (idx_t row = 0; row < published->RowCount(); row++) {
+						if (published->GetValue(0, row).ToString() != name)
+							continue;
+						const auto metric = published->GetValue(1, row).ToString();
+						double expected = published->GetValue(2, row).GetValue<double>();
+						double tolerance = published->GetValue(3, row).GetValue<double>();
+						if (std::abs(result.at(metric).point - expected) > tolerance)
+							throw std::runtime_error("Point estimate differs from AHRQ published output: " + metric);
+					}
+					if (run == 0 && mode_idx == 0)
+						reference = result;
+					double error = Compare(result, reference, mode == "asa" ? 1e-3 : 1e-8);
+					timings << name << ',' << mode << ',' << threads << ',' << run << ',' << elapsed << ','
+					        << extract_ms << ',' << elapsed - extract_ms << ',' << import_ms << ','
+					        << prep_ms + query_prep_ms << ','
+					        << (run == 0 ? import_ms + prep_ms + query_prep_ms + elapsed : 0) << ',' << error << '\n';
+					if (run == 0) {
+						cold[mode_idx] += elapsed;
+						for (auto &entry : result)
+							estimates << name << ',' << mode << ',' << entry.first << ',' << entry.second.point << ','
+							          << StandardError(entry.second) << '\n';
+						if (mode_idx == 0)
+							for (auto &entry : result)
+								for (int rep = 0; rep < 128; rep++)
+									replicates << name << ',' << entry.first << ',' << rep + 1 << ','
+									           << entry.second.replicates[rep] << '\n';
+					}
+					std::cout << name << ' ' << mode << " run=" << run << " ms=" << elapsed
+					          << " max_relative_error=" << error << std::endl;
+				}
+			}
+			timings.flush();
+			estimates.flush();
 		}
-		return duckdb::RunPoc(options);
-	} catch (const std::exception &exception) {
-		std::cerr << "MEPS BRR POC failed: " << exception.what() << "\n";
+		for (idx_t i = 0; i < modes.size(); i++)
+			std::cout << "Workflow total (shared import+preparation once), " << modes[i] << ": " << cold[i] << " ms\n";
+		return 0;
+	} catch (const std::exception &e) {
+		std::cerr << "MEPS benchmark failed: " << e.what() << '\n';
 		return 1;
 	}
 }
