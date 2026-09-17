@@ -7,5 +7,6 @@
   "as_ms": [64],
   "run_simple_hash": true,
   "run_grouped_baselines": true,
+  "verdictdb_utility_trials": 100,
   "skip_naive": false
 }
