@@ -119,8 +119,7 @@ template <typename ACCUM_T, typename VALUE_T>
 #ifndef PAC_GODBOLT
 AUTOVECTORIZE static inline
 #endif
-    void
-    AddToTotalsSimple(ACCUM_T *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
+    void AddToTotalsSimple(ACCUM_T *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
 	ACCUM_T v = static_cast<ACCUM_T>(value);
 	for (int j = 0; j < 64; j++) {
 #ifdef PAC_NOSIMD
@@ -153,8 +152,7 @@ template <typename SIGNED_T, typename UNSIGNED_T, uint64_t MASK, typename VALUE_
 #ifndef PAC_GODBOLT
 AUTOVECTORIZE static inline
 #endif
-    void
-    AddToTotalsSWAR(uint64_t *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
+    void AddToTotalsSWAR(uint64_t *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
 	constexpr int BITS = sizeof(SIGNED_T) * 8;
 	// Cast to unsigned type to avoid sign extension, then broadcast to all lanes
 	uint64_t val_packed = static_cast<UNSIGNED_T>(static_cast<SIGNED_T>(value)) * MASK;
@@ -162,7 +160,16 @@ AUTOVECTORIZE static inline
 		uint64_t bits = (key_hash >> i) & MASK;
 		// Expand each 0x01 byte to 0xFF: (bits << BITS) - bits turns 0x01 into 0xFF per byte
 		uint64_t expanded = (bits << BITS) - bits;
+#ifdef PAC_EXACTSUM
+		// Signed lanes may contain negative subtotals. Isolate the high bits so
+		// carries cannot escape a lane when adding two's-complement values.
+		constexpr uint64_t high_bits = MASK << (BITS - 1);
+		uint64_t addend = val_packed & expanded;
+		uint64_t sum = (total[i] & ~high_bits) + (addend & ~high_bits);
+		total[i] = sum ^ ((total[i] ^ addend) & high_bits);
+#else
 		total[i] += val_packed & expanded;
+#endif
 	}
 }
 
@@ -349,7 +356,7 @@ struct PacSumIntState {
 			if (k > max_level_used) { // dst does not have this yet. Try to steal from src
 #ifdef PAC_NOBUFFERING
 				// can only steal src's pointer if it's arena-allocated (not inline storage).
-				if (k != src->inline_level_idx) {       // without buffering, the SumState is not arena-allocated
+				if (k != src->inline_level_idx) { // without buffering, the SumState is not arena-allocated
 #endif
 					if (k < 9 || max_level_used >= 9) { // beware not to mess up dst inline storage
 						u.levels[k] = src->u.levels[k];
@@ -400,12 +407,13 @@ struct PacSumIntState {
 	// 2. key_hash (used to track initialization of all counters)
 	// 3. update_count (required for AVG really)
 	// 4. probabilistic pointers (lazily allocated)
-	// Exact subtotals for each level - sized to fit level's representable range.
+	// Sum of input magnitudes per level, bounding every world's subtotal even
+	// when positive and negative inputs cancel in the complete tuple stream.
 	// After any Flush, exact_totalN is either:
-	//   - the incoming `value` (which fits in TN since it was routed to level N), or
+	//   - the incoming magnitude/budget (which fits in TN), or
 	//   - `new_total` which we verified fits in TN range before assigning
 	// Flush functions use int64_t for intermediate calculations to detect overflow.
-	T8 exact_total8;   // sum of values at level 8 since last flush (fits in T8 after flush)
+	T8 exact_total8;   // magnitude budget at level 8 since last flush (fits in T8 after flush)
 	T16 exact_total16; // sum of values at level 16 since last flush (fits in T16 after flush)
 	T32 exact_total32; // sum of values at level 32 since last flush (fits in T32 after flush)
 	T64 exact_total64; // sum of values at level 64 since last flush (fits in T64 after flush)
@@ -458,7 +466,7 @@ struct PacSumIntState {
 	// Flush64: cascade probabilistic_total64 to probabilistic_total128
 	AUTOVECTORIZE inline void Flush64(ArenaAllocator &allocator, T64 value, bool force) {
 		D_ASSERT(probabilistic_total64);
-		T64 new_total = value + exact_total64;
+		T64 new_total = static_cast<T64>(static_cast<uint64_t>(value) + static_cast<uint64_t>(exact_total64));
 		bool would_overflow = CHECK_BOUNDS_64(new_total, value, exact_total64);
 		if (would_overflow || (force && probabilistic_total128)) {
 			if (would_overflow) {
@@ -476,8 +484,8 @@ struct PacSumIntState {
 		D_ASSERT(probabilistic_total32);
 		int64_t new_total = value + exact_total32;
 		bool would_overflow = CHECK_BOUNDS_32(new_total);
-		if (would_overflow || (force && probabilistic_total64)) {
-			if (would_overflow) {
+		if (would_overflow || (force && (probabilistic_total64 || probabilistic_total128))) {
+			if (!probabilistic_total64) {
 				exact_total64 = EnsureLevelAllocated(allocator, probabilistic_total64, 64, exact_total64);
 			}
 			// Flush level 64 first (propagates exact_total32, ensures room for cascade)
@@ -495,8 +503,8 @@ struct PacSumIntState {
 		D_ASSERT(probabilistic_total16);
 		int64_t new_total = value + exact_total16;
 		bool would_overflow = CHECK_BOUNDS_16(new_total);
-		if (would_overflow || (force && probabilistic_total32)) {
-			if (would_overflow) {
+		if (would_overflow || (force && (probabilistic_total32 || probabilistic_total64 || probabilistic_total128))) {
+			if (!probabilistic_total32) {
 				exact_total32 = EnsureLevelAllocated(allocator, probabilistic_total32, 32, exact_total32);
 			}
 			// Flush level 32 first (propagates exact_total16, ensures room for cascade)
@@ -514,8 +522,9 @@ struct PacSumIntState {
 		D_ASSERT(probabilistic_total8);
 		int64_t new_total = value + exact_total8;
 		bool would_overflow = CHECK_BOUNDS_8(new_total);
-		if (would_overflow || (force && probabilistic_total16)) {
-			if (would_overflow) {
+		if (would_overflow || (force && (probabilistic_total16 || probabilistic_total32 || probabilistic_total64 ||
+		                                 probabilistic_total128))) {
+			if (!probabilistic_total16) {
 				exact_total16 = EnsureLevelAllocated(allocator, probabilistic_total16, 16, exact_total16);
 			}
 			// Flush level 16 first (propagates exact_total8, ensures room for cascade)
@@ -529,15 +538,18 @@ struct PacSumIntState {
 	}
 
 	void Flush(ArenaAllocator &allocator) {
-		// Start flushing from the lowest allocated level
-		// (data may have skipped lower levels if values were always large)
+		// Flush bottom-up: a lower level adds to the next level after recursively
+		// making room there, so that next level must subsequently be flushed too.
 		if (probabilistic_total8) {
 			Flush8(allocator, 0LL, true);
-		} else if (probabilistic_total16) {
+		}
+		if (probabilistic_total16) {
 			Flush16(allocator, 0LL, true);
-		} else if (probabilistic_total32) {
+		}
+		if (probabilistic_total32) {
 			Flush32(allocator, 0LL, true);
-		} else if (probabilistic_total64) {
+		}
+		if (probabilistic_total64) {
 			Flush64(allocator, 0LL, true);
 		}
 	}

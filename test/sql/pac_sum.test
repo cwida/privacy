@@ -296,3 +296,39 @@ detected absence of sample diversity
 # Cleanup
 statement ok
 DROP TABLE test_data
+
+# Signed packed counters must not carry into neighboring worlds. The full
+# stream cancels, but worlds 1--63 contain only the positive rows, so overflow
+# detection must bound input magnitudes rather than the signed full-stream sum.
+statement ok
+SET pac_sample_diversity_check = false
+
+statement ok
+CREATE TABLE signed_worlds AS
+SELECT CASE WHEN i % 2 = 0 THEN 18446744073709551615::UBIGINT ELSE 1::UBIGINT END AS mask,
+       CASE WHEN i % 2 = 0 THEN 1::BIGINT ELSE -1::BIGINT END AS v
+FROM range(1000) t(i)
+
+query II
+WITH a AS (SELECT as_sum(mask, v) AS lanes FROM signed_worlds),
+e AS (SELECT j, sum(v) FILTER (WHERE ((mask >> j) & 1) <> 0) AS s
+      FROM signed_worlds CROSS JOIN range(64) worlds(j) GROUP BY j)
+SELECT count(*), count(*) FILTER (WHERE lanes[j+1] / 2 = s::FLOAT) FROM e, a
+----
+64	64
+
+# Finalization must retain contributions in all allocated levels. These values
+# also sum without truncation in the approximate kernel (48 + 8192 = 8240).
+query I
+WITH t(v) AS (VALUES (1::BIGINT), (15::BIGINT), (32::BIGINT), (8192::BIGINT)),
+a AS (SELECT as_sum(18446744073709551615::UBIGINT, v) AS lanes FROM t)
+SELECT count(*) FILTER (WHERE lanes[j+1] / 2 = 8240::FLOAT)
+FROM a CROSS JOIN range(64) worlds(j)
+----
+64
+
+statement ok
+DROP TABLE signed_worlds
+
+statement ok
+SET pac_sample_diversity_check = true

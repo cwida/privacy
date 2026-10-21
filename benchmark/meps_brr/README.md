@@ -33,20 +33,27 @@ new sampling, PAC noise, Fay adjustment, or privacy guarantee is involved.
   or timing of that package. `extract_ms` separately measures sorting/extraction
   into C++ arrays; `compute_ms` measures the remaining native computation.
   `analysis_ms` includes both, so extraction is not hidden in end-to-end comparisons.
-- `repeated_sql`: 128 complete ordinary aggregate queries over prepared data.
+- `repeated_sql`: 128 complete ordinary aggregate queries, each including BRR
+  linkage, mask construction, weighting, and the original event joins.
 - `conditional_sql`: one query with 128 pairs of ordinary conditional sums.
 - `asa`: two 64-world blocks for each numerator/denominator, using `as_sum`.
 
-All methods reuse the same prepared data. In these additive total/ratio analyses,
-event contributions can first be summed per person and metric without changing any
-replicate result. We apply this optimization to **every** method; joins are not
-repeated 128 times in the reference baseline. Query definitions describe these
-contributions; they are not a general automatic rewrite of arbitrary survey SQL.
+The SQL files define weighted contributions and are inlined into the timed aggregate
+queries, rather than materialized or pre-aggregated during setup. `persons` is a
+non-materialized view joining the original person records to the official BRR flags
+and packing those flags into masks. Event joins, visit-count computation, weighting,
+and mask construction therefore execute inside the query timer. Repeated SQL repeats
+this relational work for each replicate; conditional SQL and ASA each share it within
+their replicate query. All SQL methods additionally run an ordinary full-sample point
+query. The native method extracts the complete contribution query once, then reduces
+the extracted arrays; its extraction and computation are both timed.
 
 Both SQL baselines use ordinary bit tests on the supplied binary membership masks;
-neither calls AS functions. Common loading, validation, mask construction, and
-person/event preparation are measured and charged to every method. This benchmark
-therefore isolates aggregation benefits after equally shared relational work.
+neither calls AS functions. Only raw CSV loading, input validation, and view definition
+are setup work, recorded separately and charged once to each first workflow.
+The CSV field `execution_model=inline_sql` distinguishes these end-to-end query
+measurements from older runs over materialized contributions. Do not combine their
+timings or reuse the older aggregation-only speedups for this execution model.
 
 ## Run
 

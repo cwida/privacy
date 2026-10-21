@@ -1,5 +1,5 @@
 // WIP real-data MEPS BRR benchmark. Replaces the original single-query POC.
-// Query definitions are contributions to a weighted total/ratio, not a general SQL rewriter.
+// Contribution SQL is inlined into each timed analysis, not materialized during setup.
 #include "duckdb.hpp"
 #include <algorithm>
 #include <chrono>
@@ -267,7 +267,9 @@ int main(int argc, char **argv) {
 			mask += "(" + col + "::UBIGINT << " + std::to_string(rep % 64) + ")";
 		}
 		Require(con, "SELECT count(*)=0 FROM brr WHERE " + invalid, "BRR flags must be non-null binary values");
-		Query(con, "CREATE TABLE persons AS SELECT p.*, (" + lo + ") AS mask_lo, (" + hi +
+		// A view, not a prepared table: BRR linkage and mask construction execute
+		// inside each timed query, together with its event joins and weighting.
+		Query(con, "CREATE VIEW persons AS SELECT p.*, (" + lo + ") AS mask_lo, (" + hi +
 		               ") AS mask_hi FROM persons_input p JOIN brr b USING(person_id,panel)");
 		Query(con, "CHECKPOINT");
 		double prep_ms = Ms(start);
@@ -275,7 +277,7 @@ int main(int argc, char **argv) {
 		    replicates(prefix + "_replicates.csv");
 		if (!timings || !estimates || !replicates)
 			throw std::runtime_error("Cannot open output files");
-		timings << "query,mode,threads,run,analysis_ms,extract_ms,compute_ms,import_ms,prepare_ms,first_workflow_ms,"
+		timings << "query,mode,execution_model,threads,run,analysis_ms,extract_ms,compute_ms,import_ms,prepare_ms,first_workflow_ms,"
 		           "max_relative_error\n";
 		estimates << "query,mode,metric,point_estimate,brr_standard_error\n";
 		replicates << "query,metric,replicate,estimate\n";
@@ -288,17 +290,9 @@ int main(int argc, char **argv) {
 		    Query(con, "SELECT * FROM read_csv(" + Quote(queries + "/expected_points.csv") + ", header=true)");
 		for (auto name : {"q01_expenditures", "q02_age_groups", "q03_event_expenditures", "q04_visits_per_person"}) {
 			string source = Read(queries + "/" + name + ".sql");
-			// All methods reuse the same joined/derived data, as survey software does.
-			// These total/ratio estimators permit exact per-person sufficient statistics.
-			start = Clock::now();
-			Query(con, "CREATE OR REPLACE TABLE analysis_input AS SELECT person_id, mask_lo, mask_hi, metric, "
-			           "sum(numerator)::DOUBLE AS numerator, sum(denominator)::DOUBLE AS denominator, "
-			           "bool_or(is_ratio) AS is_ratio FROM (" +
-			               source + ") GROUP BY ALL");
-			double query_prep_ms = Ms(start);
-			for (auto &total : cold)
-				total += query_prep_ms;
-			source = "SELECT * FROM analysis_input";
+			// Analyze embeds this complete source in every SQL statement. In particular,
+			// repeated_sql repeats the original relational work for each replicate;
+			// ASA and conditional_sql share it within their replicate query.
 			Results reference;
 			for (int run = 0; run < repetitions; run++) {
 				for (idx_t step = 0; step < modes.size(); step++) {
@@ -320,10 +314,10 @@ int main(int argc, char **argv) {
 					if (run == 0 && mode_idx == 0)
 						reference = result;
 					double error = Compare(result, reference, mode == "asa" ? 1e-3 : 1e-8);
-					timings << name << ',' << mode << ',' << threads << ',' << run << ',' << elapsed << ','
+					timings << name << ',' << mode << ",inline_sql," << threads << ',' << run << ',' << elapsed << ','
 					        << extract_ms << ',' << elapsed - extract_ms << ',' << import_ms << ','
-					        << prep_ms + query_prep_ms << ','
-					        << (run == 0 ? import_ms + prep_ms + query_prep_ms + elapsed : 0) << ',' << error << '\n';
+					        << prep_ms << ','
+					        << (run == 0 ? import_ms + prep_ms + elapsed : 0) << ',' << error << '\n';
 					if (run == 0) {
 						cold[mode_idx] += elapsed;
 						for (auto &entry : result)

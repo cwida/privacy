@@ -1,26 +1,26 @@
 #!/usr/bin/env Rscript
-# TPC-H benchmark plotter
+# Paper runtime plotter for TPC-H and SSB.
 # Reads CSV with columns: query, mode, median_ms
 # When "simple hash AS" data is present, splits AS bars into core + sampling key join overhead
 
 script_file <- sub("^--file=", "", grep("^--file=", commandArgs(trailingOnly = FALSE), value = TRUE)[1])
 source(file.path(dirname(dirname(normalizePath(script_file))), "plot_common.R"))
-RequirePlotPackages(c("ggplot2", "dplyr", "readr", "scales", "stringr", "systemfonts"))
+RequirePlotPackages(c("ggplot2", "dplyr", "scales", "systemfonts"))
 
 suppressPackageStartupMessages({
   library(ggplot2)
   library(dplyr)
-  library(readr)
   library(scales)
-  library(stringr)
 })
 
 base_font <- PaperFont()
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) < 1) stop("Usage: Rscript plot_tpch_results.R path/to/results.csv [output_dir]")
+if (length(args) < 1) stop("Usage: Rscript plot_tpch_results.R results.csv [output_dir] [tpch|ssb] [plot.rds]")
 input_csv <- args[1]
 output_dir <- if (length(args) >= 2) args[2] else dirname(input_csv)
+benchmark_name <- if (length(args) >= 3) tolower(args[3]) else "tpch"
+if (!(benchmark_name %in% c("tpch", "ssb"))) stop("Expected tpch or ssb.")
 if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
 
 input_basename <- basename(input_csv)
@@ -34,7 +34,7 @@ if (length(sf_match) > 1) {
 }
 
 # Read CSV (format: query, mode, median_ms)
-raw <- suppressWarnings(readr::read_csv(input_csv, show_col_types = FALSE))
+raw <- read.csv(input_csv, stringsAsFactors = FALSE)
 
 expected_cols <- c("query", "mode", "median_ms")
 missing_cols <- setdiff(expected_cols, colnames(raw))
@@ -50,10 +50,10 @@ raw <- raw %>%
 if (nrow(raw) == 0) stop("No valid data to plot.")
 
 # Extract query number
-raw <- raw %>% mutate(qnum = as.integer(str_extract(query, "\\d+")))
+raw <- raw %>% mutate(qnum = as.integer(sub("^[^0-9]*([0-9]+).*", "\\1", query)))
 
 # Omit queries that are not part of the customer-level AS benchmark.
-omit_queries <- c(2, 11, 16)
+omit_queries <- if (benchmark_name == "tpch") c(2, 11, 16) else integer()
 raw <- raw %>% filter(!(qnum %in% omit_queries))
 
 # Keep only base queries (no variants like q08-nolambda)
@@ -202,7 +202,7 @@ if (!has_naive_as) {
       qidx = match(query, query_order),
       x_pos = qidx + 0.2,
       y_pos = median_ms * 1.15,
-      label = { s <- pmax(slowdown, 1.0); ifelse(s >= 10, sprintf("%.0fx", s), sprintf("%.1fx", s)) }
+      label = ifelse(slowdown >= 10, sprintf("%.0fx", slowdown), sprintf("%.1fx", slowdown))
     )
 
   # FAILED labels for bars with original_time < 0
@@ -238,10 +238,12 @@ if (!has_naive_as) {
       plot.margin = margin(2, 5, 5, 5)
     )
 
-  out_file <- file.path(output_dir, paste0("tpch_benchmark_plot_sf", sf_for_name, "_paper.png"))
+  out_file <- file.path(output_dir, paste0(benchmark_name, "_benchmark_plot_sf", sf_for_name, "_paper.png"))
   png(filename = out_file, width = 4000, height = 1350, res = 200)
     print(p)
   dev.off()
+  ggsave(sub("\\.png$", ".pdf", out_file), p, width = 4000 / 200, height = 1350 / 200, device = cairo_pdf)
+  if (length(args) >= 4) saveRDS(p, args[4])
   message("Plot saved to: ", out_file)
 
 } else {
@@ -305,7 +307,7 @@ if (!has_naive_as) {
       qidx = match(query, query_order),
       x_pos = qidx + ifelse(bar == "Naive-AS", 0.0, 0.27),
       y_pos = median_ms * 1.15,
-      label = { s <- pmax(slowdown, 1.0); ifelse(s >= 10, sprintf("%.0fx", s), sprintf("%.1fx", s)) }
+      label = ifelse(slowdown >= 10, sprintf("%.0fx", slowdown), sprintf("%.1fx", slowdown))
     )
 
   if (has_simple_hash) {
@@ -364,9 +366,12 @@ if (!has_naive_as) {
       plot.margin = margin(2, 5, 5, 5)
     )
 
-  out_file_paper <- file.path(output_dir, paste0("tpch_benchmark_plot_sf", sf_for_name, "_paper.png"))
+  out_file_paper <- file.path(output_dir, paste0(benchmark_name, "_benchmark_plot_sf", sf_for_name, "_paper.png"))
   png(filename = out_file_paper, width = 4000, height = 1500, res = 350)
     print(p_paper)
   dev.off()
+  ggsave(sub("\\.png$", ".pdf", out_file_paper), p_paper,
+         width = 4000 / 350, height = 1500 / 350, device = cairo_pdf)
+  if (length(args) >= 4) saveRDS(p_paper, args[4])
   message("Paper plot saved to: ", out_file_paper)
 }

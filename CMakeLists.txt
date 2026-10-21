@@ -20,7 +20,7 @@ include_directories(benchmark/include)
 # Set PAC_NOAPPROX=ON to use exact cascading instead
 option(PAC_NOAPPROX "Disable approximate sum algorithm, use exact cascading" OFF)
 if(PAC_NOAPPROX)
-    add_definitions(-DPAC_NOAPPROX)
+    add_definitions(-DPAC_EXACTSUM)
     message(STATUS "privacy: Using exact cascading sum algorithm (PAC_NOAPPROX)")
 else()
     message(STATUS "privacy: Using approximate sum algorithm (default)")
@@ -112,6 +112,10 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
     # WIP rebuttal experiment: four-way MEPS balanced repeated replication benchmark
     add_executable(meps_brr_poc benchmark/meps_brr/meps_brr_poc.cpp)
     target_link_libraries(meps_brr_poc ${PRIVACY_LINK_LIBS})
+
+    # WIP rebuttal experiment: standard joined SSB queries and 64 sampled worlds
+    add_executable(as_ssb_benchmark benchmark/ssb/as_ssb_benchmark.cpp)
+    target_link_libraries(as_ssb_benchmark ${PRIVACY_LINK_LIBS})
 
     # ClickBench + AS benchmark runner
     add_executable(as_clickbench_benchmark benchmark/clickbench/as_clickbench_benchmark.cpp)

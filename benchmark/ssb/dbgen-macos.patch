@@ -1,0 +1,24 @@
+diff --git a/shared.h b/shared.h
+--- a/shared.h
++++ b/shared.h
+@@ -117,7 +117,7 @@
+ #define  PHONE_LEN     15
+ 
+ #ifdef SSBM
+-#define  MAXAGG_LEN    10    /* max component length for a agg str */
++#define  MAXAGG_LEN    20    /* include full order priority, e.g. 4-NOT SPECIFIED */
+ 
+ #else
+ #define  MAXAGG_LEN    20    /* max component length for a agg str */
+diff --git a/rnd.c b/rnd.c
+--- a/rnd.c
++++ b/rnd.c
+@@ -24,6 +24,9 @@
+ void
+ dss_random(long *tgt, long lower, long upper, long stream)
+ {
++	/* Match UnifInt's fallback before indexing the per-stream usage array. */
++	if (stream < 0 || stream > MAX_STREAM)
++		stream = 0;
+ 	*tgt = UnifInt((long)lower, (long)upper, (long)stream);
+ 	Seed[stream].usage += 1;
