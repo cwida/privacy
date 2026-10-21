@@ -15,7 +15,6 @@
 #include <cstdio>
 
 #include <chrono>
-#include <cmath>
 #include <cctype>
 #include <fstream>
 #include <iostream>
@@ -30,7 +29,6 @@
 #include <thread>
 #include <dirent.h>
 #include <map>
-#include <set>
 
 namespace duckdb {
 static string Timestamp() {
@@ -164,292 +162,14 @@ static string ReadFileToString(const string &path) {
 	return ss.str();
 }
 
-// WIP benchmark labels distinguish source formulas from manually adapted SQL.
-static string VerdictMode(const string &sql) {
-	if (sql.find("verdict-mode: exact-fallback") != string::npos) {
-		return "VerdictDB-exact-fallback";
-	}
-	if (sql.find("verdict-mode: customer-adapted") != string::npos) {
-		return "VerdictDB-customer-adapted";
-	}
-	return "VerdictDB-artifact-formula";
-}
-
-static string CsvField(const string &value) {
-	if (value.find_first_of(",\"\n\r") == string::npos) {
-		return value;
-	}
-	string escaped = "\"";
-	for (auto ch : value) {
-		if (ch == '\"') {
-			escaped += "\"\"";
-		} else {
-			escaped += ch;
-		}
-	}
-	escaped += "\"";
-	return escaped;
-}
-
-static string UtilityOutputPath(const string &runtime_path) {
-	auto dot = runtime_path.rfind('.');
-	if (dot == string::npos) {
-		return runtime_path + "_verdictdb_utility.csv";
-	}
-	return runtime_path.substr(0, dot) + "_verdictdb_utility" + runtime_path.substr(dot);
-}
-
-struct QuerySnapshot {
-	vector<string> names;
-	vector<vector<Value>> rows;
-};
-
-static bool TryDouble(const Value &value, double &out);
-
-static bool ExecuteSnapshot(Connection &con, const string &sql, const string &label, QuerySnapshot &snapshot) {
-	auto result = con.Query(sql);
-	if (!result || result->HasError()) {
-		Log(label + " error: " + (result ? result->GetError() : string("null query result")));
-		return false;
-	}
-	snapshot.names = result->names;
-	while (true) {
-		auto chunk = result->Fetch();
-		if (!chunk || chunk->size() == 0) {
-			break;
-		}
-		for (idx_t row_idx = 0; row_idx < chunk->size(); row_idx++) {
-			vector<Value> row;
-			row.reserve(result->ColumnCount());
-			for (idx_t col = 0; col < result->ColumnCount(); col++) {
-				row.push_back(chunk->GetValue(col, row_idx));
-			}
-			snapshot.rows.push_back(std::move(row));
-		}
-	}
-	return true;
-}
-
-static bool SnapshotsApproximatelyEqual(const QuerySnapshot &expected, const QuerySnapshot &actual,
-	                                    const string &label) {
-	if (expected.names != actual.names) {
-		Log(label + ": column names differ");
-		return false;
-	}
-	if (expected.rows.size() != actual.rows.size()) {
-		Log(label + ": row count differs (SID=" + std::to_string(expected.rows.size()) +
-		    ", SIMD=" + std::to_string(actual.rows.size()) + ")");
-		return false;
-	}
-	for (idx_t row = 0; row < expected.rows.size(); row++) {
-		for (idx_t col = 0; col < expected.rows[row].size(); col++) {
-			auto &lhs = expected.rows[row][col];
-			auto &rhs = actual.rows[row][col];
-			if (lhs.IsNull() || rhs.IsNull()) {
-				if (lhs.IsNull() != rhs.IsNull()) {
-					Log(label + ": NULL mismatch at row " + std::to_string(row) + ", column " +
-					    expected.names[col]);
-					return false;
-				}
-				continue;
-			}
-			double lhs_numeric;
-			double rhs_numeric;
-			if (TryDouble(lhs, lhs_numeric) && TryDouble(rhs, rhs_numeric)) {
-				double tolerance = 1e-3 + 1e-4 * std::max(std::abs(lhs_numeric), std::abs(rhs_numeric));
-				if (std::abs(lhs_numeric - rhs_numeric) > tolerance) {
-					Log(label + ": numeric mismatch at row " + std::to_string(row) + ", column " +
-					    expected.names[col] + " (SID=" + FormatNumber(lhs_numeric) +
-					    ", SIMD=" + FormatNumber(rhs_numeric) + ")");
-					return false;
-				}
-			} else if (lhs.ToString() != rhs.ToString()) {
-				Log(label + ": value mismatch at row " + std::to_string(row) + ", column " +
-				    expected.names[col] + " (SID=" + lhs.ToString() + ", SIMD=" + rhs.ToString() + ")");
-				return false;
-			}
-		}
-	}
-	return true;
-}
-
-static bool TryDouble(const Value &value, double &out) {
-	if (value.IsNull()) {
-		return false;
-	}
-	try {
-		out = value.DefaultCastAs(LogicalType::DOUBLE).GetValue<double>();
-		return std::isfinite(out);
-	} catch (const std::exception &) {
-		return false;
-	}
-}
-
-static string ResultLookupKey(const vector<Value> &row, idx_t group_columns) {
-	if (group_columns == 0) {
-		return string();
-	}
-	string key;
-	for (idx_t col = 0; col < group_columns; col++) {
-		string value = row[col].IsNull() ? "<NULL>" : row[col].ToString();
-		key += std::to_string(value.size()) + ":" + value + "|";
-	}
-	return key;
-}
-
-static string ResultDisplayKey(const vector<Value> &row, idx_t group_columns) {
-	if (group_columns == 0) {
-		return "{}";
-	}
-	string key;
-	for (idx_t col = 0; col < group_columns; col++) {
-		if (col > 0) {
-			key += ";";
-		}
-		key += row[col].IsNull() ? "<NULL>" : row[col].ToString();
-	}
-	return key;
-}
-
-static string NumericField(const Value &value) {
-	double numeric;
-	return TryDouble(value, numeric) ? FormatNumber(numeric) : string();
-}
-
-static void WriteUtilityRow(std::ofstream &csv, int trial, const string &query_label, const string &group_key,
-	                        const string &metric, const string &status, const string &estimate,
-	                        const string &error_bound, const string &exact, const string &absolute_error,
-	                        const string &relative_error, const string &contains_exact) {
-	csv << trial << "," << CsvField(query_label) << "," << CsvField(group_key) << "," << CsvField(metric) << ","
-	    << status << "," << estimate << "," << error_bound << "," << exact << "," << absolute_error << ","
-	    << relative_error << "," << contains_exact << "\n";
-}
-
-// WIP rebuttal diagnostic: compare the artifact-style VerdictDB estimate and
-// reported 95% half-width with the exact TPC-H answer. Missing groups and NULL
-// intervals remain explicit rows so downstream summaries cannot silently drop them.
-static void WriteVerdictUtility(int trial, const string &query_label, const QuerySnapshot &estimate,
-	                            const QuerySnapshot &exact, std::ofstream &csv) {
-	idx_t first_measure = estimate.names.size();
-	for (idx_t col = 0; col + 1 < estimate.names.size(); col++) {
-		if (estimate.names[col + 1] == estimate.names[col] + "_error") {
-			first_measure = col;
-			break;
-		}
-	}
-	if (first_measure == estimate.names.size()) {
-		throw std::runtime_error("VerdictDB utility " + query_label + ": could not identify estimate/error column pairs");
-	}
-
-	vector<pair<idx_t, idx_t>> metric_columns;
-	std::map<string, idx_t> exact_columns;
-	for (idx_t col = 0; col < exact.names.size(); col++) {
-		exact_columns[exact.names[col]] = col;
-	}
-	for (idx_t col = first_measure; col + 1 < estimate.names.size(); col += 2) {
-		const string &metric = estimate.names[col];
-		if (estimate.names[col + 1] != metric + "_error") {
-			throw std::runtime_error("VerdictDB utility " + query_label + ": malformed estimate/error pair at " + metric);
-		}
-		auto exact_col = exact_columns.find(metric);
-		if (exact_col == exact_columns.end()) {
-			throw std::runtime_error("VerdictDB utility " + query_label + ": exact result lacks metric " + metric);
-		}
-		metric_columns.emplace_back(col, exact_col->second);
-	}
-
-	vector<idx_t> exact_group_columns;
-	for (idx_t col = 0; col < first_measure; col++) {
-		auto found = exact_columns.find(estimate.names[col]);
-		if (found == exact_columns.end()) {
-			throw std::runtime_error("Exact result lacks grouping column " + estimate.names[col]);
-		}
-		exact_group_columns.push_back(found->second);
-	}
-	auto exact_group = [&](const vector<Value> &row) {
-		vector<Value> group;
-		for (auto col : exact_group_columns) {
-			group.push_back(row[col]);
-		}
-		return group;
-	};
-	std::map<string, const vector<Value> *> exact_rows;
-	for (auto &row : exact.rows) {
-		exact_rows[ResultLookupKey(exact_group(row), first_measure)] = &row;
-	}
-	std::set<string> estimated_keys;
-
-	for (auto &row : estimate.rows) {
-		auto lookup_key = ResultLookupKey(row, first_measure);
-		auto group_key = ResultDisplayKey(row, first_measure);
-		estimated_keys.insert(lookup_key);
-		auto exact_row = exact_rows.find(lookup_key);
-		if (exact_row == exact_rows.end()) {
-			for (auto &columns : metric_columns) {
-				auto estimate_col = columns.first;
-				WriteUtilityRow(csv, trial, query_label, group_key, estimate.names[estimate_col], "missing_exact",
-				                NumericField(row[estimate_col]), NumericField(row[estimate_col + 1]), string(), string(),
-				                string(), string());
-			}
-			continue;
-		}
-		for (auto &columns : metric_columns) {
-			auto col = columns.first;
-			auto exact_col = columns.second;
-			const string &metric = estimate.names[col];
-			double estimate_value;
-			double error_bound;
-			double exact_value;
-			if (!TryDouble((*exact_row->second)[exact_col], exact_value)) {
-				WriteUtilityRow(csv, trial, query_label, group_key, metric, "null_exact", NumericField(row[col]),
-				                NumericField(row[col + 1]), string(), string(), string(), string());
-				continue;
-			}
-			if (!TryDouble(row[col], estimate_value)) {
-				WriteUtilityRow(csv, trial, query_label, group_key, metric, "null_estimate", string(),
-				                NumericField(row[col + 1]), FormatNumber(exact_value), string(), string(), string());
-				continue;
-			}
-			double absolute_error = std::abs(estimate_value - exact_value);
-			string relative_error = exact_value == 0 ? string() : FormatNumber(absolute_error / std::abs(exact_value));
-			if (!TryDouble(row[col + 1], error_bound)) {
-				WriteUtilityRow(csv, trial, query_label, group_key, metric, "null_interval",
-				                FormatNumber(estimate_value), string(), FormatNumber(exact_value),
-				                FormatNumber(absolute_error), relative_error, string());
-				continue;
-			}
-			string status = error_bound == 0.0 ? "zero_width_interval" : "ok";
-			WriteUtilityRow(csv, trial, query_label, group_key, metric, status, FormatNumber(estimate_value),
-			                FormatNumber(error_bound), FormatNumber(exact_value), FormatNumber(absolute_error),
-			                relative_error, absolute_error <= error_bound ? "true" : "false");
-		}
-	}
-
-	for (auto &exact_entry : exact_rows) {
-		if (estimated_keys.find(exact_entry.first) != estimated_keys.end()) {
-			continue;
-		}
-		auto &row = *exact_entry.second;
-		auto group_key = ResultDisplayKey(exact_group(row), first_measure);
-		for (auto &columns : metric_columns) {
-			auto estimate_col = columns.first;
-			auto exact_col = columns.second;
-			WriteUtilityRow(csv, trial, query_label, group_key, estimate.names[estimate_col], "missing_estimate",
-			                string(), string(), NumericField(row[exact_col]), string(), string(), string());
-		}
-	}
-}
-
 struct ASTpchOptions {
 	double scale_factor = 10.0;
 	string db_path = "tpch.db";
 	string queries_dir = "benchmark";
 	string out_csv;
 	bool run_simple_hash = false;
-	bool run_grouped_baselines = false;
 	bool skip_naive = false;
 	int threads = 8;
-	int verdictdb_utility_trials = 20;
 	vector<int> as_m_values = {64};
 };
 
@@ -464,11 +184,8 @@ static ASTpchOptions LoadASTpchOptions(const string &config_path) {
 	options.queries_dir = JsonString(root, "queries_dir", options.queries_dir);
 	options.out_csv = JsonString(root, "out", options.out_csv);
 	options.run_simple_hash = JsonBool(root, "run_simple_hash", options.run_simple_hash);
-	options.run_grouped_baselines = JsonBool(root, "run_grouped_baselines", options.run_grouped_baselines);
 	options.skip_naive = JsonBool(root, "skip_naive", options.skip_naive);
 	options.threads = static_cast<int>(JsonNumber(root, "threads", options.threads));
-	options.verdictdb_utility_trials =
-	    static_cast<int>(JsonNumber(root, "verdictdb_utility_trials", options.verdictdb_utility_trials));
 	options.as_m_values = JsonIntList(root, "as_ms", "as_m", options.as_m_values);
 	return options;
 }
@@ -608,40 +325,6 @@ ORDER BY ALL)";
 	return false;
 }
 
-static void CreateLineitemEnhanced(Connection &con) {
-	Log("Creating lineitem_enhanced...");
-	{
-		auto chk = con.Query("SELECT 1 FROM lineitem_enhanced LIMIT 1;");
-		if (chk && !chk->HasError()) {
-			Log("lineitem_enhanced already exists, skipping.");
-		} else {
-			auto r3 = con.Query("CREATE TABLE IF NOT EXISTS lineitem_enhanced AS "
-			                    "SELECT l.l_orderkey, l.l_suppkey, l.l_linenumber,"
-			                    "  c.rowid AS c_rowid, s.s_name AS s_name,"
-			                    "  (l.l_receiptdate > l.l_commitdate) AS is_late,"
-			                    "  (o.o_orderstatus = 'F') AS is_orderstatus_f,"
-			                    "  (n.n_name = 'SAUDI ARABIA') AS is_nation_saudi_arabia "
-			                    "FROM lineitem l "
-			                    "JOIN orders o ON o.o_orderkey = l.l_orderkey "
-			                    "JOIN customer c ON c.c_custkey = o.o_custkey "
-			                    "JOIN supplier s ON s.s_suppkey = l.l_suppkey "
-			                    "JOIN nation n ON s.s_nationkey = n.n_nationkey "
-			                    "ORDER BY l.l_orderkey, l.l_linenumber;");
-			if (r3 && r3->HasError()) {
-				Log(string("lineitem_enhanced creation error: ") + r3->GetError());
-			} else {
-				Log("lineitem_enhanced ready.");
-			}
-		}
-	}
-
-	auto r4 = con.Query("CREATE INDEX IF NOT EXISTS idx_lineitem_enhanced_order_supp "
-	                    "ON lineitem_enhanced(l_orderkey, l_suppkey);");
-	if (r4 && r4->HasError()) {
-		Log(string("idx_lineitem_enhanced_order_supp creation error: ") + r4->GetError());
-	}
-}
-
 // Create all Naive-AS sampling tables once (customer-based, orders-based, q21 extras)
 // Uses IF NOT EXISTS so tables persist across runs on existing databases.
 static void NaiveASCreateTables(Connection &con) {
@@ -711,119 +394,44 @@ static void NaiveASCreateTables(Connection &con) {
 		}
 	}
 
-	CreateLineitemEnhanced(con);
-}
-
-// WIP rebuttal experiment: these representation baselines still require full semantic
-// validation and reruns on the paper hardware before publication.
-static bool ConfigureSidWorldViews(Connection &con, bool overlapping) {
-	vector<string> statements;
-	if (overlapping) {
-		statements = {"CREATE OR REPLACE TEMP VIEW benchmark_customer_worlds AS "
-		              "SELECT c.*, samples.sample_id FROM customer c, range(64) AS samples(sample_id) "
-		              "WHERE (priv_hash(hash(c.c_custkey)) & (CAST(1 AS UBIGINT) << samples.sample_id)) <> 0",
-		              "CREATE OR REPLACE TEMP VIEW benchmark_order_worlds AS "
-		              "SELECT o.*, samples.sample_id FROM orders o, range(64) AS samples(sample_id) "
-		              "WHERE (priv_hash(hash(o.o_custkey)) & (CAST(1 AS UBIGINT) << samples.sample_id)) <> 0",
-		              "CREATE OR REPLACE TEMP VIEW benchmark_lineitem_worlds AS "
-		              "SELECT l.*, samples.sample_id FROM lineitem_enhanced l JOIN customer c ON c.rowid = l.c_rowid, "
-		              "range(64) AS samples(sample_id) "
-		              "WHERE (priv_hash(hash(c.c_custkey)) & (CAST(1 AS UBIGINT) << samples.sample_id)) <> 0"};
-	} else {
-		statements = {"CREATE OR REPLACE TEMP VIEW benchmark_customer_worlds AS "
-		              "SELECT customer.*, CAST(hash(c_custkey) % 64 AS INTEGER) AS sample_id FROM customer",
-		              "CREATE OR REPLACE TEMP VIEW benchmark_order_worlds AS "
-		              "SELECT orders.*, CAST(hash(o_custkey) % 64 AS INTEGER) AS sample_id FROM orders",
-		              "CREATE OR REPLACE TEMP VIEW benchmark_lineitem_worlds AS "
-		              "SELECT l.*, CAST(hash(c.c_custkey) % 64 AS INTEGER) AS sample_id "
-		              "FROM lineitem_enhanced l JOIN customer c ON c.rowid = l.c_rowid"};
-	}
-	for (auto &statement : statements) {
-		auto result = con.Query(statement);
-		if (result && result->HasError()) {
-			Log("SID baseline view setup error: " + result->GetError());
-			return false;
-		}
-	}
-	return true;
-}
-
-// WIP rebuttal experiment: apply VerdictDB's stored-sample layout and SIGMOD'18
-// rewrite to the same customer-level sampling unit as SIMD-ASA. Sample creation is
-// offline and deliberately excluded from query timings. VerdictDB defaults to a 1%
-// offline sample and 100 partitions. Domain-separated MD5 inputs provide reproducible
-// pseudorandom assignments. Do not use hash(key, salt): DuckDB's final XOR preserves
-// low-bit correlations between inclusion, partition assignment, and trials.
-static bool ConfigureVerdictDBSample(Connection &con, int trial, bool log_statistics = true) {
-	string sample_salt = "verdict_sample_" + std::to_string(trial);
-	string partition_salt = "verdict_partition_" + std::to_string(trial);
-	auto result = con.Query("CREATE OR REPLACE TEMP TABLE benchmark_verdict_customer_sample AS "
-	                        "SELECT c.* FROM customer c "
-	                        "WHERE md5_number_lower(concat('" +
-	                        sample_salt + ":', CAST(c_custkey AS VARCHAR))) % 100 = 0;");
-	if (!result || result->HasError()) {
-		Log("VerdictDB customer offline sample setup error: " +
-		    (result ? result->GetError() : string("null query result")));
-		return false;
-	}
-	result = con.Query("CREATE OR REPLACE TEMP TABLE benchmark_verdict_customer AS "
-	                   "SELECT c.*, "
-	                   "       CAST(md5_number_lower(concat('" +
-	                   partition_salt + ":', CAST(c_custkey AS VARCHAR))) % 100 AS SMALLINT) AS verdict_vpart, "
-	                   "       CAST((SELECT count(*) FROM benchmark_verdict_customer_sample) AS DOUBLE) "
-	                   "         / CAST((SELECT count(*) FROM customer) AS DOUBLE) AS verdict_vprob "
-	                   "FROM benchmark_verdict_customer_sample c;");
-	if (!result || result->HasError()) {
-		Log("VerdictDB customer sample setup error: " +
-		    (result ? result->GetError() : string("null query result")));
-		return false;
-	}
-	if (log_statistics) {
-		auto stats = con.Query("SELECT count(*), min(verdict_vprob), count(DISTINCT verdict_vpart) "
-		                       "FROM benchmark_verdict_customer;");
-		if (stats && !stats->HasError() && stats->RowCount() == 1) {
-			Log("VerdictDB customer sample trial " + std::to_string(trial) + " ready (" +
-			    stats->GetValue(0, 0).ToString() + " customers, realized probability " +
-			    stats->GetValue(1, 0).ToString() + ", " + stats->GetValue(2, 0).ToString() +
-			    " occupied of 100 variational partitions).");
+	Log("Creating lineitem_enhanced...");
+	{
+		auto chk = con.Query("SELECT 1 FROM lineitem_enhanced LIMIT 1;");
+		if (chk && !chk->HasError()) {
+			Log("lineitem_enhanced already exists, skipping.");
 		} else {
-			Log("VerdictDB customer sample trial " + std::to_string(trial) +
-			    " ready (1% uniform sample, 100 variational partitions).");
+			auto r3 = con.Query("CREATE TABLE IF NOT EXISTS lineitem_enhanced AS "
+			                    "SELECT l.l_orderkey, l.l_suppkey, l.l_linenumber,"
+			                    "  c.rowid AS c_rowid, s.s_name AS s_name,"
+			                    "  (l.l_receiptdate > l.l_commitdate) AS is_late,"
+			                    "  (o.o_orderstatus = 'F') AS is_orderstatus_f,"
+			                    "  (n.n_name = 'SAUDI ARABIA') AS is_nation_saudi_arabia "
+			                    "FROM lineitem l "
+			                    "JOIN orders o ON o.o_orderkey = l.l_orderkey "
+			                    "JOIN customer c ON c.c_custkey = o.o_custkey "
+			                    "JOIN supplier s ON s.s_suppkey = l.l_suppkey "
+			                    "JOIN nation n ON s.s_nationkey = n.n_nationkey "
+			                    "ORDER BY l.l_orderkey, l.l_linenumber;");
+			if (r3 && r3->HasError()) {
+				Log(string("lineitem_enhanced creation error: ") + r3->GetError());
+			} else {
+				Log("lineitem_enhanced ready.");
+			}
 		}
 	}
-	return true;
-}
 
-static double BenchmarkSqlQuery(Connection &con, const string &sql, const string &label) {
-	auto warmup = con.Query(sql);
-	if (warmup && warmup->HasError()) {
-		Log(label + " warmup error: " + warmup->GetError());
-		return -1;
+	auto r4 = con.Query("CREATE INDEX IF NOT EXISTS idx_lineitem_enhanced_order_supp "
+	                    "ON lineitem_enhanced(l_orderkey, l_suppkey);");
+	if (r4 && r4->HasError()) {
+		Log(string("idx_lineitem_enhanced_order_supp creation error: ") + r4->GetError());
 	}
-	vector<double> times_ms;
-	for (int run = 1; run <= 5; ++run) {
-		auto start = std::chrono::steady_clock::now();
-		auto result = con.Query(sql);
-		auto end = std::chrono::steady_clock::now();
-		if (result && result->HasError()) {
-			Log(label + " run " + std::to_string(run) + " error: " + result->GetError());
-			return -1;
-		}
-		double elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
-		times_ms.push_back(elapsed_ms);
-		Log(label + " run " + std::to_string(run) + " time (ms): " + FormatNumber(elapsed_ms));
-	}
-	return Median(times_ms);
 }
 
 int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double sf, const string &out_csv,
-                       bool run_simple_hash, int threads, const vector<int> &as_m_values, bool skip_naive,
-                       bool run_grouped_baselines, int verdictdb_utility_trials) {
+                       bool run_simple_hash, int threads, const vector<int> &as_m_values, bool skip_naive) {
 	try {
 		Log(string("run_simple_hash flag: ") + (run_simple_hash ? string("true") : string("false")));
-		Log(string("run_grouped_baselines flag: ") + (run_grouped_baselines ? string("true") : string("false")));
 		Log(string("skip_naive flag: ") + (skip_naive ? string("true") : string("false")));
-		Log("VerdictDB utility trials: " + std::to_string(verdictdb_utility_trials));
 		string actual_out = out_csv;
 		if (actual_out.empty()) {
 			string sf_token = FormatNumber(sf);
@@ -902,9 +510,6 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 		string bitslice_dir = queries_dir + string("/tpch/tpch_as_queries");
 		string simple_hash_dir = queries_dir + string("/tpch/tpch_as_simple_hash_queries");
 		string naive_as_dir = queries_dir + string("/tpch/tpch_naive_as_queries");
-		string sid_queries_dir = queries_dir + string("/tpch/tpch_sid_queries");
-		string matched_simd_dir = queries_dir + string("/tpch/tpch_matched_simd_queries");
-		string verdictdb_dir = queries_dir + string("/tpch/tpch_verdictdb_queries");
 
 		// Discover all .sql files in the bitslice directory
 		auto query_entries = DiscoverQueryFiles(bitslice_dir);
@@ -920,33 +525,15 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 			throw std::runtime_error("Failed to open output CSV: " + actual_out);
 		}
 		csv << "query,mode,m,median_ms\n";
-		string utility_out = UtilityOutputPath(actual_out);
-		std::ofstream utility_csv;
-		if (run_grouped_baselines) {
-			EnsureOutputParentDirectory(utility_out);
-			utility_csv.open(utility_out, std::ofstream::out | std::ofstream::trunc);
-			if (!utility_csv.is_open()) {
-				throw std::runtime_error("Failed to open VerdictDB utility CSV: " + utility_out);
-			}
-			utility_csv << "trial,query,group_key,metric,status,estimate,error_bound_95,exact,absolute_error,"
-			               "relative_error,contains_exact\n";
-		}
 
 		// Cache baseline median per query number (avoid re-running for variants like q08-nolambda)
 		std::map<int, double> baseline_cache;
 
-		// Only Naive-AS uses materialized Bernoulli membership tables. Expanded-Worlds derives
-		// the same membership bits as SIMD-AS directly from priv_hash at query time.
+		// Create sampling/helper tables only when Naive-AS is requested.
 		if (!skip_naive) {
 			Log("Creating Naive-AS sampling tables (if not already present)...");
 			NaiveASCreateTables(con);
 			Log("Naive-AS sampling tables ready.");
-		} else if (run_grouped_baselines) {
-			CreateLineitemEnhanced(con);
-		}
-		bool verdictdb_ready = false;
-		if (run_grouped_baselines) {
-			verdictdb_ready = ConfigureVerdictDBSample(con, 0);
 		}
 
 		for (auto &entry : query_entries) {
@@ -1094,72 +681,6 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 				}
 			}
 
-			if (run_grouped_baselines) {
-				struct GroupedBaseline {
-					string mode;
-					bool overlapping;
-				};
-				vector<GroupedBaseline> grouped_baselines = {
-				    {"Disjoint-SID", false},
-				    {"Expanded-Worlds", true},
-				};
-				for (auto &baseline : grouped_baselines) {
-					string query_file = FindQueryFile(sid_queries_dir, entry.query_number);
-					if (!FileExists(query_file)) {
-						Log(baseline.mode + " " + entry.label + ": no query file found at " + query_file +
-						    ", skipping");
-						continue;
-					}
-					string sql = ReadFileToString(query_file);
-					if (sql.empty() || !ConfigureSidWorldViews(con, baseline.overlapping)) {
-						csv << entry.label << "," << baseline.mode << ",64,-1\n";
-						continue;
-					}
-					double median_ms = BenchmarkSqlQuery(con, sql, baseline.mode + " " + entry.label);
-					csv << entry.label << "," << baseline.mode << ",64," << FormatNumber(median_ms) << "\n";
-				}
-
-				string matched_simd_file = FindQueryFile(matched_simd_dir, entry.query_number);
-				if (!FileExists(matched_simd_file)) {
-					Log("Matched-SIMD64 " + entry.label + ": no query file found at " + matched_simd_file +
-					    ", skipping");
-				} else {
-					string matched_simd_sql = ReadFileToString(matched_simd_file);
-					string disjoint_sql = ReadFileToString(FindQueryFile(sid_queries_dir, entry.query_number));
-					QuerySnapshot disjoint_result;
-					QuerySnapshot matched_result;
-					bool equivalent = ConfigureSidWorldViews(con, false) &&
-					                  ExecuteSnapshot(con, disjoint_sql, "Disjoint-SID validation " + entry.label,
-					                                  disjoint_result) &&
-					                  ExecuteSnapshot(con, matched_simd_sql, "Matched-SIMD64 validation " + entry.label,
-					                                  matched_result) &&
-					                  SnapshotsApproximatelyEqual(disjoint_result, matched_result,
-					                                              "Matched representation " + entry.label);
-					if (!equivalent) {
-						Log("Matched-SIMD64 " + entry.label + ": semantic validation failed");
-						csv << entry.label << ",Matched-SIMD64,64,-1\n";
-					} else {
-						Log("Matched-SIMD64 " + entry.label + ": matches Disjoint-SID");
-						double median_ms = BenchmarkSqlQuery(con, matched_simd_sql, "Matched-SIMD64 " + entry.label);
-						csv << entry.label << ",Matched-SIMD64,64," << FormatNumber(median_ms) << "\n";
-					}
-				}
-
-				string verdictdb_query_file = FindQueryFile(verdictdb_dir, entry.query_number);
-				if (!FileExists(verdictdb_query_file)) {
-					Log("VerdictDB-sigmod18 " + entry.label + ": no supported query file found at " +
-					    verdictdb_query_file + ", skipping");
-				} else if (!verdictdb_ready) {
-					csv << entry.label << ",VerdictDB-sigmod18,100,-1\n";
-				} else {
-					string verdictdb_sql = ReadFileToString(verdictdb_query_file);
-					auto mode = VerdictMode(verdictdb_sql);
-					double median_ms = BenchmarkSqlQuery(con, verdictdb_sql, mode + " " + entry.label);
-					csv << entry.label << "," << mode << ","
-					    << (mode == "VerdictDB-exact-fallback" ? 0 : 100) << "," << FormatNumber(median_ms) << "\n";
-				}
-			}
-
 			// Naive-AS mode: run on a 50% random sample, multiply median by 64.
 			string naive_as_qfile = FindQueryFile(naive_as_dir, entry.query_number);
 			if (!skip_naive && FileExists(naive_as_qfile)) {
@@ -1232,64 +753,12 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 			} else if (!skip_naive) {
 				Log("Naive-AS " + entry.label + ": no query file found at " + naive_as_qfile + ", skipping");
 			}
-			csv.flush();
-		}
-
-		// Utility is deliberately separate from timing. Repeated independent customer samples permit empirical
-		// coverage summaries; the runtime experiment above remains fixed to trial zero for reproducibility.
-		if (run_grouped_baselines && verdictdb_utility_trials > 0) {
-			std::map<int, QuerySnapshot> exact_cache;
-			for (int trial = 0; trial < verdictdb_utility_trials; trial++) {
-				if (!ConfigureVerdictDBSample(con, trial, trial == 0 || (trial + 1) % 10 == 0)) {
-					throw std::runtime_error("VerdictDB utility trial " + std::to_string(trial) + ": sample setup failed");
-				}
-				std::set<int> completed_queries;
-				for (auto &entry : query_entries) {
-					if (!completed_queries.insert(entry.query_number).second) {
-						continue;
-					}
-					string verdictdb_query_file = FindQueryFile(verdictdb_dir, entry.query_number);
-					if (!FileExists(verdictdb_query_file)) {
-						throw std::runtime_error("VerdictDB utility: missing query file for " + entry.label);
-					}
-					string verdictdb_sql = ReadFileToString(verdictdb_query_file);
-					if (VerdictMode(verdictdb_sql) == "VerdictDB-exact-fallback") {
-						continue; // Exact executions have no sampling interval to evaluate.
-					}
-					QuerySnapshot estimate;
-					if (!ExecuteSnapshot(con, verdictdb_sql,
-					                     "VerdictDB utility trial " + std::to_string(trial) + " estimate " + entry.label,
-					                     estimate)) {
-						throw std::runtime_error("VerdictDB utility trial " + std::to_string(trial) +
-						                         ": estimate failed for " + entry.label);
-					}
-					auto exact_entry = exact_cache.find(entry.query_number);
-					if (exact_entry == exact_cache.end()) {
-						QuerySnapshot exact;
-						string exact_sql = "PRAGMA tpch(" + std::to_string(entry.query_number) + ");";
-						if (!ExecuteSnapshot(con, exact_sql, "VerdictDB utility exact " + entry.label, exact)) {
-							throw std::runtime_error("VerdictDB utility: exact reference failed for " + entry.label);
-						}
-						exact_entry = exact_cache.emplace(entry.query_number, std::move(exact)).first;
-					}
-					WriteVerdictUtility(trial, entry.label, estimate, exact_entry->second, utility_csv);
-				}
-				if ((trial + 1) % 10 == 0 || trial + 1 == verdictdb_utility_trials) {
-					Log("Completed VerdictDB utility trial " + std::to_string(trial + 1) + "/" +
-					    std::to_string(verdictdb_utility_trials));
-				}
-				utility_csv.flush();
-			}
 		}
 
 		// Keep Naive-AS tables in the database so they are reused on the next run
 
 		csv.close();
 		Log(string("Benchmark finished. Results written to ") + actual_out);
-		if (utility_csv.is_open()) {
-			utility_csv.close();
-			Log("VerdictDB utility results written to " + utility_out);
-		}
 
 		return 0;
 	} catch (std::exception &ex) {
@@ -1307,15 +776,11 @@ static void PrintUsageMain() {
 	          << "  db_path: DuckDB database file (default 'tpch.db')\n"
 	          << "  queries_dir: root directory containing AS SQL variants (default 'benchmark').\n"
 	          << "               subdirectories expected: 'tpch/tpch_as_queries' (bitslice), "
-	             "'tpch/tpch_as_simple_hash_queries' (simple hash), 'tpch/tpch_naive_as_queries' (Naive-AS),\n"
-	          << "               'tpch/tpch_sid_queries' (shared disjoint/expanded SID queries), "
-	             "'tpch/tpch_verdictdb_queries' (VerdictDB variational rewrites)\n"
+	             "'tpch/tpch_as_simple_hash_queries' (simple hash), 'tpch/tpch_naive_as_queries' (Naive-AS)\n"
 	          << "  out_csv: optional output CSV path (auto-named if omitted)\n"
 	          << "  --config <json>: load benchmark options from a JSON config\n"
 	          << "  --dry-run: validate options without opening the database\n"
 	          << "  --run-simple-hash: optional flag to run a simple hash AS variant as well\n"
-	          << "  --run-grouped-baselines: run Disjoint-SID, Expanded-Worlds, and VerdictDB baselines\n"
-	          << "  --verdictdb-utility-trials=N: independent VerdictDB utility samples (default 20)\n"
 	          << "  --as-ms <csv>: AS sample counts to run, e.g. 64,512 (default 64)\n"
 	          << "  --skip-naive: skip Naive-AS setup and runs\n"
 	          << "  --threads=N: number of DuckDB threads (default 8)\n";
@@ -1346,8 +811,6 @@ int main(int argc, char **argv) {
 				dry_run = true;
 			} else if (arg == "--run-simple-hash") {
 				options.run_simple_hash = true;
-			} else if (arg == "--run-grouped-baselines") {
-				options.run_grouped_baselines = true;
 			} else if (arg == "--skip-naive") {
 				options.skip_naive = true;
 			} else if (arg == "--as-ms" && i + 1 < argc) {
@@ -1358,11 +821,6 @@ int main(int argc, char **argv) {
 				options.threads = std::stoi(argv[++i]);
 			} else if (arg.rfind("--threads=", 0) == 0) {
 				options.threads = std::stoi(arg.substr(10));
-			} else if (arg == "--verdictdb-utility-trials" && i + 1 < argc) {
-				options.verdictdb_utility_trials = std::stoi(argv[++i]);
-			} else if (arg.rfind("--verdictdb-utility-trials=", 0) == 0) {
-				options.verdictdb_utility_trials =
-				    std::stoi(arg.substr(std::string("--verdictdb-utility-trials=").size()));
 			} else if (arg.rfind("--", 0) == 0) {
 				throw std::runtime_error("unknown option: " + arg);
 			} else {
@@ -1387,9 +845,6 @@ int main(int argc, char **argv) {
 		if (options.threads <= 0) {
 			throw std::runtime_error("threads must be positive");
 		}
-		if (options.verdictdb_utility_trials < 0) {
-			throw std::runtime_error("VerdictDB utility trials must be non-negative");
-		}
 		if (options.as_m_values.empty()) {
 			throw std::runtime_error("AS sample-count list must not be empty");
 		}
@@ -1400,7 +855,7 @@ int main(int argc, char **argv) {
 		}
 		if (dry_run) {
 			std::cout << "Valid AS TPC-H config: sf=" << options.scale_factor << ", threads=" << options.threads
-			          << ", VerdictDB utility trials=" << options.verdictdb_utility_trials << ", m=";
+			          << ", m=";
 			for (size_t i = 0; i < options.as_m_values.size(); i++) {
 				std::cout << (i == 0 ? "" : ",") << options.as_m_values[i];
 			}
@@ -1409,8 +864,7 @@ int main(int argc, char **argv) {
 		}
 		return duckdb::RunASTPCHBenchmark(options.db_path, options.queries_dir, options.scale_factor, options.out_csv,
 		                                  options.run_simple_hash, options.threads, options.as_m_values,
-		                                  options.skip_naive, options.run_grouped_baselines,
-		                                  options.verdictdb_utility_trials);
+		                                  options.skip_naive);
 	} catch (std::exception &ex) {
 		std::cerr << "error: " << ex.what() << "\n";
 		return 1;
