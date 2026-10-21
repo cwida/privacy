@@ -119,7 +119,8 @@ template <typename ACCUM_T, typename VALUE_T>
 #ifndef PAC_GODBOLT
 AUTOVECTORIZE static inline
 #endif
-    void AddToTotalsSimple(ACCUM_T *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
+    void
+    AddToTotalsSimple(ACCUM_T *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
 	ACCUM_T v = static_cast<ACCUM_T>(value);
 	for (int j = 0; j < 64; j++) {
 #ifdef PAC_NOSIMD
@@ -152,7 +153,8 @@ template <typename SIGNED_T, typename UNSIGNED_T, uint64_t MASK, typename VALUE_
 #ifndef PAC_GODBOLT
 AUTOVECTORIZE static inline
 #endif
-    void AddToTotalsSWAR(uint64_t *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
+    void
+    AddToTotalsSWAR(uint64_t *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
 	constexpr int BITS = sizeof(SIGNED_T) * 8;
 	// Cast to unsigned type to avoid sign extension, then broadcast to all lanes
 	uint64_t val_packed = static_cast<UNSIGNED_T>(static_cast<SIGNED_T>(value)) * MASK;
@@ -356,7 +358,7 @@ struct PacSumIntState {
 			if (k > max_level_used) { // dst does not have this yet. Try to steal from src
 #ifdef PAC_NOBUFFERING
 				// can only steal src's pointer if it's arena-allocated (not inline storage).
-				if (k != src->inline_level_idx) { // without buffering, the SumState is not arena-allocated
+				if (k != src->inline_level_idx) {       // without buffering, the SumState is not arena-allocated
 #endif
 					if (k < 9 || max_level_used >= 9) { // beware not to mess up dst inline storage
 						u.levels[k] = src->u.levels[k];
