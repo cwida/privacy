@@ -13,7 +13,7 @@ diff --git a/shared.h b/shared.h
 diff --git a/rnd.c b/rnd.c
 --- a/rnd.c
 +++ b/rnd.c
-@@ -24,6 +24,9 @@
+@@ -24,5 +24,8 @@
  void
  dss_random(long *tgt, long lower, long upper, long stream)
  {
