@@ -76,8 +76,10 @@ void RegisterPacSampleMSumIfFunctions(ExtensionLoader &loader);
 // APPROX (NEW!): only uses 16-bits counters in 25 lazily allocated levels, staggered by 4 bits (112 bits covered)
 //              We sum into the highest level, such that the highest set bit in value is 4 positions clear from its max.
 //              This means at least 16, and on average >32, such values can be summed before overflow could happen.
-//              On overflow, all 16 bits are filled, the major 12 are added to the next counter and we reset to 0.
-//              This ensures a max error of 1/4096 (2^12) = 0.025% in the sum totals, which is comfortable for PAC.
+//              On overflow, all 16 bits are filled, the major 12 are added to the next counter and the minor 4 stay
+//              behind, so cascading is lossless. Finalization sums all levels (scaled by 2^(4*level)), so the only
+//              approximation is the rounding of each input to its level: it keeps 9-12 significant bits, i.e. a
+//              relative error of at most 2^-9 per value, unbiased (round-to-nearest), so it averages out over values.
 //              Because 25 level pointers is a largish array (200 bytes) that is often quite empty, we to use this space
 //              for storing the first set of 16-bits counters (128 bytes) as long as only small (<9) levels are used.
 //
@@ -119,8 +121,7 @@ template <typename ACCUM_T, typename VALUE_T>
 #ifndef PAC_GODBOLT
 AUTOVECTORIZE static inline
 #endif
-    void
-    AddToTotalsSimple(ACCUM_T *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
+    void AddToTotalsSimple(ACCUM_T *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
 	ACCUM_T v = static_cast<ACCUM_T>(value);
 	for (int j = 0; j < 64; j++) {
 #ifdef PAC_NOSIMD
@@ -153,8 +154,7 @@ template <typename SIGNED_T, typename UNSIGNED_T, uint64_t MASK, typename VALUE_
 #ifndef PAC_GODBOLT
 AUTOVECTORIZE static inline
 #endif
-    void
-    AddToTotalsSWAR(uint64_t *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
+    void AddToTotalsSWAR(uint64_t *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
 	constexpr int BITS = sizeof(SIGNED_T) * 8;
 	// Cast to unsigned type to avoid sign extension, then broadcast to all lanes
 	uint64_t val_packed = static_cast<UNSIGNED_T>(static_cast<SIGNED_T>(value)) * MASK;
@@ -206,6 +206,9 @@ constexpr int PAC_APPROX_SWAR_ELEMENTS = 16;
 constexpr int PAC_APPROX_LEVEL_SHIFT = 4;
 // SWAR mask for 16-bit elements (one bit per 16-bit lane)
 constexpr uint64_t PAC_APPROX_SWAR_MASK = 0x0001000100010001ULL;
+// Low bits that stay behind in a counter when its upper 12 bits cascade to the next level
+constexpr int32_t PAC_APPROX_LEVEL_MASK = (1 << PAC_APPROX_LEVEL_SHIFT) - 1;
+constexpr uint64_t PAC_APPROX_REMAINDER_MASK = static_cast<uint64_t>(PAC_APPROX_LEVEL_MASK) * PAC_APPROX_SWAR_MASK;
 
 // Templated integer state - SIGNED selects signed/unsigned types and thresholds
 // Uses lazy allocation via DuckDB's ArenaAllocator for memory management.
@@ -287,13 +290,15 @@ struct PacSumIntState {
 	static constexpr int32_t OVERFLOW_THRESHOLD = SIGNED ? 32767 : 65535;
 	static constexpr int32_t UNDERFLOW_THRESHOLD = SIGNED ? -32768 : 0;
 
-	// Add amount to exact_total[level], allocating level if needed, cascading if overflow
+	// Add amount to exact_total[level], allocating level if needed, cascading if overflow.
+	// exact_total[level] is an upper bound on every world counter at that level (each world sums a subset of
+	// the amounts), so checking it against the 16-bit range guarantees that no packed SWAR lane can overflow.
 	inline void AddToExactTotal(int level, int32_t amount, ArenaAllocator &allocator) {
 		EnsureLevelAllocated(allocator, level);
 		int32_t new_total = exact_total[level] + amount;
 		if (DUCKDB_UNLIKELY(new_total > OVERFLOW_THRESHOLD || new_total < UNDERFLOW_THRESHOLD)) {
 			Cascade(level, allocator);
-			exact_total[level] = amount;
+			exact_total[level] += amount; // Cascade() leaves the remainder bound behind
 		} else {
 			exact_total[level] = new_total;
 		}
@@ -303,6 +308,10 @@ struct PacSumIntState {
 	// Counter type: int16_t for signed, uint16_t for unsigned
 	using CounterT = typename std::conditional<SIGNED, int16_t, uint16_t>::type;
 
+	// Lossless cascade: the upper 12 bits of each counter move to level k+1, the lower 4 bits stay behind at
+	// level k (x == (x >> 4) * 16 + (x & 15), also for negative x with arithmetic shift). So cascading never
+	// loses information; the only approximation in this sum is the rounding of each input value at routing.
+	// After the cascade, each remaining counter is in [0,15], so exact_total[k] is reset to that upper bound.
 	void Cascade(int k, ArenaAllocator &allocator) {
 		if (k >= PAC_APPROX_NUM_LEVELS - 1 || !u.levels[k]) {
 			return;
@@ -316,31 +325,31 @@ struct PacSumIntState {
 		for (int j = 0; j < 64; j++) {
 			dst[j] += static_cast<CounterT>(src[j] >> PAC_APPROX_LEVEL_SHIFT);
 		}
-		memset(u.levels[k], 0, PAC_APPROX_SWAR_ELEMENTS * sizeof(uint64_t));
-		exact_total[k] = 0;
+		for (int i = 0; i < PAC_APPROX_SWAR_ELEMENTS; i++) {
+			u.levels[k][i] &= PAC_APPROX_REMAINDER_MASK;
+		}
+		exact_total[k] = PAC_APPROX_LEVEL_MASK;
 	}
 
-	// Flush all levels by cascading up to the highest level that received data
-	void Flush(ArenaAllocator &allocator) {
-		if (max_level_used < 0) {
-			return;
-		}
-		for (int k = 0; k < max_level_used; k++) {
-			Cascade(k, allocator);
-		}
+	// No forced cascade at finalization: GetTotals() reads all levels, so nothing needs to move up.
+	// (Forcing partially filled counters up to the top level would truncate them: a world whose own total
+	// is small compared to the largest value in the group would lose most of its precision.)
+	void Flush(ArenaAllocator &) {
 	}
 
-	// Get probabilistic totals as PAC_FLOAT[64] for finalization
+	// Get probabilistic totals as PAC_FLOAT[64] for finalization: sum of all levels, each scaled by 2^(4*level)
 	void GetTotals(PAC_FLOAT *dst) const {
-		if (max_level_used < 0) {
-			memset(dst, 0, 64 * sizeof(PAC_FLOAT));
-			return;
-		}
-		PAC_FLOAT scale = std::exp2(PAC_APPROX_LEVEL_SHIFT * max_level_used);
-		const CounterT *counters = reinterpret_cast<const CounterT *>(u.levels[max_level_used]);
-		for (int j = 0; j < 64; j++) {
-			int swar_idx = (j % 16) * 4 + (j / 16);
-			dst[j] = static_cast<PAC_FLOAT>(counters[swar_idx]) * scale;
+		memset(dst, 0, 64 * sizeof(PAC_FLOAT));
+		for (int k = 0; k <= max_level_used; k++) {
+			if (!u.levels[k]) {
+				continue;
+			}
+			PAC_FLOAT scale = std::exp2(PAC_APPROX_LEVEL_SHIFT * k);
+			const CounterT *counters = reinterpret_cast<const CounterT *>(u.levels[k]);
+			for (int j = 0; j < 64; j++) {
+				int swar_idx = (j % 16) * 4 + (j / 16);
+				dst[j] += static_cast<PAC_FLOAT>(counters[swar_idx]) * scale;
+			}
 		}
 	}
 
@@ -358,7 +367,7 @@ struct PacSumIntState {
 			if (k > max_level_used) { // dst does not have this yet. Try to steal from src
 #ifdef PAC_NOBUFFERING
 				// can only steal src's pointer if it's arena-allocated (not inline storage).
-				if (k != src->inline_level_idx) {       // without buffering, the SumState is not arena-allocated
+				if (k != src->inline_level_idx) { // without buffering, the SumState is not arena-allocated
 #endif
 					if (k < 9 || max_level_used >= 9) { // beware not to mess up dst inline storage
 						u.levels[k] = src->u.levels[k];
@@ -374,8 +383,13 @@ struct PacSumIntState {
 			constexpr int32_t THRESHOLD = SIGNED ? 32767 : 65535;
 			int32_t new_total = exact_total[k] + src->exact_total[k];
 			if (new_total > THRESHOLD || (SIGNED && new_total < -32768)) {
-				Cascade(k, allocator);
-				exact_total[k] = src->exact_total[k];
+				Cascade(k, allocator); // dst counters now <= PAC_APPROX_LEVEL_MASK
+				if (src->exact_total[k] > THRESHOLD - PAC_APPROX_LEVEL_MASK) {
+					// src level is (nearly) full too: cascade it as well (src is consumed, so mutating it is fine;
+					// its level k+1 grows and is merged in the next iteration, as src->max_level_used is re-read)
+					src->Cascade(k, allocator);
+				}
+				exact_total[k] += src->exact_total[k]; // Cascade() leaves the remainder bound behind
 			} else {
 				exact_total[k] = new_total;
 			}

@@ -353,7 +353,7 @@ GROUP BY
 ORDER BY
     o_year;
 ----
-1995	7956.0704
+1995	7982.2848
 1996	3997.6960
 
 # Test 4: TPC-H Q9-style query with complex arithmetic in subquery
@@ -389,7 +389,7 @@ ORDER BY
     nation,
     o_year DESC;
 ----
-FRANCE	1996	-619.3152
+FRANCE	1996	-620.1344
 FRANCE	1995	0.0000
 GERMANY	1996	0.0000
 GERMANY	1995	NULL
