@@ -296,3 +296,81 @@ detected absence of sample diversity
 # Cleanup
 statement ok
 DROP TABLE test_data
+
+# Signed packed counters must not carry into neighboring worlds. The full
+# stream cancels, but worlds 1--63 contain only the positive rows, so overflow
+# detection must bound input magnitudes rather than the signed full-stream sum.
+statement ok
+SET pac_sample_diversity_check = false
+
+statement ok
+CREATE TABLE signed_worlds AS
+SELECT CASE WHEN i % 2 = 0 THEN 18446744073709551615::UBIGINT ELSE 1::UBIGINT END AS mask,
+       CASE WHEN i % 2 = 0 THEN 1::BIGINT ELSE -1::BIGINT END AS v
+FROM range(1000) t(i)
+
+query II
+WITH a AS (SELECT as_sum(mask, v) AS lanes FROM signed_worlds),
+e AS (SELECT j, sum(v) FILTER (WHERE ((mask >> j) & 1) <> 0) AS s
+      FROM signed_worlds CROSS JOIN range(64) worlds(j) GROUP BY j)
+SELECT count(*), count(*) FILTER (WHERE lanes[j+1] / 2 = s::FLOAT) FROM e, a
+----
+64	64
+
+# Finalization must retain contributions in all allocated levels. These values
+# also sum without truncation in the approximate kernel (48 + 8192 = 8240).
+query I
+WITH t(v) AS (VALUES (1::BIGINT), (15::BIGINT), (32::BIGINT), (8192::BIGINT)),
+a AS (SELECT as_sum(18446744073709551615::UBIGINT, v) AS lanes FROM t)
+SELECT count(*) FILTER (WHERE lanes[j+1] / 2 = 8240::FLOAT)
+FROM a CROSS JOIN range(64) worlds(j)
+----
+64
+
+statement ok
+DROP TABLE signed_worlds
+
+statement ok
+SET pac_sample_diversity_check = true
+
+# Finalization must not force partially filled levels up to the top level: a
+# world whose own total is small compared to the largest value in the group
+# used to lose most of its precision (55890 finalized as 53248, -4.7%, when
+# other worlds held values of several millions). World 0 holds only the small
+# row; worlds 1..63 hold the three large rows.
+query II
+WITH t(mask, v) AS (VALUES (1::UBIGINT, 55890::BIGINT),
+                           (18446744073709551614::UBIGINT, 3000000::BIGINT),
+                           (18446744073709551614::UBIGINT, 5500000::BIGINT),
+                           (18446744073709551614::UBIGINT, 9000000::BIGINT)),
+a AS (SELECT as_sum(mask, v) AS lanes FROM t)
+SELECT abs(lanes[1] / 2 - 55890) < 55890 * 0.001, abs(lanes[2] / 2 - 17500000) < 17500000 * 0.001 FROM a
+----
+true	true
+
+# Cascading is lossless and finalization reads all levels, so the only error of
+# a large sum is the per-value truncation at routing (at most 2^-8 per value,
+# downward); the sum stays well within 0.1% of exact.
+statement ok
+CREATE TABLE approx_sum_large AS
+SELECT 18446744073709551615::UBIGINT AS mask, (1048576 + (i * 1000003) % 7340032)::BIGINT AS v FROM range(100000) t(i)
+
+query I
+WITH a AS (SELECT as_sum(mask, v) AS lanes FROM approx_sum_large),
+e AS (SELECT sum(v)::DOUBLE AS s FROM approx_sum_large)
+SELECT abs(lanes[1] / 2 - s) / s < 0.001 FROM a, e
+----
+true
+
+# Combine of two full levels: each UNION ALL branch is its own pipeline, so its
+# partial state has exact_total[0] = 65535 at combine time. Since a cascade
+# leaves up to 15 behind in each counter, the source level must be cascaded
+# too, or 15 + 65535 would wrap the packed 16-bit lanes.
+query I
+WITH t AS (SELECT 18446744073709551615::UBIGINT AS mask, 1::BIGINT AS v FROM range(65535)
+           UNION ALL SELECT 18446744073709551615::UBIGINT, 1::BIGINT FROM range(65535)
+           UNION ALL SELECT 18446744073709551615::UBIGINT, 1::BIGINT FROM range(65535)),
+a AS (SELECT as_sum(mask, v) AS lanes FROM t)
+SELECT count(*) FILTER (WHERE lanes[j+1] / 2 = 196605) FROM a CROSS JOIN range(64) worlds(j)
+----
+64

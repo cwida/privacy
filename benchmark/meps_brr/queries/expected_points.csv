@@ -1,0 +1,6 @@
+query,metric,expected,absolute_tolerance
+q01_expenditures,total_expenditure,1617531007314,0.5
+q01_expenditures,mean_expenditure,5005.64,0.005
+q01_expenditures,mean_among_spenders,5908.3,0.05
+q02_age_groups,mean_spenders_age_under65,4615.1,0.05
+q02_age_groups,mean_spenders_age_65plus,11780.8,0.05
