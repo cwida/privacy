@@ -348,9 +348,9 @@ SELECT abs(lanes[1] / 2 - 55890) < 55890 * 0.001, abs(lanes[2] / 2 - 17500000) <
 ----
 true	true
 
-# Cascading is lossless and routing rounds to nearest, so the relative error of
-# a large sum stays far below the 2^-9 per-value rounding bound (and is not
-# biased downward as truncation would be).
+# Cascading is lossless and finalization reads all levels, so the only error of
+# a large sum is the per-value truncation at routing (at most 2^-8 per value,
+# downward); the sum stays well within 0.1% of exact.
 statement ok
 CREATE TABLE approx_sum_large AS
 SELECT 18446744073709551615::UBIGINT AS mask, (1048576 + (i * 1000003) % 7340032)::BIGINT AS v FROM range(100000) t(i)
@@ -358,7 +358,7 @@ SELECT 18446744073709551615::UBIGINT AS mask, (1048576 + (i * 1000003) % 7340032
 query I
 WITH a AS (SELECT as_sum(mask, v) AS lanes FROM approx_sum_large),
 e AS (SELECT sum(v)::DOUBLE AS s FROM approx_sum_large)
-SELECT abs(lanes[1] / 2 - s) / s < 0.0001 FROM a, e
+SELECT abs(lanes[1] / 2 - s) / s < 0.001 FROM a, e
 ----
 true
 

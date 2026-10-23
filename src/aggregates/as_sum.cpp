@@ -31,15 +31,14 @@ PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, typena
 	state.key_hash |= key_hash;
 #ifndef PAC_EXACTSUM
 	// APPROX ALGORITHM: route by bit position, shift value
-	// 16-bit counters with 4-bit level shift. The shifted magnitude is rounded to nearest (not truncated), so the
-	// per-value error is unbiased and at most half a unit of the level. The rounded magnitude is at most 4096,
-	// which still leaves 16 additions of headroom in a 16-bit counter.
+	// 16-bit counters with 4-bit level shift. The value is truncated to its level (keeps 9-12 significant bits,
+	// so at most 2^-8 relative error per value, always downward); this is the only approximation in the sum,
+	// since cascading is lossless and finalization reads all levels. Rounding to nearest here would make the
+	// per-value error unbiased, but costs ~2% on this hot path, so we keep the prologue minimal.
 	uint64_t abs_val = SIGNED && value < 0 ? static_cast<uint64_t>(-value) : static_cast<uint64_t>(value);
 	int level = PacSumIntState<SIGNED>::GetLevel(static_cast<int64_t>(abs_val));
-	uint64_t shift = level << 2;               // multiply level by 4
-	uint64_t half_unit = (1ULL << shift) >> 1; // 0 for level 0, 2^(shift-1) otherwise
-	int64_t shifted_mag = static_cast<int64_t>(abs_val >> shift) + static_cast<int64_t>((abs_val & half_unit) != 0);
-	int64_t shifted_val = SIGNED && value < 0 ? -shifted_mag : shifted_mag;
+	uint64_t shift = level << 2; // multiply level by 4
+	int64_t shifted_val = static_cast<int64_t>(value) >> shift;
 	state.AddToExactTotal(level, static_cast<int32_t>(shifted_val), allocator);
 	AddToTotalsSWAR<int16_t, uint16_t, PAC_APPROX_SWAR_MASK>(state.u.levels[level], shifted_val, key_hash);
 #elif defined(PAC_NOCASCADING)

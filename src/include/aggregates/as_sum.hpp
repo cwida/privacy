@@ -78,8 +78,8 @@ void RegisterPacSampleMSumIfFunctions(ExtensionLoader &loader);
 //              This means at least 16, and on average >32, such values can be summed before overflow could happen.
 //              On overflow, all 16 bits are filled, the major 12 are added to the next counter and the minor 4 stay
 //              behind, so cascading is lossless. Finalization sums all levels (scaled by 2^(4*level)), so the only
-//              approximation is the rounding of each input to its level: it keeps 9-12 significant bits, i.e. a
-//              relative error of at most 2^-9 per value, unbiased (round-to-nearest), so it averages out over values.
+//              approximation is the truncation of each input to its level: it keeps 9-12 significant bits, i.e. a
+//              relative error of at most 2^-8 per value (downward), which is small compared to the PAC noise.
 //              Because 25 level pointers is a largish array (200 bytes) that is often quite empty, we to use this space
 //              for storing the first set of 16-bits counters (128 bytes) as long as only small (<9) levels are used.
 //
@@ -121,7 +121,8 @@ template <typename ACCUM_T, typename VALUE_T>
 #ifndef PAC_GODBOLT
 AUTOVECTORIZE static inline
 #endif
-    void AddToTotalsSimple(ACCUM_T *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
+    void
+    AddToTotalsSimple(ACCUM_T *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
 	ACCUM_T v = static_cast<ACCUM_T>(value);
 	for (int j = 0; j < 64; j++) {
 #ifdef PAC_NOSIMD
@@ -154,7 +155,8 @@ template <typename SIGNED_T, typename UNSIGNED_T, uint64_t MASK, typename VALUE_
 #ifndef PAC_GODBOLT
 AUTOVECTORIZE static inline
 #endif
-    void AddToTotalsSWAR(uint64_t *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
+    void
+    AddToTotalsSWAR(uint64_t *PAC_RESTRICT total, VALUE_T value, uint64_t key_hash) {
 	constexpr int BITS = sizeof(SIGNED_T) * 8;
 	// Cast to unsigned type to avoid sign extension, then broadcast to all lanes
 	uint64_t val_packed = static_cast<UNSIGNED_T>(static_cast<SIGNED_T>(value)) * MASK;
@@ -310,7 +312,7 @@ struct PacSumIntState {
 
 	// Lossless cascade: the upper 12 bits of each counter move to level k+1, the lower 4 bits stay behind at
 	// level k (x == (x >> 4) * 16 + (x & 15), also for negative x with arithmetic shift). So cascading never
-	// loses information; the only approximation in this sum is the rounding of each input value at routing.
+	// loses information; the only approximation in this sum is the truncation of each input value at routing.
 	// After the cascade, each remaining counter is in [0,15], so exact_total[k] is reset to that upper bound.
 	void Cascade(int k, ArenaAllocator &allocator) {
 		if (k >= PAC_APPROX_NUM_LEVELS - 1 || !u.levels[k]) {
@@ -344,7 +346,7 @@ struct PacSumIntState {
 			if (!u.levels[k]) {
 				continue;
 			}
-			PAC_FLOAT scale = std::exp2(PAC_APPROX_LEVEL_SHIFT * k);
+			PAC_FLOAT scale = std::exp2(static_cast<PAC_FLOAT>(PAC_APPROX_LEVEL_SHIFT * k));
 			const CounterT *counters = reinterpret_cast<const CounterT *>(u.levels[k]);
 			for (int j = 0; j < 64; j++) {
 				int swar_idx = (j % 16) * 4 + (j / 16);
@@ -367,7 +369,7 @@ struct PacSumIntState {
 			if (k > max_level_used) { // dst does not have this yet. Try to steal from src
 #ifdef PAC_NOBUFFERING
 				// can only steal src's pointer if it's arena-allocated (not inline storage).
-				if (k != src->inline_level_idx) { // without buffering, the SumState is not arena-allocated
+				if (k != src->inline_level_idx) {       // without buffering, the SumState is not arena-allocated
 #endif
 					if (k < 9 || max_level_used >= 9) { // beware not to mess up dst inline storage
 						u.levels[k] = src->u.levels[k];

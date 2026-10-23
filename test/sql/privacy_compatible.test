@@ -212,7 +212,7 @@ ALTER TABLE sales ADD PRIVACY_LINK (customer_id) REFERENCES customers(id);
 query I
 SELECT SUM(amount) FROM sales;
 ----
-200.08
+199.76
 
 # Not Privacy-compatible: protected column in GROUP BY
 statement error
@@ -230,7 +230,7 @@ Privacy rewrite: protected column 'sales.amount' can only be accessed inside agg
 query II
 SELECT product_id, SUM(amount) FROM sales GROUP BY product_id ORDER BY product_id;
 ----
-100	150.08
+100	149.76
 101	0.00
 102	50.00
 
@@ -258,7 +258,7 @@ query II
 SELECT products.category, SUM(sales.amount) FROM sales JOIN products ON sales.product_id = products.product_id GROUP BY products.category ORDER BY products.category;
 ----
 Electronics	0.00
-Hardware	200.08
+Hardware	199.76
 
 # Not Privacy-compatible: protected column in GROUP BY after join
 statement error
@@ -637,7 +637,7 @@ Privacy rewrite: protected column 'd_sales.amount' can only be accessed inside a
 query II
 SELECT DISTINCT product_id, SUM(amount) FROM d_sales GROUP BY product_id ORDER BY product_id;
 ----
-100	230.08
+100	229.76
 101	120.00
 102	50.00
 
@@ -645,13 +645,13 @@ SELECT DISTINCT product_id, SUM(amount) FROM d_sales GROUP BY product_id ORDER B
 query I
 SELECT DISTINCT SUM(amount) FROM d_sales;
 ----
-400.08
+399.76
 
 # Privacy-compatible: SELECT DISTINCT as subquery with outer aggregate
 query I
 SELECT SUM(total) FROM (SELECT DISTINCT product_id, SUM(amount) AS total FROM d_sales GROUP BY product_id) sub;
 ----
-400.08
+399.76
 
 # Not Privacy-compatible: SELECT DISTINCT without aggregate on FK-linked table (even on non-protected column)
 statement error

@@ -255,7 +255,7 @@ WITH order_amounts AS (
 )
 SELECT SUM(l_extendedprice * (1 - l_discount)) FROM order_amounts;
 ----
-25555.7632
+25515.6224
 
 # ============================================================
 # Test 6: Multiple CTEs, only one references PU table
