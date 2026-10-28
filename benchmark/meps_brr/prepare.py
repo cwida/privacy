@@ -19,6 +19,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--brr-dta", type=Path, help="Use an already downloaded h36brr24.dta")
+    parser.add_argument("--workload", choices=("ahrq2016", "damico2006"), default="ahrq2016")
     args = parser.parse_args()
     args.directory.mkdir(parents=True, exist_ok=True)
     for name in ("persons.csv", "events.csv", "brr.csv", "manifest.json"):
@@ -44,6 +45,29 @@ def main():
         frame = frame.replace(2.0 ** -260, 0.0)
         frame["DUPERSID"] = frame.DUPERSID.astype(str).str.strip()
         return frame
+
+    if args.workload == "damico2006":
+        # Reproduce Table 2 using the historical file, not 64 arbitrary flags
+        # selected from the newer 128-replicate design.
+        persons = load("h105")[["DUPERSID", "PANEL", "PERWT06F", "TOTEXP06", "AGE06X"]].rename(
+            columns=dict(DUPERSID="person_id", PANEL="panel", PERWT06F="weight",
+                         TOTEXP06="expenditure", AGE06X="age"))
+        persons.panel = persons.panel.astype(int)
+        brr = load("h36b06").rename(columns={"DUPERSID": "person_id", "PANEL": "panel"})
+        cols = [f"BRR{i}" for i in range(1, 65)]
+        # The paper explicitly uses an inner merge on person and panel.
+        linked = persons.merge(brr[["person_id", "panel"] + cols],
+                               on=["person_id", "panel"], how="inner", validate="one_to_one")
+        if not linked[cols].isin([0, 1]).all().all():
+            raise RuntimeError("Non-binary historical BRR flags")
+        linked[persons.columns].to_csv(args.directory / "persons.csv", index=False)
+        linked[["person_id", "panel"] + cols].to_csv(args.directory / "brr.csv", index=False)
+        manifest = dict(year=2006, workload=args.workload, replicates=64,
+                        persons=len(linked), unlinked_persons=len(persons)-len(linked), sources=sources,
+                        download_conversion_seconds=time.perf_counter()-started)
+        (args.directory / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        print(json.dumps(manifest, indent=2))
+        return
 
     persons = load("h192")
     persons = persons[["DUPERSID", "PANEL", "PERWT16F", "TOTEXP16", "AGELAST"]].rename(
@@ -75,7 +99,7 @@ def main():
 
     brr_path = args.brr_dta
     if brr_path is None:
-        url = "https://meps.ahrq.gov/mepsweb/data_files/pufs/h36brr24dta.zip"
+        url = "https://meps.ahrq.gov/mepsweb/data_files/pufs/h036brr/h36brr24dta.zip"
         archive_path = args.directory / "h36brr24dta.zip"
         if not archive_path.exists():
             urllib.request.urlretrieve(url, archive_path)

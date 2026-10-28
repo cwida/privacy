@@ -1,0 +1,25 @@
+-- AHRQ use_events_2016: explicit AS rewrite; masks constructed in the timed query.
+SELECT as_sum(p.mask_lo, p.weight) AS event_count_lo,
+       as_sum(p.mask_hi, p.weight) AS event_count_hi,
+       list_transform(list_zip(as_sum(p.mask_lo, p.weight * e.self), as_sum(p.mask_lo, p.weight)),
+    x -> x[1] / nullif(x[2], 0)) AS mean_self_lo,
+       list_transform(list_zip(as_sum(p.mask_hi, p.weight * e.self), as_sum(p.mask_hi, p.weight)),
+    x -> x[1] / nullif(x[2], 0)) AS mean_self_hi,
+       list_transform(list_zip(as_sum(p.mask_lo, p.weight * e.private), as_sum(p.mask_lo, p.weight)),
+    x -> x[1] / nullif(x[2], 0)) AS mean_private_lo,
+       list_transform(list_zip(as_sum(p.mask_hi, p.weight * e.private), as_sum(p.mask_hi, p.weight)),
+    x -> x[1] / nullif(x[2], 0)) AS mean_private_hi,
+       list_transform(list_zip(as_sum(p.mask_lo, p.weight * e.medicare), as_sum(p.mask_lo, p.weight)),
+    x -> x[1] / nullif(x[2], 0)) AS mean_medicare_lo,
+       list_transform(list_zip(as_sum(p.mask_hi, p.weight * e.medicare), as_sum(p.mask_hi, p.weight)),
+    x -> x[1] / nullif(x[2], 0)) AS mean_medicare_hi,
+       list_transform(list_zip(as_sum(p.mask_lo, p.weight * e.medicaid), as_sum(p.mask_lo, p.weight)),
+    x -> x[1] / nullif(x[2], 0)) AS mean_medicaid_lo,
+       list_transform(list_zip(as_sum(p.mask_hi, p.weight * e.medicaid), as_sum(p.mask_hi, p.weight)),
+    x -> x[1] / nullif(x[2], 0)) AS mean_medicaid_hi,
+       list_transform(list_zip(as_sum(p.mask_lo, p.weight * e.other), as_sum(p.mask_lo, p.weight)),
+    x -> x[1] / nullif(x[2], 0)) AS mean_other_lo,
+       list_transform(list_zip(as_sum(p.mask_hi, p.weight * e.other), as_sum(p.mask_hi, p.weight)),
+    x -> x[1] / nullif(x[2], 0)) AS mean_other_hi
+FROM persons_as p JOIN events e USING (person_id)
+WHERE e.kind = 'OB';

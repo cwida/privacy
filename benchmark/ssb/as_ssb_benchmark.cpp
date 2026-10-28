@@ -58,10 +58,8 @@ static string InputQuery(string sql, int world) {
 	                ") & 1) <> 0) AS ssb_input");
 	return sql;
 }
-static string UnorderedQuery(const string &sql) {
-	// SSB has no LIMIT: ordering is only for display. List sorting would not
-	// implement independent world ordering, so omit it consistently in every mode.
-	string result = benchmark::TrimSqlText(sql.substr(0, sql.find("ORDER BY")));
+static string QuerySQL(const string &sql) {
+	string result = benchmark::TrimSqlText(sql);
 	if (!result.empty() && result.back() == ';')
 		result.pop_back();
 	return result;
@@ -116,7 +114,7 @@ static Results Run(Connection &con, const string &sql, const string &as_sql, Mod
 	Results out;
 	bool is_as = mode == Mode::ASA;
 	bool grouped = sql.find("GROUP BY") != string::npos;
-	string aggregate_sql = UnorderedQuery(is_as ? as_sql : sql);
+	string aggregate_sql = QuerySQL(is_as ? as_sql : sql);
 	elapsed = 0;
 	if (mode == Mode::FULL) {
 		auto start = Clock::now();
@@ -130,7 +128,10 @@ static Results Run(Connection &con, const string &sql, const string &as_sql, Mod
 		// Hashing, sampling, joins, planning, and result materialization are timed.
 		auto start = Clock::now();
 		auto r = Query(con, query_sql);
-		elapsed += Ms(start);
+		// Match TPC-H's extrapolation: time world 0 and scale by 64.
+		// Other worlds are executed for correctness only, outside reported time.
+		if (world == 0)
+			elapsed += Ms(start);
 		// C++ validation/normalization is outside timing, equally for both methods.
 		if (is_as) {
 			for (int lane = 0; lane < 64; lane++)
@@ -138,6 +139,8 @@ static Results Run(Connection &con, const string &sql, const string &as_sql, Mod
 		} else
 			Collect(*r, out, world, false, grouped);
 	}
+	if (mode == Mode::REPEATED)
+		elapsed *= 64.0;
 	return out;
 }
 struct Comparison {
@@ -207,7 +210,7 @@ int main(int argc, char **argv) {
 			throw std::runtime_error("Cannot create output files");
 		timings << "query,mode,sum_kernel,membership_mode,threads,memory_limit,run,query_ms,import_ms,world_groups,max_"
 		           "relative_error,"
-		           "mean_relative_error,max_absolute_error,compared_values,rounded_mismatches\n"
+		           "mean_relative_error,max_absolute_error,compared_values,rounded_mismatches,timing_scope\n"
 		        << std::setprecision(17);
 #ifdef PAC_EXACTSUM
 		const char *sum_kernel = "exact";
@@ -266,8 +269,8 @@ int main(int argc, char **argv) {
 		for (auto name : {"q11", "q12", "q13", "q21", "q22", "q23", "q31", "q32", "q33", "q34", "q41", "q42", "q43"}) {
 			string sql = Read(ssb + "/queries/" + name + ".sql");
 			string as_sql = Read(ssb + "/as_queries/" + name + ".sql");
-			string aggregate_sql = UnorderedQuery(sql);
-			string as_aggregate_sql = UnorderedQuery(as_sql);
+			string aggregate_sql = QuerySQL(sql);
+			string as_aggregate_sql = QuerySQL(as_sql);
 			queries << "-- " << name << ": ordinary full-data SQL\n"
 			        << aggregate_sql << ";\n"
 			        << "-- " << name << ": query-time AS rewrite\n"
@@ -323,7 +326,8 @@ int main(int argc, char **argv) {
 					        << ',' << Csv(memory_limit) << ',' << run << ',' << elapsed << ',' << import_ms << ','
 					        << actual.size() << ',' << comparison.max_relative_error << ',' << mean << ','
 					        << comparison.max_absolute_error << ',' << comparison.compared_values << ','
-					        << comparison.rounded_mismatches << '\n';
+					        << comparison.rounded_mismatches << ','
+					        << (modes[index] == Mode::REPEATED ? "world0_x64" : "complete_query") << '\n';
 					timings.flush();
 				}
 			}

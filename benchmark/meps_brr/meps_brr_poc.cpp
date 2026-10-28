@@ -1,7 +1,5 @@
-// WIP real-data MEPS BRR benchmark. Replaces the original single-query POC.
-// Contribution SQL is inlined into each timed analysis, not materialized during setup.
+// WIP: explicit standard / naive BRR / conditional / AS SQL; query-only timing as in SSB.
 #include "duckdb.hpp"
-#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -11,11 +9,12 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <vector>
 
 using namespace duckdb;
 using Clock = std::chrono::steady_clock;
+using Results = std::map<string, std::vector<double>>;
+
 static double Ms(Clock::time_point start) {
 	return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
@@ -25,12 +24,6 @@ static string Quote(const string &s) {
 		out += c == '\'' ? "''" : string(1, c);
 	return out + "'";
 }
-static unique_ptr<MaterializedQueryResult> Query(Connection &con, const string &sql) {
-	auto r = con.Query(sql);
-	if (!r || r->HasError())
-		throw std::runtime_error(r ? r->GetError() : "No query result");
-	return r;
-}
 static string Read(const string &path) {
 	std::ifstream f(path);
 	if (!f)
@@ -39,305 +32,256 @@ static string Read(const string &path) {
 	out << f.rdbuf();
 	return out.str();
 }
+static void Save(const string &path, const string &sql) {
+	std::ofstream f(path);
+	if (!f)
+		throw std::runtime_error("Cannot write " + path);
+	f << sql;
+}
+static unique_ptr<MaterializedQueryResult> Query(Connection &con, const string &sql) {
+	auto r = con.Query(sql);
+	if (!r || r->HasError())
+		throw std::runtime_error(r ? r->GetError() : "No query result");
+	return r;
+}
 static void Require(Connection &con, const string &sql, const string &message) {
 	if (!Query(con, sql)->GetValue(0, 0).GetValue<bool>())
 		throw std::runtime_error(message);
 }
-struct Cell {
-	double point;
-	std::vector<double> replicates;
-};
-using Results = std::map<string, Cell>;
-static double Estimate(const Value &n, const Value &d, bool ratio) {
-	if (n.IsNull() || (ratio && (d.IsNull() || d.GetValue<double>() == 0)))
-		throw std::runtime_error("Undefined replicate estimate (empty domain); do not silently drop it");
-	return n.GetValue<double>() / (ratio ? d.GetValue<double>() : 1.0);
+static string ReplicateSQL(string sql, int rep) {
+	const string token = "@REPLICATE@";
+	auto pos = sql.find(token);
+	if (pos == string::npos || sql.find(token, pos + token.size()) != string::npos)
+		throw std::runtime_error("Expected exactly one BRR replicate token");
+	sql.replace(pos, token.size(), std::to_string(rep + 1));
+	return sql;
 }
-static double StandardError(const Cell &c) {
-	// BRR with full-estimate centering (survey mse=TRUE), not Taylor linearization.
+static double Number(const Value &v) {
+	if (v.IsNull())
+		throw std::runtime_error("Undefined estimate; empty replicate domains are not silently dropped");
+	double x = v.GetValue<double>();
+	if (!std::isfinite(x))
+		throw std::runtime_error("Non-finite estimate");
+	return x;
+}
+static Results Run(Connection &con, const string &sql, const string &mode, int worlds, double &elapsed) {
+	Results out;
+	elapsed = 0;
+	for (int rep = 0; rep < (mode == "naive_as" ? worlds : 1); rep++) {
+		string statement = mode == "naive_as" ? ReplicateSQL(sql, rep) : sql;
+		auto start = Clock::now();
+		auto r = Query(con, statement);
+		// Estimate repeated execution from replicate 1, as in the TPC-H timing.
+		// Evaluate remaining official replicates for validation and BRR SEs only.
+		if (rep == 0)
+			elapsed += Ms(start); // Planning, joins, masks, aggregates and materialization.
+		if (r->RowCount() != 1)
+			throw std::runtime_error("Expected one row of named scalar/list estimates");
+		for (idx_t col = 0; col < r->ColumnCount(); col++) {
+			string metric = r->names[col];
+			auto value = r->GetValue(col, 0);
+			if (mode == "duckdb" || mode == "naive_as") {
+				out[metric].push_back(Number(value));
+				continue;
+			}
+			if (mode == "conditional_sql") {
+				if (value.IsNull())
+					throw std::runtime_error("NULL conditional estimate list");
+				for (const auto &lane : ListValue::GetChildren(value))
+					out[metric].push_back(Number(lane));
+				continue;
+			}
+			if (metric.size() < 3)
+				throw std::runtime_error("Missing AS block suffix");
+			string suffix = metric.substr(metric.size() - 3);
+			if (suffix != "_lo" && suffix != "_hi")
+				throw std::runtime_error("Missing AS block suffix");
+			auto &values = out[metric.substr(0, metric.size() - 3)];
+			if (values.size() != (suffix == "_lo" ? 0 : 64))
+				throw std::runtime_error("AS blocks out of order");
+			if (value.IsNull())
+				throw std::runtime_error("NULL AS block");
+			const auto &lanes = ListValue::GetChildren(value);
+			if (lanes.size() != 64)
+				throw std::runtime_error("Expected 64 AS lanes");
+			for (const auto &lane : lanes)
+				values.push_back(Number(lane));
+		}
+	}
+	for (const auto &entry : out)
+		if (entry.second.size() != idx_t(mode == "duckdb" ? 1 : worlds))
+			throw std::runtime_error("Incomplete estimate output");
+	if (mode == "naive_as")
+		elapsed *= worlds;
+	return out;
+}
+static double SE(const std::vector<double> &values, double center) {
 	double ss = 0;
-	for (double x : c.replicates)
-		ss += (x - c.point) * (x - c.point);
-	return std::sqrt(ss / 128.0);
+	for (double value : values)
+		ss += (value - center) * (value - center);
+	return std::sqrt(ss / values.size());
 }
-static Results NativeReference(Connection &con, const string &source, int threads, double &extract_ms) {
-	struct Group {
-		string metric;
-		bool ratio;
-		std::vector<double> numerator, denominator;
-		std::vector<uint64_t> lo, hi;
-		Cell result;
-	};
-	// Extraction is included in native analysis time, not hidden in setup.
-	auto extract_start = Clock::now();
-	auto input = Query(con, "SELECT metric,numerator,denominator,is_ratio,mask_lo,mask_hi FROM (" + source +
-	                            ") ORDER BY metric,person_id");
-	std::vector<Group> groups;
-	for (idx_t row = 0; row < input->RowCount(); row++) {
-		string metric = input->GetValue(0, row).ToString();
-		if (groups.empty() || groups.back().metric != metric)
-			groups.push_back(Group {
-			    metric, input->GetValue(3, row).GetValue<bool>(), {}, {}, {}, {}, {0, std::vector<double>(128)}});
-		auto &g = groups.back();
-		g.numerator.push_back(input->GetValue(1, row).GetValue<double>());
-		g.denominator.push_back(input->GetValue(2, row).GetValue<double>());
-		g.lo.push_back(input->GetValue(4, row).GetValue<uint64_t>());
-		g.hi.push_back(input->GetValue(5, row).GetValue<uint64_t>());
-	}
-	extract_ms = Ms(extract_start);
-	for (auto &g : groups) {
-		double n = 0, d = 0;
-		for (idx_t i = 0; i < g.numerator.size(); i++) {
-			n += g.numerator[i];
-			d += g.denominator[i];
-		}
-		g.result.point = n / (g.ratio ? d : 1.0);
-	}
-	// Replicate-major weighted reductions, parallelized over independent replicates.
-	// No map mutation and each worker writes distinct, preallocated result elements.
-	std::vector<std::thread> workers;
-	int count = std::min(threads, 128);
-	for (int worker = 0; worker < count; worker++)
-		workers.emplace_back([&, worker]() {
-			for (int rep = worker; rep < 128; rep += count)
-				for (auto &g : groups) {
-					double n = 0, d = 0;
-					const auto &mask = rep < 64 ? g.lo : g.hi;
-					for (idx_t i = 0; i < mask.size(); i++) {
-						double weight = 2.0 * ((mask[i] >> (rep % 64)) & 1);
-						n += weight * g.numerator[i];
-						d += weight * g.denominator[i];
-					}
-					g.result.replicates[rep] = n / (g.ratio ? d : 1.0);
-				}
-		});
-	for (auto &worker : workers)
-		worker.join();
-	Results out;
-	for (auto &g : groups) {
-		if (!std::isfinite(StandardError(g.result))) {
-			throw std::runtime_error("Non-finite native BRR standard error");
-		}
-		out.emplace(g.metric, std::move(g.result));
-	}
-	return out;
+static double Mean(const std::vector<double> &values) {
+	double sum = 0;
+	for (double value : values)
+		sum += value;
+	return sum / values.size();
 }
-static Results Analyze(Connection &con, const string &source, const string &mode, int threads, double &extract_ms) {
-	extract_ms = 0;
-	if (mode == "cpp_replicates")
-		return NativeReference(con, source, threads, extract_ms);
-	Results out;
-	const string from = " FROM (" + source + ") contributions ";
-	auto point = Query(con, "SELECT metric, sum(numerator), sum(denominator), bool_or(is_ratio)" + from +
-	                            "GROUP BY metric ORDER BY metric");
-	for (idx_t row = 0; row < point->RowCount(); row++) {
-		out.emplace(point->GetValue(0, row).ToString(), Cell {Estimate(point->GetValue(1, row), point->GetValue(2, row),
-		                                                               point->GetValue(3, row).GetValue<bool>()),
-		                                                      {}});
-	}
-	if (mode == "asa") {
-		auto r = Query(con, "SELECT metric, as_sum(mask_lo,numerator), as_sum(mask_hi,numerator),"
-		                    "as_sum(mask_lo,denominator), as_sum(mask_hi,denominator), bool_or(is_ratio)" +
-		                        from + "GROUP BY metric ORDER BY metric");
-		for (idx_t row = 0; row < r->RowCount(); row++) {
-			auto &c = out.at(r->GetValue(0, row).ToString());
-			bool ratio = r->GetValue(5, row).GetValue<bool>();
-			for (idx_t block = 0; block < 2; block++) {
-				auto nv = r->GetValue(1 + block, row), dv = r->GetValue(3 + block, row);
-				const auto &n = ListValue::GetChildren(nv), &d = ListValue::GetChildren(dv);
-				if (n.size() != 64 || d.size() != 64)
-					throw std::runtime_error("Expected 64 lanes");
-				for (idx_t lane = 0; lane < 64; lane++)
-					c.replicates.push_back(Estimate(n[lane], d[lane], ratio));
-			}
-		}
-	} else if (mode == "repeated_sql") {
-		// One complete conventional aggregate query per official replicate.
-		for (int rep = 0; rep < 128; rep++) {
-			string selected =
-			    "((" + string(rep < 64 ? "mask_lo" : "mask_hi") + " >> " + std::to_string(rep % 64) + ") & 1) <> 0";
-			auto r = Query(con, "SELECT metric, sum(CASE WHEN " + selected +
-			                        " THEN 2.0*numerator ELSE 0 END), sum(CASE WHEN " + selected +
-			                        " THEN 2.0*denominator ELSE 0 END), bool_or(is_ratio)" + from +
-			                        "GROUP BY metric ORDER BY metric");
-			for (idx_t row = 0; row < r->RowCount(); row++) {
-				out.at(r->GetValue(0, row).ToString())
-				    .replicates.push_back(
-				        Estimate(r->GetValue(1, row), r->GetValue(2, row), r->GetValue(3, row).GetValue<bool>()));
-			}
-		}
-	} else {
-		// Stronger baseline: one shared relational query, 128 ordinary conditional SUM pairs.
-		string sql = "SELECT metric, bool_or(is_ratio)";
-		for (int rep = 0; rep < 128; rep++) {
-			string selected =
-			    "((" + string(rep < 64 ? "mask_lo" : "mask_hi") + " >> " + std::to_string(rep % 64) + ") & 1) <> 0";
-			for (auto col : {"numerator", "denominator"})
-				sql += ", sum(CASE WHEN " + selected + " THEN 2.0*" + col + " ELSE 0 END)";
-		}
-		auto r = Query(con, sql + from + "GROUP BY metric ORDER BY metric");
-		for (idx_t row = 0; row < r->RowCount(); row++) {
-			auto &c = out.at(r->GetValue(0, row).ToString());
-			for (int rep = 0; rep < 128; rep++)
-				c.replicates.push_back(Estimate(r->GetValue(2 + 2 * rep, row), r->GetValue(3 + 2 * rep, row),
-				                                r->GetValue(1, row).GetValue<bool>()));
-		}
-	}
-	for (auto &entry : out) {
-		if (entry.second.replicates.size() != 128)
-			throw std::runtime_error("Incomplete replicate output");
-		if (!std::isfinite(StandardError(entry.second)))
-			throw std::runtime_error("Non-finite BRR standard error");
-	}
-	return out;
-}
-static double Compare(const Results &actual, const Results &reference, double tolerance) {
+static double Compare(const Results &actual, const Results &reference) {
 	if (actual.size() != reference.size())
-		throw std::runtime_error("Result group count differs");
+		throw std::runtime_error("Metric count differs");
 	double maximum = 0;
-	for (auto &entry : reference) {
-		const auto &a = actual.at(entry.first), &b = entry.second;
-		auto check = [&](double x, double y) {
-			if (!std::isfinite(x) || !std::isfinite(y))
-				throw std::runtime_error("Non-finite estimate");
-			double err = std::abs(x - y) / std::max(1.0, std::abs(y));
-			maximum = std::max(maximum, err);
-			if (err > tolerance)
-				throw std::runtime_error("Numerical tolerance exceeded for " + entry.first);
-		};
-		check(a.point, b.point);
-		for (int rep = 0; rep < 128; rep++)
-			check(a.replicates[rep], b.replicates[rep]);
-		check(StandardError(a), StandardError(b));
+	for (const auto &entry : reference) {
+		const auto &values = actual.at(entry.first);
+		if (values.size() != entry.second.size())
+			throw std::runtime_error("Replicate count differs");
+		for (idx_t i = 0; i < values.size(); i++)
+			maximum =
+			    std::max(maximum, std::abs(values[i] - entry.second[i]) / std::max(1.0, std::abs(entry.second[i])));
 	}
 	return maximum;
 }
 int main(int argc, char **argv) {
 	try {
-		if (argc != 7) {
-			std::cerr << "Usage: meps_brr_poc DATA_DIR NEW_DB_PATH QUERY_DIR OUT_PREFIX THREADS REPETITIONS\n"
-			             "DATA_DIR contains persons.csv, events.csv, brr.csv from prepare.py.\n";
+		if (argc != 8) {
+			std::cerr << "Usage: meps_brr_poc DATA_DIR NEW_DB QUERY_ROOT OUT_PREFIX THREADS REPETITIONS "
+			             "damico2006|ahrq2016\n";
 			return 2;
 		}
-		string data = argv[1], db_path = argv[2], queries = argv[3], prefix = argv[4];
+		string data = argv[1], db_path = argv[2], root = argv[3], prefix = argv[4], workload = argv[7];
 		int threads = std::stoi(argv[5]), repetitions = std::stoi(argv[6]);
-		if (threads < 1 || repetitions < 1)
-			throw std::runtime_error("Threads and repetitions must be positive");
+		if (threads < 1 || repetitions < 1 || (workload != "damico2006" && workload != "ahrq2016"))
+			throw std::runtime_error("Invalid workload, threads or repetitions");
+		const int worlds = workload == "damico2006" ? 64 : 128;
 		if (std::ifstream(db_path).good() || std::ifstream(prefix + "_timings.csv").good())
-			throw std::runtime_error("Use a new database and output prefix; refusing overwrite");
+			throw std::runtime_error("Refusing to overwrite database/results");
 		auto start = Clock::now();
 		DuckDB db(db_path.c_str());
 		Connection con(db);
 		Query(con, "SET threads=" + std::to_string(threads));
 		Query(con, "SET priv_rewrite=false");
 		Query(con, "SET pac_sample_diversity_check=false");
-		Query(con, "SET pac_mi=0");
-		for (auto table : {"persons_input", "events", "brr"}) {
-			string filename = string(table) == "persons_input" ? "persons" : table;
-			Query(con, "CREATE TABLE " + string(table) + " AS SELECT * FROM read_csv(" +
-			               Quote(data + "/" + filename + ".csv") + ", header=true, sample_size=-1)");
+		for (const auto &table : std::vector<string> {"persons_input", "brr", "events"}) {
+			if (table == "events" && workload == "damico2006")
+				continue;
+			string file = table == "persons_input" ? "persons" : table;
+			Query(con, "CREATE TABLE " + table + " AS SELECT * FROM read_csv(" + Quote(data + "/" + file + ".csv") +
+			               ", header=true, sample_size=-1)");
 		}
 		double import_ms = Ms(start);
 		start = Clock::now();
-		Require(con, "SELECT count(*)=count(DISTINCT (person_id,panel)) FROM persons_input", "Duplicate person/panel");
-		Require(con, "SELECT count(*)=count(DISTINCT person_id) FROM persons_input",
-		        "Expected one survey year and unique person identifiers");
-		Require(con, "SELECT count(*)=count(DISTINCT (person_id,panel)) FROM brr", "Duplicate BRR person/panel");
-		Require(con, "SELECT count(*)=0 FROM persons_input p ANTI JOIN brr b USING(person_id,panel)",
+		Require(con, "SELECT count(*)=count(DISTINCT person_id) FROM persons_input", "Duplicate persons");
+		Require(con, "SELECT count(*)=count(DISTINCT (person_id,panel)) FROM brr", "Duplicate BRR linkage");
+		Require(con, "SELECT count(*)=0 FROM persons_input ANTI JOIN brr USING(person_id,panel)",
 		        "Missing BRR linkage");
-		Require(con, "SELECT count(*)=0 FROM events e ANTI JOIN persons_input p USING(person_id)",
-		        "Event without a person");
 		Require(con,
-		        "SELECT count(*)=0 FROM persons_input WHERE weight IS NULL OR weight<0 OR "
-		        "expenditure IS NULL OR expenditure<0 OR age IS NULL OR age<0",
+		        "SELECT count(*)=0 FROM persons_input WHERE weight IS NULL OR weight<0 OR expenditure IS NULL "
+		        "OR expenditure<0 OR age IS NULL",
 		        "Invalid person input");
-		// AHRQ Exercise1a_OUTPUT.TXT reports 6,933 zero-expenditure observations
-		// and 33,259 positive-weight observations out of 34,655 for this 2016 workload.
-		Require(con,
-		        "SELECT count(*)=34655 AND count(*) FILTER(WHERE expenditure=0)=6933 "
-		        "AND count(*) FILTER(WHERE weight>0)=33259 FROM persons_input",
-		        "Input differs from published 2016 MEPS counts; check SAS zero decoding");
-		string invalid, lo, hi;
-		for (int rep = 0; rep < 128; rep++) {
+		if (workload == "ahrq2016") {
+			Require(con, "SELECT count(*)=0 FROM events ANTI JOIN persons_input USING(person_id)", "Unmatched event");
+			Require(con,
+			        "SELECT count(*)=34655 AND count(*) FILTER(WHERE expenditure=0)=6933 AND "
+			        "count(*) FILTER(WHERE weight>0)=33259 FROM persons_input",
+			        "Incorrect 2016 source counts");
+		}
+		string invalid, masks[2];
+		for (int rep = 0; rep < worlds; rep++) {
 			string col = "BRR" + std::to_string(rep + 1);
 			invalid += (rep ? " OR " : "") + col + " IS NULL OR " + col + " NOT IN (0,1)";
-			auto &mask = rep < 64 ? lo : hi;
-			if (!mask.empty())
-				mask += " | ";
-			mask += "(" + col + "::UBIGINT << " + std::to_string(rep % 64) + ")";
+			auto &mask = masks[rep / 64];
+			mask += (mask.empty() ? "" : " | ") + string("(") + col + "::UBIGINT << " + std::to_string(rep % 64) + ")";
 		}
-		Require(con, "SELECT count(*)=0 FROM brr WHERE " + invalid, "BRR flags must be non-null binary values");
-		// A view, not a prepared table: BRR linkage and mask construction execute
-		// inside each timed query, together with its event joins and weighting.
-		Query(con, "CREATE VIEW persons AS SELECT p.*, (" + lo + ") AS mask_lo, (" + hi +
-		               ") AS mask_hi FROM persons_input p JOIN brr b USING(person_id,panel)");
-		Query(con, "CHECKPOINT");
-		double prep_ms = Ms(start);
+		Require(con, "SELECT count(*)=0 FROM brr WHERE " + invalid, "Non-binary/null BRR flags");
+		string view = "CREATE VIEW persons_as AS SELECT p.*, (" + masks[0] + ") AS mask_lo";
+		if (worlds > 64)
+			view += ", (" + masks[1] + ") AS mask_hi";
+		Query(con, view + " FROM persons_input p JOIN brr b USING(person_id,panel)");
+		double validation_ms = Ms(start);
 		std::ofstream timings(prefix + "_timings.csv"), estimates(prefix + "_estimates.csv"),
 		    replicates(prefix + "_replicates.csv");
 		if (!timings || !estimates || !replicates)
-			throw std::runtime_error("Cannot open output files");
-		timings << "query,mode,execution_model,threads,run,analysis_ms,extract_ms,compute_ms,import_ms,prepare_ms,first_workflow_ms,"
-		           "max_relative_error\n";
-		estimates << "query,mode,metric,point_estimate,brr_standard_error\n";
-		replicates << "query,metric,replicate,estimate\n";
+			throw std::runtime_error("Cannot open outputs");
+		timings << "workload,query,mode,threads,run,worlds,query_ms,import_ms,validation_ms,max_normalized_error,"
+		           "timing_scope\n";
+		estimates << "workload,query,mode,metric,point_estimate,se_mse,se_replicate_mean\n";
+		replicates << "workload,query,mode,metric,replicate,estimate\n";
 		timings << std::setprecision(17);
 		estimates << std::setprecision(17);
 		replicates << std::setprecision(17);
-		std::vector<string> modes = {"cpp_replicates", "repeated_sql", "conditional_sql", "asa"};
-		std::vector<double> cold(modes.size(), import_ms + prep_ms);
-		auto published =
-		    Query(con, "SELECT * FROM read_csv(" + Quote(queries + "/expected_points.csv") + ", header=true)");
-		for (auto name : {"q01_expenditures", "q02_age_groups", "q03_event_expenditures", "q04_visits_per_person"}) {
-			string source = Read(queries + "/" + name + ".sql");
-			// Analyze embeds this complete source in every SQL statement. In particular,
-			// repeated_sql repeats the original relational work for each replicate;
-			// ASA and conditional_sql share it within their replicate query.
-			Results reference;
+		std::vector<string> names = workload == "damico2006"
+		                                ? std::vector<string> {"q01_adults", "q02_nonelderly"}
+		                                : std::vector<string> {"q01_office", "q02_office_physician", "q03_outpatient",
+		                                                       "q04_outpatient_physician", "q05_visits_per_person"};
+		const std::vector<string> modes = {"duckdb", "naive_as", "conditional_sql", "simd_as"};
+		const std::vector<string> dirs = {"queries", "naive_queries", "conditional_queries", "as_queries"};
+		for (const auto &name : names) {
+			std::vector<string> sql;
+			for (idx_t i = 0; i < modes.size(); i++) {
+				sql.push_back(Read(root + "/" + workload + "/" + dirs[i] + "/" + name + ".sql"));
+				Save(prefix + "_" + name + "_" + modes[i] + ".sql", i == 1 ? ReplicateSQL(sql.back(), 0) : sql.back());
+				auto plan = Query(con, "EXPLAIN " + (i == 1 ? ReplicateSQL(sql.back(), 0) : sql.back()));
+				Save(prefix + "_" + name + "_" + modes[i] + ".plan", plan->ToString());
+			}
+			Results point, reference;
 			for (int run = 0; run < repetitions; run++) {
 				for (idx_t step = 0; step < modes.size(); step++) {
-					idx_t mode_idx = run == 0 ? step : (step + run) % modes.size();
-					const auto &mode = modes[mode_idx];
-					start = Clock::now();
-					double extract_ms;
-					auto result = Analyze(con, source, mode, threads, extract_ms);
-					double elapsed = Ms(start);
-					for (idx_t row = 0; row < published->RowCount(); row++) {
-						if (published->GetValue(0, row).ToString() != name)
-							continue;
-						const auto metric = published->GetValue(1, row).ToString();
-						double expected = published->GetValue(2, row).GetValue<double>();
-						double tolerance = published->GetValue(3, row).GetValue<double>();
-						if (std::abs(result.at(metric).point - expected) > tolerance)
-							throw std::runtime_error("Point estimate differs from AHRQ published output: " + metric);
-					}
-					if (run == 0 && mode_idx == 0)
+					idx_t i = run == 0 ? step : (step + run) % modes.size();
+					double elapsed;
+					auto result = Run(con, sql[i], modes[i], worlds, elapsed);
+					if (run == 0 && i == 0)
+						point = result;
+					if (run == 0 && i == 1)
 						reference = result;
-					double error = Compare(result, reference, mode == "asa" ? 1e-3 : 1e-8);
-					timings << name << ',' << mode << ",inline_sql," << threads << ',' << run << ',' << elapsed << ','
-					        << extract_ms << ',' << elapsed - extract_ms << ',' << import_ms << ','
-					        << prep_ms << ','
-					        << (run == 0 ? import_ms + prep_ms + elapsed : 0) << ',' << error << '\n';
-					if (run == 0) {
-						cold[mode_idx] += elapsed;
-						for (auto &entry : result)
-							estimates << name << ',' << mode << ',' << entry.first << ',' << entry.second.point << ','
-							          << StandardError(entry.second) << '\n';
-						if (mode_idx == 0)
-							for (auto &entry : result)
-								for (int rep = 0; rep < 128; rep++)
-									replicates << name << ',' << entry.first << ',' << rep + 1 << ','
-									           << entry.second.replicates[rep] << '\n';
+					double error = Compare(result, i == 0 ? point : reference);
+					if (i != 0) {
+						for (const auto &entry : reference) {
+							const auto &actual = result.at(entry.first);
+							double p = point.at(entry.first)[0];
+							for (bool mse : {false, true}) {
+								double expected = SE(entry.second, mse ? p : Mean(entry.second));
+								double observed = SE(actual, mse ? p : Mean(actual));
+								error =
+								    std::max(error, std::abs(observed - expected) / std::max(1.0, std::abs(expected)));
+							}
+						}
 					}
-					std::cout << name << ' ' << mode << " run=" << run << " ms=" << elapsed
-					          << " max_relative_error=" << error << std::endl;
+					// Preserve the prior FLOAT-output guard; record errors, do not claim exact equality.
+					if (error > (modes[i] == "simd_as" ? 1e-3 : 1e-8))
+						throw std::runtime_error("Estimate mismatch for " + name + "/" + modes[i]);
+					timings << workload << ',' << name << ',' << modes[i] << ',' << threads << ',' << run << ','
+					        << (i == 0 ? 1 : worlds) << ',' << elapsed << ',' << import_ms << ',' << validation_ms
+					        << ',' << error << ',' << (i == 1 ? "replicate1_x_worlds" : "complete_query") << '\n';
+					if (run == 0) {
+						for (const auto &entry : result) {
+							double p = point.at(entry.first)[0];
+							double mse = i == 0 ? 0 : SE(entry.second, p);
+							double centered = i == 0 ? 0 : SE(entry.second, Mean(entry.second));
+							estimates << workload << ',' << name << ',' << modes[i] << ',' << entry.first << ',' << p
+							          << ',' << mse << ',' << centered << '\n';
+							if (i != 0)
+								for (idx_t rep = 0; rep < entry.second.size(); rep++)
+									replicates << workload << ',' << name << ',' << modes[i] << ',' << entry.first
+									           << ',' << rep + 1 << ',' << entry.second[rep] << '\n';
+							if (workload == "damico2006" && i == 1) {
+								double expected_point = name == "q01_adults" ? 4009.1 : 3155.4;
+								double expected_mse = name == "q01_adults" ? 83.6 : 77.5;
+								double expected_centered = name == "q01_adults" ? 83.0 : 77.0;
+								if (std::abs(p - expected_point) > 0.051 || std::abs(mse - expected_mse) > 0.051 ||
+								    std::abs(centered - expected_centered) > 0.051)
+									throw std::runtime_error(
+									    "Damico Table 2 does not match published one-decimal values");
+							}
+						}
+					}
+					std::cout << workload << ' ' << name << ' ' << modes[i] << " run=" << run << " ms=" << elapsed
+					          << " max_normalized_error=" << error << std::endl;
 				}
 			}
 			timings.flush();
 			estimates.flush();
+			replicates.flush();
 		}
-		for (idx_t i = 0; i < modes.size(); i++)
-			std::cout << "Workflow total (shared import+preparation once), " << modes[i] << ": " << cold[i] << " ms\n";
 		return 0;
 	} catch (const std::exception &e) {
 		std::cerr << "MEPS benchmark failed: " << e.what() << '\n';

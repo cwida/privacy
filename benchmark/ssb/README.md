@@ -1,5 +1,8 @@
 # WIP: Star Schema Benchmark with sampled worlds
 
+For the Graviton4 server configuration, persistent launch commands, and artifact
+provenance, see [EC2 reproducibility](../EC2_REPRODUCIBILITY.md).
+
 The benchmark executes all 13 joined SSB queries on the five original tables.
 SQL follows the [SSB specification](https://www.cs.umb.edu/~poneil/StarSchemaB.PDF)
 listings, including Q1.3 quantity 26--35 and Q2.3 brand `MFGR#2221`.
@@ -60,16 +63,20 @@ shared. Customer-level sampling is our experimental extension, not part of SSB.
 - `duckdb_full`: ordinary SQL on the full original tables; a runtime reference,
   not an answer-equivalent baseline for sampled worlds.
 - `repeated_sql`: 64 ordinary queries, each filtering LINEORDER by one bit of
-  the query-time membership expression before joining and aggregating.
+  the query-time membership expression before joining and aggregating. Reported
+  time is world 0's query latency multiplied by 64, matching the TPC-H
+  extrapolation. The other 63 worlds are evaluated for correctness only.
 - `asa`: one explicitly rewritten query, using
   `as_sum(priv_hash(hash(lo_custkey)), value)` and `as_count` for group presence.
 
 All three modes use the same original tables. Timings include planning, hashing
 and world filtering where applicable, joins, aggregation, and result
 materialization. There is one excluded warmup per mode; measured order rotates.
-C++ conversion and correctness checks are excluded consistently. Display-only
-`ORDER BY` is omitted in all timed modes (SSB has no LIMIT); independent-world
-results are compared by world and group, not by list sorting.
+C++ conversion and correctness checks are excluded consistently. The original
+`ORDER BY` clauses execute in all timed modes. For AS, aggregate ordering keys
+are lists and DuckDB compares them lexicographically; this orders the returned
+batch, not each world's result independently. Per-world aggregate values are
+checked by world and group; SSB has no LIMIT.
 
 The aggregate API returns twice the selected sum. The checker divides by two
 to compare actual sampled-world sums, not full-data estimators.
@@ -97,7 +104,9 @@ explicit SQL rewrites.
 Each configuration writes `_timings.csv`, `_coverage.csv`, `_plans.txt`,
 `_queries.sql`, and a DuckDB database containing the five original SSB tables.
 Timing rows identify `membership_mode=query_time_priv_hash`; the SQL and plans
-show exactly what was timed.
+show exactly what was timed. `timing_scope=world0_x64` identifies extrapolated
+naive timing; `complete_query` identifies the other modes. Paper runs use five
+measured executions after one warmup and report medians.
 
 ## Paper-style plot
 

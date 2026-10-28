@@ -23,6 +23,10 @@ raw <- do.call(rbind, lapply(kernels, function(kernel) {
                 "max_relative_error", "mean_relative_error", "compared_values", "rounded_mismatches")
   if (!all(required %in% names(rows))) stop("Missing columns in ", path)
   if (any(rows$membership_mode != "query_time_priv_hash")) stop("Expected query-time membership timings: ", path)
+  if ("timing_scope" %in% names(rows) &&
+      any(rows$timing_scope != ifelse(rows$mode == "repeated_sql", "world0_x64", "complete_query"))) {
+    stop("Mixed or unexpected naive timing scope: ", path)
+  }
   if (any(rows$sum_kernel != kernel) || any(rows$threads != threads)) stop("Configuration mismatch in ", path)
   if (any(!is.finite(rows$query_ms) | rows$query_ms <= 0)) stop("Invalid runtime in ", path)
   expected <- as.vector(outer(queries, modes, paste, sep = ":"))
