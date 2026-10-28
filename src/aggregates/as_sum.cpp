@@ -31,7 +31,10 @@ PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, typena
 	state.key_hash |= key_hash;
 #ifndef PAC_EXACTSUM
 	// APPROX ALGORITHM: route by bit position, shift value
-	// 16-bit counters with 4-bit level shift
+	// 16-bit counters with 4-bit level shift. The value is truncated to its level (keeps 9-12 significant bits,
+	// so at most 2^-8 relative error per value, always downward); this is the only approximation in the sum,
+	// since cascading is lossless and finalization reads all levels. Rounding to nearest here would make the
+	// per-value error unbiased, but costs ~2% on this hot path, so we keep the prologue minimal.
 	uint64_t abs_val = SIGNED && value < 0 ? static_cast<uint64_t>(-value) : static_cast<uint64_t>(value);
 	int level = PacSumIntState<SIGNED>::GetLevel(static_cast<int64_t>(abs_val));
 	uint64_t shift = level << 2; // multiply level by 4
@@ -43,25 +46,33 @@ PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, typena
 #else
 	// EXACT ALGORITHM: decide based on the (integer) value, in which level to aggregate
 	// (ensure the level is allocated). Note that SIGNED stuff will be compiled away for unsigned types.
+	uint64_t magnitude =
+	    SIGNED && value < 0 ? uint64_t(0) - static_cast<uint64_t>(value) : static_cast<uint64_t>(value);
+	if (SIGNED && magnitude > static_cast<uint64_t>(INT64_MAX)) {
+		// The magnitude of INT64_MIN cannot be represented by the signed overflow budget.
+		PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total128, idx_t(64));
+		AddToTotalsSimple(state.probabilistic_total128, Hugeint::Convert(value), key_hash);
+		return;
+	}
 	if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(8)) : (value < UPPERBOUND_BITWIDTH(8))) {
 		state.exact_total8 =
 		    PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total8, 8, state.exact_total8);
-		state.Flush8(allocator, value, false);
+		state.Flush8(allocator, magnitude, false);
 		AddToTotalsSWAR<int8_t, uint8_t, 0x0101010101010101ULL>(state.probabilistic_total8, value, key_hash);
 	} else if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(16)) : (value < UPPERBOUND_BITWIDTH(16))) {
 		state.exact_total16 = PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total16, 16,
 		                                                                   state.exact_total16);
-		state.Flush16(allocator, value, false);
+		state.Flush16(allocator, magnitude, false);
 		AddToTotalsSWAR<int16_t, uint16_t, 0x0001000100010001ULL>(state.probabilistic_total16, value, key_hash);
 	} else if ((SIGNED && value < 0) ? (value >= LOWERBOUND_BITWIDTH(32)) : (value < UPPERBOUND_BITWIDTH(32))) {
 		state.exact_total32 = PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total32, 32,
 		                                                                   state.exact_total32);
-		state.Flush32(allocator, value, false);
+		state.Flush32(allocator, magnitude, false);
 		AddToTotalsSWAR<int32_t, uint32_t, 0x0000000100000001ULL>(state.probabilistic_total32, value, key_hash);
 	} else {
 		state.exact_total64 = PacSumIntState<SIGNED>::EnsureLevelAllocated(allocator, state.probabilistic_total64, 64,
 		                                                                   state.exact_total64);
-		state.Flush64(allocator, value, false);
+		state.Flush64(allocator, magnitude, false);
 		AddToTotalsSimple(state.probabilistic_total64, value, key_hash);
 	}
 #endif
@@ -286,11 +297,13 @@ static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, Ar
 }
 
 // Helper to combine src array into dst at a specific level
-template <typename BUF_T>
-static inline void CombineLevel(BUF_T *&src_buf, BUF_T *&dst_buf, idx_t count) {
+template <typename LANE_T, typename BUF_T>
+static inline void CombineLevel(BUF_T *&src_buf, BUF_T *&dst_buf) {
 	if (src_buf && dst_buf) {
-		for (idx_t j = 0; j < count; j++) {
-			dst_buf[j] += src_buf[j];
+		auto *src = reinterpret_cast<LANE_T *>(src_buf);
+		auto *dst = reinterpret_cast<LANE_T *>(dst_buf);
+		for (idx_t j = 0; j < 64; j++) {
+			dst[j] += src[j];
 		}
 	} else if (src_buf) {
 		dst_buf = src_buf;
@@ -366,17 +379,19 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 		} else {
 			d->exact_total32 += s->exact_total32;
 		}
-		if (CHECK_BOUNDS_64(s->exact_total64 + d->exact_total64, s->exact_total64, d->exact_total64)) {
+		auto total64 = static_cast<typename PacSumIntState<SIGNED>::T64>(static_cast<uint64_t>(s->exact_total64) +
+		                                                                 static_cast<uint64_t>(d->exact_total64));
+		if (CHECK_BOUNDS_64(total64, s->exact_total64, d->exact_total64)) {
 			d->Flush64(allocator, s->exact_total64, true);
 		} else {
 			d->exact_total64 += s->exact_total64;
 		}
 		// Combine arrays at each level
-		CombineLevel(s->probabilistic_total8, d->probabilistic_total8, 8);
-		CombineLevel(s->probabilistic_total16, d->probabilistic_total16, 16);
-		CombineLevel(s->probabilistic_total32, d->probabilistic_total32, 32);
-		CombineLevel(s->probabilistic_total64, d->probabilistic_total64, 64);
-		CombineLevel(s->probabilistic_total128, d->probabilistic_total128, 64);
+		CombineLevel<typename PacSumIntState<SIGNED>::T8>(s->probabilistic_total8, d->probabilistic_total8);
+		CombineLevel<typename PacSumIntState<SIGNED>::T16>(s->probabilistic_total16, d->probabilistic_total16);
+		CombineLevel<typename PacSumIntState<SIGNED>::T32>(s->probabilistic_total32, d->probabilistic_total32);
+		CombineLevel<typename PacSumIntState<SIGNED>::T64>(s->probabilistic_total64, d->probabilistic_total64);
+		CombineLevel<hugeint_t>(s->probabilistic_total128, d->probabilistic_total128);
 #endif
 #endif
 	}
