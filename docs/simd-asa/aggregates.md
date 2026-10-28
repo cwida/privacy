@@ -31,7 +31,7 @@ to calibrate noise.
 
 XORs the input key hash with a per-query hash derived from `privacy_seed`, so the same
 PU gets a fresh sub-sample assignment on every query (analogous to a full resampling of
-the possible worlds). When `pac_hash_repair` is set (default), the result is repaired to
+the possible worlds). When `pac_hash_repair` is set (default: off), the result is repaired to
 have **exactly 32 bits set**, so each PU lands in exactly half the sub-samples — a
 uniform 50% inclusion prior and maximum entropy across worlds. The repair applies up to
 16 rounds of multiplicative hashing with a 64-bit prime; the fallback (all rounds fail)

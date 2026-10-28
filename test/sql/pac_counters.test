@@ -191,6 +191,55 @@ SELECT length(as_max(priv_hash(hash(rowid)::UBIGINT), value)) FROM test_data
 64
 
 # ============================================================================
+# as_sum counters: negative-only worlds and extreme magnitudes
+# ============================================================================
+
+# Worlds 0 and 1 only receive negative values: they must not be reported as 0
+query I
+SELECT as_sum(3::UBIGINT, v)[1:4] FROM (VALUES (-5::BIGINT), (-7::BIGINT)) t(v)
+----
+[-24.0, -24.0, 0.0, 0.0]
+
+# World 0 receives a positive value, world 1 only a negative one
+query I
+SELECT as_sum(m, v)[1:4] FROM (VALUES (1::UBIGINT, 10::INTEGER), (2::UBIGINT, -7::INTEGER)) t(m, v)
+----
+[20.0, -14.0, 0.0, 0.0]
+
+# INT64_MIN: magnitude 2^63 is routed to its own level (exact: a power of two)
+query I
+SELECT as_sum(1::UBIGINT, v)[1] = -18446744073709551616::FLOAT
+FROM (VALUES ((-9223372036854775807)::BIGINT - 1)) t(v)
+----
+true
+
+# UBIGINT >= 2^63: 2^63 is exact; the maximum is truncated by at most 2^-8 (relative)
+query II
+SELECT as_sum(1::UBIGINT, a)[1] = 18446744073709551616::FLOAT,
+       abs(as_sum(1::UBIGINT, b)[1] - 2 * 18446744073709551615::DOUBLE) / (2 * 18446744073709551615::DOUBLE) < 0.004
+FROM (VALUES (9223372036854775808::UBIGINT, 18446744073709551615::UBIGINT)) t(a, b)
+----
+true	true
+
+# Every world equals 2 * the conditional SUM, also worlds 32..63 that only receive negative values
+statement ok
+CREATE TABLE neg_worlds AS
+SELECT i % 4 AS g, CASE WHEN i % 2 = 0 THEN i % 100 ELSE -(i % 100) END::INTEGER AS v,
+       CASE WHEN i % 2 = 0 THEN hash(i) & 4294967295::UBIGINT ELSE hash(i) END AS m
+FROM range(4000) t(i)
+
+query II
+WITH a AS (SELECT g, as_sum(m, v) AS s FROM neg_worlds GROUP BY g),
+     n AS (SELECT g, j, 2 * coalesce(sum(v) FILTER (WHERE (m >> j::UBIGINT) & 1::UBIGINT = 1), 0) AS e
+           FROM neg_worlds, range(64) r(j) GROUP BY g, j)
+SELECT count(*), count(*) FILTER (WHERE a.s[j + 1] <> n.e) FROM a JOIN n USING (g)
+----
+256	0
+
+statement ok
+DROP TABLE neg_worlds
+
+# ============================================================================
 # Cleanup
 # ============================================================================
 
