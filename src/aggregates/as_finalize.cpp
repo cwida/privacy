@@ -18,14 +18,9 @@ static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector 
 	auto &context = state.GetContext();
 	double mi = GetPacMiFromSetting(context);
 
-	Value pac_seed_val;
-	uint64_t seed = (context.TryGetCurrentSetting("privacy_seed", pac_seed_val) && !pac_seed_val.IsNull())
-	                    ? uint64_t(pac_seed_val.GetValue<int64_t>())
-	                    : 42;
-	if (mi != 0.0) {
-		seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(context.ActiveTransaction().GetActiveQuery());
-	}
+	uint64_t seed = GetPacSeed(context, mi);
 	uint64_t query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
+	auto gen = PacRandomStream(seed, *GetPacRandomState(context));
 
 	auto &list_vec = args.data[0];
 	idx_t count = args.size();
@@ -63,9 +58,6 @@ static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector 
 			counters[j] = child_data.validity.RowIsValid(child_idx) ? child_values[child_idx] : 0;
 		}
 
-		// RNG seeded per row using seed + list offset (stable across DataChunk batches)
-		std::mt19937_64 gen(seed ^ (entry.offset * PAC_MAGIC_HASH));
-
 		result_data[i] = PacNoisySampleFrom64Counters(counters, mi, 1.0, gen, 0ULL, query_hash, nullptr);
 	}
 }
@@ -74,6 +66,7 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
 	auto scalar_type = PacFloatLogicalType();
 	ScalarFunction priv_finalize("priv_finalize", {list_type}, scalar_type, PacFinalizeFunction);
+	priv_finalize.stability = FunctionStability::VOLATILE;
 	loader.RegisterFunction(priv_finalize);
 
 	// Register implicit casts LIST<FLOAT> → FLOAT and LIST<FLOAT> → DOUBLE so the binder
@@ -83,6 +76,7 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 		double mi = 0.0;
 		uint64_t seed = 42;
 		uint64_t query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
+		PacRandomEngine gen(seed, 0);
 
 		UnifiedVectorFormat list_data;
 		source.ToUnifiedFormat(count, list_data);
@@ -113,7 +107,6 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 				auto child_idx = child_data.sel->get_index(entry.offset + j);
 				counters[j] = child_data.validity.RowIsValid(child_idx) ? child_values[child_idx] : 0;
 			}
-			std::mt19937_64 gen(seed ^ (entry.offset * PAC_MAGIC_HASH));
 			tmp[i] = PacNoisySampleFrom64Counters(counters, mi, 1.0, gen, 0ULL, query_hash, nullptr);
 		}
 
