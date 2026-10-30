@@ -263,6 +263,12 @@ bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt1993
 // noise_variance: the PAC noise variance used for this cell (delta = sigma^2 / (2*mi))
 bool PacUtilityNull(double noised_value, double noise_variance, double threshold, std::mt19937_64 &gen);
 
+// PacCellRng: the generator of one released cell, seeded by the query's seed and by the cell itself (its world
+// mask and its 64 counters). Different cells of a query draw independent NULL decisions and noise, and a cell
+// draws the same values whatever the order, thread or batch in which it is finalized. Cells with the same mask
+// and counters draw the same values, so averaging their releases does not reduce the noise.
+std::mt19937_64 PacCellRng(uint64_t seed, uint64_t key_hash, const PAC_FLOAT counters[64]);
+
 // Minimum total rows across all groups before the diversity check applies
 // With hash32_32 (hash_repair), single-PU groups always have exactly 32 zero bits
 // (in the [29,35] suspicious range), so small test datasets need a higher threshold.

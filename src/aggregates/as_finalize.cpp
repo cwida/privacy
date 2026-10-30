@@ -63,8 +63,8 @@ static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector 
 			counters[j] = child_data.validity.RowIsValid(child_idx) ? child_values[child_idx] : 0;
 		}
 
-		// RNG seeded per row using seed + list offset (stable across DataChunk batches)
-		std::mt19937_64 gen(seed ^ (entry.offset * PAC_MAGIC_HASH));
+		// per-cell generator: independent draws across rows, the same whatever the batch
+		auto gen = PacCellRng(seed, ~0ULL, counters);
 
 		result_data[i] = PacNoisySampleFrom64Counters(counters, mi, 1.0, gen, 0ULL, query_hash, nullptr);
 	}
@@ -113,7 +113,7 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 				auto child_idx = child_data.sel->get_index(entry.offset + j);
 				counters[j] = child_data.validity.RowIsValid(child_idx) ? child_values[child_idx] : 0;
 			}
-			std::mt19937_64 gen(seed ^ (entry.offset * PAC_MAGIC_HASH));
+			auto gen = PacCellRng(seed, ~0ULL, counters);
 			tmp[i] = PacNoisySampleFrom64Counters(counters, mi, 1.0, gen, 0ULL, query_hash, nullptr);
 		}
 

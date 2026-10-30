@@ -441,14 +441,8 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 			result_mask.SetInvalid(offset + i); // return NULL (no values seen)
 			continue;
 		}
-		// Use per-group deterministic RNG seeded by both privacy_seed and key_hash
-		// This ensures each group gets the same noise regardless of processing order
 		uint64_t key_hash = pos->key_hash;
-		std::mt19937_64 gen(input.bind_data->Cast<PrivBindData>().seed);
-		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
-			result_mask.SetInvalid(offset + i); // return NULL (probabilistic decision)
-			continue;
-		}
+		uint64_t null_key_hash = key_hash; // the NULL decision considers the worlds of the positive state
 #ifndef PAC_SIGNEDSUM
 		// Double-sided mode: use SFINAE helpers (cast to unsigned for int states only)
 		FlushPosState<State>(pos, input.allocator);
@@ -460,6 +454,12 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 		pos->GetTotals(buf);
 		uint64_t update_count = pos->update_count;
 #endif
+		// per-cell generator: independent draws across groups, the same whatever the processing order
+		auto gen = PacCellRng(input.bind_data->Cast<PrivBindData>().seed, key_hash, buf);
+		if (PacNoiseInNull(null_key_hash, mi, correction, gen)) {
+			result_mask.SetInvalid(offset + i); // return NULL (probabilistic decision)
+			continue;
+		}
 		CheckPacSampleDiversity(key_hash, buf, update_count, "as_noised_sum", input.bind_data->Cast<PrivBindData>());
 		double noise_var = 0.0;
 		PAC_FLOAT result_val =

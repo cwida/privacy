@@ -1,0 +1,133 @@
+# name: test/sql/pac_noise_independence.test
+# description: Every released cell draws its own NULL decision and noise (PacCellRng): the cells of one query are
+#              independent, and a cell's release does not depend on the order or batch in which it is finalized
+# group: [sql]
+
+require privacy
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET privacy_seed = 42
+
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0.0078125
+
+statement ok
+SET pac_ptracking = false
+
+statement ok
+SET pac_sample_diversity_check = false
+
+# 1000 groups of one entity: each is NULL with probability popcount(~key_hash)/64 = 1/2
+statement ok
+CREATE TABLE solo AS SELECT i AS g, i AS e, 1 + i % 5 AS v FROM range(1000) t(i)
+
+# 1000 groups of 20 entities (no world empty: never NULL), the same data inserted in two orders
+statement ok
+CREATE TABLE cells AS SELECT i // 20 AS g, i AS e, 1 + i % 7 AS v FROM range(20000) t(i)
+
+statement ok
+CREATE TABLE cells_rev AS SELECT * FROM cells ORDER BY e DESC
+
+# ============================================================================
+# NULL decisions are independent across groups (not all-or-nothing)
+# ============================================================================
+
+query I
+SELECT count(*) FILTER (WHERE s IS NULL) BETWEEN 400 AND 600
+FROM (SELECT g, as_noised_sum(priv_hash(hash(e)), v) AS s FROM solo GROUP BY g)
+----
+true
+
+query I
+SELECT count(*) FILTER (WHERE c IS NULL) BETWEEN 400 AND 600
+FROM (SELECT g, as_noised_count(priv_hash(hash(e))) AS c FROM solo GROUP BY g)
+----
+true
+
+query II
+SELECT count(*) FILTER (WHERE mx IS NULL) BETWEEN 400 AND 600, count(*) FILTER (WHERE mn IS NULL) BETWEEN 400 AND 600
+FROM (SELECT g, as_noised_max(priv_hash(hash(e)), v) AS mx, as_noised_min(priv_hash(hash(e)), v) AS mn
+      FROM solo GROUP BY g)
+----
+true	true
+
+query II
+SELECT count(*) FILTER (WHERE s IS NULL) BETWEEN 400 AND 600, count(*) FILTER (WHERE mx IS NULL) BETWEEN 400 AND 600
+FROM (SELECT g, as_noised_clip_sum(priv_hash(hash(e)), v) AS s, as_noised_clip_max(priv_hash(hash(e)), v) AS mx
+      FROM solo GROUP BY g)
+----
+true	true
+
+# ============================================================================
+# Noise is independent across groups: released values fall on either side of the exact ones about equally
+# often (500 +- 16 of 1000; with one draw shared by all groups, nearly all fall on the same side)
+# ============================================================================
+
+query II
+SELECT count(*) FILTER (WHERE s > x) BETWEEN 400 AND 600, count(*) FILTER (WHERE s < x) BETWEEN 400 AND 600
+FROM (SELECT g, as_noised_sum(priv_hash(hash(e)), v) AS s, sum(v) AS x FROM cells GROUP BY g)
+----
+true	true
+
+query II
+SELECT count(*) FILTER (WHERE c > x) BETWEEN 400 AND 600, count(*) FILTER (WHERE c < x) BETWEEN 400 AND 600
+FROM (SELECT g, as_noised_count(priv_hash(hash(e))) AS c, count(*) AS x FROM cells GROUP BY g)
+----
+true	true
+
+query II
+SELECT count(*) FILTER (WHERE s > x) BETWEEN 400 AND 600, count(*) FILTER (WHERE s < x) BETWEEN 400 AND 600
+FROM (SELECT g, as_noised_clip_sum(priv_hash(hash(e)), v) AS s, sum(v) AS x FROM cells GROUP BY g)
+----
+true	true
+
+query II
+SELECT count(*) FILTER (WHERE s > x) BETWEEN 400 AND 600, count(*) FILTER (WHERE s < x) BETWEEN 400 AND 600
+FROM (SELECT g, as_noised(as_sum(priv_hash(hash(e)), v)) AS s, sum(v) AS x FROM cells GROUP BY g)
+----
+true	true
+
+# ============================================================================
+# A cell's release depends on the cell, not on the order or batch in which it is finalized:
+# the same groups aggregated from rows inserted in opposite orders release the same values
+# ============================================================================
+
+query I
+SELECT count(*) FROM (
+  SELECT g, as_noised_sum(priv_hash(hash(e)), v) AS s, as_noised_count(priv_hash(hash(e))) AS c,
+         as_noised_max(priv_hash(hash(e)), v) AS mx, as_noised(as_sum(priv_hash(hash(e)), v)) AS l,
+         as_noised_div(as_sum(priv_hash(hash(e)), v), as_count(priv_hash(hash(e)))) AS d
+  FROM cells GROUP BY g) a
+FULL JOIN (
+  SELECT g, as_noised_sum(priv_hash(hash(e)), v) AS s, as_noised_count(priv_hash(hash(e))) AS c,
+         as_noised_max(priv_hash(hash(e)), v) AS mx, as_noised(as_sum(priv_hash(hash(e)), v)) AS l,
+         as_noised_div(as_sum(priv_hash(hash(e)), v), as_count(priv_hash(hash(e)))) AS d
+  FROM cells_rev GROUP BY g) b USING (g)
+WHERE a.s IS DISTINCT FROM b.s OR a.c IS DISTINCT FROM b.c OR a.mx IS DISTINCT FROM b.mx
+   OR a.l IS DISTINCT FROM b.l OR a.d IS DISTINCT FROM b.d
+----
+0
+
+# the same over more than one vector of groups (4096 groups of 8 entities: as_count, as_noised, as_noised_div and
+# priv_finalize used to draw one sequence per vector, so a cell's draws depended on its position in the vector)
+query I
+SELECT count(*) FROM (
+  SELECT e // 8 AS g, as_noised_count(priv_hash(hash(e))) AS c, as_noised_sum(priv_hash(hash(e)), e) AS s,
+         as_noised(as_sum(priv_hash(hash(e)), e)) AS l, priv_finalize(as_sum(priv_hash(hash(e)), e)) AS f,
+         as_noised_div(as_sum(priv_hash(hash(e)), e), as_count(priv_hash(hash(e)))) AS d
+  FROM range(32768) t(e) GROUP BY g) a
+FULL JOIN (
+  SELECT e // 8 AS g, as_noised_count(priv_hash(hash(e))) AS c, as_noised_sum(priv_hash(hash(e)), e) AS s,
+         as_noised(as_sum(priv_hash(hash(e)), e)) AS l, priv_finalize(as_sum(priv_hash(hash(e)), e)) AS f,
+         as_noised_div(as_sum(priv_hash(hash(e)), e), as_count(priv_hash(hash(e)))) AS d
+  FROM (SELECT * FROM range(32768) t(e) ORDER BY e DESC) GROUP BY g) b USING (g)
+WHERE a.c IS DISTINCT FROM b.c OR a.s IS DISTINCT FROM b.s OR a.l IS DISTINCT FROM b.l
+   OR a.f IS DISTINCT FROM b.f OR a.d IS DISTINCT FROM b.d
+----
+0
