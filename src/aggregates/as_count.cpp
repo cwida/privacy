@@ -227,7 +227,7 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	uint64_t query_hash = bind.query_hash;
 	auto pstate = bind.pstate;
 	PAC_FLOAT buf[64];
-	auto gen = PacRandomStream(bind.seed);
+	auto gen = PacRandomStream(bind.seed, *bind.random_state);
 	for (idx_t i = 0; i < count; i++) {
 #if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
 		aggs[i]->FlushBuffer(*aggs[i], input.allocator); // flush values into yourself

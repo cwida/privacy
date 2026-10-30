@@ -7,6 +7,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/main/client_context_state.hpp"
 
 #include <random>
 #include <atomic>
@@ -134,9 +135,28 @@ bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, PacRandomEn
 	return pac_popcount64(~key_hash) > threshold;
 }
 
-PacRandomEngine PacRandomStream(uint64_t seed) {
-	static std::atomic<uint64_t> next_stream {0};
-	return PacRandomEngine(seed, next_stream.fetch_add(1, std::memory_order_relaxed));
+struct PacRandomState : public ClientContextState {
+	std::atomic<uint64_t> next_stream {0};
+
+	void QueryBegin(ClientContext &) override {
+		next_stream.store(0, std::memory_order_relaxed);
+	}
+};
+
+shared_ptr<PacRandomState> GetPacRandomState(ClientContext &context) {
+	return context.registered_state->GetOrCreate<PacRandomState>("privacy_random_streams");
+}
+
+uint64_t GetPacSeed(ClientContext &context, double mi) {
+	Value value;
+	if (context.TryGetCurrentSetting("privacy_seed", value) && !value.IsNull()) {
+		return uint64_t(value.GetValue<int64_t>());
+	}
+	return mi == 0.0 ? 42 : 42 ^ (PAC_MAGIC_HASH * uint64_t(context.ActiveTransaction().GetActiveQuery()));
+}
+
+PacRandomEngine PacRandomStream(uint64_t seed, PacRandomState &state) {
+	return PacRandomEngine(seed, state.next_stream.fetch_add(1, std::memory_order_relaxed));
 }
 
 // ============================================================================
@@ -356,19 +376,19 @@ uint64_t PacRepairHash32(uint64_t num) {
 //   k     : minimum per-subsample support; cells below it are released as NULL
 // ============================================================================
 struct PacAggregateLocalState : public FunctionLocalState {
-	explicit PacAggregateLocalState(uint64_t seed) : gen(PacRandomStream(seed)) {
+	explicit PacAggregateLocalState(PacRandomEngine gen_p) : gen(std::move(gen_p)) {
 	}
 	PacRandomEngine gen;
 };
 
-static unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &, const BoundFunctionExpression &,
+static unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const BoundFunctionExpression &,
                                                        FunctionData *bind_data) {
 	// Single source-of-truth: prefer seed supplied via bind_data (PrivBindData).
 	uint64_t seed = std::random_device {}();
 	if (bind_data) {
 		seed = bind_data->Cast<PrivBindData>().seed;
 	}
-	return make_uniq<PacAggregateLocalState>(seed);
+	return make_uniq<PacAggregateLocalState>(PacRandomStream(seed, *GetPacRandomState(state.GetContext())));
 }
 
 // Templated over values element type T and counts element type C so we can accept
