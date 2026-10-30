@@ -102,7 +102,7 @@ SET privacy_min_group_count = NULL;  -- disable (default)
 
 ### Hash Repair (pac_hash_repair)
 
-When `pac_hash_repair=true` (default), `priv_hash` repairs its output to have **exactly 32 bits set**. Without repair, DuckDB's internal hash function produces hashes with approximately but not exactly 32 bits. The repair ensures:
+When `pac_hash_repair=true` (default: `false`), `priv_hash` repairs its output to have **exactly 32 bits set**. Without repair, DuckDB's internal hash function produces hashes with approximately but not exactly 32 bits. The repair ensures:
 
 1. **Uniform MIA prior**: every PU appears in exactly half the sub-samples
 2. **Stable noise calibration**: the variance across counters is well-behaved (no outlier counters from PUs that appear in too many or too few sub-samples)

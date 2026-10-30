@@ -35,10 +35,13 @@ PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, typena
 	// so at most 2^-8 relative error per value, always downward); this is the only approximation in the sum,
 	// since cascading is lossless and finalization reads all levels. Rounding to nearest here would make the
 	// per-value error unbiased, but costs ~2% on this hot path, so we keep the prologue minimal.
-	uint64_t abs_val = SIGNED && value < 0 ? static_cast<uint64_t>(-value) : static_cast<uint64_t>(value);
-	int level = PacSumIntState<SIGNED>::GetLevel(static_cast<int64_t>(abs_val));
+	uint64_t abs_val = SIGNED && value < 0 ? uint64_t(0) - static_cast<uint64_t>(value) : static_cast<uint64_t>(value);
+	int level = PacSumIntState<SIGNED>::GetLevel(abs_val);
 	uint64_t shift = level << 2; // multiply level by 4
-	int64_t shifted_val = static_cast<int64_t>(value) >> shift;
+	// Unsigned values (all values in the default double-sided mode) need a logical shift: an arithmetic shift
+	// would sign-extend values >= 2^63. Signed values (PAC_SIGNEDSUM) keep the arithmetic shift.
+	int64_t shifted_val =
+	    SIGNED ? static_cast<int64_t>(value) >> shift : static_cast<int64_t>(static_cast<uint64_t>(value) >> shift);
 	state.AddToExactTotal(level, static_cast<int32_t>(shifted_val), allocator);
 	AddToTotalsSWAR<int16_t, uint16_t, PAC_APPROX_SWAR_MASK>(state.u.levels[level], shifted_val, key_hash);
 #elif defined(PAC_NOCASCADING)
@@ -142,7 +145,8 @@ inline void PacSumRouteValue(WrapperT &wrapper, typename WrapperT::State *state,
 		auto &state_u = *reinterpret_cast<PacSumIntState<false> *>(state);
 		if (SIGNED && value < 0) {
 			auto *neg = wrapper.EnsureNegState(a);
-			PacSumUpdateOneInternal<false>(*neg, hash, static_cast<uint64_t>(-value), a);
+			// negate in unsigned arithmetic: well defined for INT64_MIN (magnitude 2^63)
+			PacSumUpdateOneInternal<false>(*neg, hash, uint64_t(0) - static_cast<uint64_t>(value), a);
 			neg->update_count++;
 		} else {
 			PacSumUpdateOneInternal<false>(state_u, hash, static_cast<uint64_t>(value), a);
@@ -832,9 +836,9 @@ static void PacSumAvgFinalizeCountersInternal(Vector &states, AggregateInputData
 			// Double-sided mode: use SFINAE helpers
 			FlushPosState<State>(s, input.allocator);
 			GetPosStateTotals<State>(s, buf);
-			// For signed int states, subtract neg_state counters element-wise
-			uint64_t dummy_key_hash = 0;
-			update_count += SubtractNegStateTotals<State, SIGNED>(state_ptrs[i], buf, dummy_key_hash, input.allocator);
+			// For signed int states, subtract neg_state counters element-wise. The neg_state's worlds are OR-ed
+			// into key_hash: a world that only received negative values must not be zeroed below.
+			update_count += SubtractNegStateTotals<State, SIGNED>(state_ptrs[i], buf, key_hash, input.allocator);
 #else
 			s->Flush(input.allocator);
 			s->GetTotals(buf);
