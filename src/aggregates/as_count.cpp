@@ -222,7 +222,6 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	auto data = FlatVector::GetData<int64_t>(result);
 	auto &result_mask = FlatVector::Validity(result);
 	auto &bind = input.bind_data->Cast<PrivBindData>();
-	std::mt19937_64 gen(bind.seed);
 	double mi = bind.mi;
 	double correction = bind.correction;
 	uint64_t query_hash = bind.query_hash;
@@ -234,15 +233,17 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 #endif
 		PacCountState *s = aggs[i]->GetState();
 		uint64_t key_hash = s ? s->key_hash : 0;
-		// Check if we should return NULL based on key_hash (uses mi and correction)
-		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
-			result_mask.SetInvalid(offset + i);
-			continue;
-		}
 		if (s) {
 			s->GetTotalsWithSWAR(buf);
 		} else {
 			memset(buf, 0, sizeof(buf));
+		}
+		// per-cell generator: independent draws across groups, the same whatever the processing order
+		auto gen = PacCellRng(bind.seed, key_hash, buf);
+		// Check if we should return NULL based on key_hash (uses mi and correction)
+		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
+			result_mask.SetInvalid(offset + i);
+			continue;
 		}
 		CheckPacSampleDiversity(key_hash, buf, s ? s->GetUpdateCount() : 0, "as_noised_count",
 		                        input.bind_data->Cast<PrivBindData>());

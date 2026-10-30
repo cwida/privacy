@@ -567,11 +567,7 @@ static void PacClipSumFinalize(Vector &states, AggregateInputData &input, Vector
 			continue;
 		}
 		uint64_t key_hash = pos->key_hash;
-		std::mt19937_64 gen(bind.seed);
-		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
-			result_mask.SetInvalid(offset + i);
-			continue;
-		}
+		uint64_t null_key_hash = key_hash; // the NULL decision considers the worlds of the positive state
 
 		// Non-mutating: just read totals with clip_support filtering
 		pos->GetTotals(buf, clip_support, clip_scale);
@@ -587,6 +583,12 @@ static void PacClipSumFinalize(Vector &states, AggregateInputData &input, Vector
 				buf[j] -= neg_buf[j];
 			}
 			update_count += neg->update_count;
+		}
+		// per-cell generator: independent draws across groups, the same whatever the processing order
+		auto gen = PacCellRng(bind.seed, key_hash, buf);
+		if (PacNoiseInNull(null_key_hash, mi, correction, gen)) {
+			result_mask.SetInvalid(offset + i);
+			continue;
 		}
 
 		CheckPacSampleDiversity(key_hash, buf, update_count, "as_clip_sum", bind);

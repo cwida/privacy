@@ -587,8 +587,6 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
 	auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
 
-	std::mt19937_64 gen(bind_data.seed);
-
 	UnifiedVectorFormat list_data;
 	list_vec.ToUnifiedFormat(count, list_data);
 
@@ -619,16 +617,18 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 		// Assume all 64 worlds are populated (all bits set)
 		uint64_t key_hash = ~uint64_t(0);
 
-		// Check if we should return NULL based on key_hash (uses mi and correction)
-		if (PacNoiseInNull(key_hash, bind_data.mi, bind_data.correction, gen)) {
-			result_validity.SetInvalid(i);
-			continue;
-		}
 		// Extract counter values from the list
 		PAC_FLOAT counters[64];
 		for (idx_t j = 0; j < 64; j++) {
 			auto child_idx = child_data.sel->get_index(entry.offset + j);
 			counters[j] = child_values[child_idx];
+		}
+		// per-cell generator: independent draws across rows, the same whatever the batch
+		auto gen = PacCellRng(bind_data.seed, key_hash, counters);
+		// Check if we should return NULL based on key_hash (uses mi and correction)
+		if (PacNoiseInNull(key_hash, bind_data.mi, bind_data.correction, gen)) {
+			result_validity.SetInvalid(i);
+			continue;
 		}
 		double noise_var = 0.0;
 		result_data[i] = PacNoisySampleFrom64Counters(counters, bind_data.mi, bind_data.correction, gen, ~key_hash,
@@ -733,7 +733,6 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
 	auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
-	std::mt19937_64 gen(bind_data.seed);
 
 	UnifiedVectorFormat sum_data, cnt_data;
 	sum_vec.ToUnifiedFormat(count, sum_data);
@@ -768,10 +767,6 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 			continue;
 		}
 		uint64_t key_hash = ~uint64_t(0);
-		if (PacNoiseInNull(key_hash, bind_data.mi, bind_data.correction, gen)) {
-			result_validity.SetInvalid(i);
-			continue;
-		}
 		// Element-wise division: sum[j] / cnt[j] for each of the 64 counters
 		PAC_FLOAT counters[64];
 		for (idx_t j = 0; j < 64; j++) {
@@ -780,6 +775,12 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 			PAC_FLOAT s = sum_values[s_idx];
 			PAC_FLOAT c = cnt_values[c_idx];
 			counters[j] = s / c; // 0/0 → NaN, which propagates correctly
+		}
+		// per-cell generator: independent draws across rows, the same whatever the batch
+		auto gen = PacCellRng(bind_data.seed, key_hash, counters);
+		if (PacNoiseInNull(key_hash, bind_data.mi, bind_data.correction, gen)) {
+			result_validity.SetInvalid(i);
+			continue;
 		}
 		double noise_var = 0.0;
 		result_data[i] = static_cast<double>(PacNoisySampleFrom64Counters(counters, bind_data.mi, bind_data.correction,

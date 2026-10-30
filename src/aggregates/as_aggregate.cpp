@@ -133,6 +133,12 @@ bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt1993
 	return pac_popcount64(~key_hash) > threshold;
 }
 
+std::mt19937_64 PacCellRng(uint64_t seed, uint64_t key_hash, const PAC_FLOAT counters[64]) {
+	hash_t h = CombineHash(Hash(seed), Hash(key_hash));
+	h = CombineHash(h, Hash(reinterpret_cast<const char *>(counters), 64 * sizeof(PAC_FLOAT)));
+	return std::mt19937_64(h);
+}
+
 // ============================================================================
 // Utility NULLing: probabilistically NULL low-SNR cells (post-processing)
 // ============================================================================

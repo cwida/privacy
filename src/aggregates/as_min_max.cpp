@@ -113,17 +113,18 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		auto *s = state_ptrs[i]->GetState();
 		// Check if we should return NULL based on key_hash
 		uint64_t key_hash = s ? s->key_hash : 0;
-		std::mt19937_64 gen(input.bind_data->Cast<PrivBindData>().seed);
-		// mi controls noise mode, correction reduces NULL probability (but does NOT scale min/max values)
-		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
-			result_mask.SetInvalid(offset + i);
-			continue;
-		}
 		PAC_FLOAT buf[64];
 		if (s && s->initialized) {
 			s->GetTotals(buf);
 		} else {
 			memset(buf, 0, sizeof(buf));
+		}
+		// per-cell generator: independent draws across groups, the same whatever the processing order
+		auto gen = PacCellRng(input.bind_data->Cast<PrivBindData>().seed, key_hash, buf);
+		// mi controls noise mode, correction reduces NULL probability (but does NOT scale min/max values)
+		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
+			result_mask.SetInvalid(offset + i);
+			continue;
 		}
 		CheckPacSampleDiversity(key_hash, buf, s ? s->update_count : 0, IS_MAX ? "as_noised_max" : "as_noised_min",
 		                        input.bind_data->Cast<PrivBindData>());
