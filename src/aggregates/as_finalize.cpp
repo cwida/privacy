@@ -18,15 +18,9 @@ static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector 
 	auto &context = state.GetContext();
 	double mi = GetPacMiFromSetting(context);
 
-	Value pac_seed_val;
-	uint64_t seed = (context.TryGetCurrentSetting("privacy_seed", pac_seed_val) && !pac_seed_val.IsNull())
-	                    ? uint64_t(pac_seed_val.GetValue<int64_t>())
-	                    : 42;
-	if (mi != 0.0) {
-		seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(context.ActiveTransaction().GetActiveQuery());
-	}
+	uint64_t seed = GetPacSeed(context, mi);
 	uint64_t query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
-	auto gen = PacRandomStream(seed);
+	auto gen = PacRandomStream(seed, *GetPacRandomState(context));
 
 	auto &list_vec = args.data[0];
 	idx_t count = args.size();
@@ -82,7 +76,7 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 		double mi = 0.0;
 		uint64_t seed = 42;
 		uint64_t query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
-		auto gen = PacRandomStream(seed);
+		PacRandomEngine gen(seed, 0);
 
 		UnifiedVectorFormat list_data;
 		source.ToUnifiedFormat(count, list_data);

@@ -104,7 +104,9 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 	double correction = input.bind_data ? input.bind_data->Cast<PrivBindData>().correction : 1.0;
 	uint64_t query_hash = input.bind_data ? input.bind_data->Cast<PrivBindData>().query_hash : 0;
 	auto pstate = input.bind_data ? input.bind_data->Cast<PrivBindData>().pstate : nullptr;
-	auto gen = PacRandomStream(input.bind_data ? input.bind_data->Cast<PrivBindData>().seed : 0);
+	auto gen = input.bind_data ? PacRandomStream(input.bind_data->Cast<PrivBindData>().seed,
+	                                             *input.bind_data->Cast<PrivBindData>().random_state)
+	                           : PacRandomEngine(0, 0);
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING

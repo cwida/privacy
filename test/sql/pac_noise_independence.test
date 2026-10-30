@@ -110,3 +110,90 @@ FROM (SELECT as_noised(range(64)::FLOAT[]) AS l,
       FROM range(4096)) t
 ----
 true	true	true
+
+# A fixed seed repeats for the same execution setup, even after unrelated draws.
+statement ok
+CREATE TABLE seeded_first AS
+SELECT g, as_noised_sum(priv_hash(hash(e)), v) AS s,
+          as_noised_count(priv_hash(hash(e))) AS c,
+          as_noised_min(priv_hash(hash(e)), v) AS mn,
+          as_noised_max(priv_hash(hash(e)), v) AS mx,
+          as_noised_clip_sum(priv_hash(hash(e)), v) AS cs,
+          as_noised_clip_max(priv_hash(hash(e)), v) AS cm
+FROM solo GROUP BY g
+
+statement ok
+CREATE TABLE unrelated_draws AS SELECT as_noised(range(64)::FLOAT[]) AS v FROM range(8192)
+
+statement ok
+CREATE TABLE seeded_second AS
+SELECT g, as_noised_sum(priv_hash(hash(e)), v) AS s,
+          as_noised_count(priv_hash(hash(e))) AS c,
+          as_noised_min(priv_hash(hash(e)), v) AS mn,
+          as_noised_max(priv_hash(hash(e)), v) AS mx,
+          as_noised_clip_sum(priv_hash(hash(e)), v) AS cs,
+          as_noised_clip_max(priv_hash(hash(e)), v) AS cm
+FROM solo GROUP BY g
+
+query I
+SELECT count(*) FROM seeded_first a JOIN seeded_second b USING (g)
+WHERE a.s IS DISTINCT FROM b.s OR a.c IS DISTINCT FROM b.c
+   OR a.mn IS DISTINCT FROM b.mn OR a.mx IS DISTINCT FROM b.mx
+   OR a.cs IS DISTINCT FROM b.cs OR a.cm IS DISTINCT FROM b.cm
+----
+0
+
+# Prepared scalar releases must reset streams on every execution and advance
+# between vectors; bind data can survive many executions of the statement.
+statement ok
+CREATE TABLE seeded_prepared(i BIGINT, l FLOAT, f FLOAT, d DOUBLE)
+
+statement ok
+PREPARE seeded_release AS INSERT INTO seeded_prepared
+SELECT i, as_noised(range(64)::FLOAT[]), priv_finalize(range(64)::FLOAT[]),
+       as_noised_div(range(64)::FLOAT[], list_transform(range(64), x -> 1::FLOAT))
+FROM range(4096) t(i)
+
+statement ok
+EXECUTE seeded_release
+
+statement ok
+EXECUTE seeded_release
+
+query I
+SELECT count(*) FROM seeded_prepared a JOIN seeded_prepared b USING (i)
+WHERE a.rowid < 4096 AND b.rowid >= 4096
+AND (a.l IS DISTINCT FROM b.l OR a.f IS DISTINCT FROM b.f OR a.d IS DISTINCT FROM b.d)
+----
+0
+
+query III
+SELECT count(DISTINCT l) > 3000, count(DISTINCT f) > 3000, count(DISTINCT d) > 3000
+FROM seeded_prepared WHERE rowid < 4096
+----
+true	true	true
+
+statement ok
+DEALLOCATE seeded_release
+
+statement ok
+CREATE TABLE seeded_counts(g BIGINT, c BIGINT)
+
+statement ok
+PREPARE seeded_count AS INSERT INTO seeded_counts
+SELECT g, as_noised_count(priv_hash(hash(e))) FROM solo GROUP BY g
+
+statement ok
+EXECUTE seeded_count
+
+statement ok
+EXECUTE seeded_count
+
+query I
+SELECT count(*) FROM seeded_counts a JOIN seeded_counts b USING (g)
+WHERE a.rowid < 1000 AND b.rowid >= 1000 AND a.c IS DISTINCT FROM b.c
+----
+0
+
+statement ok
+DEALLOCATE seeded_count

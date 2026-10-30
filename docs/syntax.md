@@ -158,3 +158,7 @@ There is some preliminary support for using multiple PU tables inside the same s
 | `privacy_diffcols` | `NULL` | [Utility diff](pac/utility.md): compare noised vs exact results |
 | `privacy_min_group_count` | `NULL` (disabled) | Admin-set minimum support threshold for DP groups. In PAC aggregates, this remains the z-score threshold for [utility NULLing](pac/runtime_checks.md#utility-nulling). |
 | `priv_clip_support` | `NULL` (disabled) | Enable clipping: aggregate per-PU values with outlier elimination at the given support threshold |
+
+PAC seeded reproducibility requires stable execution order; use `SET threads = 1`
+for repeatable tests. Parallel group order and p-tracking state can change results;
+see the [seed reproducibility contract](../README.md#settings).

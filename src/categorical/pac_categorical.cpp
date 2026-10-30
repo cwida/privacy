@@ -54,25 +54,19 @@ struct PacCategoricalBindData : public FunctionData {
 	uint64_t query_hash;               // derived from seed: used as counter selector for NoisySample
 	std::shared_ptr<PacPState> pstate; // p-tracking state shared across query (may be nullptr)
 	double utility_threshold;          // z-score threshold for utility NULLing (NaN = disabled)
+	shared_ptr<PacRandomState> random_state;
 
 	// Primary constructor - reads seed from privacy_seed setting, or uses default 42 if not set.
-	// When mi > 0, seed is randomized per query via the query number.
+	// Without an explicit seed, mi > 0 mixes in the query number.
 	explicit PacCategoricalBindData(ClientContext &ctx, double mi_val = 0.0, double correction_val = 1.0)
-	    : mi(mi_val), correction(correction_val), utility_threshold(std::numeric_limits<double>::quiet_NaN()) {
+	    : mi(mi_val), correction(correction_val), utility_threshold(std::numeric_limits<double>::quiet_NaN()),
+	      random_state(GetPacRandomState(ctx)) {
 		// Read utility threshold setting
 		Value ut_val;
 		if (ctx.TryGetCurrentSetting("privacy_min_group_count", ut_val) && !ut_val.IsNull()) {
 			utility_threshold = ut_val.GetValue<double>();
 		}
-		Value pac_seed_val;
-		if (ctx.TryGetCurrentSetting("privacy_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
-			seed = uint64_t(pac_seed_val.GetValue<int64_t>());
-		} else {
-			seed = 42;
-		}
-		if (mi != 0.0) { // randomize seed per query (not in deterministic mode aka mi==0)
-			seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(ctx.ActiveTransaction().GetActiveQuery());
-		}
+		seed = GetPacSeed(ctx, mi);
 		query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
 		// Initialize p-tracking if mi > 0 and pac_ptracking is enabled
 		if (mi > 0.0) {
@@ -103,7 +97,7 @@ struct PacCategoricalBindData : public FunctionData {
 // ============================================================================
 struct PacCategoricalLocalState : public FunctionLocalState {
 	PacRandomEngine gen;
-	explicit PacCategoricalLocalState(uint64_t seed) : gen(PacRandomStream(seed)) {
+	explicit PacCategoricalLocalState(PacRandomEngine gen_p) : gen(std::move(gen_p)) {
 	}
 };
 
@@ -113,7 +107,7 @@ PacCategoricalInitLocal(ExpressionState &state, const BoundFunctionExpression &e
 	if (bind_data) {
 		seed = bind_data->Cast<PacCategoricalBindData>().seed;
 	}
-	return make_uniq<PacCategoricalLocalState>(seed);
+	return make_uniq<PacCategoricalLocalState>(PacRandomStream(seed, *GetPacRandomState(state.GetContext())));
 }
 
 // ============================================================================
@@ -586,7 +580,7 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
 	auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
-	auto gen = PacRandomStream(bind_data.seed);
+	auto gen = PacRandomStream(bind_data.seed, *bind_data.random_state);
 
 	UnifiedVectorFormat list_data;
 	list_vec.ToUnifiedFormat(count, list_data);
@@ -732,7 +726,7 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
 	auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
-	auto gen = PacRandomStream(bind_data.seed);
+	auto gen = PacRandomStream(bind_data.seed, *bind_data.random_state);
 
 	UnifiedVectorFormat sum_data, cnt_data;
 	sum_vec.ToUnifiedFormat(count, sum_data);
