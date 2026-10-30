@@ -557,7 +557,7 @@ static void PacClipSumFinalize(Vector &states, AggregateInputData &input, Vector
 	int clip_support = bind.clip_support_threshold;
 	bool clip_scale = bind.clip_scale;
 
-	auto gen = PacRandomStream(bind.seed);
+	auto gen = PacRandomStream(bind.seed, *bind.random_state);
 	for (idx_t i = 0; i < count; i++) {
 		PacClipSumFlushBuffer<NL, SIGNED>(*state_ptrs[i], *state_ptrs[i], input.allocator, bind.sample_lanes);
 
