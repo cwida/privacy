@@ -102,8 +102,8 @@ struct PacCategoricalBindData : public FunctionData {
 // Local state for PAC categorical functions (RNG)
 // ============================================================================
 struct PacCategoricalLocalState : public FunctionLocalState {
-	std::mt19937_64 gen;
-	explicit PacCategoricalLocalState(uint64_t seed) : gen(seed) {
+	PacRandomEngine gen;
+	explicit PacCategoricalLocalState(uint64_t seed) : gen(PacRandomStream(seed)) {
 	}
 };
 
@@ -141,7 +141,7 @@ static inline uint64_t BoolListToMask(UnifiedVectorFormat &list_data, UnifiedVec
 // Helper: Common filter logic for mask-based filtering
 // ============================================================================
 static inline bool FilterFromCount(idx_t true_count, idx_t lane_count, double mi, double correction,
-                                   std::mt19937_64 &gen) {
+                                   PacRandomEngine &gen) {
 	if (lane_count == 0) {
 		return false;
 	}
@@ -168,7 +168,7 @@ static inline bool FilterFromCount(idx_t true_count, idx_t lane_count, double mi
 // correction: considers correction times more non-nulls (increases true probability)
 // When mi <= 0: deterministic, true when popcount(mask) * correction >= 32
 // When mi > 0: probabilistic, P(true) = popcount(mask) * correction / 64
-static inline bool FilterFromMask(uint64_t mask, double mi, double correction, std::mt19937_64 &gen) {
+static inline bool FilterFromMask(uint64_t mask, double mi, double correction, PacRandomEngine &gen) {
 	int popcount = Popcount64(mask);
 	return FilterFromCount(popcount, 64, mi, correction, gen);
 }
@@ -223,7 +223,7 @@ static void PacSelectFunction(DataChunk &args, ExpressionState &state, Vector &r
 struct PacFilterParams {
 	double mi;
 	double correction;
-	std::mt19937_64 &gen;
+	PacRandomEngine &gen;
 };
 
 static PacFilterParams GetPacFilterParams(ExpressionState &state) {
@@ -586,6 +586,7 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
 	auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
+	auto gen = PacRandomStream(bind_data.seed);
 
 	UnifiedVectorFormat list_data;
 	list_vec.ToUnifiedFormat(count, list_data);
@@ -623,8 +624,6 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 			auto child_idx = child_data.sel->get_index(entry.offset + j);
 			counters[j] = child_values[child_idx];
 		}
-		// per-cell generator: independent draws across rows, the same whatever the batch
-		auto gen = PacCellRng(bind_data.seed, key_hash, counters);
 		// Check if we should return NULL based on key_hash (uses mi and correction)
 		if (PacNoiseInNull(key_hash, bind_data.mi, bind_data.correction, gen)) {
 			result_validity.SetInvalid(i);
@@ -733,6 +732,7 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
 	auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
+	auto gen = PacRandomStream(bind_data.seed);
 
 	UnifiedVectorFormat sum_data, cnt_data;
 	sum_vec.ToUnifiedFormat(count, sum_data);
@@ -776,8 +776,6 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 			PAC_FLOAT c = cnt_values[c_idx];
 			counters[j] = s / c; // 0/0 → NaN, which propagates correctly
 		}
-		// per-cell generator: independent draws across rows, the same whatever the batch
-		auto gen = PacCellRng(bind_data.seed, key_hash, counters);
 		if (PacNoiseInNull(key_hash, bind_data.mi, bind_data.correction, gen)) {
 			result_validity.SetInvalid(i);
 			continue;
@@ -1217,6 +1215,7 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	// as_noised(list<PAC_FLOAT>) -> PAC_FLOAT
 	ScalarFunction as_noised("as_noised", {list_double_type}, PacFloatLogicalType(), PacNoisedFunction,
 	                         PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	as_noised.stability = FunctionStability::VOLATILE;
 	loader.RegisterFunction(
 	    make_scalar_info(as_noised, "[INTERNAL] Applies PAC noise to 64-element counter list, returns scalar."));
 
@@ -1227,6 +1226,7 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 	// as_noised_div(list<PAC_FLOAT> sum, list<PAC_FLOAT> cnt) -> DOUBLE
 	ScalarFunction as_noised_div("as_noised_div", {list_double_type, list_double_type}, LogicalType::DOUBLE,
 	                             PacNoisedDivFunction, PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	as_noised_div.stability = FunctionStability::VOLATILE;
 	loader.RegisterFunction(make_scalar_info(as_noised_div, "[INTERNAL] Fused counter-list division + noise for AVG."));
 
 	// priv_filter_<cmp>: optimized comparison + filter in a single pass

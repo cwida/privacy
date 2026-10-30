@@ -26,6 +26,7 @@ static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector 
 		seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(context.ActiveTransaction().GetActiveQuery());
 	}
 	uint64_t query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
+	auto gen = PacRandomStream(seed);
 
 	auto &list_vec = args.data[0];
 	idx_t count = args.size();
@@ -63,9 +64,6 @@ static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector 
 			counters[j] = child_data.validity.RowIsValid(child_idx) ? child_values[child_idx] : 0;
 		}
 
-		// per-cell generator: independent draws across rows, the same whatever the batch
-		auto gen = PacCellRng(seed, ~0ULL, counters);
-
 		result_data[i] = PacNoisySampleFrom64Counters(counters, mi, 1.0, gen, 0ULL, query_hash, nullptr);
 	}
 }
@@ -74,6 +72,7 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
 	auto scalar_type = PacFloatLogicalType();
 	ScalarFunction priv_finalize("priv_finalize", {list_type}, scalar_type, PacFinalizeFunction);
+	priv_finalize.stability = FunctionStability::VOLATILE;
 	loader.RegisterFunction(priv_finalize);
 
 	// Register implicit casts LIST<FLOAT> → FLOAT and LIST<FLOAT> → DOUBLE so the binder
@@ -83,6 +82,7 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 		double mi = 0.0;
 		uint64_t seed = 42;
 		uint64_t query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
+		auto gen = PacRandomStream(seed);
 
 		UnifiedVectorFormat list_data;
 		source.ToUnifiedFormat(count, list_data);
@@ -113,7 +113,6 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 				auto child_idx = child_data.sel->get_index(entry.offset + j);
 				counters[j] = child_data.validity.RowIsValid(child_idx) ? child_values[child_idx] : 0;
 			}
-			auto gen = PacCellRng(seed, ~0ULL, counters);
 			tmp[i] = PacNoisySampleFrom64Counters(counters, mi, 1.0, gen, 0ULL, query_hash, nullptr);
 		}
 

@@ -557,6 +557,7 @@ static void PacClipSumFinalize(Vector &states, AggregateInputData &input, Vector
 	int clip_support = bind.clip_support_threshold;
 	bool clip_scale = bind.clip_scale;
 
+	auto gen = PacRandomStream(bind.seed);
 	for (idx_t i = 0; i < count; i++) {
 		PacClipSumFlushBuffer<NL, SIGNED>(*state_ptrs[i], *state_ptrs[i], input.allocator, bind.sample_lanes);
 
@@ -567,7 +568,10 @@ static void PacClipSumFinalize(Vector &states, AggregateInputData &input, Vector
 			continue;
 		}
 		uint64_t key_hash = pos->key_hash;
-		uint64_t null_key_hash = key_hash; // the NULL decision considers the worlds of the positive state
+		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
+			result_mask.SetInvalid(offset + i);
+			continue;
+		}
 
 		// Non-mutating: just read totals with clip_support filtering
 		pos->GetTotals(buf, clip_support, clip_scale);
@@ -583,12 +587,6 @@ static void PacClipSumFinalize(Vector &states, AggregateInputData &input, Vector
 				buf[j] -= neg_buf[j];
 			}
 			update_count += neg->update_count;
-		}
-		// per-cell generator: independent draws across groups, the same whatever the processing order
-		auto gen = PacCellRng(bind.seed, key_hash, buf);
-		if (PacNoiseInNull(null_key_hash, mi, correction, gen)) {
-			result_mask.SetInvalid(offset + i);
-			continue;
 		}
 
 		CheckPacSampleDiversity(key_hash, buf, update_count, "as_clip_sum", bind);
