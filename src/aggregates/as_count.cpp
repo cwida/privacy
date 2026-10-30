@@ -227,23 +227,21 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	uint64_t query_hash = bind.query_hash;
 	auto pstate = bind.pstate;
 	PAC_FLOAT buf[64];
+	auto gen = PacRandomStream(bind.seed);
 	for (idx_t i = 0; i < count; i++) {
 #if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
 		aggs[i]->FlushBuffer(*aggs[i], input.allocator); // flush values into yourself
 #endif
 		PacCountState *s = aggs[i]->GetState();
 		uint64_t key_hash = s ? s->key_hash : 0;
+		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
+			result_mask.SetInvalid(offset + i);
+			continue;
+		}
 		if (s) {
 			s->GetTotalsWithSWAR(buf);
 		} else {
 			memset(buf, 0, sizeof(buf));
-		}
-		// per-cell generator: independent draws across groups, the same whatever the processing order
-		auto gen = PacCellRng(bind.seed, key_hash, buf);
-		// Check if we should return NULL based on key_hash (uses mi and correction)
-		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
-			result_mask.SetInvalid(offset + i);
-			continue;
 		}
 		CheckPacSampleDiversity(key_hash, buf, s ? s->GetUpdateCount() : 0, "as_noised_count",
 		                        input.bind_data->Cast<PrivBindData>());

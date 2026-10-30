@@ -5,6 +5,7 @@
 #include "duckdb/common/random_engine.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
+#include "pcg_random.hpp"
 #include <type_traits>
 #include <mutex>
 #include <memory>
@@ -184,6 +185,27 @@ static inline int pac_ctzll(uint64_t x) {
 
 namespace duckdb {
 
+// DuckDB's PCG32 core, exposed as a 64-bit URBG for the standard distributions.
+class PacRandomEngine {
+public:
+	using result_type = uint64_t;
+	explicit PacRandomEngine(uint64_t seed, uint64_t stream) : engine(seed, stream) {
+	}
+	static constexpr result_type min() {
+		return 0;
+	}
+	static constexpr result_type max() {
+		return ~result_type(0);
+	}
+	result_type operator()() {
+		const auto high = engine();
+		return (result_type(high) << 32) | engine();
+	}
+
+private:
+	pcg32 engine;
+};
+
 // Returns the DuckDB LogicalType corresponding to PAC_FLOAT (FLOAT or DOUBLE).
 static inline LogicalType PacFloatLogicalType() {
 	return std::is_same<PAC_FLOAT, float>::value ? LogicalType::FLOAT : LogicalType::DOUBLE;
@@ -237,7 +259,7 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader);
 // correction: factor to multiply values by after compacting NULLs but before adding noise
 // pstate: optional shared p-tracking state for persistent secret composition (may be nullptr)
 // out_noise_variance: if non-null, receives the noise variance used (for utility NULLing)
-PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, double correction, std::mt19937_64 &gen,
+PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, double correction, PacRandomEngine &gen,
                                        uint64_t is_null = 0, uint64_t counter_selector = 0,
                                        const std::shared_ptr<PacPState> &pstate = nullptr,
                                        double *out_noise_variance = nullptr);
@@ -253,7 +275,7 @@ static inline bool PacNoisedSelect(uint64_t key_hash, uint64_t rnd) {
 // correction: reduces NULL probability by this factor (considers correction times more non-nulls)
 // Probabilistic: P(NULL) = popcount(~key_hash) / (64 * correction)
 // Deterministic: NULL when popcount(key_hash) * correction < 1
-bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt19937_64 &gen);
+bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, PacRandomEngine &gen);
 
 // PacUtilityNull: post-processing NULLing of low-SNR cells.
 // Returns true (NULL the cell) probabilistically based on z-score = |noised_value| / noise_std_dev.
@@ -261,13 +283,12 @@ bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt1993
 // Safe by data processing inequality: this is a function of the already-noised output + independent coins.
 // threshold: z-score center (e.g., 4.0 means ~20% expected relative error cutoff). NaN = disabled.
 // noise_variance: the PAC noise variance used for this cell (delta = sigma^2 / (2*mi))
-bool PacUtilityNull(double noised_value, double noise_variance, double threshold, std::mt19937_64 &gen);
+bool PacUtilityNull(double noised_value, double noise_variance, double threshold, PacRandomEngine &gen);
 
-// PacCellRng: the generator of one released cell, seeded by the query's seed and by the cell itself (its world
-// mask and its 64 counters). Different cells of a query draw independent NULL decisions and noise, and a cell
-// draws the same values whatever the order, thread or batch in which it is finalized. Cells with the same mask
-// and counters draw the same values, so averaging their releases does not reduce the noise.
-std::mt19937_64 PacCellRng(uint64_t seed, uint64_t key_hash, const PAC_FLOAT counters[64]);
+// One lightweight stream per finalization batch, advanced across its cells.
+// Stream IDs distinguish batches and workers without hashing counters or adding per-group state.
+// Which draw a cell receives depends on execution order; bit-identical per-cell releases are not promised.
+PacRandomEngine PacRandomStream(uint64_t seed);
 
 // Minimum total rows across all groups before the diversity check applies
 // With hash32_32 (hash_repair), single-PU groups always have exactly 32 zero bits

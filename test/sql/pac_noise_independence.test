@@ -1,6 +1,5 @@
 # name: test/sql/pac_noise_independence.test
-# description: Every released cell draws its own NULL decision and noise (PacCellRng): the cells of one query are
-#              independent, and a cell's release does not depend on the order or batch in which it is finalized
+# description: Independent noise draws across groups and finalization batches
 # group: [sql]
 
 require privacy
@@ -27,12 +26,9 @@ SET pac_sample_diversity_check = false
 statement ok
 CREATE TABLE solo AS SELECT i AS g, i AS e, 1 + i % 5 AS v FROM range(1000) t(i)
 
-# 1000 groups of 20 entities (no world empty: never NULL), the same data inserted in two orders
+# 1000 groups of 20 entities (no world empty: never NULL)
 statement ok
 CREATE TABLE cells AS SELECT i // 20 AS g, i AS e, 1 + i % 7 AS v FROM range(20000) t(i)
-
-statement ok
-CREATE TABLE cells_rev AS SELECT * FROM cells ORDER BY e DESC
 
 # ============================================================================
 # NULL decisions are independent across groups (not all-or-nothing)
@@ -94,40 +90,23 @@ FROM (SELECT g, as_noised(as_sum(priv_hash(hash(e)), v)) AS s, sum(v) AS x FROM 
 true	true
 
 # ============================================================================
-# A cell's release depends on the cell, not on the order or batch in which it is finalized:
-# the same groups aggregated from rows inserted in opposite orders release the same values
+# Equal counter values in different groups still receive independent draws.
+# Reinitializing the generator from counters would make all 1000 NULL decisions identical.
 # ============================================================================
 
 query I
-SELECT count(*) FROM (
-  SELECT g, as_noised_sum(priv_hash(hash(e)), v) AS s, as_noised_count(priv_hash(hash(e))) AS c,
-         as_noised_max(priv_hash(hash(e)), v) AS mx, as_noised(as_sum(priv_hash(hash(e)), v)) AS l,
-         as_noised_div(as_sum(priv_hash(hash(e)), v), as_count(priv_hash(hash(e)))) AS d
-  FROM cells GROUP BY g) a
-FULL JOIN (
-  SELECT g, as_noised_sum(priv_hash(hash(e)), v) AS s, as_noised_count(priv_hash(hash(e))) AS c,
-         as_noised_max(priv_hash(hash(e)), v) AS mx, as_noised(as_sum(priv_hash(hash(e)), v)) AS l,
-         as_noised_div(as_sum(priv_hash(hash(e)), v), as_count(priv_hash(hash(e)))) AS d
-  FROM cells_rev GROUP BY g) b USING (g)
-WHERE a.s IS DISTINCT FROM b.s OR a.c IS DISTINCT FROM b.c OR a.mx IS DISTINCT FROM b.mx
-   OR a.l IS DISTINCT FROM b.l OR a.d IS DISTINCT FROM b.d
+SELECT count(*) FILTER (WHERE c IS NULL) BETWEEN 400 AND 600
+FROM (SELECT i, as_noised_count(4294967295::UBIGINT) AS c FROM range(1000) t(i) GROUP BY i)
 ----
-0
+true
 
-# the same over more than one vector of groups (4096 groups of 8 entities: as_count, as_noised, as_noised_div and
-# priv_finalize used to draw one sequence per vector, so a cell's draws depended on its position in the vector)
-query I
-SELECT count(*) FROM (
-  SELECT e // 8 AS g, as_noised_count(priv_hash(hash(e))) AS c, as_noised_sum(priv_hash(hash(e)), e) AS s,
-         as_noised(as_sum(priv_hash(hash(e)), e)) AS l, priv_finalize(as_sum(priv_hash(hash(e)), e)) AS f,
-         as_noised_div(as_sum(priv_hash(hash(e)), e), as_count(priv_hash(hash(e)))) AS d
-  FROM range(32768) t(e) GROUP BY g) a
-FULL JOIN (
-  SELECT e // 8 AS g, as_noised_count(priv_hash(hash(e))) AS c, as_noised_sum(priv_hash(hash(e)), e) AS s,
-         as_noised(as_sum(priv_hash(hash(e)), e)) AS l, priv_finalize(as_sum(priv_hash(hash(e)), e)) AS f,
-         as_noised_div(as_sum(priv_hash(hash(e)), e), as_count(priv_hash(hash(e)))) AS d
-  FROM (SELECT * FROM range(32768) t(e) ORDER BY e DESC) GROUP BY g) b USING (g)
-WHERE a.c IS DISTINCT FROM b.c OR a.s IS DISTINCT FROM b.s OR a.l IS DISTINCT FROM b.l
-   OR a.f IS DISTINCT FROM b.f OR a.d IS DISTINCT FROM b.d
+# Constant counter arrays across several vectors must not be constant-folded,
+# or restart the same RNG stream in each vector. Check all scalar release forms.
+query III
+SELECT count(DISTINCT l) > 3000, count(DISTINCT f) > 3000, count(DISTINCT d) > 3000
+FROM (SELECT as_noised(range(64)::FLOAT[]) AS l,
+             priv_finalize(range(64)::FLOAT[]) AS f,
+             as_noised_div(range(64)::FLOAT[], list_transform(range(64), x -> 1::FLOAT)) AS d
+      FROM range(4096)) t
 ----
-0
+true	true	true

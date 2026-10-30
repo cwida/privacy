@@ -430,6 +430,7 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 	double correction = input.bind_data ? input.bind_data->Cast<PrivBindData>().correction : 1.0;
 	uint64_t query_hash = input.bind_data ? input.bind_data->Cast<PrivBindData>().query_hash : 0;
 	auto pstate = input.bind_data ? input.bind_data->Cast<PrivBindData>().pstate : nullptr;
+	auto gen = PacRandomStream(input.bind_data ? input.bind_data->Cast<PrivBindData>().seed : 0);
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -442,7 +443,10 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 			continue;
 		}
 		uint64_t key_hash = pos->key_hash;
-		uint64_t null_key_hash = key_hash; // the NULL decision considers the worlds of the positive state
+		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
+			result_mask.SetInvalid(offset + i);
+			continue;
+		}
 #ifndef PAC_SIGNEDSUM
 		// Double-sided mode: use SFINAE helpers (cast to unsigned for int states only)
 		FlushPosState<State>(pos, input.allocator);
@@ -454,12 +458,6 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 		pos->GetTotals(buf);
 		uint64_t update_count = pos->update_count;
 #endif
-		// per-cell generator: independent draws across groups, the same whatever the processing order
-		auto gen = PacCellRng(input.bind_data->Cast<PrivBindData>().seed, key_hash, buf);
-		if (PacNoiseInNull(null_key_hash, mi, correction, gen)) {
-			result_mask.SetInvalid(offset + i); // return NULL (probabilistic decision)
-			continue;
-		}
 		CheckPacSampleDiversity(key_hash, buf, update_count, "as_noised_sum", input.bind_data->Cast<PrivBindData>());
 		double noise_var = 0.0;
 		PAC_FLOAT result_val =

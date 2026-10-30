@@ -354,6 +354,7 @@ static void PacClipMinMaxFinalize(Vector &states, AggregateInputData &input, Vec
 	int clip_support = bind.clip_support_threshold;
 	bool clip_scale = bind.clip_scale;
 
+	auto gen = PacRandomStream(bind.seed);
 	for (idx_t i = 0; i < count; i++) {
 		PacClipMinMaxFlushBuffer<IS_MAX, true>(*state_ptrs[i], *state_ptrs[i], input.allocator);
 
@@ -365,6 +366,10 @@ static void PacClipMinMaxFinalize(Vector &states, AggregateInputData &input, Vec
 			continue;
 		}
 		uint64_t key_hash = (pos ? pos->key_hash : 0) | (neg ? neg->key_hash : 0);
+		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
+			result_mask.SetInvalid(offset + i);
+			continue;
+		}
 		uint64_t update_count = 0;
 		if (pos) {
 			pos->GetTotals(buf, clip_support, clip_scale);
@@ -386,12 +391,6 @@ static void PacClipMinMaxFinalize(Vector &states, AggregateInputData &input, Vec
 				}
 			}
 			update_count += neg->update_count;
-		}
-		// per-cell generator: independent draws across groups, the same whatever the processing order
-		auto gen = PacCellRng(bind.seed, key_hash, buf);
-		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
-			result_mask.SetInvalid(offset + i);
-			continue;
 		}
 		CheckPacSampleDiversity(key_hash, buf, update_count, IS_MAX ? "as_noised_clip_max" : "as_noised_clip_min",
 		                        bind);
