@@ -31,8 +31,8 @@ static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t inp
 		int sample_lanes = GetPrivSampleLanes(aggr);
 
 		UnifiedVectorFormat hash_data, value_data;
-		inputs[0].ToUnifiedFormat(count, hash_data);
-		inputs[1].ToUnifiedFormat(count, value_data);
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(value_data);
 		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 		auto values = UnifiedVectorFormat::GetData<T>(value_data);
 
@@ -53,9 +53,9 @@ template <typename T, bool IS_MAX>
 static void PacMinMaxScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
 	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, value_data, sdata;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, sdata);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(sdata);
 
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<T>(value_data);
@@ -466,8 +466,8 @@ static void DpSampleMMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx
 		auto &state = *reinterpret_cast<DpSampleMMinMaxState<T, IS_MAX> *>(state_ptr);
 		int sample_count = GetPrivSampleCount(aggr);
 		UnifiedVectorFormat hash_data, value_data;
-		inputs[0].ToUnifiedFormat(count, hash_data);
-		inputs[1].ToUnifiedFormat(count, value_data);
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(value_data);
 		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 		auto values = UnifiedVectorFormat::GetData<T>(value_data);
 		for (idx_t i = 0; i < count; i++) {
@@ -485,9 +485,9 @@ static void DpSampleMMinMaxScatterUpdate(Vector inputs[], AggregateInputData &ag
                                          idx_t count) {
 	int sample_count = GetPrivSampleCount(aggr);
 	UnifiedVectorFormat hash_data, value_data, state_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, state_data);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(state_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<T>(value_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<DpSampleMMinMaxState<T, IS_MAX> *>(state_data);

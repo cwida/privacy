@@ -27,14 +27,14 @@ static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector 
 	idx_t count = args.size();
 
 	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
+	list_vec.ToUnifiedFormat(list_data);
 
 	auto result_data = FlatVector::GetDataMutable<PAC_FLOAT>(result);
 	auto &result_validity = FlatVector::ValidityMutable(result);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 
 	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
@@ -80,11 +80,11 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 		PacRandomEngine gen(seed, 0);
 
 		UnifiedVectorFormat list_data;
-		source.ToUnifiedFormat(count, list_data);
+		source.ToUnifiedFormat(list_data);
 
-		auto &child_vec = ListVector::GetEntry(source);
+		auto &child_vec = ListVector::GetChild(source);
 		UnifiedVectorFormat child_data;
-		child_vec.ToUnifiedFormat(ListVector::GetListSize(source), child_data);
+		child_vec.ToUnifiedFormat(child_data);
 		auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 		auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
 
@@ -138,7 +138,7 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 		auto child_data = FlatVector::GetDataMutable<PAC_FLOAT>(child_vec);
 		auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
 		UnifiedVectorFormat source_data;
-		source.ToUnifiedFormat(count, source_data);
+		source.ToUnifiedFormat(source_data);
 		idx_t offset = 0;
 		for (idx_t i = 0; i < count; i++) {
 			auto src_idx = source_data.sel->get_index(i);

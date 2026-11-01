@@ -241,7 +241,7 @@ struct DpApproxBoundsInputs {
 	const double *values;
 
 	DpApproxBoundsInputs(Vector inputs[], idx_t count) {
-		inputs[0].ToUnifiedFormat(count, value);
+		inputs[0].ToUnifiedFormat(value);
 		values = UnifiedVectorFormat::GetData<double>(value);
 	}
 
@@ -274,7 +274,7 @@ static void DpApproxBoundsUpdate(Vector inputs[], AggregateInputData &input, idx
 static void DpApproxBoundsScatterUpdate(Vector inputs[], AggregateInputData &input, idx_t, Vector &states,
                                         idx_t count) {
 	UnifiedVectorFormat state_data;
-	states.ToUnifiedFormat(count, state_data);
+	states.ToUnifiedFormat(state_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<DpApproxBoundsState *>(state_data);
 	UpdateRows(inputs, input, count, [&](idx_t row) { return state_ptrs[state_data.sel->get_index(row)]; });
 }
@@ -576,7 +576,7 @@ static void InsertBoundedValue(DpBoundedValueListState &state, double value, idx
 template <class STATE_GETTER>
 static void UpdateBoundedValueRows(Vector inputs[], AggregateInputData &input, idx_t count, STATE_GETTER get_state) {
 	UnifiedVectorFormat values;
-	inputs[0].ToUnifiedFormat(count, values);
+	inputs[0].ToUnifiedFormat(values);
 	auto value_data = UnifiedVectorFormat::GetData<double>(values);
 	auto max_values = input.bind_data->Cast<DpBoundedValueListBindData>().max_values;
 	for (idx_t row = 0; row < count; row++) {
@@ -599,7 +599,7 @@ static void DpBoundedValueListUpdate(Vector inputs[], AggregateInputData &input,
 static void DpBoundedValueListScatterUpdate(Vector inputs[], AggregateInputData &input, idx_t, Vector &states,
                                             idx_t count) {
 	UnifiedVectorFormat state_data;
-	states.ToUnifiedFormat(count, state_data);
+	states.ToUnifiedFormat(state_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<DpBoundedValueListState *>(state_data);
 	UpdateBoundedValueRows(inputs, input, count, [&](idx_t row) { return state_ptrs[state_data.sel->get_index(row)]; });
 }
@@ -766,11 +766,11 @@ static void WriteDebug(Vector &result, idx_t row, const DpApproxBoundsResult &va
 template <class STATE_GETTER>
 static void UpdateMeanRows(Vector inputs[], AggregateInputData &input, idx_t count, STATE_GETTER get_state) {
 	UnifiedVectorFormat lists;
-	inputs[0].ToUnifiedFormat(count, lists);
+	inputs[0].ToUnifiedFormat(lists);
 	auto entries = UnifiedVectorFormat::GetData<list_entry_t>(lists);
-	auto &child = ListVector::GetEntry(inputs[0]);
+	auto &child = ListVector::GetChild(inputs[0]);
 	UnifiedVectorFormat values;
-	child.ToUnifiedFormat(ListVector::GetListSize(inputs[0]), values);
+	child.ToUnifiedFormat(values);
 	auto value_data = UnifiedVectorFormat::GetData<double>(values);
 	auto max_contributions = input.bind_data->Cast<DpApproxBoundsBindData>().max_contributions;
 	for (idx_t row = 0; row < count; row++) {
@@ -805,7 +805,7 @@ static void DpApproxBoundsMeanUpdate(Vector inputs[], AggregateInputData &input,
 static void DpApproxBoundsMeanScatterUpdate(Vector inputs[], AggregateInputData &input, idx_t, Vector &states,
                                             idx_t count) {
 	UnifiedVectorFormat state_data;
-	states.ToUnifiedFormat(count, state_data);
+	states.ToUnifiedFormat(state_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<DpApproxBoundsState *>(state_data);
 	UpdateMeanRows(inputs, input, count, [&](idx_t row) { return state_ptrs[state_data.sel->get_index(row)]; });
 }

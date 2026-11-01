@@ -246,12 +246,12 @@ inline void PacSumUpdateOne(PacSumIntStateWrapper<SIGNED> &agg, uint64_t key_has
 template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE, class HASH_TRANSFORM = PacIdentityHash>
 static void PacSumUpdate(Vector inputs[], State &state, idx_t count, ArenaAllocator &allocator, int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
 
-	if (hash_data.validity.AllValid() && value_data.validity.AllValid()) {
+	if (hash_data.validity.CannotHaveNull() && value_data.validity.CannotHaveNull()) {
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
@@ -277,9 +277,9 @@ template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE, class HA
 static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator,
                                 int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data, sdata;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, sdata);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(sdata);
 
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
@@ -1056,9 +1056,9 @@ static void DpSampleAvgUpdate(Vector inputs[], AggregateInputData &aggr, idx_t i
 		int sample_lanes = GetPrivSampleLanes(aggr);
 
 		UnifiedVectorFormat hash_data, sum_data, count_data;
-		inputs[0].ToUnifiedFormat(count, hash_data);
-		inputs[1].ToUnifiedFormat(count, sum_data);
-		inputs[2].ToUnifiedFormat(count, count_data);
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(sum_data);
+		inputs[2].ToUnifiedFormat(count_data);
 
 		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 		auto sums = UnifiedVectorFormat::GetData<double>(sum_data);
@@ -1082,10 +1082,10 @@ static void DpSampleAvgScatterUpdate(Vector inputs[], AggregateInputData &aggr, 
 	int sample_lanes = GetPrivSampleLanes(aggr);
 
 	UnifiedVectorFormat hash_data, sum_data, count_data, state_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, sum_data);
-	inputs[2].ToUnifiedFormat(count, count_data);
-	states.ToUnifiedFormat(count, state_data);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(sum_data);
+	inputs[2].ToUnifiedFormat(count_data);
+	states.ToUnifiedFormat(state_data);
 
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto sums = UnifiedVectorFormat::GetData<double>(sum_data);
@@ -1231,8 +1231,8 @@ static void DpSampleMSumUpdate(Vector inputs[], AggregateInputData &aggr, idx_t 
 		auto &state = *reinterpret_cast<DpSampleMSumState *>(state_ptr);
 		int sample_count = GetPrivSampleCount(aggr);
 		UnifiedVectorFormat hash_data, value_data;
-		inputs[0].ToUnifiedFormat(count, hash_data);
-		inputs[1].ToUnifiedFormat(count, value_data);
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(value_data);
 		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 		auto values = UnifiedVectorFormat::GetData<double>(value_data);
 		for (idx_t i = 0; i < count; i++) {
@@ -1248,9 +1248,9 @@ static void DpSampleMSumUpdate(Vector inputs[], AggregateInputData &aggr, idx_t 
 static void DpSampleMSumScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
 	int sample_count = GetPrivSampleCount(aggr);
 	UnifiedVectorFormat hash_data, value_data, state_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, state_data);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(state_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<double>(value_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<DpSampleMSumState *>(state_data);
@@ -1279,8 +1279,8 @@ static void DpSampleMNullableSumUpdate(Vector inputs[], AggregateInputData &aggr
 		auto &state = *reinterpret_cast<DpSampleMNullableSumState *>(state_ptr);
 		int sample_count = GetPrivSampleCount(aggr);
 		UnifiedVectorFormat hash_data, value_data;
-		inputs[0].ToUnifiedFormat(count, hash_data);
-		inputs[1].ToUnifiedFormat(count, value_data);
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(value_data);
 		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 		auto values = UnifiedVectorFormat::GetData<double>(value_data);
 		for (idx_t i = 0; i < count; i++) {
@@ -1297,9 +1297,9 @@ static void DpSampleMNullableSumScatterUpdate(Vector inputs[], AggregateInputDat
                                               idx_t count) {
 	int sample_count = GetPrivSampleCount(aggr);
 	UnifiedVectorFormat hash_data, value_data, state_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, state_data);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(state_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<double>(value_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<DpSampleMNullableSumState *>(state_data);
@@ -1319,14 +1319,14 @@ static void DpSampleMSumIfUpdate(Vector inputs[], AggregateInputData &aggr, idx_
 		auto &state = *reinterpret_cast<DpSampleMSumState *>(state_ptr);
 		int sample_count = GetPrivSampleCount(aggr);
 		UnifiedVectorFormat hash_data, value_data, predicate_data;
-		inputs[0].ToUnifiedFormat(count, hash_data);
-		inputs[1].ToUnifiedFormat(count, value_data);
-		inputs[2].ToUnifiedFormat(count, predicate_data);
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(value_data);
+		inputs[2].ToUnifiedFormat(predicate_data);
 		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 		auto values = UnifiedVectorFormat::GetData<double>(value_data);
-		auto &predicate_child = ListVector::GetEntry(inputs[2]);
+		auto &predicate_child = ListVector::GetChild(inputs[2]);
 		UnifiedVectorFormat predicate_child_data;
-		predicate_child.ToUnifiedFormat(ListVector::GetListSize(inputs[2]), predicate_child_data);
+		predicate_child.ToUnifiedFormat(predicate_child_data);
 		auto predicate_values = UnifiedVectorFormat::GetData<bool>(predicate_child_data);
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
@@ -1347,16 +1347,16 @@ static void DpSampleMSumIfUpdate(Vector inputs[], AggregateInputData &aggr, idx_
 static void DpSampleMSumIfScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
 	int sample_count = GetPrivSampleCount(aggr);
 	UnifiedVectorFormat hash_data, value_data, predicate_data, state_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	inputs[2].ToUnifiedFormat(count, predicate_data);
-	states.ToUnifiedFormat(count, state_data);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	inputs[2].ToUnifiedFormat(predicate_data);
+	states.ToUnifiedFormat(state_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<double>(value_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<DpSampleMSumState *>(state_data);
-	auto &predicate_child = ListVector::GetEntry(inputs[2]);
+	auto &predicate_child = ListVector::GetChild(inputs[2]);
 	UnifiedVectorFormat predicate_child_data;
-	predicate_child.ToUnifiedFormat(ListVector::GetListSize(inputs[2]), predicate_child_data);
+	predicate_child.ToUnifiedFormat(predicate_child_data);
 	auto predicate_values = UnifiedVectorFormat::GetData<bool>(predicate_child_data);
 	for (idx_t i = 0; i < count; i++) {
 		auto h_idx = hash_data.sel->get_index(i);
@@ -1555,9 +1555,9 @@ static void DpSampleMAvgUpdate(Vector inputs[], AggregateInputData &aggr, idx_t 
 		auto &state = *reinterpret_cast<DpSampleMAvgState *>(state_ptr);
 		int sample_count = GetPrivSampleCount(aggr);
 		UnifiedVectorFormat hash_data, sum_data, count_data;
-		inputs[0].ToUnifiedFormat(count, hash_data);
-		inputs[1].ToUnifiedFormat(count, sum_data);
-		inputs[2].ToUnifiedFormat(count, count_data);
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(sum_data);
+		inputs[2].ToUnifiedFormat(count_data);
 		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 		auto sums = UnifiedVectorFormat::GetData<double>(sum_data);
 		auto counts = UnifiedVectorFormat::GetData<double>(count_data);
@@ -1576,10 +1576,10 @@ static void DpSampleMAvgUpdate(Vector inputs[], AggregateInputData &aggr, idx_t 
 static void DpSampleMAvgScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
 	int sample_count = GetPrivSampleCount(aggr);
 	UnifiedVectorFormat hash_data, sum_data, count_data, state_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, sum_data);
-	inputs[2].ToUnifiedFormat(count, count_data);
-	states.ToUnifiedFormat(count, state_data);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(sum_data);
+	inputs[2].ToUnifiedFormat(count_data);
+	states.ToUnifiedFormat(state_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto sums = UnifiedVectorFormat::GetData<double>(sum_data);
 	auto counts = UnifiedVectorFormat::GetData<double>(count_data);
@@ -1674,8 +1674,8 @@ static void PacSampleMSumUpdate(Vector inputs[], AggregateInputData &aggr, idx_t
 		auto &state = *reinterpret_cast<DpSampleMSumState *>(state_ptr);
 		auto &bind = aggr.bind_data->Cast<PrivBindData>();
 		UnifiedVectorFormat hash_data, value_data;
-		inputs[0].ToUnifiedFormat(count, hash_data);
-		inputs[1].ToUnifiedFormat(count, value_data);
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(value_data);
 		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 		auto values = UnifiedVectorFormat::GetData<double>(value_data);
 		for (idx_t i = 0; i < count; i++) {
@@ -1691,9 +1691,9 @@ static void PacSampleMSumUpdate(Vector inputs[], AggregateInputData &aggr, idx_t
 static void PacSampleMSumScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
 	auto &bind = aggr.bind_data->Cast<PrivBindData>();
 	UnifiedVectorFormat hash_data, value_data, state_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, state_data);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(state_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<double>(value_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<DpSampleMSumState *>(state_data);
@@ -1713,14 +1713,14 @@ static void PacSampleMSumIfUpdate(Vector inputs[], AggregateInputData &aggr, idx
 		auto &state = *reinterpret_cast<DpSampleMSumState *>(state_ptr);
 		auto &bind = aggr.bind_data->Cast<PrivBindData>();
 		UnifiedVectorFormat hash_data, value_data, predicate_data;
-		inputs[0].ToUnifiedFormat(count, hash_data);
-		inputs[1].ToUnifiedFormat(count, value_data);
-		inputs[2].ToUnifiedFormat(count, predicate_data);
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(value_data);
+		inputs[2].ToUnifiedFormat(predicate_data);
 		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 		auto values = UnifiedVectorFormat::GetData<double>(value_data);
-		auto &predicate_child = ListVector::GetEntry(inputs[2]);
+		auto &predicate_child = ListVector::GetChild(inputs[2]);
 		UnifiedVectorFormat predicate_child_data;
-		predicate_child.ToUnifiedFormat(ListVector::GetListSize(inputs[2]), predicate_child_data);
+		predicate_child.ToUnifiedFormat(predicate_child_data);
 		auto predicate_values = UnifiedVectorFormat::GetData<bool>(predicate_child_data);
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
@@ -1743,16 +1743,16 @@ static void PacSampleMSumIfScatterUpdate(Vector inputs[], AggregateInputData &ag
                                          idx_t count) {
 	auto &bind = aggr.bind_data->Cast<PrivBindData>();
 	UnifiedVectorFormat hash_data, value_data, predicate_data, state_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	inputs[2].ToUnifiedFormat(count, predicate_data);
-	states.ToUnifiedFormat(count, state_data);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	inputs[2].ToUnifiedFormat(predicate_data);
+	states.ToUnifiedFormat(state_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<double>(value_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<DpSampleMSumState *>(state_data);
-	auto &predicate_child = ListVector::GetEntry(inputs[2]);
+	auto &predicate_child = ListVector::GetChild(inputs[2]);
 	UnifiedVectorFormat predicate_child_data;
-	predicate_child.ToUnifiedFormat(ListVector::GetListSize(inputs[2]), predicate_child_data);
+	predicate_child.ToUnifiedFormat(predicate_child_data);
 	auto predicate_values = UnifiedVectorFormat::GetData<bool>(predicate_child_data);
 	for (idx_t i = 0; i < count; i++) {
 		auto h_idx = hash_data.sel->get_index(i);
@@ -1814,9 +1814,9 @@ static void PacSampleMAvgUpdate(Vector inputs[], AggregateInputData &aggr, idx_t
 		auto &state = *reinterpret_cast<DpSampleMAvgState *>(state_ptr);
 		auto &bind = aggr.bind_data->Cast<PrivBindData>();
 		UnifiedVectorFormat hash_data, sum_data, count_data;
-		inputs[0].ToUnifiedFormat(count, hash_data);
-		inputs[1].ToUnifiedFormat(count, sum_data);
-		inputs[2].ToUnifiedFormat(count, count_data);
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(sum_data);
+		inputs[2].ToUnifiedFormat(count_data);
 		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 		auto sums = UnifiedVectorFormat::GetData<double>(sum_data);
 		auto counts = UnifiedVectorFormat::GetData<double>(count_data);
@@ -1835,10 +1835,10 @@ static void PacSampleMAvgUpdate(Vector inputs[], AggregateInputData &aggr, idx_t
 static void PacSampleMAvgScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
 	auto &bind = aggr.bind_data->Cast<PrivBindData>();
 	UnifiedVectorFormat hash_data, sum_data, count_data, state_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, sum_data);
-	inputs[2].ToUnifiedFormat(count, count_data);
-	states.ToUnifiedFormat(count, state_data);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(sum_data);
+	inputs[2].ToUnifiedFormat(count_data);
+	states.ToUnifiedFormat(state_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto sums = UnifiedVectorFormat::GetData<double>(sum_data);
 	auto counts = UnifiedVectorFormat::GetData<double>(count_data);

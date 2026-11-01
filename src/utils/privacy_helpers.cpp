@@ -56,8 +56,8 @@ unique_ptr<BoundWindowExpression> BindRankingWindow(ClientContext &context, Expr
 	default:
 		throw InternalException("Unsupported privacy ranking window");
 	}
-	auto &entry =
-	    Catalog::GetSystemCatalog(context).GetEntry<WindowFunctionCatalogEntry>(context, DEFAULT_SCHEMA, name);
+	auto &entry = Catalog::GetSystemCatalog(context).GetEntry<WindowFunctionCatalogEntry>(
+	    context, QualifiedName(Catalog::GetSystemCatalog(context).GetName(), Identifier::DefaultSchema(), name));
 	FunctionBinder binder(context);
 	vector<LogicalType> order_types;
 	vector<LogicalType> arg_order_types;

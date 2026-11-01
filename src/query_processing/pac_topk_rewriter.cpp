@@ -40,14 +40,14 @@ static void PacMeanFunction(DataChunk &args, ExpressionState &state, Vector &res
 	idx_t count = args.size();
 
 	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
+	list_vec.ToUnifiedFormat(list_data);
 
 	auto result_data = FlatVector::GetDataMutable<PAC_FLOAT>(result);
 	auto &result_validity = FlatVector::ValidityMutable(result);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 
 	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);

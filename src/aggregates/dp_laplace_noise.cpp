@@ -130,12 +130,12 @@ static void DpSassStabilityFunction(DataChunk &args, ExpressionState &, Vector &
 	idx_t count = args.size();
 	auto &list_vec = args.data[0];
 	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
+	list_vec.ToUnifiedFormat(list_data);
 	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 
 	auto &entries = StructVector::GetEntries(result);
@@ -274,14 +274,14 @@ static void DpSassRecordStabilityFunction(DataChunk &args, ExpressionState &, Ve
 	idx_t count = args.size();
 	auto &list_vec = args.data[0];
 	UnifiedVectorFormat list_data, aggregate_index_data;
-	list_vec.ToUnifiedFormat(count, list_data);
-	args.data[1].ToUnifiedFormat(count, aggregate_index_data);
+	list_vec.ToUnifiedFormat(list_data);
+	args.data[1].ToUnifiedFormat(aggregate_index_data);
 	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
 	auto aggregate_indexes = UnifiedVectorFormat::GetData<int32_t>(aggregate_index_data);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 
 	auto result_data = FlatVector::GetDataMutable<double>(result);
@@ -496,8 +496,8 @@ static void DpLaplaceNoiseFunction(DataChunk &args, ExpressionState &, Vector &r
 	auto count = args.size();
 	UnifiedVectorFormat values;
 	UnifiedVectorFormat scales;
-	args.data[0].ToUnifiedFormat(count, values);
-	args.data[1].ToUnifiedFormat(count, scales);
+	args.data[0].ToUnifiedFormat(values);
+	args.data[1].ToUnifiedFormat(scales);
 	auto value_data = UnifiedVectorFormat::GetData<double>(values);
 	auto scale_data = UnifiedVectorFormat::GetData<double>(scales);
 	// BinaryExecutor preserves a CONSTANT vector by invoking its callback once. Noise is volatile, so
@@ -775,28 +775,28 @@ static void DpSmoothMedianNoiseFunctionInternal(DataChunk &args, ExpressionState
 	auto &list_vec = args.data[0];
 	UnifiedVectorFormat list_data, epsilon_data, delta_data, sample_lanes_data, lower_data, upper_data, empty_data,
 	    aggregate_index_data, aggregate_count_data, group_identity_data;
-	list_vec.ToUnifiedFormat(count, list_data);
-	args.data[1].ToUnifiedFormat(count, epsilon_data);
-	args.data[2].ToUnifiedFormat(count, delta_data);
-	args.data[3].ToUnifiedFormat(count, sample_lanes_data);
+	list_vec.ToUnifiedFormat(list_data);
+	args.data[1].ToUnifiedFormat(epsilon_data);
+	args.data[2].ToUnifiedFormat(delta_data);
+	args.data[3].ToUnifiedFormat(sample_lanes_data);
 	if (bounded) {
-		args.data[4].ToUnifiedFormat(count, lower_data);
-		args.data[5].ToUnifiedFormat(count, upper_data);
+		args.data[4].ToUnifiedFormat(lower_data);
+		args.data[5].ToUnifiedFormat(upper_data);
 	}
 	if (has_empty_default) {
-		args.data[6].ToUnifiedFormat(count, empty_data);
+		args.data[6].ToUnifiedFormat(empty_data);
 	}
 	if (record_scale) {
-		args.data[args.ColumnCount() - 1].ToUnifiedFormat(count, aggregate_index_data);
+		args.data[args.ColumnCount() - 1].ToUnifiedFormat(aggregate_index_data);
 	} else if (has_cell_identity) {
-		args.data[7].ToUnifiedFormat(count, aggregate_index_data);
-		args.data[8].ToUnifiedFormat(count, aggregate_count_data);
-		args.data[9].ToUnifiedFormat(count, group_identity_data);
+		args.data[7].ToUnifiedFormat(aggregate_index_data);
+		args.data[8].ToUnifiedFormat(aggregate_count_data);
+		args.data[9].ToUnifiedFormat(group_identity_data);
 	}
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
 	auto epsilons = UnifiedVectorFormat::GetData<double>(epsilon_data);
@@ -897,16 +897,16 @@ static void DpAggregateFunction(DataChunk &args, ExpressionState &state, Vector 
 	idx_t count = args.size();
 	auto &list_vec = args.data[0]; // samples (counts at args.data[1] is intentionally ignored)
 	UnifiedVectorFormat list_data, epsilon_data, delta_data, sample_lanes_data, lower_data, upper_data;
-	list_vec.ToUnifiedFormat(count, list_data);
-	args.data[2].ToUnifiedFormat(count, epsilon_data);
-	args.data[3].ToUnifiedFormat(count, delta_data);
-	args.data[4].ToUnifiedFormat(count, sample_lanes_data);
-	args.data[5].ToUnifiedFormat(count, lower_data);
-	args.data[6].ToUnifiedFormat(count, upper_data);
+	list_vec.ToUnifiedFormat(list_data);
+	args.data[2].ToUnifiedFormat(epsilon_data);
+	args.data[3].ToUnifiedFormat(delta_data);
+	args.data[4].ToUnifiedFormat(sample_lanes_data);
+	args.data[5].ToUnifiedFormat(lower_data);
+	args.data[6].ToUnifiedFormat(upper_data);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
 	auto epsilons = UnifiedVectorFormat::GetData<double>(epsilon_data);
@@ -1003,25 +1003,25 @@ static void DpGuptMeanNoiseFunctionInternal(DataChunk &args, ExpressionState &st
 	auto &list_vec = args.data[0];
 	UnifiedVectorFormat list_data, epsilon_data, sample_lanes_data, lower_data, upper_data, empty_data,
 	    aggregate_index_data, aggregate_count_data, group_identity_data;
-	list_vec.ToUnifiedFormat(count, list_data);
-	args.data[1].ToUnifiedFormat(count, epsilon_data);
-	args.data[2].ToUnifiedFormat(count, sample_lanes_data);
-	args.data[3].ToUnifiedFormat(count, lower_data);
-	args.data[4].ToUnifiedFormat(count, upper_data);
+	list_vec.ToUnifiedFormat(list_data);
+	args.data[1].ToUnifiedFormat(epsilon_data);
+	args.data[2].ToUnifiedFormat(sample_lanes_data);
+	args.data[3].ToUnifiedFormat(lower_data);
+	args.data[4].ToUnifiedFormat(upper_data);
 	if (has_empty_default) {
-		args.data[5].ToUnifiedFormat(count, empty_data);
+		args.data[5].ToUnifiedFormat(empty_data);
 	}
 	if (record_scale) {
-		args.data[args.ColumnCount() - 1].ToUnifiedFormat(count, aggregate_index_data);
+		args.data[args.ColumnCount() - 1].ToUnifiedFormat(aggregate_index_data);
 	} else if (has_cell_identity) {
-		args.data[6].ToUnifiedFormat(count, aggregate_index_data);
-		args.data[7].ToUnifiedFormat(count, aggregate_count_data);
-		args.data[8].ToUnifiedFormat(count, group_identity_data);
+		args.data[6].ToUnifiedFormat(aggregate_index_data);
+		args.data[7].ToUnifiedFormat(aggregate_count_data);
+		args.data[8].ToUnifiedFormat(group_identity_data);
 	}
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
 	auto epsilons = UnifiedVectorFormat::GetData<double>(epsilon_data);
@@ -1224,22 +1224,22 @@ static void DpNonEmptyMeanNoiseFunctionInternal(DataChunk &args, ExpressionState
 	UnifiedVectorFormat list_data, epsilon_data, sample_lanes_data, lower_data, upper_data, baseline_data,
 	    sensitivity_data, aggregate_index_data;
 	UnifiedVectorFormat aggregate_count_data, group_identity_data;
-	list_vec.ToUnifiedFormat(count, list_data);
-	args.data[1].ToUnifiedFormat(count, epsilon_data);
-	args.data[2].ToUnifiedFormat(count, sample_lanes_data);
-	args.data[3].ToUnifiedFormat(count, lower_data);
-	args.data[4].ToUnifiedFormat(count, upper_data);
-	args.data[5].ToUnifiedFormat(count, baseline_data);
-	args.data[6].ToUnifiedFormat(count, sensitivity_data);
-	args.data[7].ToUnifiedFormat(count, aggregate_index_data);
+	list_vec.ToUnifiedFormat(list_data);
+	args.data[1].ToUnifiedFormat(epsilon_data);
+	args.data[2].ToUnifiedFormat(sample_lanes_data);
+	args.data[3].ToUnifiedFormat(lower_data);
+	args.data[4].ToUnifiedFormat(upper_data);
+	args.data[5].ToUnifiedFormat(baseline_data);
+	args.data[6].ToUnifiedFormat(sensitivity_data);
+	args.data[7].ToUnifiedFormat(aggregate_index_data);
 	if (!record_scales) {
-		args.data[8].ToUnifiedFormat(count, aggregate_count_data);
-		args.data[9].ToUnifiedFormat(count, group_identity_data);
+		args.data[8].ToUnifiedFormat(aggregate_count_data);
+		args.data[9].ToUnifiedFormat(group_identity_data);
 	}
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
 	auto epsilons = UnifiedVectorFormat::GetData<double>(epsilon_data);

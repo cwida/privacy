@@ -107,7 +107,9 @@ static unique_ptr<Expression> BindAggregateLocal(OptimizerExtensionInput &input,
 	}
 
 	auto &entry = Catalog::GetSystemCatalog(input.context)
-	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, Identifier(func_name));
+	                  .GetEntry<AggregateFunctionCatalogEntry>(
+	                      input.context, QualifiedName(Catalog::GetSystemCatalog(input.context).GetName(),
+	                                                   Identifier::DefaultSchema(), Identifier(func_name)));
 	auto best = function_binder.BindFunction(Identifier(entry.name), entry.functions, arg_types, error);
 	if (!best.IsValid()) {
 		throw InternalException("dp: failed to bind aggregate function '" + func_name + "': " + error.Message());

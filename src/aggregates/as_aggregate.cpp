@@ -377,7 +377,7 @@ uint64_t PacRepairHash32(uint64_t num) {
 //   k     : minimum per-subsample support; cells below it are released as NULL
 // ============================================================================
 struct PacAggregateLocalState : public FunctionLocalState {
-	explicit PacAggregateLocalState(PacRandomEngine gen_p) : gen(std::move(gen_p)) {
+	explicit PacAggregateLocalState(PacRandomEngine gen_p) : gen(gen_p) {
 	}
 	PacRandomEngine gen;
 };
@@ -420,11 +420,11 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 	}
 
 	UnifiedVectorFormat vvals, vcnts;
-	vals.ToUnifiedFormat(count, vvals);
-	cnts.ToUnifiedFormat(count, vcnts);
+	vals.ToUnifiedFormat(vvals);
+	cnts.ToUnifiedFormat(vcnts);
 
 	UnifiedVectorFormat kvals;
-	k_vec.ToUnifiedFormat(count, kvals);
+	k_vec.ToUnifiedFormat(kvals);
 	auto *kdata = UnifiedVectorFormat::GetData<int32_t>(kvals);
 
 	for (idx_t row = 0; row < count; row++) {
@@ -453,10 +453,10 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 		idx_t vals_len = ve.length;
 		idx_t cnts_len = ce.length;
 
-		auto &vals_child = ListVector::GetEntry(vals);
-		auto &cnts_child = ListVector::GetEntry(cnts);
-		vals_child.Flatten(ve.offset + ve.length);
-		cnts_child.Flatten(ce.offset + ce.length);
+		auto &vals_child = ListVector::GetChild(vals);
+		auto &cnts_child = ListVector::GetChild(cnts);
+		vals_child.Flatten();
+		cnts_child.Flatten();
 		auto *vdata = FlatVector::GetData<T>(vals_child);
 		auto *cdata = FlatVector::GetData<C>(cnts_child);
 

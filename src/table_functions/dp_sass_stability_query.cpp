@@ -330,15 +330,14 @@ static unique_ptr<GlobalTableFunctionState> DpSassStabilityQueryInit(ClientConte
 static void DpSassStabilityQueryFunction(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind_data = data_p.bind_data->Cast<DpSassStabilityQueryBindData>();
 	auto &state = data_p.global_state->Cast<DpSassStabilityQueryState>();
-	idx_t count = 0;
-	while (state.offset < bind_data.rows.size() && count < STANDARD_VECTOR_SIZE) {
+	idx_t count = MinValue<idx_t>(bind_data.rows.size() - state.offset, STANDARD_VECTOR_SIZE);
+	output.SetChildCardinality(count);
+	for (idx_t row_idx = 0; row_idx < count; row_idx++) {
 		auto &row = bind_data.rows[state.offset++];
 		for (idx_t col = 0; col < row.values.size(); col++) {
-			output.SetValue(col, count, row.values[col]);
+			output.data[col].SetValue(row_idx, row.values[col]);
 		}
-		count++;
 	}
-	output.SetCardinality(count);
 }
 
 } // namespace
