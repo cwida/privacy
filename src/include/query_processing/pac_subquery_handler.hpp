@@ -24,7 +24,7 @@ struct DelimColumnResult {
 	LogicalType type;
 
 	bool IsValid() const {
-		return binding.table_index != DConstants::INVALID_INDEX;
+		return binding.table_index.index != DConstants::INVALID_INDEX;
 	}
 };
 

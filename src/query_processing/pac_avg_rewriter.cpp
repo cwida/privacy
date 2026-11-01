@@ -4,6 +4,7 @@
 // works for both compiler-generated and user-written as_avg() SQL.
 //
 
+#include "duckdb/planner/expression_iterator.hpp"
 #include "query_processing/pac_avg_rewriter.hpp"
 #include "query_processing/privacy_expression_builder.hpp"
 #include "privacy_debug.hpp"
@@ -21,10 +22,10 @@ namespace duckdb {
 // with a copy of the corresponding expression value.  Recurses into children.
 static void ReplaceAvgRefs(unique_ptr<Expression> &expr,
                            const unordered_map<idx_t, unique_ptr<Expression>> &replacements, idx_t table_index) {
-	if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+	if (expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 		auto &col_ref = expr->Cast<BoundColumnRefExpression>();
-		if (col_ref.binding.table_index == table_index) {
-			auto it = replacements.find(col_ref.binding.column_index);
+		if (col_ref.BindingMutable().table_index.index == table_index) {
+			auto it = replacements.find(col_ref.BindingMutable().column_index);
 			if (it != replacements.end()) {
 				expr = it->second->Copy();
 				return;
@@ -61,7 +62,8 @@ static void RewritePacAvgAggregate(OptimizerExtensionInput &input, unique_ptr<Lo
 			continue;
 		}
 		auto &aggr = agg.expressions[i]->Cast<BoundAggregateExpression>();
-		if (aggr.function.name == "as_noised_avg" || aggr.function.name == "as_avg") {
+		if (aggr.FunctionMutable().GetName().GetIdentifierName() == "as_noised_avg" ||
+		    aggr.FunctionMutable().GetName().GetIdentifierName() == "as_avg") {
 			avg_positions.push_back(i);
 		}
 	}
@@ -69,7 +71,7 @@ static void RewritePacAvgAggregate(OptimizerExtensionInput &input, unique_ptr<Lo
 		return;
 	}
 
-	idx_t agg_index = agg.aggregate_index;
+	idx_t agg_index = agg.aggregate_index.index;
 
 	// For each avg, replace with sum at the same position, append count at end.
 	struct AvgDecomp {
@@ -81,16 +83,16 @@ static void RewritePacAvgAggregate(OptimizerExtensionInput &input, unique_ptr<Lo
 
 	for (auto pos : avg_positions) {
 		auto &old_aggr = agg.expressions[pos]->Cast<BoundAggregateExpression>();
-		bool is_noised = (old_aggr.function.name == "as_noised_avg");
+		bool is_noised = (old_aggr.FunctionMutable().GetName().GetIdentifierName() == "as_noised_avg");
 
 		// Extract hash and value children: pac_[noised_]avg(hash, col[, correction])
-		auto hash_child = old_aggr.children[0]->Copy();
-		auto value_child = old_aggr.children[1]->Copy();
+		auto hash_child = old_aggr.GetChildrenMutable()[0]->Copy();
+		auto value_child = old_aggr.GetChildrenMutable()[1]->Copy();
 
 		// Extract optional correction factor (3rd arg), default to constant 1.0
 		unique_ptr<Expression> corr_expr;
-		if (old_aggr.children.size() >= 3) {
-			corr_expr = old_aggr.children[2]->Copy();
+		if (old_aggr.GetChildrenMutable().size() >= 3) {
+			corr_expr = old_aggr.GetChildrenMutable()[2]->Copy();
 		}
 
 		string sum_name = is_noised ? "as_noised_sum" : "as_sum";
@@ -115,11 +117,13 @@ static void RewritePacAvgAggregate(OptimizerExtensionInput &input, unique_ptr<Lo
 	for (auto &kv : decomp_map) {
 		auto avg_col = kv.first;
 		auto &info = kv.second;
-		auto sum_type = agg.expressions[info.sum_col]->return_type;
-		auto count_type = agg.expressions[info.count_col]->return_type;
+		auto sum_type = agg.expressions[info.sum_col]->GetReturnType();
+		auto count_type = agg.expressions[info.count_col]->GetReturnType();
 
-		auto sum_ref = make_uniq<BoundColumnRefExpression>(sum_type, ColumnBinding(agg_index, info.sum_col));
-		auto cnt_ref = make_uniq<BoundColumnRefExpression>(count_type, ColumnBinding(agg_index, info.count_col));
+		auto sum_ref = make_uniq<BoundColumnRefExpression>(
+		    sum_type, ColumnBinding(TableIndex(agg_index), ProjectionIndex(info.sum_col)));
+		auto cnt_ref = make_uniq<BoundColumnRefExpression>(
+		    count_type, ColumnBinding(TableIndex(agg_index), ProjectionIndex(info.count_col)));
 
 		unique_ptr<Expression> div_expr;
 		if (info.is_noised) {

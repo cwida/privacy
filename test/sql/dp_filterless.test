@@ -367,7 +367,7 @@ EXPLAIN SELECT grp, SUM(amount)
 FROM filterless_group_cap_three
 GROUP BY grp;
 ----
-physical_plan	<REGEX>:[\s\S]*UNNEST[\s\S]*arg_min_nulls_last[\s\S]*
+physical_plan	<REGEX>:[\s\S]*Unnest[\s\S]*arg_min_nulls_last[\s\S]*
 
 statement ok
 SET dp_max_groups_contributed = 1;
@@ -541,7 +541,7 @@ EXPLAIN SELECT AVG(amount)
 FROM filterless_sampled_events
 WHERE qualifies;
 ----
-physical_plan	<REGEX>:[\s\S]*UNGROUPED_AGGREGATE[\s\S]*priv_filterless_avg[\s\S]*priv_filterless_sum_pair[\s\S]*priv_filterless_count_pair[\s\S]*
+physical_plan	<REGEX>:[\s\S]*Ungrouped Aggregate[\s\S]*priv_filterless_avg[\s\S]*priv_filterless_sum_pair[\s\S]*priv_filterless_count_pair[\s\S]*
 
 # COUNT(expr) is zero when every qualifying value is NULL, so fused AVG keeps
 # SQL's NULL result instead of dividing by a synthetic denominator.

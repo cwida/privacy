@@ -1,3 +1,7 @@
+#include "duckdb/main/database_manager.hpp"
+#include "duckdb/catalog/catalog_entry/window_function_catalog_entry.hpp"
+#include "duckdb/function/function_binder.hpp"
+#include "duckdb/planner/expression/bound_window_expression.hpp"
 #include "utils/privacy_helpers.hpp"
 
 #include <sstream>
@@ -23,6 +27,7 @@
 #include "duckdb/planner/operator/logical_distinct.hpp"
 #include "duckdb/planner/operator/logical_order.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include <unordered_set>
@@ -38,6 +43,26 @@
 using idx_set = std::unordered_set<idx_t>;
 
 namespace duckdb {
+
+unique_ptr<BoundWindowExpression> BindRankingWindow(ClientContext &context, ExpressionType type) {
+	Identifier name;
+	switch (type) {
+	case ExpressionType::WINDOW_ROW_NUMBER:
+		name = "row_number";
+		break;
+	case ExpressionType::WINDOW_RANK_DENSE:
+		name = "dense_rank";
+		break;
+	default:
+		throw InternalException("Unsupported privacy ranking window");
+	}
+	auto &entry = Catalog::GetSystemCatalog(context).GetEntry<WindowFunctionCatalogEntry>(
+	    context, QualifiedName(Catalog::GetSystemCatalog(context).GetName(), Identifier::DefaultSchema(), name));
+	FunctionBinder binder(context);
+	vector<LogicalType> order_types;
+	vector<LogicalType> arg_order_types;
+	return binder.BindWindowFunction(entry.functions.GetFunctionByOffset(0), {}, order_types, arg_order_types);
+}
 
 string Sanitize(const string &in) {
 	string out;
@@ -95,7 +120,8 @@ idx_t GetNextTableIndex(unique_ptr<LogicalOperator> &plan) {
 			continue;
 		}
 		auto tbls = cur->GetTableIndex();
-		for (auto t : tbls) {
+		for (auto typed_index : tbls) {
+			auto t = typed_index.index;
 			if (t != DConstants::INVALID_INDEX && (max_index == DConstants::INVALID_INDEX || t > max_index)) {
 				max_index = t;
 			}
@@ -112,7 +138,8 @@ void CollectTableIndicesRecursive(LogicalOperator *node, idx_set &out) {
 		return;
 	}
 	auto tbls = node->GetTableIndex();
-	for (auto t : tbls) {
+	for (auto typed_index : tbls) {
+		auto t = typed_index.index;
 		if (t != DConstants::INVALID_INDEX) {
 			out.insert(t);
 		}
@@ -130,7 +157,8 @@ static void CollectTableIndicesExcluding(LogicalOperator *node, LogicalOperator 
 		return; // skip this subtree entirely
 	}
 	auto tbls = node->GetTableIndex();
-	for (auto t : tbls) {
+	for (auto typed_index : tbls) {
+		auto t = typed_index.index;
 		if (t != DConstants::INVALID_INDEX) {
 			out.insert(t);
 		}
@@ -146,73 +174,74 @@ void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_map<idx_
 	}
 	// Update operator-specific index fields where applicable
 	if (auto get_ptr = dynamic_cast<LogicalGet *>(node)) {
-		if (map.find(get_ptr->table_index) != map.end()) {
-			get_ptr->table_index = map.at(get_ptr->table_index);
+		if (map.find(get_ptr->table_index.index) != map.end()) {
+			get_ptr->table_index.index = map.at(get_ptr->table_index.index);
 		}
 	} else if (auto proj_ptr = dynamic_cast<LogicalProjection *>(node)) {
-		if (map.find(proj_ptr->table_index) != map.end()) {
-			proj_ptr->table_index = map.at(proj_ptr->table_index);
+		if (map.find(proj_ptr->table_index.index) != map.end()) {
+			proj_ptr->table_index.index = map.at(proj_ptr->table_index.index);
 		}
 	} else if (auto setop_ptr = dynamic_cast<LogicalSetOperation *>(node)) {
-		if (map.find(setop_ptr->table_index) != map.end()) {
-			setop_ptr->table_index = map.at(setop_ptr->table_index);
+		if (map.find(setop_ptr->table_index.index) != map.end()) {
+			setop_ptr->table_index.index = map.at(setop_ptr->table_index.index);
 		}
 	} else if (auto insert_ptr = dynamic_cast<LogicalInsert *>(node)) {
-		if (map.find(insert_ptr->table_index) != map.end()) {
-			insert_ptr->table_index = map.at(insert_ptr->table_index);
+		if (map.find(insert_ptr->table_index.index) != map.end()) {
+			insert_ptr->table_index.index = map.at(insert_ptr->table_index.index);
 		}
 	} else if (auto dummy_ptr = dynamic_cast<LogicalDummyScan *>(node)) {
-		if (map.find(dummy_ptr->table_index) != map.end()) {
-			dummy_ptr->table_index = map.at(dummy_ptr->table_index);
+		if (map.find(dummy_ptr->table_index.index) != map.end()) {
+			dummy_ptr->table_index.index = map.at(dummy_ptr->table_index.index);
 		}
 	} else if (auto coldata_ptr = dynamic_cast<LogicalColumnDataGet *>(node)) {
-		if (map.find(coldata_ptr->table_index) != map.end()) {
-			coldata_ptr->table_index = map.at(coldata_ptr->table_index);
+		if (map.find(coldata_ptr->table_index.index) != map.end()) {
+			coldata_ptr->table_index.index = map.at(coldata_ptr->table_index.index);
 		}
 	} else if (auto upd_ptr = dynamic_cast<LogicalUpdate *>(node)) {
-		if (map.find(upd_ptr->table_index) != map.end()) {
-			upd_ptr->table_index = map.at(upd_ptr->table_index);
+		if (map.find(upd_ptr->table_index.index) != map.end()) {
+			upd_ptr->table_index.index = map.at(upd_ptr->table_index.index);
 		}
 	} else if (auto del_ptr = dynamic_cast<LogicalDelete *>(node)) {
-		if (map.find(del_ptr->table_index) != map.end()) {
-			del_ptr->table_index = map.at(del_ptr->table_index);
+		if (map.find(del_ptr->table_index.index) != map.end()) {
+			del_ptr->table_index.index = map.at(del_ptr->table_index.index);
 		}
 	} else if (auto cte_ptr = dynamic_cast<LogicalCTE *>(node)) {
-		if (map.find(cte_ptr->table_index) != map.end()) {
-			cte_ptr->table_index = map.at(cte_ptr->table_index);
+		if (map.find(cte_ptr->table_index.index) != map.end()) {
+			cte_ptr->table_index.index = map.at(cte_ptr->table_index.index);
 		}
 	} else if (auto rcte_ptr = dynamic_cast<LogicalRecursiveCTE *>(node)) {
-		if (map.find(rcte_ptr->table_index) != map.end()) {
-			rcte_ptr->table_index = map.at(rcte_ptr->table_index);
+		if (map.find(rcte_ptr->table_index.index) != map.end()) {
+			rcte_ptr->table_index.index = map.at(rcte_ptr->table_index.index);
 		}
 	} else if (auto eg_ptr = dynamic_cast<LogicalExpressionGet *>(node)) {
-		if (map.find(eg_ptr->table_index) != map.end()) {
-			eg_ptr->table_index = map.at(eg_ptr->table_index);
+		if (map.find(eg_ptr->table_index.index) != map.end()) {
+			eg_ptr->table_index.index = map.at(eg_ptr->table_index.index);
 		}
 	} else if (auto cteref_ptr = dynamic_cast<LogicalCTERef *>(node)) {
-		if (map.find(cteref_ptr->table_index) != map.end()) {
-			cteref_ptr->table_index = map.at(cteref_ptr->table_index);
+		if (map.find(cteref_ptr->table_index.index) != map.end()) {
+			cteref_ptr->table_index.index = map.at(cteref_ptr->table_index.index);
 		}
 	} else if (auto dg_ptr = dynamic_cast<LogicalDelimGet *>(node)) {
-		if (map.find(dg_ptr->table_index) != map.end()) {
-			dg_ptr->table_index = map.at(dg_ptr->table_index);
+		if (map.find(dg_ptr->table_index.index) != map.end()) {
+			dg_ptr->table_index.index = map.at(dg_ptr->table_index.index);
 		}
 	} else if (auto unnest_ptr = dynamic_cast<LogicalUnnest *>(node)) {
-		if (map.find(unnest_ptr->unnest_index) != map.end()) {
-			unnest_ptr->unnest_index = map.at(unnest_ptr->unnest_index);
+		if (map.find(unnest_ptr->unnest_index.index) != map.end()) {
+			unnest_ptr->unnest_index.index = map.at(unnest_ptr->unnest_index.index);
 		}
 	}
 
 	// Special handling for LogicalAggregate: multiple indices
 	if (auto agg_ptr = dynamic_cast<LogicalAggregate *>(node)) {
-		if (map.find(agg_ptr->aggregate_index) != map.end()) {
-			agg_ptr->aggregate_index = map.at(agg_ptr->aggregate_index);
+		if (map.find(agg_ptr->aggregate_index.index) != map.end()) {
+			agg_ptr->aggregate_index.index = map.at(agg_ptr->aggregate_index.index);
 		}
-		if (map.find(agg_ptr->group_index) != map.end()) {
-			agg_ptr->group_index = map.at(agg_ptr->group_index);
+		if (map.find(agg_ptr->group_index.index) != map.end()) {
+			agg_ptr->group_index.index = map.at(agg_ptr->group_index.index);
 		}
-		if (agg_ptr->groupings_index != DConstants::INVALID_INDEX && map.find(agg_ptr->groupings_index) != map.end()) {
-			agg_ptr->groupings_index = map.at(agg_ptr->groupings_index);
+		if (agg_ptr->groupings_index.index != DConstants::INVALID_INDEX &&
+		    map.find(agg_ptr->groupings_index.index) != map.end()) {
+			agg_ptr->groupings_index.index = map.at(agg_ptr->groupings_index.index);
 		}
 	}
 
@@ -263,7 +292,7 @@ void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> 
 	// Build index remapping for any new-subtree indices that collide with external indices
 	std::unordered_map<idx_t, idx_t> index_map;
 	if (!new_subtree_indices.empty()) {
-		idx_t next_idx = binder ? binder->GenerateTableIndex() : GetNextTableIndex(root);
+		idx_t next_idx = binder ? binder->GenerateTableIndex().index : GetNextTableIndex(root);
 		for (auto idx : new_subtree_indices) {
 			if (idx == DConstants::INVALID_INDEX) {
 				continue;
@@ -272,11 +301,11 @@ void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> 
 				// find a fresh index not in external_indices and not in new_subtree_indices
 				while (external_indices.find(next_idx) != external_indices.end() ||
 				       new_subtree_indices.find(next_idx) != new_subtree_indices.end()) {
-					next_idx = binder ? binder->GenerateTableIndex() : next_idx + 1;
+					next_idx = binder ? binder->GenerateTableIndex().index : next_idx + 1;
 				}
 				index_map[idx] = next_idx;
 				external_indices.insert(next_idx);
-				next_idx = binder ? binder->GenerateTableIndex() : next_idx + 1;
+				next_idx = binder ? binder->GenerateTableIndex().index : next_idx + 1;
 			}
 		}
 	}
@@ -293,9 +322,9 @@ void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> 
 	ColumnBindingReplacer replacer;
 	if (!index_map.empty()) {
 		for (auto &old_b : old_top_bindings) {
-			auto it = index_map.find(old_b.table_index);
+			auto it = index_map.find(old_b.table_index.index);
 			if (it != index_map.end()) {
-				ColumnBinding new_b(it->second, old_b.column_index);
+				ColumnBinding new_b {TableIndex(it->second), ProjectionIndex(old_b.column_index)};
 				replacer.replacement_bindings.emplace_back(old_b, new_b);
 			}
 		}
@@ -320,14 +349,14 @@ vector<string> FindPacKey(ClientContext &context, const string &table_name) {
 		vector<string> out;
 		out.reserve(cols.size());
 		for (auto &col_name : cols) {
-			string tmp = col_name;
+			Identifier tmp(col_name);
 			try {
 				auto col_idx = table_entry.GetColumnIndex(tmp);
 				auto &col = table_entry.GetColumn(col_idx);
 				if (!col.Type().IsNumeric()) {
 					return {};
 				}
-				out.push_back(col.GetName());
+				out.push_back(col.GetName().GetIdentifierName());
 			} catch (...) {
 				return {};
 			}
@@ -351,16 +380,16 @@ vector<string> FindPacKey(ClientContext &context, const string &table_name) {
 	// Validate columns exist and are numeric by looking up the table in the catalog
 	if (dot_pos != string::npos) {
 		string schema = table_name.substr(0, dot_pos);
-		auto entry =
-		    catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, unqualified, OnEntryNotFound::RETURN_NULL);
+		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, Identifier(schema), Identifier(unqualified),
+		                              OnEntryNotFound::RETURN_NULL);
 		if (entry) {
 			return check_and_return_numeric_columns(entry->Cast<TableCatalogEntry>(), pac_meta->primary_key_columns);
 		}
 	} else {
 		CatalogSearchPath path(context);
 		for (auto &entry_path : path.Get()) {
-			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, table_name,
-			                              OnEntryNotFound::RETURN_NULL);
+			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.GetSchema(),
+			                              Identifier(table_name), OnEntryNotFound::RETURN_NULL);
 			if (entry) {
 				return check_and_return_numeric_columns(entry->Cast<TableCatalogEntry>(),
 				                                        pac_meta->primary_key_columns);
@@ -437,7 +466,8 @@ std::unordered_map<string, vector<string>> FindPacLinkPath(ClientContext &contex
 		if (dot_pos != string::npos) {
 			string schema = tbl_name.substr(0, dot_pos);
 			string tbl = tbl_name.substr(dot_pos + 1);
-			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema, tbl, OnEntryNotFound::RETURN_NULL);
+			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, Identifier(schema), Identifier(tbl),
+			                              OnEntryNotFound::RETURN_NULL);
 			if (entry) {
 				return StringUtil::Lower(tbl); // return unqualified table name, normalized to lowercase
 			}
@@ -446,8 +476,8 @@ std::unordered_map<string, vector<string>> FindPacLinkPath(ClientContext &contex
 		// Non-qualified: walk the search path; if found return unqualified table name
 		CatalogSearchPath path(context);
 		for (auto &entry_path : path.Get()) {
-			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.schema, tbl_name,
-			                              OnEntryNotFound::RETURN_NULL);
+			auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, entry_path.GetSchema(),
+			                              Identifier(tbl_name), OnEntryNotFound::RETURN_NULL);
 			if (entry) {
 				return StringUtil::Lower(tbl_name); // already unqualified, normalized to lowercase
 			}
@@ -538,7 +568,7 @@ ReplanGuard::~ReplanGuard() {
 // Configuration helpers
 string GetPacCompiledPath(ClientContext &context, const string &default_path) {
 	Value v;
-	context.TryGetCurrentSetting("priv_compiled_path", v);
+	context.TryGetCurrentSetting(Identifier("priv_compiled_path"), v);
 	string path = v.IsNull() ? default_path : v.ToString();
 	if (!path.empty() && path.back() != '/') {
 		path.push_back('/');
@@ -548,7 +578,7 @@ string GetPacCompiledPath(ClientContext &context, const string &default_path) {
 
 int64_t GetPacM(ClientContext &context, int64_t default_m) {
 	Value v;
-	context.TryGetCurrentSetting("pac_m", v);
+	context.TryGetCurrentSetting(Identifier("pac_m"), v);
 	if (!v.IsNull()) {
 		try {
 			int64_t m = v.GetValue<int64_t>();
@@ -563,7 +593,7 @@ int64_t GetPacM(ClientContext &context, int64_t default_m) {
 
 bool IsPacNoiseEnabled(ClientContext &context, bool default_value) {
 	Value v;
-	context.TryGetCurrentSetting("privacy_noise", v);
+	context.TryGetCurrentSetting(Identifier("privacy_noise"), v);
 	if (v.IsNull()) {
 		return default_value;
 	}
@@ -577,7 +607,7 @@ bool IsPacNoiseEnabled(ClientContext &context, bool default_value) {
 static string GetNormalizedStringSetting(ClientContext &context, const string &setting_name,
                                          const string &default_value) {
 	Value v;
-	if (!context.TryGetCurrentSetting(setting_name, v) || v.IsNull()) {
+	if (!context.TryGetCurrentSetting(Identifier(setting_name), v) || v.IsNull()) {
 		return default_value;
 	}
 	string s = v.ToString();
@@ -596,7 +626,7 @@ string GetPrivacyMode(ClientContext &context) {
 
 static bool TryGetDoubleSetting(ClientContext &context, const char *setting_name, double &out) {
 	Value v;
-	if (!context.TryGetCurrentSetting(setting_name, v) || v.IsNull()) {
+	if (!context.TryGetCurrentSetting(Identifier(setting_name), v) || v.IsNull()) {
 		return false;
 	}
 	try {
@@ -652,7 +682,7 @@ bool TryGetDpDelta(ClientContext &context, double &out) {
 // Add implementation for GetPacCompileMethod
 string GetPacCompileMethod(ClientContext &context, const string &default_method) {
 	Value v;
-	context.TryGetCurrentSetting("pac_compile_method", v);
+	context.TryGetCurrentSetting(Identifier("pac_compile_method"), v);
 	if (v.IsNull()) {
 		return default_method;
 	}
@@ -672,7 +702,7 @@ string GetPacCompileMethod(ClientContext &context, const string &default_method)
 // Helper to safely retrieve boolean settings with defaults
 bool GetBooleanSetting(ClientContext &context, const string &setting_name, bool default_value) {
 	Value val;
-	if (context.TryGetCurrentSetting(setting_name, val) && !val.IsNull()) {
+	if (context.TryGetCurrentSetting(Identifier(setting_name), val) && !val.IsNull()) {
 		return val.GetValue<bool>();
 	}
 	return default_value;
@@ -683,7 +713,7 @@ static void CollectOperatorsByTableIndex(LogicalOperator &op,
                                          std::unordered_map<idx_t, LogicalOperator *> &table_index_to_op) {
 	auto bindings = op.GetColumnBindings();
 	if (!bindings.empty()) {
-		idx_t op_table_index = bindings[0].table_index;
+		idx_t op_table_index = bindings[0].table_index.index;
 		table_index_to_op[op_table_index] = &op;
 	}
 	for (auto &child : op.children) {
@@ -693,6 +723,26 @@ static void CollectOperatorsByTableIndex(LogicalOperator &op,
 	}
 }
 
+// Casts and the optimizer's reversible storage encodings retain column lineage.
+static optional_ptr<const BoundColumnRefExpression> FindLineageColumn(const Expression &expression) {
+	auto *expr = &expression;
+	while (expr->GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+		auto &function = expr->Cast<BoundFunctionExpression>();
+		auto name = function.Function().GetName().GetIdentifierName();
+		if (expr->GetExpressionType() != ExpressionType::OPERATOR_CAST &&
+		    !StringUtil::StartsWith(name, "__internal_compress_") &&
+		    !StringUtil::StartsWith(name, "__internal_decompress_")) {
+			break;
+		}
+		if (function.GetChildren().empty()) {
+			return nullptr;
+		}
+		expr = function.GetChildren()[0].get();
+	}
+	return expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF ? &expr->Cast<BoundColumnRefExpression>()
+	                                                                     : nullptr;
+}
+
 // Helper to trace a binding back through the plan to find which LogicalGet it originates from
 LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBinding &binding, idx_t *out_column_index) {
 	// Build a map from table_index to the operator that produces it
@@ -700,7 +750,7 @@ LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBinding &bin
 	CollectOperatorsByTableIndex(plan, table_index_to_op);
 
 	// Start from the binding's table_index and trace backwards
-	idx_t current_table_index = binding.table_index;
+	idx_t current_table_index = binding.table_index.index;
 	idx_t current_column_index = binding.column_index;
 
 	// Limit iterations to prevent infinite loops
@@ -737,10 +787,10 @@ LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBinding &bin
 			auto &expr = proj.expressions[current_column_index];
 
 			// If it's a BoundColumnRefExpression, follow it
-			if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
-				auto &col_ref = expr->Cast<BoundColumnRefExpression>();
-				current_table_index = col_ref.binding.table_index;
-				current_column_index = col_ref.binding.column_index;
+			auto col_ref = FindLineageColumn(*expr);
+			if (col_ref) {
+				current_table_index = col_ref->Binding().table_index.index;
+				current_column_index = col_ref->Binding().column_index;
 				continue;
 			}
 
@@ -757,10 +807,10 @@ LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBinding &bin
 				// This is a group column, trace through the group expression
 				auto &group_expr = agg.groups[current_column_index];
 
-				if (group_expr->type == ExpressionType::BOUND_COLUMN_REF) {
-					auto &col_ref = group_expr->Cast<BoundColumnRefExpression>();
-					current_table_index = col_ref.binding.table_index;
-					current_column_index = col_ref.binding.column_index;
+				auto col_ref = FindLineageColumn(*group_expr);
+				if (col_ref) {
+					current_table_index = col_ref->Binding().table_index.index;
+					current_column_index = col_ref->Binding().column_index;
 					continue;
 				}
 				return nullptr;
@@ -785,7 +835,7 @@ LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBinding &bin
 			if (current_column_index < left_count && op->children[0]) {
 				auto left_bindings = op->children[0]->GetColumnBindings();
 				if (current_column_index < left_bindings.size()) {
-					current_table_index = left_bindings[current_column_index].table_index;
+					current_table_index = left_bindings[current_column_index].table_index.index;
 					current_column_index = left_bindings[current_column_index].column_index;
 					continue;
 				}
@@ -796,7 +846,7 @@ LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBinding &bin
 				idx_t right_col_idx = current_column_index - left_count;
 				auto right_bindings = op->children[1]->GetColumnBindings();
 				if (right_col_idx < right_bindings.size()) {
-					current_table_index = right_bindings[right_col_idx].table_index;
+					current_table_index = right_bindings[right_col_idx].table_index.index;
 					current_column_index = right_bindings[right_col_idx].column_index;
 					continue;
 				}
@@ -809,7 +859,7 @@ LogicalGet *TraceBindingToSource(LogicalOperator &plan, const ColumnBinding &bin
 		if (!op->children.empty() && op->children[0]) {
 			auto child_bindings = op->children[0]->GetColumnBindings();
 			if (current_column_index < child_bindings.size()) {
-				current_table_index = child_bindings[current_column_index].table_index;
+				current_table_index = child_bindings[current_column_index].table_index.index;
 				current_column_index = child_bindings[current_column_index].column_index;
 			} else {
 				return nullptr;
@@ -832,16 +882,29 @@ static void CollectJoinKeyEquivalences(LogicalOperator &op,
 
 		for (auto &cond : join.conditions) {
 			// Only consider equality conditions
-			if (cond.comparison != ExpressionType::COMPARE_EQUAL) {
+			if (cond.GetComparisonType() != ExpressionType::COMPARE_EQUAL) {
 				continue;
 			}
 
 			// Check if both sides are column references
-			if (cond.left && cond.right && cond.left->type == ExpressionType::BOUND_COLUMN_REF &&
-			    cond.right->type == ExpressionType::BOUND_COLUMN_REF) {
-				auto &left_ref = cond.left->Cast<BoundColumnRefExpression>();
-				auto &right_ref = cond.right->Cast<BoundColumnRefExpression>();
-				equivalences.emplace_back(left_ref.binding, right_ref.binding);
+			if (cond.LeftReference() && cond.RightReference() &&
+			    cond.LeftReference()->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF &&
+			    cond.RightReference()->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
+				auto &left_ref = cond.LeftReference()->Cast<BoundColumnRefExpression>();
+				auto &right_ref = cond.RightReference()->Cast<BoundColumnRefExpression>();
+				equivalences.emplace_back(left_ref.BindingMutable(), right_ref.BindingMutable());
+			}
+		}
+	}
+
+	// Optimizer-inserted projections can rename a join key or encode it for
+	// grouping. Include these aliases in the same equivalence graph.
+	if (op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		auto &projection = op.Cast<LogicalProjection>();
+		for (idx_t i = 0; i < projection.expressions.size(); i++) {
+			auto ref = FindLineageColumn(*projection.expressions[i]);
+			if (ref) {
+				equivalences.emplace_back(ColumnBinding(projection.table_index, ProjectionIndex(i)), ref->Binding());
 			}
 		}
 	}
@@ -859,7 +922,7 @@ static void FindEquivalentBindings(const ColumnBinding &binding,
                                    const vector<std::pair<ColumnBinding, ColumnBinding>> &equivalences,
                                    std::unordered_set<uint64_t> &visited, vector<ColumnBinding> &result) {
 	// Create a unique key for the binding
-	uint64_t key = (static_cast<uint64_t>(binding.table_index) << 32) | binding.column_index;
+	uint64_t key = (static_cast<uint64_t>(binding.table_index.index) << 32) | binding.column_index;
 	if (visited.find(key) != visited.end()) {
 		return;
 	}
@@ -868,10 +931,11 @@ static void FindEquivalentBindings(const ColumnBinding &binding,
 
 	// Find all equivalences involving this binding
 	for (auto &eq : equivalences) {
-		if (eq.first.table_index == binding.table_index && eq.first.column_index == binding.column_index) {
+		if (eq.first.table_index.index == binding.table_index.index && eq.first.column_index == binding.column_index) {
 			FindEquivalentBindings(eq.second, equivalences, visited, result);
 		}
-		if (eq.second.table_index == binding.table_index && eq.second.column_index == binding.column_index) {
+		if (eq.second.table_index.index == binding.table_index.index &&
+		    eq.second.column_index == binding.column_index) {
 			FindEquivalentBindings(eq.first, equivalences, visited, result);
 		}
 	}
@@ -899,7 +963,7 @@ bool ColumnBelongsToTable(LogicalOperator &plan, const string &table_name, const
 			continue;
 		}
 
-		if (table_entry->name == table_name) {
+		if (table_entry->name.GetIdentifierName() == table_name) {
 			return true;
 		}
 	}
@@ -909,11 +973,11 @@ bool ColumnBelongsToTable(LogicalOperator &plan, const string &table_name, const
 
 // Recursively remap BoundColumnRefExpression bindings in an expression tree.
 static void RemapBindingsInExpr(Expression &e, const std::unordered_map<idx_t, idx_t> &map) {
-	if (e.type == ExpressionType::BOUND_COLUMN_REF) {
+	if (e.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 		auto &col_ref = e.Cast<BoundColumnRefExpression>();
-		auto it = map.find(col_ref.binding.table_index);
+		auto it = map.find(col_ref.BindingMutable().table_index.index);
 		if (it != map.end()) {
-			col_ref.binding.table_index = it->second;
+			col_ref.BindingMutable().table_index.index = it->second;
 		}
 	}
 	ExpressionIterator::EnumerateChildren(e, [&map](Expression &child) { RemapBindingsInExpr(child, map); });
@@ -947,8 +1011,8 @@ void RemapBindingsInSubtree(LogicalOperator &op, const std::unordered_map<idx_t,
 	// LogicalComparisonJoin (and subclasses like DELIM_JOIN): remap conditions + duplicate_eliminated_columns
 	if (auto *cj = dynamic_cast<LogicalComparisonJoin *>(&op)) {
 		for (auto &cond : cj->conditions) {
-			remap_expr(cond.left);
-			remap_expr(cond.right);
+			remap_expr(cond.LeftReference());
+			remap_expr(cond.RightReference());
 		}
 		for (auto &expr : cj->duplicate_eliminated_columns) {
 			remap_expr(expr);
@@ -996,9 +1060,9 @@ std::unordered_map<idx_t, idx_t> RemapSubtreeIndices(LogicalOperator *subtree, B
 		if (old_idx == DConstants::INVALID_INDEX) {
 			continue;
 		}
-		idx_t fresh = binder.GenerateTableIndex();
+		idx_t fresh = binder.GenerateTableIndex().index;
 		while (used.find(fresh) != used.end()) {
-			fresh = binder.GenerateTableIndex();
+			fresh = binder.GenerateTableIndex().index;
 		}
 		map[old_idx] = fresh;
 		used.insert(fresh);

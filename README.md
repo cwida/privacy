@@ -7,7 +7,7 @@
 
 Both modes share the same DDL and require no changes to query syntax — the extension rewrites aggregate query plans transparently.
 
-This works on DuckDB v1.5 and beyond. See https://duckdb.org/install to install. Or if you do not want to install anything: this extension is also distributed in WASM, so you can run the examples also in https://shell.duckdb.org in a browser.
+This branch targets DuckDB v2.0.0. See https://duckdb.org/install to install. Or if you do not want to install anything: this extension is also distributed in WASM, so you can run the examples also in https://shell.duckdb.org in a browser.
 
 ## Install
 
@@ -217,6 +217,19 @@ This gives a formal (ε,δ)-DP guarantee at the **user level** — neighboring d
 | `dp_epsilon` | `1.0` | dp_elastic | Privacy budget ε |
 | `dp_delta` | `1e-6` | dp_elastic | Failure probability δ (0 = pure DP) |
 | `dp_sum_bound` | required | dp_elastic | Clipping bound for `SUM`/`AVG` inputs: values are clipped to `[-bound, bound]` |
+
+For PAC, a fixed `privacy_seed` repeats the random draws when the query, data,
+settings, execution order, and initial p-tracking state are unchanged on the same
+build. Stream allocation resets for every query, including prepared executions,
+so unrelated queries do not shift later seeded draws. Streams advance across cells:
+identical aggregate counters in different groups still receive independent draws.
+
+For reproducible tests, use `SET threads = 1` and a stable input order. Parallel
+hash aggregation can emit groups in a different order even at a fixed thread count,
+so bit-identical per-group results are not guaranteed across parallel executions,
+row/batch reordering, or builds. P-tracking updates its calibration state after
+releases; comparisons must start from the same state (the RNG regression tests use
+`SET pac_ptracking = false`).
 
 ## SQL Reference
 

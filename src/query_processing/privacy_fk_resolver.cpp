@@ -45,7 +45,7 @@ AccessibleFKTableResult FindAccessibleFKTable(unique_ptr<LogicalOperator> &plan,
 
 		for (auto *node : table_nodes) {
 			auto &node_get = node->get()->Cast<LogicalGet>();
-			idx_t node_table_idx = node_get.table_index;
+			idx_t node_table_idx = node_get.table_index.index;
 
 			// Check if this table is in the search root's subtree
 			if (search_root && !HasTableIndexInSubtree(search_root, node_table_idx)) {
@@ -55,7 +55,7 @@ AccessibleFKTableResult FindAccessibleFKTable(unique_ptr<LogicalOperator> &plan,
 			// Check if this table's columns are accessible
 			if (AreTableColumnsAccessible(plan.get(), node_table_idx)) {
 				result.get_node = &node_get;
-				result.table_index = node_table_idx;
+				result.table_index.index = node_table_idx;
 				result.table_name = table_name;
 				result.fk_columns = fk_result.fk_columns;
 				result.found = true;

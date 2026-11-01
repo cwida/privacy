@@ -1,3 +1,4 @@
+#include "duckdb/common/vector/list_vector.hpp"
 #include "aggregates/as_clip_sum.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "duckdb/common/types/decimal.hpp"
@@ -200,12 +201,12 @@ template <int NL = CLIP_NUM_LEVELS_64, bool SIGNED = true, class VALUE_TYPE = ui
 static void PacClipSumUpdate(Vector inputs[], PacClipSumStateWrapper<NL> &state, idx_t count, ArenaAllocator &allocator,
                              int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
 
-	if (hash_data.validity.AllValid() && value_data.validity.AllValid()) {
+	if (hash_data.validity.CannotHaveNull() && value_data.validity.CannotHaveNull()) {
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
@@ -230,9 +231,9 @@ template <int NL = CLIP_NUM_LEVELS_64, bool SIGNED = true, class VALUE_TYPE = ui
 static void PacClipSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator,
                                     int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data, sdata;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, sdata);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(sdata);
 
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
@@ -266,11 +267,13 @@ static void PacClipSumScatterUpdate(Vector inputs[], Vector &states, idx_t count
 	X(UBigInt, uint64_t, uint64_t, false)
 
 #define X(NAME, VALUE_T, INPUT_T, SIGNED)                                                                              \
-	static void PacClipSumUpdate##NAME(Vector input[], AggregateInputData &agg, idx_t, data_ptr_t state_p,             \
-	                                   idx_t cnt) {                                                                    \
-		auto &state = *reinterpret_cast<PacClipSumStateWrapper<> *>(state_p);                                          \
-		PacClipSumUpdate<CLIP_NUM_LEVELS_64, SIGNED, VALUE_T, INPUT_T>(input, state, cnt, agg.allocator,               \
-		                                                               GetPrivSampleLanes(agg));                       \
+	static void PacClipSumUpdate##NAME(Vector input[], AggregateInputData &agg, idx_t input_count,                     \
+	                                   const ClusteredAggr &clusters, idx_t cnt) {                                     \
+		ExecutePrivClusters(input, input_count, clusters, [&](Vector input[], data_ptr_t state_p, idx_t cnt) {         \
+			auto &state = *reinterpret_cast<PacClipSumStateWrapper<> *>(state_p);                                      \
+			PacClipSumUpdate<CLIP_NUM_LEVELS_64, SIGNED, VALUE_T, INPUT_T>(input, state, cnt, agg.allocator,           \
+			                                                               GetPrivSampleLanes(agg));                   \
+		});                                                                                                            \
 	}                                                                                                                  \
 	static void PacClipSumScatterUpdate##NAME(Vector input[], AggregateInputData &agg, idx_t, Vector &sts,             \
 	                                          idx_t cnt) {                                                             \
@@ -282,30 +285,34 @@ CLIP_SUM_INT_TYPES_UNSIGNED
 #undef X
 
 // HugeInt update (signed, via hugeint routing — 128-bit needs full 62 levels)
-static void PacClipSumUpdateHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count) {
-	auto &state = *reinterpret_cast<PacClipSumStateWrapper<CLIP_NUM_LEVELS> *>(state_p);
-	int sample_lanes = GetPrivSampleLanes(aggr);
-	UnifiedVectorFormat hash_data, value_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-	auto values = UnifiedVectorFormat::GetData<hugeint_t>(value_data);
-	for (idx_t i = 0; i < count; i++) {
-		auto h_idx = hash_data.sel->get_index(i);
-		auto v_idx = value_data.sel->get_index(i);
-		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
-			continue;
+static void PacClipSumUpdateHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t input_count,
+                                    const ClusteredAggr &clusters, idx_t count) {
+	ExecutePrivClusters(inputs, input_count, clusters, [&](Vector inputs[], data_ptr_t state_p, idx_t count) {
+		auto &state = *reinterpret_cast<PacClipSumStateWrapper<CLIP_NUM_LEVELS> *>(state_p);
+		int sample_lanes = GetPrivSampleLanes(aggr);
+		UnifiedVectorFormat hash_data, value_data;
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(value_data);
+		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+		auto values = UnifiedVectorFormat::GetData<hugeint_t>(value_data);
+		for (idx_t i = 0; i < count; i++) {
+			auto h_idx = hash_data.sel->get_index(i);
+			auto v_idx = value_data.sel->get_index(i);
+			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
+				continue;
+			}
+			PacClipSumUpdateOne<CLIP_NUM_LEVELS, true>(state, hashes[h_idx], values[v_idx], aggr.allocator,
+			                                           sample_lanes);
 		}
-		PacClipSumUpdateOne<CLIP_NUM_LEVELS, true>(state, hashes[h_idx], values[v_idx], aggr.allocator, sample_lanes);
-	}
+	});
 }
 static void PacClipSumScatterUpdateHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
                                            idx_t count) {
 	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, value_data, sdata;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, sdata);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(sdata);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<hugeint_t>(value_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<PacClipSumStateWrapper<CLIP_NUM_LEVELS> *>(sdata);
@@ -321,56 +328,58 @@ static void PacClipSumScatterUpdateHugeInt(Vector inputs[], AggregateInputData &
 }
 
 // UHugeInt update (unsigned, convert to hugeint for routing — 128-bit needs full 62 levels)
-static void PacClipSumUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p,
-                                     idx_t count) {
-	auto &state = *reinterpret_cast<PacClipSumStateWrapper<CLIP_NUM_LEVELS> *>(state_p);
-	int sample_lanes = GetPrivSampleLanes(aggr);
-	UnifiedVectorFormat hash_data, value_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-	auto values = UnifiedVectorFormat::GetData<uhugeint_t>(value_data);
-	for (idx_t i = 0; i < count; i++) {
-		auto h_idx = hash_data.sel->get_index(i);
-		auto v_idx = value_data.sel->get_index(i);
-		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
-			continue;
-		}
-		// uhugeint_t is always positive; treat as 128-bit unsigned
-		auto &v = values[v_idx];
-		auto *pos_state = state.EnsureState(aggr.allocator);
-		if (DUCKDB_LIKELY(hashes[h_idx])) {
-			uint64_t counter_hash = TransformPacUpdateHash(hashes[h_idx], sample_lanes);
-			uint64_t upper = static_cast<uint64_t>(v.upper);
-			uint64_t lower = v.lower;
-			int level = PacClipSumIntState<CLIP_NUM_LEVELS>::GetLevel128(upper, lower);
-			uint64_t shift = level << 1;
-			uint16_t shifted_val;
-			if (shift >= 64) {
-				shifted_val = static_cast<uint16_t>(upper >> (shift - 64));
-			} else if (shift > 0) {
-				shifted_val = static_cast<uint16_t>((lower >> shift) | (upper << (64 - shift)));
-			} else {
-				shifted_val = static_cast<uint16_t>(lower);
+static void PacClipSumUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t input_count,
+                                     const ClusteredAggr &clusters, idx_t count) {
+	ExecutePrivClusters(inputs, input_count, clusters, [&](Vector inputs[], data_ptr_t state_p, idx_t count) {
+		auto &state = *reinterpret_cast<PacClipSumStateWrapper<CLIP_NUM_LEVELS> *>(state_p);
+		int sample_lanes = GetPrivSampleLanes(aggr);
+		UnifiedVectorFormat hash_data, value_data;
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(value_data);
+		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+		auto values = UnifiedVectorFormat::GetData<uhugeint_t>(value_data);
+		for (idx_t i = 0; i < count; i++) {
+			auto h_idx = hash_data.sel->get_index(i);
+			auto v_idx = value_data.sel->get_index(i);
+			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
+				continue;
 			}
-			shifted_val &= 0xFF;
-			pos_state->key_hash |= counter_hash;
-			pos_state->EnsureLevelAllocated(aggr.allocator, level);
-			uint64_t *buf = pos_state->levels[level];
-			buf[17] |= (1ULL << (hashes[h_idx] >> 58));
-			pos_state->AddToExactCount(buf, shifted_val, aggr.allocator);
-			Pac2AddToTotalsSWAR16(buf, shifted_val, counter_hash);
-			pos_state->update_count++;
+			// uhugeint_t is always positive; treat as 128-bit unsigned
+			auto &v = values[v_idx];
+			auto *pos_state = state.EnsureState(aggr.allocator);
+			if (DUCKDB_LIKELY(hashes[h_idx])) {
+				uint64_t counter_hash = TransformPacUpdateHash(hashes[h_idx], sample_lanes);
+				uint64_t upper = static_cast<uint64_t>(v.upper);
+				uint64_t lower = v.lower;
+				int level = PacClipSumIntState<CLIP_NUM_LEVELS>::GetLevel128(upper, lower);
+				uint64_t shift = level << 1;
+				uint16_t shifted_val;
+				if (shift >= 64) {
+					shifted_val = static_cast<uint16_t>(upper >> (shift - 64));
+				} else if (shift > 0) {
+					shifted_val = static_cast<uint16_t>((lower >> shift) | (upper << (64 - shift)));
+				} else {
+					shifted_val = static_cast<uint16_t>(lower);
+				}
+				shifted_val &= 0xFF;
+				pos_state->key_hash |= counter_hash;
+				pos_state->EnsureLevelAllocated(aggr.allocator, level);
+				uint64_t *buf = pos_state->levels[level];
+				buf[17] |= (1ULL << (hashes[h_idx] >> 58));
+				pos_state->AddToExactCount(buf, shifted_val, aggr.allocator);
+				Pac2AddToTotalsSWAR16(buf, shifted_val, counter_hash);
+				pos_state->update_count++;
+			}
 		}
-	}
+	});
 }
 static void PacClipSumScatterUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
                                             idx_t count) {
 	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, value_data, sdata;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, sdata);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(sdata);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<uhugeint_t>(value_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<PacClipSumStateWrapper<CLIP_NUM_LEVELS> *>(sdata);
@@ -413,35 +422,38 @@ static void PacClipSumScatterUpdateUHugeInt(Vector inputs[], AggregateInputData 
 // Float/Double update: scale to int64, route through signed path
 // ============================================================================
 template <typename FLOAT_TYPE, int SHIFT, class HASH_TRANSFORM = PacIdentityHash>
-static void PacClipSumUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count) {
-	auto &state = *reinterpret_cast<PacClipSumStateWrapper<> *>(state_p);
-	int sample_lanes = GetPrivSampleLanes(aggr);
-	UnifiedVectorFormat hash_data, value_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-	auto values = UnifiedVectorFormat::GetData<FLOAT_TYPE>(value_data);
+static void PacClipSumUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx_t input_count,
+                                  const ClusteredAggr &clusters, idx_t count) {
+	ExecutePrivClusters(inputs, input_count, clusters, [&](Vector inputs[], data_ptr_t state_p, idx_t count) {
+		auto &state = *reinterpret_cast<PacClipSumStateWrapper<> *>(state_p);
+		int sample_lanes = GetPrivSampleLanes(aggr);
+		UnifiedVectorFormat hash_data, value_data;
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(value_data);
+		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+		auto values = UnifiedVectorFormat::GetData<FLOAT_TYPE>(value_data);
 
-	if (hash_data.validity.AllValid() && value_data.validity.AllValid()) {
-		for (idx_t i = 0; i < count; i++) {
-			auto h_idx = hash_data.sel->get_index(i);
-			auto v_idx = value_data.sel->get_index(i);
-			PacClipSumUpdateOne<CLIP_NUM_LEVELS_64, true, int64_t, HASH_TRANSFORM>(
-			    state, hashes[h_idx], ScaleFloatToInt64<FLOAT_TYPE, SHIFT>(values[v_idx]), aggr.allocator,
-			    sample_lanes);
-		}
-	} else {
-		for (idx_t i = 0; i < count; i++) {
-			auto h_idx = hash_data.sel->get_index(i);
-			auto v_idx = value_data.sel->get_index(i);
-			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
-				continue;
+		if (hash_data.validity.CannotHaveNull() && value_data.validity.CannotHaveNull()) {
+			for (idx_t i = 0; i < count; i++) {
+				auto h_idx = hash_data.sel->get_index(i);
+				auto v_idx = value_data.sel->get_index(i);
+				PacClipSumUpdateOne<CLIP_NUM_LEVELS_64, true, int64_t, HASH_TRANSFORM>(
+				    state, hashes[h_idx], ScaleFloatToInt64<FLOAT_TYPE, SHIFT>(values[v_idx]), aggr.allocator,
+				    sample_lanes);
 			}
-			PacClipSumUpdateOne<CLIP_NUM_LEVELS_64, true, int64_t, HASH_TRANSFORM>(
-			    state, hashes[h_idx], ScaleFloatToInt64<FLOAT_TYPE, SHIFT>(values[v_idx]), aggr.allocator,
-			    sample_lanes);
+		} else {
+			for (idx_t i = 0; i < count; i++) {
+				auto h_idx = hash_data.sel->get_index(i);
+				auto v_idx = value_data.sel->get_index(i);
+				if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
+					continue;
+				}
+				PacClipSumUpdateOne<CLIP_NUM_LEVELS_64, true, int64_t, HASH_TRANSFORM>(
+				    state, hashes[h_idx], ScaleFloatToInt64<FLOAT_TYPE, SHIFT>(values[v_idx]), aggr.allocator,
+				    sample_lanes);
+			}
 		}
-	}
+	});
 }
 
 template <typename FLOAT_TYPE, int SHIFT, class HASH_TRANSFORM = PacIdentityHash>
@@ -449,9 +461,9 @@ static void PacClipSumScatterUpdateFloat(Vector inputs[], AggregateInputData &ag
                                          idx_t count) {
 	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, value_data, sdata;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, sdata);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(sdata);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<FLOAT_TYPE>(value_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<PacClipSumStateWrapper<> *>(sdata);
@@ -469,26 +481,26 @@ static void PacClipSumScatterUpdateFloat(Vector inputs[], AggregateInputData &ag
 }
 
 // Instantiate float/double update functions
-static void PacClipSumUpdateSingleFloat(Vector inputs[], AggregateInputData &aggr, idx_t n, data_ptr_t state_p,
-                                        idx_t count) {
-	PacClipSumUpdateFloat<float, CLIP_FLOAT_SHIFT>(inputs, aggr, n, state_p, count);
+static void PacClipSumUpdateSingleFloat(Vector inputs[], AggregateInputData &aggr, idx_t n,
+                                        const ClusteredAggr &clusters, idx_t count) {
+	PacClipSumUpdateFloat<float, CLIP_FLOAT_SHIFT>(inputs, aggr, n, clusters, count);
 }
 static void PacClipSumScatterUpdateSingleFloat(Vector inputs[], AggregateInputData &aggr, idx_t n, Vector &states,
                                                idx_t count) {
 	PacClipSumScatterUpdateFloat<float, CLIP_FLOAT_SHIFT>(inputs, aggr, n, states, count);
 }
-static void PacClipSumUpdateSingleDouble(Vector inputs[], AggregateInputData &aggr, idx_t n, data_ptr_t state_p,
-                                         idx_t count) {
-	PacClipSumUpdateFloat<double, CLIP_DOUBLE_SHIFT>(inputs, aggr, n, state_p, count);
+static void PacClipSumUpdateSingleDouble(Vector inputs[], AggregateInputData &aggr, idx_t n,
+                                         const ClusteredAggr &clusters, idx_t count) {
+	PacClipSumUpdateFloat<double, CLIP_DOUBLE_SHIFT>(inputs, aggr, n, clusters, count);
 }
 static void PacClipSumScatterUpdateSingleDouble(Vector inputs[], AggregateInputData &aggr, idx_t n, Vector &states,
                                                 idx_t count) {
 	PacClipSumScatterUpdateFloat<double, CLIP_DOUBLE_SHIFT>(inputs, aggr, n, states, count);
 }
 
-static void DpSampleClipSumUpdateDouble(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p,
-                                        idx_t count) {
-	PacClipSumUpdateFloat<double, CLIP_DOUBLE_SHIFT>(inputs, aggr, 0, state_p, count);
+static void DpSampleClipSumUpdateDouble(Vector inputs[], AggregateInputData &aggr, idx_t input_count,
+                                        const ClusteredAggr &clusters, idx_t count) {
+	PacClipSumUpdateFloat<double, CLIP_DOUBLE_SHIFT>(inputs, aggr, input_count, clusters, count);
 }
 
 static void DpSampleClipSumScatterUpdateDouble(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
@@ -545,10 +557,11 @@ static void DpSampleClipSumCombine(Vector &src, Vector &dst, AggregateInputData 
 // Finalize
 // ============================================================================
 template <int NL = CLIP_NUM_LEVELS_64, class ACC_TYPE = hugeint_t, bool SIGNED = true>
-static void PacClipSumFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
+static void PacClipSumFinalize(Vector &states, AggregateFinalizeInputData &input, Vector &result, idx_t count,
+                               idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<PacClipSumStateWrapper<NL> *>(states);
-	auto data = FlatVector::GetData<ACC_TYPE>(result);
-	auto &result_mask = FlatVector::Validity(result);
+	auto data = FlatVector::GetDataMutable<ACC_TYPE>(result);
+	auto &result_mask = FlatVector::ValidityMutable(result);
 	auto &bind = static_cast<PacClipBindData &>(*input.bind_data);
 	double mi = bind.mi;
 	double correction = bind.correction;
@@ -557,6 +570,7 @@ static void PacClipSumFinalize(Vector &states, AggregateInputData &input, Vector
 	int clip_support = bind.clip_support_threshold;
 	bool clip_scale = bind.clip_scale;
 
+	auto gen = PacRandomStream(bind.seed, *bind.random_state);
 	for (idx_t i = 0; i < count; i++) {
 		PacClipSumFlushBuffer<NL, SIGNED>(*state_ptrs[i], *state_ptrs[i], input.allocator, bind.sample_lanes);
 
@@ -567,7 +581,6 @@ static void PacClipSumFinalize(Vector &states, AggregateInputData &input, Vector
 			continue;
 		}
 		uint64_t key_hash = pos->key_hash;
-		std::mt19937_64 gen(bind.seed);
 		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_mask.SetInvalid(offset + i);
 			continue;
@@ -607,35 +620,35 @@ static void PacClipSumFinalize(Vector &states, AggregateInputData &input, Vector
 
 // Instantiate noised finalize (scalar output for as_noised_clip_sum)
 // 64-bit types
-static void PacClipSumNoisedFinalizeSigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                           idx_t offset) {
+static void PacClipSumNoisedFinalizeSigned(Vector &states, AggregateFinalizeInputData &input, Vector &result,
+                                           idx_t count, idx_t offset) {
 	PacClipSumFinalize<CLIP_NUM_LEVELS_64, hugeint_t, true>(states, input, result, count, offset);
 }
-static void PacClipSumNoisedFinalizeUnsigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                             idx_t offset) {
+static void PacClipSumNoisedFinalizeUnsigned(Vector &states, AggregateFinalizeInputData &input, Vector &result,
+                                             idx_t count, idx_t offset) {
 	PacClipSumFinalize<CLIP_NUM_LEVELS_64, hugeint_t, false>(states, input, result, count, offset);
 }
 // 128-bit types
-static void PacClipSumNoisedFinalizeSigned128(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                              idx_t offset) {
+static void PacClipSumNoisedFinalizeSigned128(Vector &states, AggregateFinalizeInputData &input, Vector &result,
+                                              idx_t count, idx_t offset) {
 	PacClipSumFinalize<CLIP_NUM_LEVELS, hugeint_t, true>(states, input, result, count, offset);
 }
-static void PacClipSumNoisedFinalizeUnsigned128(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                                idx_t offset) {
+static void PacClipSumNoisedFinalizeUnsigned128(Vector &states, AggregateFinalizeInputData &input, Vector &result,
+                                                idx_t count, idx_t offset) {
 	PacClipSumFinalize<CLIP_NUM_LEVELS, hugeint_t, false>(states, input, result, count, offset);
 }
 // BIGINT output variant — used for count→sum conversion where the original returned BIGINT
-static void PacClipSumNoisedFinalizeBigInt(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                           idx_t offset) {
+static void PacClipSumNoisedFinalizeBigInt(Vector &states, AggregateFinalizeInputData &input, Vector &result,
+                                           idx_t count, idx_t offset) {
 	PacClipSumFinalize<CLIP_NUM_LEVELS_64, int64_t, true>(states, input, result, count, offset);
 }
 // Float/double output variants
-static void PacClipSumNoisedFinalizeFloat(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                          idx_t offset) {
+static void PacClipSumNoisedFinalizeFloat(Vector &states, AggregateFinalizeInputData &input, Vector &result,
+                                          idx_t count, idx_t offset) {
 	PacClipSumFinalize<CLIP_NUM_LEVELS_64, float, true>(states, input, result, count, offset);
 }
-static void PacClipSumNoisedFinalizeDouble(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                           idx_t offset) {
+static void PacClipSumNoisedFinalizeDouble(Vector &states, AggregateFinalizeInputData &input, Vector &result,
+                                           idx_t count, idx_t offset) {
 	PacClipSumFinalize<CLIP_NUM_LEVELS_64, double, true>(states, input, result, count, offset);
 }
 
@@ -646,7 +659,7 @@ enum class ClipCountersFinalizeMode : uint8_t { PAC, DP_SAMPLE };
 // ============================================================================
 template <int NL = CLIP_NUM_LEVELS_64, bool SIGNED = true,
           ClipCountersFinalizeMode MODE = ClipCountersFinalizeMode::PAC>
-static void PacClipSumFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+static void PacClipSumFinalizeCounters(Vector &states, AggregateFinalizeInputData &input, Vector &result, idx_t count,
                                        idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<PacClipSumStateWrapper<NL> *>(states);
 	auto &bind = static_cast<PacClipBindData &>(*input.bind_data);
@@ -657,14 +670,14 @@ static void PacClipSumFinalizeCounters(Vector &states, AggregateInputData &input
 	bool dp_sample = MODE == ClipCountersFinalizeMode::DP_SAMPLE;
 	double dp_sample_rescale = dp_sample && bind.sample_rescale ? DpSampleRescale(bind.sample_lanes) : 1.0;
 
-	auto list_entries = FlatVector::GetData<list_entry_t>(result);
-	auto &child_vec = ListVector::GetEntry(result);
+	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
+	auto &child_vec = ListVector::GetChildMutable(result);
 
 	idx_t total_elements = (offset + count) * 64;
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
 
-	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
+	auto child_data = FlatVector::GetDataMutable<PAC_FLOAT>(child_vec);
 
 	for (idx_t i = 0; i < count; i++) {
 		PacClipSumFlushBuffer<NL, SIGNED>(*state_ptrs[i], *state_ptrs[i], input.allocator, bind.sample_lanes);
@@ -718,25 +731,25 @@ static void PacClipSumFinalizeCounters(Vector &states, AggregateInputData &input
 }
 
 // 64-bit counters finalize
-static void PacClipSumFinalizeCountersSigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                             idx_t offset) {
+static void PacClipSumFinalizeCountersSigned(Vector &states, AggregateFinalizeInputData &input, Vector &result,
+                                             idx_t count, idx_t offset) {
 	PacClipSumFinalizeCounters<CLIP_NUM_LEVELS_64, true>(states, input, result, count, offset);
 }
-static void PacClipSumFinalizeCountersUnsigned(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                               idx_t offset) {
+static void PacClipSumFinalizeCountersUnsigned(Vector &states, AggregateFinalizeInputData &input, Vector &result,
+                                               idx_t count, idx_t offset) {
 	PacClipSumFinalizeCounters<CLIP_NUM_LEVELS_64, false>(states, input, result, count, offset);
 }
 // 128-bit counters finalize
-static void PacClipSumFinalizeCountersSigned128(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                                idx_t offset) {
+static void PacClipSumFinalizeCountersSigned128(Vector &states, AggregateFinalizeInputData &input, Vector &result,
+                                                idx_t count, idx_t offset) {
 	PacClipSumFinalizeCounters<CLIP_NUM_LEVELS, true>(states, input, result, count, offset);
 }
-static void PacClipSumFinalizeCountersUnsigned128(Vector &states, AggregateInputData &input, Vector &result,
+static void PacClipSumFinalizeCountersUnsigned128(Vector &states, AggregateFinalizeInputData &input, Vector &result,
                                                   idx_t count, idx_t offset) {
 	PacClipSumFinalizeCounters<CLIP_NUM_LEVELS, false>(states, input, result, count, offset);
 }
-static void DpSampleClipSumFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                            idx_t offset) {
+static void DpSampleClipSumFinalizeCounters(Vector &states, AggregateFinalizeInputData &input, Vector &result,
+                                            idx_t count, idx_t offset) {
 	PacClipSumFinalizeCounters<CLIP_NUM_LEVELS_64, true, ClipCountersFinalizeMode::DP_SAMPLE>(states, input, result,
 	                                                                                          count, offset);
 }
@@ -744,18 +757,24 @@ static void DpSampleClipSumFinalizeCounters(Vector &states, AggregateInputData &
 // ============================================================================
 // State size / init / bind
 // ============================================================================
-static idx_t PacClipSumStateSize(const AggregateFunction &) {
+static idx_t PacClipSumStateSize(AggregateStateInput &) {
 	return sizeof(PacClipSumStateWrapper<>);
 }
-static idx_t PacClipSumStateSize128(const AggregateFunction &) {
+static idx_t PacClipSumStateSize128(AggregateStateInput &) {
 	return sizeof(PacClipSumStateWrapper<CLIP_NUM_LEVELS>);
 }
 
-static void PacClipSumInitialize(const AggregateFunction &, data_ptr_t state_p) {
-	memset(state_p, 0, sizeof(PacClipSumStateWrapper<>));
+static void PacClipSumInitialize(AggregateStateInput &, data_ptr_t *states, idx_t count) {
+	for (idx_t i = 0; i < count; i++) {
+		auto state_p = states[i];
+		memset(state_p, 0, sizeof(PacClipSumStateWrapper<>));
+	}
 }
-static void PacClipSumInitialize128(const AggregateFunction &, data_ptr_t state_p) {
-	memset(state_p, 0, sizeof(PacClipSumStateWrapper<CLIP_NUM_LEVELS>));
+static void PacClipSumInitialize128(AggregateStateInput &, data_ptr_t *states, idx_t count) {
+	for (idx_t i = 0; i < count; i++) {
+		auto state_p = states[i];
+		memset(state_p, 0, sizeof(PacClipSumStateWrapper<CLIP_NUM_LEVELS>));
+	}
 }
 
 // PacClipBind, PacClipBindFloat, PacClipBindDouble are defined in as_clip_aggr.hpp
@@ -818,31 +837,35 @@ static AggregateFunction GetPacClipSumCountersAggregate(PhysicalType type) {
 	}
 }
 
-static unique_ptr<FunctionData> BindDecimalPacNoisedClipSum(ClientContext &ctx, AggregateFunction &function,
-                                                            vector<unique_ptr<Expression>> &args) {
-	auto decimal_type = args[1]->return_type;
-	function = GetPacClipSumNoisedAggregate(decimal_type.InternalType());
-	function.name = "as_noised_clip_sum";
-	function.arguments[1] = decimal_type;
-	function.return_type = LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(decimal_type));
-	return PacClipBind(ctx, function, args);
+static unique_ptr<FunctionData> BindDecimalPacNoisedClipSum(BindAggregateFunctionInput &bind_input) {
+	auto &ctx = bind_input.GetClientContext();
+	auto &function = bind_input.GetBoundFunction();
+	auto &args = bind_input.GetArguments();
+	auto decimal_type = args[1]->GetReturnType();
+	function.ReplaceImplementation(GetPacClipSumNoisedAggregate(decimal_type.InternalType()));
+	function.SetName("as_noised_clip_sum");
+	function.GetArguments()[1] = decimal_type;
+	function.SetReturnType(LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(decimal_type)));
+	return PacClipBind(bind_input);
 }
 
-static unique_ptr<FunctionData> BindDecimalPacClipSum(ClientContext &ctx, AggregateFunction &function,
-                                                      vector<unique_ptr<Expression>> &args) {
-	auto decimal_type = args[1]->return_type;
-	function = GetPacClipSumCountersAggregate(decimal_type.InternalType());
-	function.name = "as_clip_sum";
-	function.arguments[1] = decimal_type;
+static unique_ptr<FunctionData> BindDecimalPacClipSum(BindAggregateFunctionInput &bind_input) {
+	auto &ctx = bind_input.GetClientContext();
+	auto &function = bind_input.GetBoundFunction();
+	auto &args = bind_input.GetArguments();
+	auto decimal_type = args[1]->GetReturnType();
+	function.ReplaceImplementation(GetPacClipSumCountersAggregate(decimal_type.InternalType()));
+	function.SetName("as_clip_sum");
+	function.GetArguments()[1] = decimal_type;
 	// counters always return LIST<FLOAT>, no DECIMAL return type needed
-	return PacClipBind(ctx, function, args);
+	return PacClipBind(bind_input);
 }
 
-static unique_ptr<FunctionData> DpSampleClipSumBind(ClientContext &ctx, AggregateFunction &,
-                                                    vector<unique_ptr<Expression>> &) {
+static unique_ptr<FunctionData> DpSampleClipSumBind(BindAggregateFunctionInput &bind_input) {
+	auto &ctx = bind_input.GetClientContext();
 	Value dc_val;
 	int clip_support = 0;
-	if (ctx.TryGetCurrentSetting("priv_clip_support", dc_val) && !dc_val.IsNull()) {
+	if (ctx.TryGetCurrentSetting(Identifier("priv_clip_support"), dc_val) && !dc_val.IsNull()) {
 		clip_support = static_cast<int>(dc_val.GetValue<int64_t>());
 	}
 	if (clip_support <= 0) {
@@ -857,25 +880,26 @@ static unique_ptr<FunctionData> DpSampleClipSumBind(ClientContext &ctx, Aggregat
 // ============================================================================
 static void AddClipSumCountersFcn(AggregateFunctionSet &set, const string &name, const LogicalType &value_type,
                                   aggregate_update_t scatter, aggregate_finalize_t finalize,
-                                  aggregate_simple_update_t update) {
+                                  aggregate_cluster_update_t update) {
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
-	set.AddFunction(AggregateFunction(name, {LogicalType::UBIGINT, value_type}, list_type, PacClipSumStateSize,
-	                                  PacClipSumInitialize, scatter, PacClipSumCombine, finalize,
-	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipBind));
-	set.AddFunction(AggregateFunction(name, {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE}, list_type,
+	set.AddFunction(AggregateFunction(Identifier(name), {LogicalType::UBIGINT, value_type}, list_type,
 	                                  PacClipSumStateSize, PacClipSumInitialize, scatter, PacClipSumCombine, finalize,
 	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipBind));
+	set.AddFunction(AggregateFunction(Identifier(name), {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE},
+	                                  list_type, PacClipSumStateSize, PacClipSumInitialize, scatter, PacClipSumCombine,
+	                                  finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipBind));
 }
 
 static void AddNoisedClipSumFcn(AggregateFunctionSet &set, const string &name, const LogicalType &value_type,
                                 const LogicalType &result_type, aggregate_update_t scatter,
-                                aggregate_finalize_t finalize, aggregate_simple_update_t update) {
-	set.AddFunction(AggregateFunction(name, {LogicalType::UBIGINT, value_type}, result_type, PacClipSumStateSize,
-	                                  PacClipSumInitialize, scatter, PacClipSumCombine, finalize,
-	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipBind));
-	set.AddFunction(AggregateFunction(name, {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE}, result_type,
+                                aggregate_finalize_t finalize, aggregate_cluster_update_t update) {
+	set.AddFunction(AggregateFunction(Identifier(name), {LogicalType::UBIGINT, value_type}, result_type,
 	                                  PacClipSumStateSize, PacClipSumInitialize, scatter, PacClipSumCombine, finalize,
 	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacClipBind));
+	set.AddFunction(AggregateFunction(Identifier(name), {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE},
+	                                  result_type, PacClipSumStateSize, PacClipSumInitialize, scatter,
+	                                  PacClipSumCombine, finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING, update,
+	                                  PacClipBind));
 }
 
 // Helper to register all type overloads for a clip sum function set
@@ -903,15 +927,16 @@ static void RegisterClipSumTypeOverloads(AggregateFunctionSet &set, const string
 		// HUGEINT/UHUGEINT: use 128-bit state (62 levels)
 		{
 			auto lt = LogicalType::LIST(PacFloatLogicalType());
-			set.AddFunction(AggregateFunction(
-			    name, {LogicalType::UBIGINT, LogicalType::HUGEINT}, lt, PacClipSumStateSize128, PacClipSumInitialize128,
-			    PacClipSumScatterUpdateHugeInt, PacClipSumCombine128, PacClipSumFinalizeCountersSigned128,
-			    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateHugeInt, PacClipBind));
 			set.AddFunction(
-			    AggregateFunction(name, {LogicalType::UBIGINT, LogicalType::UHUGEINT}, lt, PacClipSumStateSize128,
-			                      PacClipSumInitialize128, PacClipSumScatterUpdateUHugeInt, PacClipSumCombine128,
-			                      PacClipSumFinalizeCountersUnsigned128, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-			                      PacClipSumUpdateUHugeInt, PacClipBind));
+			    AggregateFunction(Identifier(name), {LogicalType::UBIGINT, LogicalType::HUGEINT}, lt,
+			                      PacClipSumStateSize128, PacClipSumInitialize128, PacClipSumScatterUpdateHugeInt,
+			                      PacClipSumCombine128, PacClipSumFinalizeCountersSigned128,
+			                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateHugeInt, PacClipBind));
+			set.AddFunction(
+			    AggregateFunction(Identifier(name), {LogicalType::UBIGINT, LogicalType::UHUGEINT}, lt,
+			                      PacClipSumStateSize128, PacClipSumInitialize128, PacClipSumScatterUpdateUHugeInt,
+			                      PacClipSumCombine128, PacClipSumFinalizeCountersUnsigned128,
+			                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateUHugeInt, PacClipBind));
 		}
 	} else {
 		// Noised (scalar HUGEINT) variants
@@ -935,12 +960,12 @@ static void RegisterClipSumTypeOverloads(AggregateFunctionSet &set, const string
 		                    PacClipSumNoisedFinalizeUnsigned, PacClipSumUpdateUBigInt);
 		// HUGEINT/UHUGEINT: use 128-bit state (62 levels)
 		set.AddFunction(
-		    AggregateFunction(name, {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::HUGEINT,
+		    AggregateFunction(Identifier(name), {LogicalType::UBIGINT, LogicalType::HUGEINT}, LogicalType::HUGEINT,
 		                      PacClipSumStateSize128, PacClipSumInitialize128, PacClipSumScatterUpdateHugeInt,
 		                      PacClipSumCombine128, PacClipSumNoisedFinalizeSigned128,
 		                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateHugeInt, PacClipBind));
 		set.AddFunction(
-		    AggregateFunction(name, {LogicalType::UBIGINT, LogicalType::UHUGEINT}, LogicalType::HUGEINT,
+		    AggregateFunction(Identifier(name), {LogicalType::UBIGINT, LogicalType::UHUGEINT}, LogicalType::HUGEINT,
 		                      PacClipSumStateSize128, PacClipSumInitialize128, PacClipSumScatterUpdateUHugeInt,
 		                      PacClipSumCombine128, PacClipSumNoisedFinalizeUnsigned128,
 		                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacClipSumUpdateUHugeInt, PacClipBind));

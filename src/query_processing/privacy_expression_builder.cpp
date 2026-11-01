@@ -43,7 +43,7 @@ static void EnsureProjectionIdsPopulated(LogicalGet &get) {
 	}
 	if (get.projection_ids.empty()) {
 		for (idx_t i = 0; i < column_ids.size(); i++) {
-			get.projection_ids.push_back(i);
+			get.projection_ids.push_back(ProjectionIndex(i));
 		}
 	}
 }
@@ -53,7 +53,7 @@ static void EnsureProjectionIdsPopulated(LogicalGet &get) {
 static LogicalGet *FindLogicalGetByTableIndex(LogicalOperator &op, idx_t table_index) {
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = op.Cast<LogicalGet>();
-		if (get.table_index == table_index) {
+		if (get.table_index.index == table_index) {
 			return &get;
 		}
 	}
@@ -68,19 +68,19 @@ static LogicalGet *FindLogicalGetByTableIndex(LogicalOperator &op, idx_t table_i
 
 // Helper function to resolve a column name from a binding by finding the corresponding LogicalGet
 static string ResolveColumnNameFromBinding(LogicalOperator &root, const ColumnBinding &binding) {
-	auto get = FindLogicalGetByTableIndex(root, binding.table_index);
+	auto get = FindLogicalGetByTableIndex(root, binding.table_index.index);
 	if (!get) {
-		return "[" + std::to_string(binding.table_index) + "." + std::to_string(binding.column_index) + "]";
+		return "[" + std::to_string(binding.table_index.index) + "." + std::to_string(binding.column_index) + "]";
 	}
 
 	const auto &column_ids = get->GetColumnIds();
 	if (binding.column_index >= column_ids.size()) {
-		return "[" + std::to_string(binding.table_index) + "." + std::to_string(binding.column_index) + "]";
+		return "[" + std::to_string(binding.table_index.index) + "." + std::to_string(binding.column_index) + "]";
 	}
 
-	auto col_name = get->GetColumnName(column_ids[binding.column_index]);
+	auto col_name = get->GetColumnName(column_ids[binding.column_index]).GetIdentifierName();
 	if (col_name.empty()) {
-		return "[" + std::to_string(binding.table_index) + "." + std::to_string(binding.column_index) + "]";
+		return "[" + std::to_string(binding.table_index.index) + "." + std::to_string(binding.column_index) + "]";
 	}
 
 	return col_name;
@@ -93,7 +93,7 @@ idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name) {
 	for (idx_t cid = 0; cid < g.GetColumnIds().size(); ++cid) {
 		auto col_idx = g.GetColumnIds()[cid];
 		if (!col_idx.IsVirtualColumn()) {
-			const auto &existing_name = g.GetColumnName(col_idx);
+			const auto &existing_name = g.GetColumnName(col_idx).GetIdentifierName();
 			if (!existing_name.empty() && StringUtil::CIEquals(existing_name, col_name)) {
 				return cid;
 			}
@@ -108,7 +108,7 @@ idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name) {
 	LogicalType logical_type = LogicalType::INVALID;
 	idx_t ti = 0;
 	for (auto &col : table_entry->GetColumns().Logical()) {
-		if (StringUtil::CIEquals(col.Name(), col_name)) {
+		if (StringUtil::CIEquals(col.Name().GetIdentifierName(), col_name)) {
 			logical_idx = ti;
 			logical_type = col.Type();
 			break;
@@ -130,7 +130,7 @@ idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name) {
 
 	// The projection index is the position in the output, which equals the new size - 1
 	idx_t new_proj_idx = g.GetColumnIds().size() - 1;
-	g.projection_ids.push_back(new_proj_idx);
+	g.projection_ids.push_back(ProjectionIndex(new_proj_idx));
 
 	// ResolveOperatorTypes() calls the protected ResolveTypes() which rebuilds
 	// the types vector from column_ids/projection_ids
@@ -162,7 +162,7 @@ void AddRowIDColumn(LogicalGet &get) {
 	EnsureProjectionIdsPopulated(get);
 
 	get.AddColumnId(COLUMN_IDENTIFIER_ROW_ID);
-	get.projection_ids.push_back(get.GetColumnIds().size() - 1);
+	get.projection_ids.push_back(ProjectionIndex(get.GetColumnIds().size() - 1));
 
 	// ResolveOperatorTypes() calls the protected ResolveTypes() which rebuilds
 	// the types vector from column_ids/projection_ids
@@ -191,7 +191,7 @@ unique_ptr<Expression> BuildXorHashFromPKs(OptimizerExtensionInput &input, Logic
 		if (proj_idx == DConstants::INVALID_INDEX) {
 			throw InternalException("Privacy compiler: failed to find PK column " + pk);
 		}
-		auto col_binding = ColumnBinding(get.table_index, proj_idx);
+		auto col_binding = ColumnBinding(TableIndex(get.table_index.index), ProjectionIndex(proj_idx));
 		auto col_index_obj = get.GetColumnIds()[proj_idx];
 		auto &col_type = get.GetColumnType(col_index_obj);
 		pk_cols.push_back(make_uniq<BoundColumnRefExpression>(col_type, col_binding));
@@ -205,7 +205,8 @@ ColumnBinding InsertHashProjectionAboveGet(OptimizerExtensionInput &input, uniqu
 	unique_ptr<Expression> hash_expr;
 	if (use_rowid) {
 		AddRowIDColumn(get);
-		auto rowid_binding = ColumnBinding(get.table_index, get.GetColumnIds().size() - 1);
+		auto rowid_binding =
+		    ColumnBinding(TableIndex(get.table_index.index), ProjectionIndex(get.GetColumnIds().size() - 1));
 		auto rowid_col = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, rowid_binding);
 		hash_expr = input.optimizer.BindScalarFunction("hash", std::move(rowid_col));
 	} else {
@@ -215,14 +216,14 @@ ColumnBinding InsertHashProjectionAboveGet(OptimizerExtensionInput &input, uniqu
 
 	// 1b. Wrap in priv_hash() to XOR with query_hash and optionally repair to 32 bits set
 	hash_expr = input.optimizer.BindScalarFunction("priv_hash", std::move(hash_expr));
-	hash_expr->alias = "pac_pu";
+	hash_expr->SetAlias(Identifier("pac_pu"));
 
 	// 2. Find the unique_ptr slot holding this get in the plan tree
 	vector<unique_ptr<LogicalOperator> *> get_nodes;
-	FindAllNodesByTableIndex(&plan, get.table_index, get_nodes);
+	FindAllNodesByTableIndex(&plan, get.table_index.index, get_nodes);
 	if (get_nodes.empty()) {
 		throw InternalException("Privacy compiler: InsertHashProjectionAboveGet could not find get #" +
-		                        std::to_string(get.table_index));
+		                        std::to_string(get.table_index.index));
 	}
 	auto &get_slot = *get_nodes[0];
 
@@ -232,20 +233,20 @@ ColumnBinding InsertHashProjectionAboveGet(OptimizerExtensionInput &input, uniqu
 
 	// 4. Create projection with passthrough + hash column
 	auto &binder = input.optimizer.binder;
-	idx_t proj_table_index = binder.GenerateTableIndex();
+	idx_t proj_table_index = binder.GenerateTableIndex().index;
 	vector<unique_ptr<Expression>> proj_expressions;
 
 	// Passthrough expressions for each existing get output column
 	for (idx_t i = 0; i < num_get_cols; i++) {
 		auto col_type = get_slot->types[i];
-		auto binding = ColumnBinding(get.table_index, i);
+		auto binding = ColumnBinding(TableIndex(get.table_index.index), ProjectionIndex(i));
 		proj_expressions.push_back(make_uniq<BoundColumnRefExpression>(col_type, binding));
 	}
 
 	// Hash expression as the last column
 	proj_expressions.push_back(std::move(hash_expr));
 
-	auto projection = make_uniq<LogicalProjection>(proj_table_index, std::move(proj_expressions));
+	auto projection = make_uniq<LogicalProjection>(TableIndex(proj_table_index), std::move(proj_expressions));
 
 	// 5. Move get into projection as child, place projection in slot
 	projection->children.push_back(std::move(get_slot));
@@ -255,29 +256,29 @@ ColumnBinding InsertHashProjectionAboveGet(OptimizerExtensionInput &input, uniqu
 	LogicalOperator *proj_ptr = projection.get();
 	get_slot = std::move(projection);
 
-	// 6. Use ColumnBindingReplacer to remap [get.table_index, i] → [proj.table_index, i]
+	// 6. Use ColumnBindingReplacer to remap [get.table_index.index, i] → [proj.table_index.index, i]
 	ColumnBindingReplacer replacer;
 	for (idx_t i = 0; i < num_get_cols; i++) {
 		ColumnBinding old_b = old_bindings[i];
-		ColumnBinding new_b(proj_table_index, i);
+		ColumnBinding new_b {TableIndex(proj_table_index), ProjectionIndex(i)};
 		replacer.replacement_bindings.emplace_back(old_b, new_b);
 	}
 	replacer.stop_operator = proj_ptr;
 	replacer.VisitOperator(*plan);
 
 	// 7. Return binding for the hash column (last expression in projection)
-	return ColumnBinding(proj_table_index, num_get_cols);
+	return ColumnBinding(TableIndex(proj_table_index), ProjectionIndex(num_get_cols));
 }
 
 ColumnBinding GetOrInsertHashProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                         LogicalGet &get, const vector<string> &key_columns, bool use_rowid,
                                         std::unordered_map<idx_t, ColumnBinding> &cache) {
-	auto it = cache.find(get.table_index);
+	auto it = cache.find(get.table_index.index);
 	if (it != cache.end()) {
 		return it->second;
 	}
 	auto binding = InsertHashProjectionAboveGet(input, plan, get, key_columns, use_rowid);
-	cache[get.table_index] = binding;
+	cache[get.table_index.index] = binding;
 	return binding;
 }
 
@@ -291,7 +292,7 @@ static unique_ptr<LogicalOperator> *FindCTERefSlot(unique_ptr<LogicalOperator> &
 	}
 	if (root->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		auto &ref = root->Cast<LogicalCTERef>();
-		if (ref.table_index == table_index) {
+		if (ref.table_index.index == table_index) {
 			return &root;
 		}
 	}
@@ -307,8 +308,9 @@ static unique_ptr<LogicalOperator> *FindCTERefSlot(unique_ptr<LogicalOperator> &
 ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                               LogicalCTERef &cte_ref, const vector<string> &key_columns) {
 #if PRIVACY_DEBUG
-	PRIVACY_DEBUG_PRINT("InsertHashProjectionAboveCTERef: CTE_SCAN table_index=" + std::to_string(cte_ref.table_index) +
-	                    " cte_index=" + std::to_string(cte_ref.cte_index));
+	PRIVACY_DEBUG_PRINT(
+	    "InsertHashProjectionAboveCTERef: CTE_SCAN table_index=" + std::to_string(cte_ref.table_index.index) +
+	    " cte_index=" + std::to_string(cte_ref.cte_index.index));
 #endif
 
 	// 1. Resolve key column indices in the CTE_SCAN's bound_columns
@@ -317,7 +319,7 @@ ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, un
 		bool found = false;
 		for (idx_t i = 0; i < cte_ref.bound_columns.size(); i++) {
 			if (cte_ref.bound_columns[i] == key) {
-				auto binding = ColumnBinding(cte_ref.table_index, i);
+				auto binding = ColumnBinding(TableIndex(cte_ref.table_index.index), ProjectionIndex(i));
 				key_col_exprs.push_back(make_uniq<BoundColumnRefExpression>(cte_ref.chunk_types[i], binding));
 				found = true;
 				break;
@@ -327,7 +329,7 @@ ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, un
 #if PRIVACY_DEBUG
 			PRIVACY_DEBUG_PRINT("InsertHashProjectionAboveCTERef: key column '" + key + "' not found in bound_columns");
 #endif
-			return ColumnBinding(DConstants::INVALID_INDEX, 0);
+			return ColumnBinding(TableIndex(DConstants::INVALID_INDEX), ProjectionIndex(0));
 		}
 	}
 
@@ -336,13 +338,13 @@ ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, un
 
 	// Wrap in priv_hash() to XOR with query_hash and optionally repair to 32 bits set
 	hash_expr = input.optimizer.BindScalarFunction("priv_hash", std::move(hash_expr));
-	hash_expr->alias = "pac_pu";
+	hash_expr->SetAlias(Identifier("pac_pu"));
 
 	// 3. Find the unique_ptr slot holding this CTE_SCAN in the plan tree
-	auto *cte_slot_ptr = FindCTERefSlot(plan, cte_ref.table_index);
+	auto *cte_slot_ptr = FindCTERefSlot(plan, cte_ref.table_index.index);
 	if (!cte_slot_ptr) {
 		throw InternalException("Privacy compiler: InsertHashProjectionAboveCTERef could not find CTE_SCAN #" +
-		                        std::to_string(cte_ref.table_index));
+		                        std::to_string(cte_ref.table_index.index));
 	}
 	auto &cte_slot = *cte_slot_ptr;
 
@@ -351,14 +353,14 @@ ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, un
 	idx_t num_cte_cols = old_bindings.size();
 
 	auto &binder = input.optimizer.binder;
-	idx_t proj_table_index = binder.GenerateTableIndex();
+	idx_t proj_table_index = binder.GenerateTableIndex().index;
 	vector<unique_ptr<Expression>> proj_expressions;
 	for (idx_t i = 0; i < num_cte_cols; i++) {
 		proj_expressions.push_back(make_uniq<BoundColumnRefExpression>(cte_slot->types[i], old_bindings[i]));
 	}
 	proj_expressions.push_back(std::move(hash_expr));
 
-	auto projection = make_uniq<LogicalProjection>(proj_table_index, std::move(proj_expressions));
+	auto projection = make_uniq<LogicalProjection>(TableIndex(proj_table_index), std::move(proj_expressions));
 	projection->children.push_back(std::move(cte_slot));
 	projection->ResolveOperatorTypes();
 
@@ -368,18 +370,19 @@ ColumnBinding InsertHashProjectionAboveCTERef(OptimizerExtensionInput &input, un
 
 	ColumnBindingReplacer replacer;
 	for (idx_t i = 0; i < num_cte_cols; i++) {
-		replacer.replacement_bindings.emplace_back(old_bindings[i], ColumnBinding(proj_table_index, i));
+		replacer.replacement_bindings.emplace_back(old_bindings[i],
+		                                           ColumnBinding(TableIndex(proj_table_index), ProjectionIndex(i)));
 	}
 	replacer.stop_operator = proj_ptr;
 	replacer.VisitOperator(*plan);
 
 #if PRIVACY_DEBUG
 	PRIVACY_DEBUG_PRINT("InsertHashProjectionAboveCTERef: inserted hash projection (table_index=" +
-	                    std::to_string(proj_table_index) + ") above CTE_SCAN #" + std::to_string(cte_ref.table_index) +
-	                    ", hash at column " + std::to_string(num_cte_cols));
+	                    std::to_string(proj_table_index) + ") above CTE_SCAN #" +
+	                    std::to_string(cte_ref.table_index.index) + ", hash at column " + std::to_string(num_cte_cols));
 #endif
 
-	return ColumnBinding(proj_table_index, num_cte_cols);
+	return ColumnBinding(TableIndex(proj_table_index), ProjectionIndex(num_cte_cols));
 }
 
 // Build AND expression from multiple hash expressions (for multiple PUs)
@@ -409,14 +412,16 @@ unique_ptr<Expression> BindPacAggregate(OptimizerExtensionInput &input, const st
                                         unique_ptr<Expression> correction_expr) {
 	FunctionBinder function_binder(input.context);
 	ErrorData error;
-	vector<LogicalType> arg_types = {hash_expr->return_type, value_expr->return_type};
+	vector<LogicalType> arg_types = {hash_expr->GetReturnType(), value_expr->GetReturnType()};
 	if (correction_expr) {
-		arg_types.push_back(correction_expr->return_type);
+		arg_types.push_back(correction_expr->GetReturnType());
 	}
 
 	auto &entry = Catalog::GetSystemCatalog(input.context)
-	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, pac_func_name);
-	auto best = function_binder.BindFunction(entry.name, entry.functions, arg_types, error);
+	                  .GetEntry<AggregateFunctionCatalogEntry>(
+	                      input.context, QualifiedName(Catalog::GetSystemCatalog(input.context).GetName(),
+	                                                   Identifier::DefaultSchema(), Identifier(pac_func_name)));
+	auto best = function_binder.BindFunction(Identifier(entry.name), entry.functions, arg_types, error);
 	if (!best.IsValid()) {
 		throw InternalException("Privacy compiler: failed to bind " + pac_func_name);
 	}
@@ -435,11 +440,12 @@ PuPreAggregationInfo InsertPuPreAggregation(OptimizerExtensionInput &input, Logi
                                             vector<unique_ptr<Expression>> lower_expressions,
                                             unique_ptr<Expression> pu_hash_expr) {
 	auto &binder = input.optimizer.binder;
-	idx_t lower_group_index = binder.GenerateTableIndex();
-	idx_t lower_agg_index = binder.GenerateTableIndex();
+	idx_t lower_group_index = binder.GenerateTableIndex().index;
+	idx_t lower_agg_index = binder.GenerateTableIndex().index;
 	idx_t num_original_groups = agg->groups.size();
 
-	auto lower_agg = make_uniq<LogicalAggregate>(lower_group_index, lower_agg_index, std::move(lower_expressions));
+	auto lower_agg = make_uniq<LogicalAggregate>(TableIndex(lower_group_index), TableIndex(lower_agg_index),
+	                                             std::move(lower_expressions));
 	for (auto &g : agg->groups) {
 		lower_agg->groups.push_back(g->Copy());
 	}
@@ -448,11 +454,13 @@ PuPreAggregationInfo InsertPuPreAggregation(OptimizerExtensionInput &input, Logi
 	lower_agg->ResolveOperatorTypes();
 
 	for (idx_t i = 0; i < num_original_groups; i++) {
-		agg->groups[i] = make_uniq<BoundColumnRefExpression>(lower_agg->types[i], ColumnBinding(lower_group_index, i));
+		agg->groups[i] = make_uniq<BoundColumnRefExpression>(
+		    lower_agg->types[i], ColumnBinding(TableIndex(lower_group_index), ProjectionIndex(i)));
 	}
 
-	auto pu_hash_ref = make_uniq<BoundColumnRefExpression>(lower_agg->types[num_original_groups],
-	                                                       ColumnBinding(lower_group_index, num_original_groups));
+	auto pu_hash_ref = make_uniq<BoundColumnRefExpression>(
+	    lower_agg->types[num_original_groups],
+	    ColumnBinding(TableIndex(lower_group_index), ProjectionIndex(num_original_groups)));
 	auto *lower_agg_ptr = lower_agg.get();
 	agg->children[0] = std::move(lower_agg);
 
@@ -464,10 +472,13 @@ unique_ptr<Expression> BindBitOrAggregate(OptimizerExtensionInput &input, unique
                                           unique_ptr<Expression> filter_col_expr) {
 	FunctionBinder function_binder(input.context);
 	ErrorData error;
-	vector<LogicalType> bit_or_types = {hash_expr->return_type};
+	vector<LogicalType> bit_or_types = {hash_expr->GetReturnType()};
 	auto &bit_or_entry = Catalog::GetSystemCatalog(input.context)
-	                         .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, "bit_or");
-	auto bit_or_best = function_binder.BindFunction(bit_or_entry.name, bit_or_entry.functions, bit_or_types, error);
+	                         .GetEntry<AggregateFunctionCatalogEntry>(
+	                             input.context, QualifiedName(Catalog::GetSystemCatalog(input.context).GetName(),
+	                                                          Identifier::DefaultSchema(), "bit_or"));
+	auto bit_or_best =
+	    function_binder.BindFunction(Identifier(bit_or_entry.name), bit_or_entry.functions, bit_or_types, error);
 	if (!bit_or_best.IsValid()) {
 		throw InternalException("Privacy compiler: failed to bind bit_or");
 	}
@@ -481,8 +492,8 @@ unique_ptr<Expression> BindBitOrAggregate(OptimizerExtensionInput &input, unique
 	// Add IS NOT NULL filter
 	auto not_null_filter =
 	    make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NOT_NULL, LogicalType::BOOLEAN);
-	not_null_filter->children.push_back(std::move(filter_col_expr));
-	bit_or_expr->Cast<BoundAggregateExpression>().filter = std::move(not_null_filter);
+	not_null_filter->GetChildrenMutable().push_back(std::move(filter_col_expr));
+	bit_or_expr->Cast<BoundAggregateExpression>().GetFilterMutable() = std::move(not_null_filter);
 
 	return bit_or_expr;
 }
@@ -523,8 +534,8 @@ static void InsertDistinctPreAggregation(OptimizerExtensionInput &input, Logical
 	auto &binder = input.optimizer.binder;
 
 	// 1. Create inner aggregate with new table indices
-	idx_t inner_group_index = binder.GenerateTableIndex();
-	idx_t inner_agg_index = binder.GenerateTableIndex();
+	idx_t inner_group_index = binder.GenerateTableIndex().index;
+	idx_t inner_agg_index = binder.GenerateTableIndex().index;
 
 	// 2. Bind bit_or aggregate on the hash expression with IS NOT NULL filter
 	auto bit_or_expr = BindBitOrAggregate(input, hash_input_expr->Copy(), distinct_value_expr->Copy());
@@ -532,7 +543,8 @@ static void InsertDistinctPreAggregation(OptimizerExtensionInput &input, Logical
 	// 3. Build the inner aggregate node
 	vector<unique_ptr<Expression>> inner_expressions;
 	inner_expressions.push_back(std::move(bit_or_expr));
-	auto inner_agg_node = make_uniq<LogicalAggregate>(inner_group_index, inner_agg_index, std::move(inner_expressions));
+	auto inner_agg_node = make_uniq<LogicalAggregate>(TableIndex(inner_group_index), TableIndex(inner_agg_index),
+	                                                  std::move(inner_expressions));
 
 	// Copy outer groups into inner aggregate (passthrough group keys)
 	idx_t num_original_groups = agg->groups.size();
@@ -551,20 +563,21 @@ static void InsertDistinctPreAggregation(OptimizerExtensionInput &input, Logical
 
 	// 5. Remap outer aggregate's groups to reference inner aggregate's group output
 	for (idx_t i = 0; i < num_original_groups; i++) {
-		auto gtype = agg->groups[i]->return_type;
-		agg->groups[i] = make_uniq<BoundColumnRefExpression>(gtype, ColumnBinding(inner_group_index, i));
+		auto gtype = agg->groups[i]->GetReturnType();
+		agg->groups[i] = make_uniq<BoundColumnRefExpression>(
+		    gtype, ColumnBinding(TableIndex(inner_group_index), ProjectionIndex(i)));
 	}
 
 	// Inner aggregate output layout:
 	//   groups:     [g1, ..., gN, distinct_col]  at inner_group_index
 	//   aggregates: [bit_or(hash)]               at inner_agg_index
-	ColumnBinding combined_hash_binding(inner_agg_index, 0);
-	ColumnBinding distinct_val_binding(inner_group_index, num_original_groups);
+	ColumnBinding combined_hash_binding {TableIndex(inner_agg_index), ProjectionIndex(0)};
+	ColumnBinding distinct_val_binding {TableIndex(inner_group_index), ProjectionIndex(num_original_groups)};
 
 	// 6. Replace each aggregate expression with the corresponding PAC function
 	for (idx_t i = 0; i < agg->expressions.size(); i++) {
 		auto &old_aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-		string function_name = old_aggr.function.name;
+		string function_name = old_aggr.FunctionMutable().GetName().GetIdentifierName();
 		string pac_name = GetPacAggregateFunctionName(function_name, &input.context);
 
 		auto hash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, combined_hash_binding);
@@ -573,7 +586,7 @@ static void InsertDistinctPreAggregation(OptimizerExtensionInput &input, Logical
 			value_ref = make_uniq_base<Expression, BoundConstantExpression>(Value::BIGINT(1));
 		} else {
 			// SUM/AVG/MIN/MAX DISTINCT: value comes from the distinct column (now a group key in inner agg)
-			value_ref = make_uniq<BoundColumnRefExpression>(distinct_value_expr->return_type, distinct_val_binding);
+			value_ref = make_uniq<BoundColumnRefExpression>(distinct_value_expr->GetReturnType(), distinct_val_binding);
 		}
 
 		agg->expressions[i] = BindPacAggregate(input, pac_name, std::move(hash_ref), std::move(value_ref));
@@ -598,14 +611,15 @@ BuildDistinctBranch(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> 
                     const vector<std::pair<idx_t, string>> &agg_specs, // (original_agg_idx, original_func_name)
                     idx_t &out_group_index, idx_t &out_agg_index) {
 	auto &binder = input.optimizer.binder;
-	idx_t inner_group_index = binder.GenerateTableIndex();
-	idx_t inner_agg_index = binder.GenerateTableIndex();
+	idx_t inner_group_index = binder.GenerateTableIndex().index;
+	idx_t inner_agg_index = binder.GenerateTableIndex().index;
 
 	// Inner aggregate: bit_or(hash) FILTER (distinct_col IS NOT NULL) GROUP BY [groups..., distinct_col]
 	auto bit_or_expr = BindBitOrAggregate(input, hash_expr->Copy(), distinct_value_expr->Copy());
 	vector<unique_ptr<Expression>> inner_expressions;
 	inner_expressions.push_back(std::move(bit_or_expr));
-	auto inner_agg = make_uniq<LogicalAggregate>(inner_group_index, inner_agg_index, std::move(inner_expressions));
+	auto inner_agg = make_uniq<LogicalAggregate>(TableIndex(inner_group_index), TableIndex(inner_agg_index),
+	                                             std::move(inner_expressions));
 
 	idx_t num_groups = groups.size();
 	for (auto &g : groups) {
@@ -616,11 +630,11 @@ BuildDistinctBranch(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> 
 	inner_agg->ResolveOperatorTypes();
 
 	// Outer aggregate: pac_*(combined_hash, value) GROUP BY [groups...]
-	idx_t outer_group_index = binder.GenerateTableIndex();
-	idx_t outer_agg_index = binder.GenerateTableIndex();
+	idx_t outer_group_index = binder.GenerateTableIndex().index;
+	idx_t outer_agg_index = binder.GenerateTableIndex().index;
 
-	ColumnBinding combined_hash_binding(inner_agg_index, 0);
-	ColumnBinding distinct_val_binding(inner_group_index, num_groups);
+	ColumnBinding combined_hash_binding {TableIndex(inner_agg_index), ProjectionIndex(0)};
+	ColumnBinding distinct_val_binding {TableIndex(inner_group_index), ProjectionIndex(num_groups)};
 
 	vector<unique_ptr<Expression>> outer_expressions;
 	for (auto &spec : agg_specs) {
@@ -630,15 +644,17 @@ BuildDistinctBranch(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> 
 		if (spec.second == "count" || spec.second == "count_star") {
 			value_ref = make_uniq_base<Expression, BoundConstantExpression>(Value::BIGINT(1));
 		} else {
-			value_ref = make_uniq<BoundColumnRefExpression>(distinct_value_expr->return_type, distinct_val_binding);
+			value_ref = make_uniq<BoundColumnRefExpression>(distinct_value_expr->GetReturnType(), distinct_val_binding);
 		}
 		outer_expressions.push_back(BindPacAggregate(input, pac_name, std::move(hash_ref), std::move(value_ref)));
 	}
 
-	auto outer_agg = make_uniq<LogicalAggregate>(outer_group_index, outer_agg_index, std::move(outer_expressions));
+	auto outer_agg = make_uniq<LogicalAggregate>(TableIndex(outer_group_index), TableIndex(outer_agg_index),
+	                                             std::move(outer_expressions));
 	for (idx_t i = 0; i < num_groups; i++) {
-		auto gtype = groups[i]->return_type;
-		outer_agg->groups.push_back(make_uniq<BoundColumnRefExpression>(gtype, ColumnBinding(inner_group_index, i)));
+		auto gtype = groups[i]->GetReturnType();
+		outer_agg->groups.push_back(make_uniq<BoundColumnRefExpression>(
+		    gtype, ColumnBinding(TableIndex(inner_group_index), ProjectionIndex(i))));
 	}
 	outer_agg->children.push_back(std::move(inner_agg));
 	outer_agg->ResolveOperatorTypes();
@@ -656,26 +672,26 @@ static unique_ptr<LogicalOperator> BuildNonDistinctBranch(
     const vector<std::pair<idx_t, const BoundAggregateExpression *>> &agg_specs, // (original_agg_idx, original_expr)
     idx_t &out_group_index, idx_t &out_agg_index) {
 	auto &binder = input.optimizer.binder;
-	idx_t group_index = binder.GenerateTableIndex();
-	idx_t agg_index = binder.GenerateTableIndex();
+	idx_t group_index = binder.GenerateTableIndex().index;
+	idx_t agg_index = binder.GenerateTableIndex().index;
 
 	vector<unique_ptr<Expression>> expressions;
 	for (auto &spec : agg_specs) {
 		auto &old_aggr = *spec.second;
-		string function_name = old_aggr.function.name;
+		string function_name = old_aggr.Function().GetName().GetIdentifierName();
 		string pac_name = GetPacAggregateFunctionName(function_name, &input.context);
 
 		unique_ptr<Expression> value_child;
-		if (old_aggr.children.empty()) {
+		if (old_aggr.GetChildren().empty()) {
 			value_child = make_uniq_base<Expression, BoundConstantExpression>(Value::BIGINT(1));
 		} else {
-			value_child = old_aggr.children[0]->Copy();
+			value_child = old_aggr.GetChildren()[0]->Copy();
 		}
 
 		expressions.push_back(BindPacAggregate(input, pac_name, hash_expr->Copy(), std::move(value_child)));
 	}
 
-	auto agg_node = make_uniq<LogicalAggregate>(group_index, agg_index, std::move(expressions));
+	auto agg_node = make_uniq<LogicalAggregate>(TableIndex(group_index), TableIndex(agg_index), std::move(expressions));
 	for (auto &g : groups) {
 		agg_node->groups.push_back(g->Copy());
 	}
@@ -689,11 +705,11 @@ static unique_ptr<LogicalOperator> BuildNonDistinctBranch(
 
 // Helper: remap expression bindings using an index map
 static void RemapExpressionBindings(Expression &e, const std::unordered_map<idx_t, idx_t> &map) {
-	if (e.type == ExpressionType::BOUND_COLUMN_REF) {
+	if (e.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 		auto &col_ref = e.Cast<BoundColumnRefExpression>();
-		auto it = map.find(col_ref.binding.table_index);
+		auto it = map.find(col_ref.BindingMutable().table_index.index);
 		if (it != map.end()) {
-			col_ref.binding.table_index = it->second;
+			col_ref.BindingMutable().table_index.index = it->second;
 		}
 	}
 	ExpressionIterator::EnumerateChildren(e, [&](Expression &child) { RemapExpressionBindings(child, map); });
@@ -728,20 +744,21 @@ JoinedDistinctAggregateBranches BuildJoinedDistinctAggregateBranches(OptimizerEx
 	std::unordered_map<string, idx_t> distinct_col_to_branch;
 	for (idx_t i = 0; i < agg->expressions.size(); i++) {
 		auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-		bool is_distinct = aggr.IsDistinct() && !aggr.children.empty();
+		bool is_distinct = aggr.IsDistinct() && !aggr.GetChildrenMutable().empty();
 
 		if (is_distinct) {
-			string col_str = aggr.children[0]->ToString();
+			string col_str = aggr.GetChildrenMutable()[0]->ToString();
 			auto it = distinct_col_to_branch.find(col_str);
 			if (it != distinct_col_to_branch.end()) {
-				branches[it->second].distinct_agg_specs.emplace_back(i, aggr.function.name);
+				branches[it->second].distinct_agg_specs.emplace_back(
+				    i, aggr.FunctionMutable().GetName().GetIdentifierName());
 				branches[it->second].original_agg_indices.push_back(i);
 			} else {
 				BranchInfo info;
 				info.is_distinct = true;
 				info.distinct_col_str = col_str;
-				info.distinct_col_expr = aggr.children[0]->Copy();
-				info.distinct_agg_specs.emplace_back(i, aggr.function.name);
+				info.distinct_col_expr = aggr.GetChildrenMutable()[0]->Copy();
+				info.distinct_agg_specs.emplace_back(i, aggr.FunctionMutable().GetName().GetIdentifierName());
 				info.original_agg_indices.push_back(i);
 				distinct_col_to_branch[col_str] = branches.size();
 				branches.push_back(std::move(info));
@@ -809,7 +826,7 @@ JoinedDistinctAggregateBranches BuildJoinedDistinctAggregateBranches(OptimizerEx
 		}
 		auto &branch_agg = built.subtree->Cast<LogicalAggregate>();
 		for (auto &expr : branch_agg.expressions) {
-			built.aggregate_types.push_back(expr->return_type);
+			built.aggregate_types.push_back(expr->GetReturnType());
 		}
 		built_branches.push_back(std::move(built));
 	}
@@ -822,12 +839,13 @@ JoinedDistinctAggregateBranches BuildJoinedDistinctAggregateBranches(OptimizerEx
 		if (has_groups) {
 			auto join = make_uniq<LogicalComparisonJoin>(JoinType::INNER);
 			for (idx_t gi = 0; gi < agg->groups.size(); gi++) {
-				JoinCondition cond;
-				cond.left = make_uniq<BoundColumnRefExpression>(agg->groups[gi]->return_type,
-				                                                ColumnBinding(left_group_index, gi));
-				cond.right = make_uniq<BoundColumnRefExpression>(agg->groups[gi]->return_type,
-				                                                 ColumnBinding(right.group_index, gi));
-				cond.comparison = ExpressionType::COMPARE_NOT_DISTINCT_FROM;
+				JoinCondition cond(nullptr, nullptr, ExpressionType::COMPARE_NOT_DISTINCT_FROM);
+				cond.LeftReference() = make_uniq<BoundColumnRefExpression>(
+				    agg->groups[gi]->GetReturnType(), ColumnBinding(TableIndex(left_group_index), ProjectionIndex(gi)));
+				cond.RightReference() = make_uniq<BoundColumnRefExpression>(
+				    agg->groups[gi]->GetReturnType(),
+				    ColumnBinding(TableIndex(right.group_index), ProjectionIndex(gi)));
+
 				join->conditions.push_back(std::move(cond));
 			}
 			join->children.push_back(std::move(joined));
@@ -883,8 +901,8 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 				auto &branch_agg = subtree->Cast<LogicalAggregate>();
 				for (auto &expr : branch_agg.expressions) {
 					auto &bound_agg = expr->Cast<BoundAggregateExpression>();
-					if (bound_agg.children.size() > 1) {
-						RemapExpressionBindings(*bound_agg.children[1], *index_map);
+					if (bound_agg.GetChildrenMutable().size() > 1) {
+						RemapExpressionBindings(*bound_agg.GetChildrenMutable()[1], *index_map);
 					}
 				}
 				subtree->ResolveOperatorTypes();
@@ -896,13 +914,14 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 	PacBranchBuilder builder;
 	auto branch_plan = BuildJoinedDistinctAggregateBranches(input, plan, agg, hash_input_expr->Copy(), builder);
 
-	idx_t proj_table_index = input.optimizer.binder.GenerateTableIndex();
+	idx_t proj_table_index = input.optimizer.binder.GenerateTableIndex().index;
 	vector<unique_ptr<Expression>> proj_expressions;
 
 	idx_t num_groups = agg->groups.size();
 	for (idx_t gi = 0; gi < num_groups; gi++) {
 		proj_expressions.push_back(make_uniq<BoundColumnRefExpression>(
-		    agg->groups[gi]->return_type, ColumnBinding(branch_plan.left_group_index, gi)));
+		    agg->groups[gi]->GetReturnType(),
+		    ColumnBinding(TableIndex(branch_plan.left_group_index), ProjectionIndex(gi))));
 	}
 
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
@@ -914,22 +933,22 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 		idx_t pos_in_branch = it->second.second;
 		auto &branch = branch_plan.branches[branch_idx];
 
-		auto original_type = agg->expressions[ai]->return_type;
+		auto original_type = agg->expressions[ai]->GetReturnType();
 		auto branch_type = branch.aggregate_types[pos_in_branch];
 
 		PRIVACY_DEBUG_PRINT("MultiBranch output: ai=" + std::to_string(ai) + " branch=" + std::to_string(branch_idx) +
 		                    " pos=" + std::to_string(pos_in_branch) + " agg_index=" + std::to_string(branch.agg_index) +
 		                    " original_type=" + original_type.ToString() + " branch_type=" + branch_type.ToString());
 
-		unique_ptr<Expression> ref =
-		    make_uniq<BoundColumnRefExpression>(branch_type, ColumnBinding(branch.agg_index, pos_in_branch));
+		unique_ptr<Expression> ref = make_uniq<BoundColumnRefExpression>(
+		    branch_type, ColumnBinding(TableIndex(branch.agg_index), ProjectionIndex(pos_in_branch)));
 		if (branch_type != original_type) {
 			ref = BoundCastExpression::AddCastToType(input.context, std::move(ref), original_type);
 		}
 		proj_expressions.push_back(std::move(ref));
 	}
 
-	auto projection = make_uniq<LogicalProjection>(proj_table_index, std::move(proj_expressions));
+	auto projection = make_uniq<LogicalProjection>(TableIndex(proj_table_index), std::move(proj_expressions));
 	projection->children.push_back(std::move(branch_plan.joined));
 	projection->ResolveOperatorTypes();
 
@@ -938,18 +957,19 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 		throw InternalException("Privacy compiler: InsertMultiBranchPreAggregation could not find aggregate in plan");
 	}
 
-	idx_t old_group_index = agg->group_index;
-	idx_t old_agg_index = agg->aggregate_index;
+	idx_t old_group_index = agg->group_index.index;
+	idx_t old_agg_index = agg->aggregate_index.index;
 	idx_t num_agg_exprs = agg->expressions.size();
 
 	ColumnBindingReplacer replacer;
 	for (idx_t gi = 0; gi < num_groups; gi++) {
-		replacer.replacement_bindings.emplace_back(ColumnBinding(old_group_index, gi),
-		                                           ColumnBinding(proj_table_index, gi));
+		replacer.replacement_bindings.emplace_back(ColumnBinding(TableIndex(old_group_index), ProjectionIndex(gi)),
+		                                           ColumnBinding(TableIndex(proj_table_index), ProjectionIndex(gi)));
 	}
 	for (idx_t ai = 0; ai < num_agg_exprs; ai++) {
-		replacer.replacement_bindings.emplace_back(ColumnBinding(old_agg_index, ai),
-		                                           ColumnBinding(proj_table_index, num_groups + ai));
+		replacer.replacement_bindings.emplace_back(
+		    ColumnBinding(TableIndex(old_agg_index), ProjectionIndex(ai)),
+		    ColumnBinding(TableIndex(proj_table_index), ProjectionIndex(num_groups + ai)));
 	}
 
 	LogicalOperator *proj_ptr = projection.get();
@@ -1019,16 +1039,16 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 	// Debug: Print hash input expression details
 	PRIVACY_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Hash input expression: " + hash_input_expr->ToString());
 	PRIVACY_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Hash input type: " +
-	                    hash_input_expr->return_type.ToString());
+	                    hash_input_expr->GetReturnType().ToString());
 
 	// Debug: Print all column references in the hash expression
 	ExpressionIterator::EnumerateExpression(hash_input_expr, [&](Expression &expr) {
-		if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+		if (expr.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 			auto &col_ref = expr.Cast<BoundColumnRefExpression>();
 			PRIVACY_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Hash expr references column [" +
-			                    std::to_string(col_ref.binding.table_index) + "." +
-			                    std::to_string(col_ref.binding.column_index) +
-			                    "] type=" + col_ref.return_type.ToString());
+			                    std::to_string(col_ref.Binding().table_index.index) + "." +
+			                    std::to_string(col_ref.Binding().column_index) +
+			                    "] type=" + col_ref.GetReturnType().ToString());
 		}
 	});
 
@@ -1040,8 +1060,8 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 	}
 
 	// Debug: Print aggregate's group_index and aggregate_index
-	PRIVACY_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: group_index=" + std::to_string(agg->group_index) +
-	                    ", aggregate_index=" + std::to_string(agg->aggregate_index));
+	PRIVACY_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: group_index=" + std::to_string(agg->group_index.index) +
+	                    ", aggregate_index=" + std::to_string(agg->aggregate_index.index));
 
 	// Debug: Print child operator info
 	if (!agg->children.empty()) {
@@ -1050,7 +1070,7 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 		if (agg->children[0]->type == LogicalOperatorType::LOGICAL_GET) {
 			auto &child_get = agg->children[0]->Cast<LogicalGet>();
 			PRIVACY_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Child is GET with table_index=" +
-			                    std::to_string(child_get.table_index) +
+			                    std::to_string(child_get.table_index.index) +
 			                    ", columns=" + std::to_string(child_get.GetColumnIds().size()));
 		}
 	}
@@ -1063,7 +1083,8 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 			throw NotImplementedException("Not found expected aggregate expression in PAC compiler");
 		}
 		auto &check_aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-		GetPacAggregateFunctionName(check_aggr.function.name); // throws if unsupported
+		GetPacAggregateFunctionName(
+		    check_aggr.FunctionMutable().GetName().GetIdentifierName()); // throws if unsupported
 	}
 
 	// === DISTINCT pre-aggregation ===
@@ -1078,11 +1099,11 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 
 		for (idx_t i = 0; i < agg->expressions.size(); i++) {
 			auto &check = agg->expressions[i]->Cast<BoundAggregateExpression>();
-			if (check.IsDistinct() && !check.children.empty()) {
+			if (check.IsDistinct() && !check.GetChildrenMutable().empty()) {
 				has_any_distinct = true;
 				if (!common_distinct_value) {
-					common_distinct_value = check.children[0]->Copy();
-				} else if (check.children[0]->ToString() != common_distinct_value->ToString()) {
+					common_distinct_value = check.GetChildrenMutable()[0]->Copy();
+				} else if (check.GetChildrenMutable()[0]->ToString() != common_distinct_value->ToString()) {
 					all_same_col = false;
 				}
 			} else {
@@ -1109,7 +1130,7 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 		}
 
 		auto &old_aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-		string function_name = old_aggr.function.name;
+		string function_name = old_aggr.FunctionMutable().GetName().GetIdentifierName();
 
 #if PRIVACY_DEBUG
 		PRIVACY_DEBUG_PRINT("ModifyAggregatesWithPacFunctions: Transforming " + function_name + " to PAC function");
@@ -1117,14 +1138,14 @@ void ModifyAggregatesWithPacFunctions(OptimizerExtensionInput &input, LogicalAgg
 
 		// Extract the original aggregate's value child expression
 		unique_ptr<Expression> value_child;
-		if (old_aggr.children.empty()) {
+		if (old_aggr.GetChildrenMutable().empty()) {
 			if (function_name == "count_star" || function_name == "count") {
 				value_child = make_uniq_base<Expression, BoundConstantExpression>(Value::BIGINT(1));
 			} else {
 				throw InternalException("Privacy compiler: expected aggregate to have a child expression");
 			}
 		} else {
-			value_child = old_aggr.children[0]->Copy();
+			value_child = old_aggr.GetChildrenMutable()[0]->Copy();
 		}
 
 		string pac_function_name = GetPacAggregateFunctionName(function_name, &input.context);
@@ -1179,11 +1200,13 @@ unique_ptr<Expression> BindPlainAggregate(OptimizerExtensionInput &input, const 
 	ErrorData error;
 	vector<LogicalType> arg_types;
 	for (auto &child : children) {
-		arg_types.push_back(child->return_type);
+		arg_types.push_back(child->GetReturnType());
 	}
 	auto &entry = Catalog::GetSystemCatalog(input.context)
-	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, func_name);
-	auto best = function_binder.BindFunction(entry.name, entry.functions, arg_types, error);
+	                  .GetEntry<AggregateFunctionCatalogEntry>(
+	                      input.context, QualifiedName(Catalog::GetSystemCatalog(input.context).GetName(),
+	                                                   Identifier::DefaultSchema(), Identifier(func_name)));
+	auto best = function_binder.BindFunction(Identifier(entry.name), entry.functions, arg_types, error);
 	if (!best.IsValid()) {
 		throw InternalException("Privacy compiler: failed to bind aggregate '" + func_name + "'");
 	}
@@ -1207,7 +1230,7 @@ static bool IsPacAggregate(LogicalAggregate *agg) {
 			continue;
 		}
 		auto &aggr = expr->Cast<BoundAggregateExpression>();
-		if (!GetClipVariant(aggr.function.name).empty()) {
+		if (!GetClipVariant(aggr.FunctionMutable().GetName().GetIdentifierName()).empty()) {
 			return true;
 		}
 	}
@@ -1240,13 +1263,13 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 					continue;
 				}
 				auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-				string clip_name = GetClipVariant(aggr.function.name);
+				string clip_name = GetClipVariant(aggr.FunctionMutable().GetName().GetIdentifierName());
 				if (clip_name.empty()) {
 					continue;
 				}
 				// Rebind with the clip variant name
 				vector<unique_ptr<Expression>> children;
-				for (auto &child : aggr.children) {
+				for (auto &child : aggr.GetChildrenMutable()) {
 					children.push_back(child->Copy());
 				}
 				agg->expressions[i] = RebindAggregate(input.context, clip_name, std::move(children), false);
@@ -1262,8 +1285,9 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 				continue;
 			}
 			auto &aggr = expr->Cast<BoundAggregateExpression>();
-			if (!GetClipVariant(aggr.function.name).empty() && !aggr.children.empty()) {
-				pu_hash_expr = aggr.children[0]->Copy();
+			if (!GetClipVariant(aggr.FunctionMutable().GetName().GetIdentifierName()).empty() &&
+			    !aggr.GetChildrenMutable().empty()) {
+				pu_hash_expr = aggr.GetChildrenMutable()[0]->Copy();
 				break;
 			}
 		}
@@ -1280,21 +1304,22 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 		vector<unique_ptr<Expression>> lower_expressions;
 		for (idx_t i = 0; i < agg->expressions.size(); i++) {
 			auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-			string orig_name = GetOriginalAggregate(aggr.function.name);
+			string orig_name = GetOriginalAggregate(aggr.FunctionMutable().GetName().GetIdentifierName());
 			if (orig_name.empty()) {
-				throw InternalException("PAC clip rewrite: unexpected aggregate " + aggr.function.name);
+				throw InternalException("PAC clip rewrite: unexpected aggregate " +
+				                        aggr.FunctionMutable().GetName().GetIdentifierName());
 			}
 
 			vector<unique_ptr<Expression>> plain_children;
-			if (orig_name == "count" && (aggr.children.size() <= 1)) {
+			if (orig_name == "count" && (aggr.GetChildrenMutable().size() <= 1)) {
 				// as_noised_count(hash) or as_count(hash) → count_star()
 				// as_noised_count(hash, col) → count(col) — but children[1] might be constant 1
-				if (aggr.children.size() >= 2) {
-					auto &val_child = aggr.children[1];
+				if (aggr.GetChildrenMutable().size() >= 2) {
+					auto &val_child = aggr.GetChildrenMutable()[1];
 					// Check if it's a constant 1 (from count_star rewrite)
-					if (val_child->type == ExpressionType::VALUE_CONSTANT) {
+					if (val_child->GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
 						auto &const_expr = val_child->Cast<BoundConstantExpression>();
-						if (const_expr.value.IsNull() || const_expr.value == Value::BIGINT(1)) {
+						if (const_expr.GetValue().IsNull() || const_expr.GetValue() == Value::BIGINT(1)) {
 							// count_star — no children
 						} else {
 							plain_children.push_back(val_child->Copy());
@@ -1304,14 +1329,14 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 					}
 				}
 				lower_expressions.push_back(BindPlainAggregate(input, "count_star", std::move(plain_children)));
-			} else if (orig_name == "count" && aggr.children.size() > 1) {
+			} else if (orig_name == "count" && aggr.GetChildrenMutable().size() > 1) {
 				// count with column reference
-				plain_children.push_back(aggr.children[1]->Copy());
+				plain_children.push_back(aggr.GetChildrenMutable()[1]->Copy());
 				lower_expressions.push_back(BindPlainAggregate(input, "count", std::move(plain_children)));
 			} else {
 				// sum, min, max — extract the value child (children[1])
-				if (aggr.children.size() >= 2) {
-					plain_children.push_back(aggr.children[1]->Copy());
+				if (aggr.GetChildrenMutable().size() >= 2) {
+					plain_children.push_back(aggr.GetChildrenMutable()[1]->Copy());
 				}
 				lower_expressions.push_back(BindPlainAggregate(input, orig_name, std::move(plain_children)));
 			}
@@ -1322,14 +1347,14 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 		// Rewrite top aggregate's expressions to clip variants
 		for (idx_t i = 0; i < agg->expressions.size(); i++) {
 			auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-			string pac_name = aggr.function.name;
+			string pac_name = aggr.FunctionMutable().GetName().GetIdentifierName();
 			bool noised = IsNoisedVariant(pac_name);
 			string orig = GetOriginalAggregate(pac_name);
 
 			// Reference to lower aggregate's result
 			auto lower_type = pre_agg.lower_agg->types[pre_agg.num_original_groups + 1 + i];
-			unique_ptr<Expression> lower_ref =
-			    make_uniq<BoundColumnRefExpression>(lower_type, ColumnBinding(pre_agg.lower_agg_index, i));
+			unique_ptr<Expression> lower_ref = make_uniq<BoundColumnRefExpression>(
+			    lower_type, ColumnBinding(TableIndex(pre_agg.lower_agg_index), ProjectionIndex(i)));
 
 			// as_clip_sum has integer + DECIMAL overloads but no FLOAT/DOUBLE.
 			// Cast FLOAT/DOUBLE to BIGINT so binding succeeds.

@@ -6,6 +6,7 @@
 // Created by ila on 1/22/26.
 //
 
+#include "duckdb/common/vector/list_vector.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "privacy_debug.hpp"
@@ -54,31 +55,25 @@ struct PacCategoricalBindData : public FunctionData {
 	uint64_t query_hash;               // derived from seed: used as counter selector for NoisySample
 	std::shared_ptr<PacPState> pstate; // p-tracking state shared across query (may be nullptr)
 	double utility_threshold;          // z-score threshold for utility NULLing (NaN = disabled)
+	shared_ptr<PacRandomState> random_state;
 
 	// Primary constructor - reads seed from privacy_seed setting, or uses default 42 if not set.
-	// When mi > 0, seed is randomized per query via the query number.
+	// Without an explicit seed, mi > 0 mixes in the query number.
 	explicit PacCategoricalBindData(ClientContext &ctx, double mi_val = 0.0, double correction_val = 1.0)
-	    : mi(mi_val), correction(correction_val), utility_threshold(std::numeric_limits<double>::quiet_NaN()) {
+	    : mi(mi_val), correction(correction_val), utility_threshold(std::numeric_limits<double>::quiet_NaN()),
+	      random_state(GetPacRandomState(ctx)) {
 		// Read utility threshold setting
 		Value ut_val;
-		if (ctx.TryGetCurrentSetting("privacy_min_group_count", ut_val) && !ut_val.IsNull()) {
+		if (ctx.TryGetCurrentSetting(Identifier("privacy_min_group_count"), ut_val) && !ut_val.IsNull()) {
 			utility_threshold = ut_val.GetValue<double>();
 		}
-		Value pac_seed_val;
-		if (ctx.TryGetCurrentSetting("privacy_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
-			seed = uint64_t(pac_seed_val.GetValue<int64_t>());
-		} else {
-			seed = 42;
-		}
-		if (mi != 0.0) { // randomize seed per query (not in deterministic mode aka mi==0)
-			seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(ctx.ActiveTransaction().GetActiveQuery());
-		}
+		seed = GetPacSeed(ctx, mi);
 		query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
 		// Initialize p-tracking if mi > 0 and pac_ptracking is enabled
 		if (mi > 0.0) {
 			Value pt_val;
 			bool ptracking_enabled = true;
-			if (ctx.TryGetCurrentSetting("pac_ptracking", pt_val) && !pt_val.IsNull()) {
+			if (ctx.TryGetCurrentSetting(Identifier("pac_ptracking"), pt_val) && !pt_val.IsNull()) {
 				ptracking_enabled = pt_val.GetValue<bool>();
 			}
 			if (ptracking_enabled) {
@@ -102,8 +97,8 @@ struct PacCategoricalBindData : public FunctionData {
 // Local state for PAC categorical functions (RNG)
 // ============================================================================
 struct PacCategoricalLocalState : public FunctionLocalState {
-	std::mt19937_64 gen;
-	explicit PacCategoricalLocalState(uint64_t seed) : gen(seed) {
+	PacRandomEngine gen;
+	explicit PacCategoricalLocalState(PacRandomEngine gen_p) : gen(gen_p) {
 	}
 };
 
@@ -113,7 +108,7 @@ PacCategoricalInitLocal(ExpressionState &state, const BoundFunctionExpression &e
 	if (bind_data) {
 		seed = bind_data->Cast<PacCategoricalBindData>().seed;
 	}
-	return make_uniq<PacCategoricalLocalState>(seed);
+	return make_uniq<PacCategoricalLocalState>(PacRandomStream(seed, *GetPacRandomState(state.GetContext())));
 }
 
 // ============================================================================
@@ -141,7 +136,7 @@ static inline uint64_t BoolListToMask(UnifiedVectorFormat &list_data, UnifiedVec
 // Helper: Common filter logic for mask-based filtering
 // ============================================================================
 static inline bool FilterFromCount(idx_t true_count, idx_t lane_count, double mi, double correction,
-                                   std::mt19937_64 &gen) {
+                                   PacRandomEngine &gen) {
 	if (lane_count == 0) {
 		return false;
 	}
@@ -168,7 +163,7 @@ static inline bool FilterFromCount(idx_t true_count, idx_t lane_count, double mi
 // correction: considers correction times more non-nulls (increases true probability)
 // When mi <= 0: deterministic, true when popcount(mask) * correction >= 32
 // When mi > 0: probabilistic, P(true) = popcount(mask) * correction / 64
-static inline bool FilterFromMask(uint64_t mask, double mi, double correction, std::mt19937_64 &gen) {
+static inline bool FilterFromMask(uint64_t mask, double mi, double correction, PacRandomEngine &gen) {
 	int popcount = Popcount64(mask);
 	return FilterFromCount(popcount, 64, mi, correction, gen);
 }
@@ -184,20 +179,20 @@ static void PacSelectFunction(DataChunk &args, ExpressionState &state, Vector &r
 	idx_t count = args.size();
 
 	UnifiedVectorFormat hash_data;
-	args.data[0].ToUnifiedFormat(count, hash_data);
+	args.data[0].ToUnifiedFormat(hash_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 
 	auto &list_vec = args.data[1];
 	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
+	list_vec.ToUnifiedFormat(list_data);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<bool>(child_data);
 
-	auto result_data = FlatVector::GetData<uint64_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<uint64_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < count; i++) {
 		auto h_idx = hash_data.sel->get_index(i);
@@ -223,7 +218,7 @@ static void PacSelectFunction(DataChunk &args, ExpressionState &state, Vector &r
 struct PacFilterParams {
 	double mi;
 	double correction;
-	std::mt19937_64 &gen;
+	PacRandomEngine &gen;
 };
 
 static PacFilterParams GetPacFilterParams(ExpressionState &state) {
@@ -231,8 +226,8 @@ static PacFilterParams GetPacFilterParams(ExpressionState &state) {
 	double mi = 0.0;
 	double correction = 1.0;
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
-	if (function.bind_info) {
-		auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
+	if (function.BindInfo()) {
+		auto &bind_data = function.BindInfo()->Cast<PacCategoricalBindData>();
 		mi = bind_data.mi;
 		correction = bind_data.correction;
 	}
@@ -247,13 +242,13 @@ static void PacFilterFromBoolListFunction(DataChunk &args, ExpressionState &stat
 	auto params = GetPacFilterParams(state);
 
 	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
+	list_vec.ToUnifiedFormat(list_data);
 
-	auto result_data = FlatVector::GetData<bool>(result);
+	auto result_data = FlatVector::GetDataMutable<bool>(result);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<bool>(child_data);
 
 	for (idx_t i = 0; i < count; i++) {
@@ -286,8 +281,7 @@ static void PacFilterFromBoolListFunction(DataChunk &args, ExpressionState &stat
 }
 
 // Forward declarations for functions used by priv_filter_<cmp> registration
-static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFunction &func,
-                                                   vector<unique_ptr<Expression>> &args);
+static unique_ptr<FunctionData> PacCategoricalBind(BindScalarFunctionInput &bind_input);
 
 // ============================================================================
 // PAC_FILTER_<CMP>: Compare scalar against counter list and filter in one pass
@@ -325,26 +319,26 @@ static void PacFilterCmpFunction(DataChunk &args, ExpressionState &state, Vector
 
 	// arg0: PAC_FLOAT scalar value, arg1: LIST<PAC_FLOAT> counters, arg2 (optional): PAC_FLOAT correction
 	UnifiedVectorFormat val_data;
-	args.data[0].ToUnifiedFormat(count, val_data);
+	args.data[0].ToUnifiedFormat(val_data);
 	auto vals = UnifiedVectorFormat::GetData<PAC_FLOAT>(val_data);
 
 	auto &list_vec = args.data[1];
 	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
+	list_vec.ToUnifiedFormat(list_data);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 
 	UnifiedVectorFormat correction_data;
 	const PAC_FLOAT *corrections = nullptr;
 	if (HAS_CORRECTION_ARG) {
-		args.data[2].ToUnifiedFormat(count, correction_data);
+		args.data[2].ToUnifiedFormat(correction_data);
 		corrections = UnifiedVectorFormat::GetData<PAC_FLOAT>(correction_data);
 	}
 
-	auto result_data = FlatVector::GetData<bool>(result);
+	auto result_data = FlatVector::GetDataMutable<bool>(result);
 
 	for (idx_t i = 0; i < count; i++) {
 		auto val_idx = val_data.sel->get_index(i);
@@ -385,14 +379,15 @@ static void PacFilterCmpFunction(DataChunk &args, ExpressionState &state, Vector
 }
 
 template <PacFilterCmpOp CMP>
-static void RegisterPacFilterCmp(ExtensionLoader &loader, const string &name) {
+static void RegisterPacFilterCmp(ExtensionLoader &loader, const Identifier &name) {
 	auto pf = PacFloatLogicalType();
 	auto ldt = LogicalType::LIST(pf);
-	ScalarFunctionSet fset(name);
-	fset.AddFunction(ScalarFunction(name, {pf, ldt}, LogicalType::BOOLEAN, PacFilterCmpFunction<CMP, false>,
-	                                PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal));
-	fset.AddFunction(ScalarFunction(name, {pf, ldt, pf}, LogicalType::BOOLEAN, PacFilterCmpFunction<CMP, true>,
-	                                PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal));
+	ScalarFunctionSet fset {Identifier(name)};
+	fset.AddFunction(ScalarFunction(Identifier(name), {pf, ldt}, LogicalType::BOOLEAN, PacFilterCmpFunction<CMP, false>,
+	                                PacCategoricalBind, nullptr, PacCategoricalInitLocal));
+	fset.AddFunction(ScalarFunction(Identifier(name), {pf, ldt, pf}, LogicalType::BOOLEAN,
+	                                PacFilterCmpFunction<CMP, true>, PacCategoricalBind, nullptr,
+	                                PacCategoricalInitLocal));
 	CreateScalarFunctionInfo info(fset);
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Categorical comparison + probabilistic filter for PAC queries.";
@@ -412,22 +407,22 @@ static void PacSelectCmpFunction(DataChunk &args, ExpressionState &state, Vector
 
 	// arg0: UBIGINT hash, arg1: PAC_FLOAT scalar value, arg2: LIST<PAC_FLOAT> counters
 	UnifiedVectorFormat hash_data, val_data;
-	args.data[0].ToUnifiedFormat(count, hash_data);
-	args.data[1].ToUnifiedFormat(count, val_data);
+	args.data[0].ToUnifiedFormat(hash_data);
+	args.data[1].ToUnifiedFormat(val_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto vals = UnifiedVectorFormat::GetData<PAC_FLOAT>(val_data);
 
 	auto &list_vec = args.data[2];
 	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
+	list_vec.ToUnifiedFormat(list_data);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 
-	auto result_data = FlatVector::GetData<uint64_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<uint64_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < count; i++) {
 		auto h_idx = hash_data.sel->get_index(i);
@@ -458,7 +453,7 @@ static void PacSelectCmpFunction(DataChunk &args, ExpressionState &state, Vector
 }
 
 template <PacFilterCmpOp CMP>
-static void RegisterPacSelectCmp(ExtensionLoader &loader, const string &name) {
+static void RegisterPacSelectCmp(ExtensionLoader &loader, const Identifier &name) {
 	auto pf = PacFloatLogicalType();
 	auto ldt = LogicalType::LIST(pf);
 	ScalarFunction f(name, {LogicalType::UBIGINT, pf, ldt}, LogicalType::UBIGINT, PacSelectCmpFunction<CMP>,
@@ -480,10 +475,10 @@ static void PacCoalesceFunction(DataChunk &args, ExpressionState &state, Vector 
 	idx_t count = args.size();
 
 	UnifiedVectorFormat input_data;
-	input.ToUnifiedFormat(count, input_data);
+	input.ToUnifiedFormat(input_data);
 
 	// Fast path: if no NULL lists, zero-copy pass-through (common case)
-	if (input_data.validity.AllValid()) {
+	if (input_data.validity.CannotHaveNull()) {
 		result.Reference(input);
 		return;
 	}
@@ -492,8 +487,8 @@ static void PacCoalesceFunction(DataChunk &args, ExpressionState &state, Vector 
 	auto input_entries = UnifiedVectorFormat::GetData<list_entry_t>(input_data);
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto list_entries = FlatVector::GetData<list_entry_t>(result);
-	auto &child_vec = ListVector::GetEntry(result);
+	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
+	auto &child_vec = ListVector::GetChildMutable(result);
 
 	// First pass: count total elements needed
 	idx_t total_elements = 0;
@@ -508,12 +503,12 @@ static void PacCoalesceFunction(DataChunk &args, ExpressionState &state, Vector 
 
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
-	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
-	auto &child_validity = FlatVector::Validity(child_vec);
+	auto child_data = FlatVector::GetDataMutable<PAC_FLOAT>(child_vec);
+	auto &child_validity = FlatVector::ValidityMutable(child_vec);
 	child_validity.EnsureWritable();
 
 	// Get the source child vector for non-NULL lists
-	auto &input_child = ListVector::GetEntry(input);
+	auto &input_child = ListVector::GetChild(input);
 	bool child_is_flat = (input_child.GetVectorType() == VectorType::FLAT_VECTOR);
 	auto flat_src_data = child_is_flat ? FlatVector::GetData<PAC_FLOAT>(input_child) : nullptr;
 	auto *flat_src_validity = child_is_flat ? &FlatVector::Validity(input_child) : nullptr;
@@ -522,7 +517,7 @@ static void PacCoalesceFunction(DataChunk &args, ExpressionState &state, Vector 
 	UnifiedVectorFormat input_child_data;
 	const PAC_FLOAT *src_data = nullptr;
 	if (!child_is_flat) {
-		input_child.ToUnifiedFormat(ListVector::GetListSize(input), input_child_data);
+		input_child.ToUnifiedFormat(input_child_data);
 		src_data = UnifiedVectorFormat::GetData<PAC_FLOAT>(input_child_data);
 	}
 
@@ -585,19 +580,18 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 	idx_t count = args.size();
 
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
-
-	std::mt19937_64 gen(bind_data.seed);
+	auto &bind_data = function.BindInfo()->Cast<PacCategoricalBindData>();
+	auto gen = PacRandomStream(bind_data.seed, *bind_data.random_state);
 
 	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
+	list_vec.ToUnifiedFormat(list_data);
 
-	auto result_data = FlatVector::GetData<PAC_FLOAT>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<PAC_FLOAT>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 
 	for (idx_t i = 0; i < count; i++) {
@@ -619,16 +613,16 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 		// Assume all 64 worlds are populated (all bits set)
 		uint64_t key_hash = ~uint64_t(0);
 
-		// Check if we should return NULL based on key_hash (uses mi and correction)
-		if (PacNoiseInNull(key_hash, bind_data.mi, bind_data.correction, gen)) {
-			result_validity.SetInvalid(i);
-			continue;
-		}
 		// Extract counter values from the list
 		PAC_FLOAT counters[64];
 		for (idx_t j = 0; j < 64; j++) {
 			auto child_idx = child_data.sel->get_index(entry.offset + j);
 			counters[j] = child_values[child_idx];
+		}
+		// Check if we should return NULL based on key_hash (uses mi and correction)
+		if (PacNoiseInNull(key_hash, bind_data.mi, bind_data.correction, gen)) {
+			result_validity.SetInvalid(i);
+			continue;
 		}
 		double noise_var = 0.0;
 		result_data[i] = PacNoisySampleFrom64Counters(counters, bind_data.mi, bind_data.correction, gen, ~key_hash,
@@ -651,14 +645,14 @@ static void PacDivFunction(DataChunk &args, ExpressionState &state, Vector &resu
 	idx_t count = args.size();
 
 	UnifiedVectorFormat num_data, den_data;
-	num_vec.ToUnifiedFormat(count, num_data);
-	den_vec.ToUnifiedFormat(count, den_data);
+	num_vec.ToUnifiedFormat(num_data);
+	den_vec.ToUnifiedFormat(den_data);
 
-	auto &num_child = ListVector::GetEntry(num_vec);
-	auto &den_child = ListVector::GetEntry(den_vec);
+	auto &num_child = ListVector::GetChild(num_vec);
+	auto &den_child = ListVector::GetChild(den_vec);
 	UnifiedVectorFormat num_child_data, den_child_data;
-	num_child.ToUnifiedFormat(ListVector::GetListSize(num_vec), num_child_data);
-	den_child.ToUnifiedFormat(ListVector::GetListSize(den_vec), den_child_data);
+	num_child.ToUnifiedFormat(num_child_data);
+	den_child.ToUnifiedFormat(den_child_data);
 	auto num_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(num_child_data);
 	auto den_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(den_child_data);
 	auto num_entries = UnifiedVectorFormat::GetData<list_entry_t>(num_data);
@@ -677,14 +671,14 @@ static void PacDivFunction(DataChunk &args, ExpressionState &state, Vector &resu
 	}
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto list_entries = FlatVector::GetData<list_entry_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
-	auto &result_child = ListVector::GetEntry(result);
+	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
+	auto &result_child = ListVector::GetChildMutable(result);
 
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
-	auto result_data = FlatVector::GetData<PAC_FLOAT>(result_child);
-	auto &result_child_validity = FlatVector::Validity(result_child);
+	auto result_data = FlatVector::GetDataMutable<PAC_FLOAT>(result_child);
+	auto &result_child_validity = FlatVector::ValidityMutable(result_child);
 	result_child_validity.SetAllValid(total_elements);
 
 	idx_t base = 0;
@@ -732,21 +726,21 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 	idx_t count = args.size();
 
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
-	std::mt19937_64 gen(bind_data.seed);
+	auto &bind_data = function.BindInfo()->Cast<PacCategoricalBindData>();
+	auto gen = PacRandomStream(bind_data.seed, *bind_data.random_state);
 
 	UnifiedVectorFormat sum_data, cnt_data;
-	sum_vec.ToUnifiedFormat(count, sum_data);
-	cnt_vec.ToUnifiedFormat(count, cnt_data);
+	sum_vec.ToUnifiedFormat(sum_data);
+	cnt_vec.ToUnifiedFormat(cnt_data);
 
-	auto result_data = FlatVector::GetData<double>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<double>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
-	auto &sum_child = ListVector::GetEntry(sum_vec);
-	auto &cnt_child = ListVector::GetEntry(cnt_vec);
+	auto &sum_child = ListVector::GetChild(sum_vec);
+	auto &cnt_child = ListVector::GetChild(cnt_vec);
 	UnifiedVectorFormat sum_child_data, cnt_child_data;
-	sum_child.ToUnifiedFormat(ListVector::GetListSize(sum_vec), sum_child_data);
-	cnt_child.ToUnifiedFormat(ListVector::GetListSize(cnt_vec), cnt_child_data);
+	sum_child.ToUnifiedFormat(sum_child_data);
+	cnt_child.ToUnifiedFormat(cnt_child_data);
 	auto sum_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(sum_child_data);
 	auto cnt_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(cnt_child_data);
 
@@ -768,10 +762,6 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 			continue;
 		}
 		uint64_t key_hash = ~uint64_t(0);
-		if (PacNoiseInNull(key_hash, bind_data.mi, bind_data.correction, gen)) {
-			result_validity.SetInvalid(i);
-			continue;
-		}
 		// Element-wise division: sum[j] / cnt[j] for each of the 64 counters
 		PAC_FLOAT counters[64];
 		for (idx_t j = 0; j < 64; j++) {
@@ -780,6 +770,10 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 			PAC_FLOAT s = sum_values[s_idx];
 			PAC_FLOAT c = cnt_values[c_idx];
 			counters[j] = s / c; // 0/0 → NaN, which propagates correctly
+		}
+		if (PacNoiseInNull(key_hash, bind_data.mi, bind_data.correction, gen)) {
+			result_validity.SetInvalid(i);
+			continue;
 		}
 		double noise_var = 0.0;
 		result_data[i] = static_cast<double>(PacNoisySampleFrom64Counters(counters, bind_data.mi, bind_data.correction,
@@ -794,8 +788,10 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 // ============================================================================
 // Bind function for priv_filter/priv_select (reads privacy_seed and pac_mi settings)
 // ============================================================================
-static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFunction &func,
-                                                   vector<unique_ptr<Expression>> &args) {
+static unique_ptr<FunctionData> PacCategoricalBind(BindScalarFunctionInput &bind_input) {
+	auto &ctx = bind_input.GetClientContext();
+	auto &func = bind_input.GetBoundFunction();
+	auto &args = bind_input.GetArguments();
 	// Read mi from pac_mi setting
 	double mi = GetPacMiFromSetting(ctx);
 	// Default correction is 1.0 (can be overridden via explicit parameter in some functions)
@@ -1010,13 +1006,16 @@ struct PacListOps<PacListAggType::MAX> {
 // ============================================================================
 
 template <PacListAggType AGG_TYPE>
-static void PacListAggregateInit(const AggregateFunction &, data_ptr_t state_ptr) {
-	auto &state = *reinterpret_cast<PacListAggregateState *>(state_ptr);
-	state.key_hash = 0;
-	PAC_FLOAT init_val = PacListOps<AGG_TYPE>::InitValue();
-	for (idx_t i = 0; i < 64; i++) {
-		state.values[i] = init_val;
-		state.counts[i] = 0;
+static void PacListAggregateInit(AggregateStateInput &, data_ptr_t *states, idx_t count) {
+	for (idx_t i = 0; i < count; i++) {
+		auto state_ptr = states[i];
+		auto &state = *reinterpret_cast<PacListAggregateState *>(state_ptr);
+		state.key_hash = 0;
+		PAC_FLOAT init_val = PacListOps<AGG_TYPE>::InitValue();
+		for (idx_t i = 0; i < 64; i++) {
+			state.values[i] = init_val;
+			state.counts[i] = 0;
+		}
 	}
 }
 
@@ -1060,19 +1059,19 @@ static void PacListAggregateUpdate(Vector inputs[], AggregateInputData &, idx_t 
 	auto &list_vec = inputs[0];
 
 	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
+	list_vec.ToUnifiedFormat(list_data);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 
 	UnifiedVectorFormat sdata;
-	state_vector.ToUnifiedFormat(count, sdata);
-	auto states = reinterpret_cast<PacListAggregateState **>(sdata.data);
+	state_vector.ToUnifiedFormat(sdata);
+	auto states = UnifiedVectorFormat::GetData<PacListAggregateState *>(sdata);
 
 	// Check if child vector is flat with all valid entries (enables dense path)
-	bool child_is_flat = child_vec.GetVectorType() == VectorType::FLAT_VECTOR && child_data.validity.AllValid();
+	bool child_is_flat = child_vec.GetVectorType() == VectorType::FLAT_VECTOR && child_data.validity.CannotHaveNull();
 
 	for (idx_t i = 0; i < count; i++) {
 		auto list_idx = list_data.sel->get_index(i);
@@ -1098,10 +1097,10 @@ static void PacListAggregateUpdate(Vector inputs[], AggregateInputData &, idx_t 
 template <PacListAggType AGG_TYPE>
 static void PacListAggregateCombine(Vector &source_vec, Vector &target_vec, AggregateInputData &, idx_t count) {
 	UnifiedVectorFormat sdata, tdata;
-	source_vec.ToUnifiedFormat(count, sdata);
-	target_vec.ToUnifiedFormat(count, tdata);
-	auto sources = reinterpret_cast<PacListAggregateState **>(sdata.data);
-	auto targets = reinterpret_cast<PacListAggregateState **>(tdata.data);
+	source_vec.ToUnifiedFormat(sdata);
+	target_vec.ToUnifiedFormat(tdata);
+	auto sources = UnifiedVectorFormat::GetData<PacListAggregateState *>(sdata);
+	auto targets = UnifiedVectorFormat::GetData<PacListAggregateState *>(tdata);
 
 	for (idx_t i = 0; i < count; i++) {
 		auto &source = *sources[sdata.sel->get_index(i)];
@@ -1116,14 +1115,14 @@ static void PacListAggregateCombine(Vector &source_vec, Vector &target_vec, Aggr
 }
 
 template <PacListAggType AGG_TYPE>
-static void PacListAggregateFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count,
+static void PacListAggregateFinalize(Vector &state_vector, AggregateFinalizeInputData &, Vector &result, idx_t count,
                                      idx_t offset) {
 	UnifiedVectorFormat sdata;
-	state_vector.ToUnifiedFormat(count, sdata);
-	auto states = reinterpret_cast<PacListAggregateState **>(sdata.data);
+	state_vector.ToUnifiedFormat(sdata);
+	auto states = UnifiedVectorFormat::GetData<PacListAggregateState *>(sdata);
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &result_validity = FlatVector::Validity(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < count; i++) {
 		auto &state = *states[sdata.sel->get_index(i)];
@@ -1160,9 +1159,9 @@ static void PacListAggregateDestructor(Vector &, AggregateInputData &, idx_t) {
 }
 
 template <PacListAggType AGG_TYPE>
-static AggregateFunction CreatePacListAggregate(const string &name) {
+static AggregateFunction CreatePacListAggregate(const Identifier &name) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	return AggregateFunction(name, {list_double_type}, list_double_type,
+	return AggregateFunction(Identifier(name), {list_double_type}, list_double_type,
 	                         AggregateFunction::StateSize<PacListAggregateState>, PacListAggregateInit<AGG_TYPE>,
 	                         PacListAggregateUpdate<AGG_TYPE>, PacListAggregateCombine<AGG_TYPE>,
 	                         PacListAggregateFinalize<AGG_TYPE>, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr,
@@ -1203,19 +1202,20 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 
 	// priv_filter(list<bool>) -> BOOLEAN
 	ScalarFunction pac_filter_list("priv_filter", {list_bool_type}, LogicalType::BOOLEAN, PacFilterFromBoolListFunction,
-	                               PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	                               PacCategoricalBind, nullptr, PacCategoricalInitLocal);
 	loader.RegisterFunction(make_scalar_info(
 	    pac_filter_list, "[INTERNAL] Probabilistic filter from boolean list for categorical queries."));
 
 	// priv_coalesce(list<PAC_FLOAT>) -> list<PAC_FLOAT>
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
 	ScalarFunction priv_coalesce("priv_coalesce", {list_double_type}, list_double_type, PacCoalesceFunction);
-	priv_coalesce.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	priv_coalesce.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	loader.RegisterFunction(make_scalar_info(priv_coalesce, "[INTERNAL] Replaces NULL counter list with 64 zeros."));
 
 	// as_noised(list<PAC_FLOAT>) -> PAC_FLOAT
 	ScalarFunction as_noised("as_noised", {list_double_type}, PacFloatLogicalType(), PacNoisedFunction,
-	                         PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	                         PacCategoricalBind, nullptr, PacCategoricalInitLocal);
+	as_noised.SetStability(FunctionStability::VOLATILE);
 	loader.RegisterFunction(
 	    make_scalar_info(as_noised, "[INTERNAL] Applies PAC noise to 64-element counter list, returns scalar."));
 
@@ -1225,7 +1225,8 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 
 	// as_noised_div(list<PAC_FLOAT> sum, list<PAC_FLOAT> cnt) -> DOUBLE
 	ScalarFunction as_noised_div("as_noised_div", {list_double_type, list_double_type}, LogicalType::DOUBLE,
-	                             PacNoisedDivFunction, PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	                             PacNoisedDivFunction, PacCategoricalBind, nullptr, PacCategoricalInitLocal);
+	as_noised_div.SetStability(FunctionStability::VOLATILE);
 	loader.RegisterFunction(make_scalar_info(as_noised_div, "[INTERNAL] Fused counter-list division + noise for AVG."));
 
 	// priv_filter_<cmp>: optimized comparison + filter in a single pass

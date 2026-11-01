@@ -5,130 +5,89 @@
 //
 // Created by ila on 1/23/26.
 //
+#include "privacy_debug.hpp"
 #include "categorical/pac_categorical_detection.hpp"
+#include "duckdb/planner/operator/logical_cteref.hpp"
+#include "duckdb/planner/operator/logical_materialized_cte.hpp"
 
 namespace duckdb {
 
-static string FindPacAggregateInExpression(Expression *expr, LogicalOperator *plan_root,
-                                           ColumnBinding *out_source_binding = nullptr); // forward declaration
-
-// Trace a column binding through the plan to find if it comes from a PAC aggregate
-// Returns the PAC aggregate name if found (base name without _counters), empty string otherwise
-static string TracePacAggregateFromBinding(const ColumnBinding &binding, LogicalOperator *plan_root,
-                                           ColumnBinding *out_source_binding = nullptr) {
-	auto *source_op = FindOperatorByTableIndex(plan_root, binding.table_index);
-	if (!source_op) {
-		return "";
+// Follow every source, including both COUNT copies in DuckDB's nullable-count
+// wrapper and aggregates over aggregates. A projection may depend on several
+// stochastic outputs; retaining only its first source prematurely finalizes the rest.
+static void CollectPacSources(const Expression &expr, LogicalOperator &root, vector<ColumnBinding> &sources,
+                              unordered_set<uint64_t> &visited) {
+	if (IsAlreadyWrappedInPacNoised(&expr)) {
+		return;
 	}
-	if (source_op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-		auto *unwrapped = RecognizeDuckDBScalarWrapper(source_op);
-		if (unwrapped) { // Scalar subquery wrapper: trace through inner projection's expression
-			auto &agg_child = source_op->Cast<LogicalProjection>().children[0]->Cast<LogicalAggregate>();
-			auto &inner_proj = agg_child.children[0]->Cast<LogicalProjection>();
-			if (!inner_proj.expressions.empty()) {
-				return FindPacAggregateInExpression(inner_proj.expressions[0].get(), plan_root, out_source_binding);
-			}
-			return "";
+	if (expr.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
+		auto binding = expr.Cast<BoundColumnRefExpression>().Binding();
+		if (!visited.insert(HashBinding(binding)).second) {
+			return;
 		}
-		auto &proj = source_op->Cast<LogicalProjection>();
-		if (binding.column_index < proj.expressions.size()) {
-			if (IsAlreadyWrappedInPacNoised(proj.expressions[binding.column_index].get())) {
-				return "";
-			}
-			return FindPacAggregateInExpression(proj.expressions[binding.column_index].get(), plan_root,
-			                                    out_source_binding);
+		auto *source = FindOperatorByTableIndex(&root, binding.table_index.index);
+		if (!source) {
+			return;
 		}
-	} else if (source_op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-		auto &aggr = source_op->Cast<LogicalAggregate>();
-		if (binding.table_index == aggr.aggregate_index) {
-			if (binding.column_index < aggr.expressions.size()) {
-				auto &agg_expr = aggr.expressions[binding.column_index];
-				if (agg_expr->type == ExpressionType::BOUND_AGGREGATE) {
-					auto &bound_agg = agg_expr->Cast<BoundAggregateExpression>();
-					if (IsAnyPacAggregate(bound_agg.function.name)) {
-						if (out_source_binding) {
-							*out_source_binding = binding;
-						}
-						return GetBasePacAggregateName(bound_agg.function.name);
-					}
+		if (source->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+			auto &projection = source->Cast<LogicalProjection>();
+			if (binding.column_index < projection.expressions.size()) {
+				CollectPacSources(*projection.expressions[binding.column_index], root, sources, visited);
+			}
+		} else if (source->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+			auto &aggregate = source->Cast<LogicalAggregate>();
+			if (binding.table_index != aggregate.aggregate_index ||
+			    binding.column_index >= aggregate.expressions.size()) {
+				return;
+			}
+			auto &aggregate_expr = *aggregate.expressions[binding.column_index];
+			if (aggregate_expr.GetExpressionType() == ExpressionType::BOUND_AGGREGATE &&
+			    IsAnyPacAggregate(
+			        aggregate_expr.Cast<BoundAggregateExpression>().Function().GetName().GetIdentifierName())) {
+				sources.push_back(binding);
+			} else {
+				CollectPacSources(aggregate_expr, root, sources, visited);
+			}
+		} else if (source->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+			auto &ref = source->Cast<LogicalCTERef>();
+			PRIVACY_DEBUG_PRINT("Categorical detection: tracing CTE reader #" + std::to_string(ref.table_index.index));
+			auto *cte = FindMaterializedCTE(&root, ref.cte_index.index);
+			if (cte) {
+				auto bindings = cte->children[0]->GetColumnBindings();
+				if (binding.column_index < bindings.size()) {
+					BoundColumnRefExpression definition_ref(expr.GetReturnType(), bindings[binding.column_index]);
+					CollectPacSources(definition_ref, root, sources, visited);
 				}
 			}
 		}
+		return;
 	}
-	return "";
+	ExpressionIterator::EnumerateChildren(
+	    expr, [&](const Expression &child) { CollectPacSources(child, root, sources, visited); });
 }
 
-// Helper to collect ALL distinct PAC aggregate bindings in an expression
-// Returns the bindings in the order they were discovered
-static void CollectPacBindingsInExpression(Expression *expr, LogicalOperator *root, vector<PacBindingInfo> &bindings,
-                                           unordered_map<uint64_t, idx_t> &binding_hash_to_index) {
-	// Check if this is a column reference that traces back to a PAC aggregate
-	if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
-		auto &col_ref = expr->Cast<BoundColumnRefExpression>();
-		ColumnBinding source_binding;
-		string pac_name = TracePacAggregateFromBinding(col_ref.binding, root, &source_binding);
-		if (!pac_name.empty()) {
-			uint64_t binding_hash = HashBinding(col_ref.binding);
-			if (binding_hash_to_index.find(binding_hash) == binding_hash_to_index.end()) {
-				PacBindingInfo info;
-				info.binding = col_ref.binding;
-				info.index = bindings.size();
-				info.source_binding = source_binding;
-				binding_hash_to_index[binding_hash] = info.index;
-				bindings.push_back(info);
-			}
-		}
-	}
-	ExpressionIterator::EnumerateChildren(*expr, [&](Expression &child) {
-		CollectPacBindingsInExpression(&child, root, bindings, binding_hash_to_index);
-	});
-}
-
-// Find all PAC aggregate bindings in an expression
 vector<PacBindingInfo> FindAllPacBindingsInExpression(Expression *expr, LogicalOperator *plan_root) {
-	vector<PacBindingInfo> bindings;
-	unordered_map<uint64_t, idx_t> binding_hash_to_index;
-	CollectPacBindingsInExpression(expr, plan_root, bindings, binding_hash_to_index);
-	return bindings;
-}
-
-// Recursively search for PAC aggregate in an expression tree, with plan context for tracing column refs
-// Returns the base aggregate name (without _counters suffix)
-static string FindPacAggregateInExpression(Expression *expr, LogicalOperator *plan_root,
-                                           ColumnBinding *out_source_binding) {
-	// examine specific expression types where the PAC aggregate could be in
-	if (expr->type == ExpressionType::BOUND_AGGREGATE) { // Base case: direct PAC aggregate
-		auto &agg_expr = expr->Cast<BoundAggregateExpression>();
-		if (IsAnyPacAggregate(agg_expr.function.name)) {
-			return GetBasePacAggregateName(agg_expr.function.name);
-		}
-	} else if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
-		auto &col_ref = expr->Cast<BoundColumnRefExpression>();
-		return TracePacAggregateFromBinding(col_ref.binding, plan_root, out_source_binding);
-	} else if (expr->type == ExpressionType::SUBQUERY) {
-		auto &subquery_expr = expr->Cast<BoundSubqueryExpression>();
-		for (auto &child : subquery_expr.children) {
-			string result = FindPacAggregateInExpression(child.get(), plan_root);
-			if (!result.empty()) {
-				return result; // Found PAC aggregate in the subquery's children (for IN, ANY, ALL operators)
+	vector<PacBindingInfo> result;
+	unordered_set<uint64_t> seen;
+	std::function<void(const Expression &)> collect = [&](const Expression &expression) {
+		if (expression.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
+			auto binding = expression.Cast<BoundColumnRefExpression>().Binding();
+			if (seen.insert(HashBinding(binding)).second) {
+				vector<ColumnBinding> sources;
+				unordered_set<uint64_t> visited;
+				CollectPacSources(expression, *plan_root, sources, visited);
+				for (auto &source : sources) {
+					PacBindingInfo info;
+					info.binding = binding;
+					info.source_binding = source;
+					info.index = result.size();
+					result.push_back(info);
+				}
 			}
 		}
-		if (subquery_expr.subquery_type == SubqueryType::SCALAR) {
-			string result = FindPacAggregateInOperator(plan_root);
-			if (!result.empty()) {
-				return result; // found PAC aggregate in scalar subquery
-			}
-		}
-		return "";
-	}
-	// Generic traversal for all other expression types (comparisons, operators, casts,
-	// functions, constants, CASE, BETWEEN, conjunctions, window functions, etc.)
-	string result;
-	ExpressionIterator::EnumerateChildren(*expr, [&](Expression &child) {
-		if (result.empty()) {
-			result = FindPacAggregateInExpression(&child, plan_root, out_source_binding);
-		}
-	});
+		ExpressionIterator::EnumerateChildren(expression, collect);
+	};
+	collect(*expr);
 	return result;
 }
 
@@ -146,7 +105,7 @@ static bool IsHavingBinding(LogicalOperator *filter_op, const ColumnBinding &bin
 	LogicalOperator *child = filter_op->children[0].get();
 	while (child && child->type == LogicalOperatorType::LOGICAL_PROJECTION) {
 		auto &proj = child->Cast<LogicalProjection>();
-		if (binding.table_index == proj.table_index) {
+		if (binding.table_index.index == proj.table_index.index) {
 			return true;
 		}
 		if (child->children.empty()) {
@@ -156,7 +115,8 @@ static bool IsHavingBinding(LogicalOperator *filter_op, const ColumnBinding &bin
 	}
 	if (child && child->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
 		auto &agg = child->Cast<LogicalAggregate>();
-		return binding.table_index == agg.aggregate_index || binding.table_index == agg.group_index;
+		return binding.table_index.index == agg.aggregate_index.index ||
+		       binding.table_index.index == agg.group_index.index;
 	}
 	return false;
 }
@@ -178,16 +138,18 @@ void DetectCategoricalPatterns(LogicalOperator *op, LogicalOperator *plan_root,
 	// Fallback: extract from children[0] of the first PAC aggregate expression.
 	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
 		auto &agg = op->Cast<LogicalAggregate>();
-		auto it = pac_agg_info.find(agg.aggregate_index);
+		auto it = pac_agg_info.find(agg.aggregate_index.index);
 		if (it != pac_agg_info.end()) {
 			hash_for_children = it->second.hash_binding;
 		} else {
 			for (auto &agg_expr : agg.expressions) {
-				if (agg_expr->type == ExpressionType::BOUND_AGGREGATE) {
+				if (agg_expr->GetExpressionType() == ExpressionType::BOUND_AGGREGATE) {
 					auto &bound_agg = agg_expr->Cast<BoundAggregateExpression>();
-					if (IsPacAggregate(bound_agg.function.name) && !bound_agg.children.empty() &&
-					    bound_agg.children[0]->type == ExpressionType::BOUND_COLUMN_REF) {
-						hash_for_children = bound_agg.children[0]->Cast<BoundColumnRefExpression>().binding;
+					if (IsPacAggregate(bound_agg.FunctionMutable().GetName().GetIdentifierName()) &&
+					    !bound_agg.GetChildrenMutable().empty() &&
+					    bound_agg.GetChildrenMutable()[0]->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
+						hash_for_children =
+						    bound_agg.GetChildrenMutable()[0]->Cast<BoundColumnRefExpression>().BindingMutable();
 						break;
 					}
 				}
@@ -196,14 +158,14 @@ void DetectCategoricalPatterns(LogicalOperator *op, LogicalOperator *plan_root,
 	}
 
 	// Resolve hash binding through projections (follow col_ref chains)
-	if (hash_for_children.table_index != DConstants::INVALID_INDEX &&
+	if (hash_for_children.table_index.index != DConstants::INVALID_INDEX &&
 	    op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
 		auto &proj = op->Cast<LogicalProjection>();
-		if (hash_for_children.table_index == proj.table_index &&
+		if (hash_for_children.table_index.index == proj.table_index.index &&
 		    hash_for_children.column_index < proj.expressions.size()) {
 			auto &expr = proj.expressions[hash_for_children.column_index];
-			if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
-				hash_for_children = expr->Cast<BoundColumnRefExpression>().binding;
+			if (expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
+				hash_for_children = expr->Cast<BoundColumnRefExpression>().BindingMutable();
 			}
 		}
 	}
@@ -238,7 +200,7 @@ void DetectCategoricalPatterns(LogicalOperator *op, LogicalOperator *plan_root,
 				info.expr_index = i;
 				info.pac_bindings = std::move(pac_bindings);
 				info.outer_pac_hash = hash_for_children;
-				info.has_outer_pac_hash = (hash_for_children.table_index != DConstants::INVALID_INDEX);
+				info.has_outer_pac_hash = (hash_for_children.table_index.index != DConstants::INVALID_INDEX);
 				patterns.push_back(info);
 			}
 		}
@@ -247,20 +209,26 @@ void DetectCategoricalPatterns(LogicalOperator *op, LogicalOperator *plan_root,
 		auto &join = op->Cast<LogicalComparisonJoin>();
 		for (idx_t i = 0; i < join.conditions.size(); i++) {
 			auto &cond = join.conditions[i];
-			// Check both sides; any PAC aggregate in a join condition is categorical (not HAVING).
-			for (auto *side : {cond.left.get(), cond.right.get()}) {
-				string pac_name = FindPacAggregateInExpression(side, plan_root);
-				if (pac_name.empty()) {
-					continue;
+			vector<PacBindingInfo> bindings;
+			unordered_set<uint64_t> seen;
+			for (auto *side : {cond.LeftReference().get(), cond.RightReference().get()}) {
+				for (auto &binding : FindAllPacBindingsInExpression(side, plan_root)) {
+					if (seen.insert(HashBinding(binding.source_binding)).second) {
+						binding.index = bindings.size();
+						bindings.push_back(binding);
+					}
 				}
-				CategoricalPatternInfo info;
-				info.parent_op = op;
-				info.expr_index = i;
-				info.outer_pac_hash = hash_for_children;
-				info.has_outer_pac_hash = (hash_for_children.table_index != DConstants::INVALID_INDEX);
-				patterns.push_back(info);
-				break; // one match per condition is enough
 			}
+			if (bindings.empty()) {
+				continue;
+			}
+			CategoricalPatternInfo info;
+			info.parent_op = op;
+			info.expr_index = i;
+			info.pac_bindings = std::move(bindings);
+			info.outer_pac_hash = hash_for_children;
+			info.has_outer_pac_hash = (hash_for_children.table_index.index != DConstants::INVALID_INDEX);
+			patterns.push_back(std::move(info));
 		}
 	} else if (!inside_aggregate && patterns.empty() && op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
 		// Check projection expressions for arithmetic involving multiple PAC aggregates
@@ -271,7 +239,7 @@ void DetectCategoricalPatterns(LogicalOperator *op, LogicalOperator *plan_root,
 		auto &proj = op->Cast<LogicalProjection>();
 		for (idx_t i = 0; i < proj.expressions.size(); i++) {
 			auto &expr = proj.expressions[i];
-			if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+			if (expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 				continue; // Skip simple column references - they don't need rewriting
 			}
 			// Find ALL PAC aggregate bindings in this expression
@@ -287,18 +255,19 @@ void DetectCategoricalPatterns(LogicalOperator *op, LogicalOperator *plan_root,
 				is_arithmetic_with_pac = true;
 			} else if (pac_bindings.size() == 1) {
 				// Single aggregate - check if it's in an arithmetic expression (not just a column ref or simple cast)
-				if (expr->type != ExpressionType::BOUND_COLUMN_REF && expr->type != ExpressionType::OPERATOR_CAST) {
+				if (expr->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF &&
+				    expr->GetExpressionType() != ExpressionType::OPERATOR_CAST) {
 					is_arithmetic_with_pac = true;
-				} else if (expr->type == ExpressionType::OPERATOR_CAST) {
+				} else if (expr->GetExpressionType() == ExpressionType::OPERATOR_CAST) {
 					// Check if cast contains arithmetic
-					auto &cast_expr = expr->Cast<BoundCastExpression>();
-					if (cast_expr.child->type != ExpressionType::BOUND_COLUMN_REF) {
+					auto &cast_expr = expr->Cast<BoundFunctionExpression>();
+					if (cast_expr.GetChildrenMutable()[0]->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
 						is_arithmetic_with_pac = true;
 					}
 				}
 			}
 			if (is_arithmetic_with_pac) {
-				if (!IsNumericalType(expr->return_type)) {
+				if (!IsNumericalType(expr->GetReturnType())) {
 					continue; // Only create pattern if result is numerical (as_noised only works on numbers)
 				}
 				CategoricalPatternInfo info;
