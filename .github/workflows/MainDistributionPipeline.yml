@@ -14,17 +14,17 @@ concurrency:
 jobs:
   duckdb-stable-build:
     name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5.4
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@ebdcc1961780b0ce1272a0d7637dc58447c34885
     with:
-      duckdb_version: v1.5.4
-      ci_tools_version: v1.5.4
+      duckdb_version: v2.0.0
+      ci_tools_version: ebdcc1961780b0ce1272a0d7637dc58447c34885
       extension_name: privacy
 
   code-quality-check:
     name: Code Quality Check
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.5.4
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@ebdcc1961780b0ce1272a0d7637dc58447c34885
     with:
-      duckdb_version: v1.5.4
-      ci_tools_version: v1.5.4
+      duckdb_version: v2.0.0
+      ci_tools_version: ebdcc1961780b0ce1272a0d7637dc58447c34885
       extension_name: privacy
       format_checks: 'format;tidy'

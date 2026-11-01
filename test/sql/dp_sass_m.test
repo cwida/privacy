@@ -866,7 +866,7 @@ EXPLAIN SELECT category AS g1, length(category) AS g2, COUNT(DISTINCT v)
 FROM sass_m_events
 GROUP BY g1, g2;
 ----
-logical_opt	<REGEX>:[\s\S]*RANK_DENSE[\s\S]*ORDER BY[\s\S]*#0 ASC[\s\S]*#1 ASC[\s\S]*
+logical_opt	<REGEX>:[\s\S]*dense_rank[\s\S]*ORDER BY[\s\S]*#0 ASC[\s\S]*#1 ASC[\s\S]*
 
 # Noisy aggregate cells must use independent random streams even when their lane
 # lists and public domains are identical. Cover both the optimized m=64 path and

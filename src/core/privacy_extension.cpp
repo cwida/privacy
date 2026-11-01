@@ -2,6 +2,7 @@
 
 #include "privacy_extension.hpp"
 #include "duckdb.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
@@ -92,7 +93,7 @@ static string QuoteIdentifier(const string &identifier) {
 static void SetExtensionSetting(ClientContext &context, const string &name, const Value &value) {
 	auto &config = DBConfig::GetConfig(context);
 	ExtensionOption extension_option;
-	if (!config.TryGetExtensionOption(name, extension_option)) {
+	if (!config.TryGetExtensionOption(Identifier(name), extension_option)) {
 		throw InternalException("refresh_dp_stats: extension setting '" + name + "' was not registered");
 	}
 	auto target_value = value.CastAs(context, extension_option.type);

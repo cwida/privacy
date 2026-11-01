@@ -1,3 +1,5 @@
+#include "duckdb/common/vector/struct_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
 #include "aggregates/dp_approx_bounds.hpp"
 
 #include "aggregates/as_clip_aggr.hpp"
@@ -111,7 +113,7 @@ DpApproxBoundsParameters GetDpApproxBoundsParameters(const LogicalType &type) {
 }
 
 static double EvaluateConfig(ClientContext &context, const Expression &expression, const string &function_name,
-                             const string &name) {
+                             const Identifier &name) {
 	if (!expression.IsFoldable()) {
 		throw InvalidInputException(function_name + ": " + name + " must be a constant");
 	}
@@ -128,32 +130,41 @@ static idx_t EvaluateBinCount(ClientContext &context, const Expression &expressi
 	return static_cast<idx_t>(value);
 }
 
-static unique_ptr<FunctionData> BindDpApproxBounds(ClientContext &context, AggregateFunction &function,
-                                                   vector<unique_ptr<Expression>> &arguments) {
+static unique_ptr<FunctionData> BindDpApproxBounds(BindAggregateFunctionInput &bind_input) {
+	auto &context = bind_input.GetClientContext();
+	auto &function = bind_input.GetBoundFunction();
+	auto &arguments = bind_input.GetArguments();
 	if (arguments.size() != 5 && arguments.size() != 6) {
-		throw InternalException(function.name + ": invalid internal argument count");
+		throw InternalException(function.GetName().GetIdentifierName() + ": invalid internal argument count");
 	}
-	double epsilon = EvaluateConfig(context, *arguments[1], function.name, "epsilon");
-	double max_groups = EvaluateConfig(context, *arguments[2], function.name, "max groups");
+	double epsilon = EvaluateConfig(context, *arguments[1], function.GetName().GetIdentifierName(), "epsilon");
+	double max_groups = EvaluateConfig(context, *arguments[2], function.GetName().GetIdentifierName(), "max groups");
 	double max_contributions =
-	    arguments.size() == 6 ? EvaluateConfig(context, *arguments[3], function.name, "max contributions") : 1.0;
+	    arguments.size() == 6
+	        ? EvaluateConfig(context, *arguments[3], function.GetName().GetIdentifierName(), "max contributions")
+	        : 1.0;
 	idx_t profile_offset = arguments.size() == 6 ? 4 : 3;
-	double scale = EvaluateConfig(context, *arguments[profile_offset], function.name, "scale");
-	idx_t num_bins = EvaluateBinCount(context, *arguments[profile_offset + 1], function.name);
+	double scale = EvaluateConfig(context, *arguments[profile_offset], function.GetName().GetIdentifierName(), "scale");
+	idx_t num_bins = EvaluateBinCount(context, *arguments[profile_offset + 1], function.GetName().GetIdentifierName());
 	if (!std::isfinite(epsilon) || epsilon <= 0.0) {
-		throw InvalidInputException(function.name + ": epsilon must be a positive finite number");
+		throw InvalidInputException(function.GetName().GetIdentifierName() +
+		                            ": epsilon must be a positive finite number");
 	}
 	if (!std::isfinite(max_groups) || max_groups <= 0.0) {
-		throw InvalidInputException(function.name + ": max groups must be a positive finite number");
+		throw InvalidInputException(function.GetName().GetIdentifierName() +
+		                            ": max groups must be a positive finite number");
 	}
 	if (!std::isfinite(max_contributions) || max_contributions <= 0.0) {
-		throw InvalidInputException(function.name + ": max contributions must be a positive finite number");
+		throw InvalidInputException(function.GetName().GetIdentifierName() +
+		                            ": max contributions must be a positive finite number");
 	}
 	if (arguments.size() == 6 && std::round(max_contributions) != max_contributions) {
-		throw InvalidInputException(function.name + ": max contributions must be integer-valued");
+		throw InvalidInputException(function.GetName().GetIdentifierName() +
+		                            ": max contributions must be integer-valued");
 	}
 	if (!std::isfinite(scale) || scale <= 0.0) {
-		throw InvalidInputException(function.name + ": scale must be a positive finite number");
+		throw InvalidInputException(function.GetName().GetIdentifierName() +
+		                            ": scale must be a positive finite number");
 	}
 	auto result = make_uniq<DpApproxBoundsBindData>();
 	result->epsilon = epsilon;
@@ -165,12 +176,15 @@ static unique_ptr<FunctionData> BindDpApproxBounds(ClientContext &context, Aggre
 	return std::move(result);
 }
 
-static idx_t DpApproxBoundsStateSize(const AggregateFunction &) {
+static idx_t DpApproxBoundsStateSize(AggregateStateInput &) {
 	return sizeof(DpApproxBoundsState);
 }
 
-static void DpApproxBoundsInitialize(const AggregateFunction &, data_ptr_t state_p) {
-	memset(state_p, 0, sizeof(DpApproxBoundsState));
+static void DpApproxBoundsInitialize(AggregateStateInput &, data_ptr_t *states, idx_t count) {
+	for (idx_t i = 0; i < count; i++) {
+		auto state_p = states[i];
+		memset(state_p, 0, sizeof(DpApproxBoundsState));
+	}
 }
 
 static DpApproxBoundsBin *EnsureBins(DpApproxBoundsBin *&bins, idx_t num_bins, ArenaAllocator &allocator) {
@@ -249,9 +263,12 @@ static void UpdateRows(Vector inputs[], AggregateInputData &input, idx_t count, 
 	}
 }
 
-static void DpApproxBoundsUpdate(Vector inputs[], AggregateInputData &input, idx_t, data_ptr_t state_p, idx_t count) {
-	auto state = reinterpret_cast<DpApproxBoundsState *>(state_p);
-	UpdateRows(inputs, input, count, [state](idx_t) { return state; });
+static void DpApproxBoundsUpdate(Vector inputs[], AggregateInputData &input, idx_t input_count,
+                                 const ClusteredAggr &clusters, idx_t count) {
+	ExecutePrivClusters(inputs, input_count, clusters, [&](Vector inputs[], data_ptr_t state_p, idx_t count) {
+		auto state = reinterpret_cast<DpApproxBoundsState *>(state_p);
+		UpdateRows(inputs, input, count, [state](idx_t) { return state; });
+	});
 }
 
 static void DpApproxBoundsScatterUpdate(Vector inputs[], AggregateInputData &input, idx_t, Vector &states,
@@ -475,8 +492,9 @@ struct DpBoundedValueListState {
 	idx_t size;
 };
 
-static unique_ptr<FunctionData> BindDpBoundedValueList(ClientContext &context, AggregateFunction &,
-                                                       vector<unique_ptr<Expression>> &arguments) {
+static unique_ptr<FunctionData> BindDpBoundedValueList(BindAggregateFunctionInput &bind_input) {
+	auto &context = bind_input.GetClientContext();
+	auto &arguments = bind_input.GetArguments();
 	if (arguments.size() != 2 || !arguments[1]->IsFoldable()) {
 		throw InvalidInputException("dp_bounded_value_list: max values must be a constant");
 	}
@@ -493,12 +511,15 @@ static unique_ptr<FunctionData> BindDpBoundedValueList(ClientContext &context, A
 	return std::move(result);
 }
 
-static idx_t DpBoundedValueListStateSize(const AggregateFunction &) {
+static idx_t DpBoundedValueListStateSize(AggregateStateInput &) {
 	return sizeof(DpBoundedValueListState);
 }
 
-static void DpBoundedValueListInitialize(const AggregateFunction &, data_ptr_t state_p) {
-	memset(state_p, 0, sizeof(DpBoundedValueListState));
+static void DpBoundedValueListInitialize(AggregateStateInput &, data_ptr_t *states, idx_t count) {
+	for (idx_t i = 0; i < count; i++) {
+		auto state_p = states[i];
+		memset(state_p, 0, sizeof(DpBoundedValueListState));
+	}
 }
 
 static uint64_t BoundedValueScore(double value) {
@@ -567,10 +588,12 @@ static void UpdateBoundedValueRows(Vector inputs[], AggregateInputData &input, i
 	}
 }
 
-static void DpBoundedValueListUpdate(Vector inputs[], AggregateInputData &input, idx_t, data_ptr_t state_p,
-                                     idx_t count) {
-	auto state = reinterpret_cast<DpBoundedValueListState *>(state_p);
-	UpdateBoundedValueRows(inputs, input, count, [state](idx_t) { return state; });
+static void DpBoundedValueListUpdate(Vector inputs[], AggregateInputData &input, idx_t input_count,
+                                     const ClusteredAggr &clusters, idx_t count) {
+	ExecutePrivClusters(inputs, input_count, clusters, [&](Vector inputs[], data_ptr_t state_p, idx_t count) {
+		auto state = reinterpret_cast<DpBoundedValueListState *>(state_p);
+		UpdateBoundedValueRows(inputs, input, count, [state](idx_t) { return state; });
+	});
 }
 
 static void DpBoundedValueListScatterUpdate(Vector inputs[], AggregateInputData &input, idx_t, Vector &states,
@@ -592,18 +615,18 @@ static void DpBoundedValueListCombine(Vector &source, Vector &target, AggregateI
 	}
 }
 
-static void DpBoundedValueListFinalize(Vector &states, AggregateInputData &, Vector &result, idx_t count,
+static void DpBoundedValueListFinalize(Vector &states, AggregateFinalizeInputData &, Vector &result, idx_t count,
                                        idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<DpBoundedValueListState *>(states);
-	auto entries = FlatVector::GetData<list_entry_t>(result);
-	auto &child = ListVector::GetEntry(result);
+	auto entries = FlatVector::GetDataMutable<list_entry_t>(result);
+	auto &child = ListVector::GetChildMutable(result);
 	idx_t total = ListVector::GetListSize(result);
 	for (idx_t i = 0; i < count; i++) {
 		total += state_ptrs[i]->size;
 	}
 	ListVector::Reserve(result, total);
 	ListVector::SetListSize(result, total);
-	auto output = FlatVector::GetData<double>(child);
+	auto output = FlatVector::GetDataMutable<double>(child);
 	idx_t cursor = total;
 	for (idx_t i = count; i > 0; i--) {
 		auto *state = state_ptrs[i - 1];
@@ -730,14 +753,14 @@ static LogicalType DpApproxBoundsDebugType() {
 
 static void WriteDebug(Vector &result, idx_t row, const DpApproxBoundsResult &value) {
 	auto &children = StructVector::GetEntries(result);
-	FlatVector::GetData<bool>(*children[0])[row] = value.success;
-	FlatVector::GetData<double>(*children[1])[row] = value.lower_bound;
-	FlatVector::GetData<double>(*children[2])[row] = value.upper_bound;
-	FlatVector::GetData<double>(*children[3])[row] = value.clipped_value;
-	FlatVector::GetData<double>(*children[4])[row] = value.noise_scale;
-	FlatVector::GetData<int32_t>(*children[5])[row] = value.selected_bin;
-	FlatVector::GetData<int32_t>(*children[6])[row] = value.attempts;
-	FlatVector::GetData<uint64_t>(*children[7])[row] = value.contributions;
+	FlatVector::GetDataMutable<bool>(children[0])[row] = value.success;
+	FlatVector::GetDataMutable<double>(children[1])[row] = value.lower_bound;
+	FlatVector::GetDataMutable<double>(children[2])[row] = value.upper_bound;
+	FlatVector::GetDataMutable<double>(children[3])[row] = value.clipped_value;
+	FlatVector::GetDataMutable<double>(children[4])[row] = value.noise_scale;
+	FlatVector::GetDataMutable<int32_t>(children[5])[row] = value.selected_bin;
+	FlatVector::GetDataMutable<int32_t>(children[6])[row] = value.attempts;
+	FlatVector::GetDataMutable<uint64_t>(children[7])[row] = value.contributions;
 }
 
 template <class STATE_GETTER>
@@ -771,10 +794,12 @@ static void UpdateMeanRows(Vector inputs[], AggregateInputData &input, idx_t cou
 	}
 }
 
-static void DpApproxBoundsMeanUpdate(Vector inputs[], AggregateInputData &input, idx_t, data_ptr_t state_p,
-                                     idx_t count) {
-	auto state = reinterpret_cast<DpApproxBoundsState *>(state_p);
-	UpdateMeanRows(inputs, input, count, [state](idx_t) { return state; });
+static void DpApproxBoundsMeanUpdate(Vector inputs[], AggregateInputData &input, idx_t input_count,
+                                     const ClusteredAggr &clusters, idx_t count) {
+	ExecutePrivClusters(inputs, input_count, clusters, [&](Vector inputs[], data_ptr_t state_p, idx_t count) {
+		auto state = reinterpret_cast<DpApproxBoundsState *>(state_p);
+		UpdateMeanRows(inputs, input, count, [state](idx_t) { return state; });
+	});
 }
 
 static void DpApproxBoundsMeanScatterUpdate(Vector inputs[], AggregateInputData &input, idx_t, Vector &states,
@@ -789,15 +814,15 @@ static double ClampMean(double value, double lower, double upper) {
 	return std::max(lower, std::min(upper, value));
 }
 
-static void DpApproxBoundsMeanFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+static void DpApproxBoundsMeanFinalize(Vector &states, AggregateFinalizeInputData &input, Vector &result, idx_t count,
                                        idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<DpApproxBoundsState *>(states);
 	auto &bind = input.bind_data->Cast<DpApproxBoundsBindData>();
-	auto result_data = FlatVector::GetData<double>(result);
+	auto result_data = FlatVector::GetDataMutable<double>(result);
 	for (idx_t i = 0; i < count; i++) {
 		auto bounds = FinalizeState(*state_ptrs[i], bind, false);
 		if (!bounds.success) {
-			FlatVector::Validity(result).SetInvalid(offset + i);
+			FlatVector::ValidityMutable(result).SetInvalid(offset + i);
 			continue;
 		}
 		// A point interval has zero sensitivity but cannot define the normalized mean. Widen it by one
@@ -838,11 +863,11 @@ static void DpApproxBoundsMeanFinalize(Vector &states, AggregateInputData &input
 }
 
 template <bool DEBUG>
-static void DpApproxBoundsFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+static void DpApproxBoundsFinalize(Vector &states, AggregateFinalizeInputData &input, Vector &result, idx_t count,
                                    idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<DpApproxBoundsState *>(states);
 	auto &bind = input.bind_data->Cast<DpApproxBoundsBindData>();
-	auto result_data = DEBUG ? nullptr : FlatVector::GetData<double>(result);
+	auto result_data = DEBUG ? nullptr : FlatVector::GetDataMutable<double>(result);
 	for (idx_t i = 0; i < count; i++) {
 		auto value = FinalizeState(*state_ptrs[i], bind, true);
 		if (DEBUG) {
@@ -850,7 +875,7 @@ static void DpApproxBoundsFinalize(Vector &states, AggregateInputData &input, Ve
 			continue;
 		}
 		if (!value.success) {
-			FlatVector::Validity(result).SetInvalid(offset + i);
+			FlatVector::ValidityMutable(result).SetInvalid(offset + i);
 			continue;
 		}
 		result_data[offset + i] =
@@ -858,10 +883,10 @@ static void DpApproxBoundsFinalize(Vector &states, AggregateInputData &input, Ve
 	}
 }
 
-static AggregateFunction MakeDpApproxBoundsFunction(const string &name, const LogicalType &return_type,
+static AggregateFunction MakeDpApproxBoundsFunction(const Identifier &name, const LogicalType &return_type,
                                                     aggregate_finalize_t finalize) {
 	return AggregateFunction(
-	    name,
+	    Identifier(name),
 	    {LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::UBIGINT},
 	    return_type, DpApproxBoundsStateSize, DpApproxBoundsInitialize, DpApproxBoundsScatterUpdate,
 	    DpApproxBoundsCombine, finalize, FunctionNullHandling::SPECIAL_HANDLING, DpApproxBoundsUpdate,

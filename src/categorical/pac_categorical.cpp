@@ -6,6 +6,7 @@
 // Created by ila on 1/22/26.
 //
 
+#include "duckdb/common/vector/list_vector.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "privacy_debug.hpp"
@@ -63,7 +64,7 @@ struct PacCategoricalBindData : public FunctionData {
 	      random_state(GetPacRandomState(ctx)) {
 		// Read utility threshold setting
 		Value ut_val;
-		if (ctx.TryGetCurrentSetting("privacy_min_group_count", ut_val) && !ut_val.IsNull()) {
+		if (ctx.TryGetCurrentSetting(Identifier("privacy_min_group_count"), ut_val) && !ut_val.IsNull()) {
 			utility_threshold = ut_val.GetValue<double>();
 		}
 		seed = GetPacSeed(ctx, mi);
@@ -72,7 +73,7 @@ struct PacCategoricalBindData : public FunctionData {
 		if (mi > 0.0) {
 			Value pt_val;
 			bool ptracking_enabled = true;
-			if (ctx.TryGetCurrentSetting("pac_ptracking", pt_val) && !pt_val.IsNull()) {
+			if (ctx.TryGetCurrentSetting(Identifier("pac_ptracking"), pt_val) && !pt_val.IsNull()) {
 				ptracking_enabled = pt_val.GetValue<bool>();
 			}
 			if (ptracking_enabled) {
@@ -190,8 +191,8 @@ static void PacSelectFunction(DataChunk &args, ExpressionState &state, Vector &r
 	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
 	auto child_values = UnifiedVectorFormat::GetData<bool>(child_data);
 
-	auto result_data = FlatVector::GetData<uint64_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<uint64_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < count; i++) {
 		auto h_idx = hash_data.sel->get_index(i);
@@ -225,8 +226,8 @@ static PacFilterParams GetPacFilterParams(ExpressionState &state) {
 	double mi = 0.0;
 	double correction = 1.0;
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
-	if (function.bind_info) {
-		auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
+	if (function.BindInfo()) {
+		auto &bind_data = function.BindInfo()->Cast<PacCategoricalBindData>();
 		mi = bind_data.mi;
 		correction = bind_data.correction;
 	}
@@ -243,7 +244,7 @@ static void PacFilterFromBoolListFunction(DataChunk &args, ExpressionState &stat
 	UnifiedVectorFormat list_data;
 	list_vec.ToUnifiedFormat(count, list_data);
 
-	auto result_data = FlatVector::GetData<bool>(result);
+	auto result_data = FlatVector::GetDataMutable<bool>(result);
 
 	auto &child_vec = ListVector::GetEntry(list_vec);
 	UnifiedVectorFormat child_data;
@@ -280,8 +281,7 @@ static void PacFilterFromBoolListFunction(DataChunk &args, ExpressionState &stat
 }
 
 // Forward declarations for functions used by priv_filter_<cmp> registration
-static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFunction &func,
-                                                   vector<unique_ptr<Expression>> &args);
+static unique_ptr<FunctionData> PacCategoricalBind(BindScalarFunctionInput &bind_input);
 
 // ============================================================================
 // PAC_FILTER_<CMP>: Compare scalar against counter list and filter in one pass
@@ -338,7 +338,7 @@ static void PacFilterCmpFunction(DataChunk &args, ExpressionState &state, Vector
 		corrections = UnifiedVectorFormat::GetData<PAC_FLOAT>(correction_data);
 	}
 
-	auto result_data = FlatVector::GetData<bool>(result);
+	auto result_data = FlatVector::GetDataMutable<bool>(result);
 
 	for (idx_t i = 0; i < count; i++) {
 		auto val_idx = val_data.sel->get_index(i);
@@ -379,14 +379,15 @@ static void PacFilterCmpFunction(DataChunk &args, ExpressionState &state, Vector
 }
 
 template <PacFilterCmpOp CMP>
-static void RegisterPacFilterCmp(ExtensionLoader &loader, const string &name) {
+static void RegisterPacFilterCmp(ExtensionLoader &loader, const Identifier &name) {
 	auto pf = PacFloatLogicalType();
 	auto ldt = LogicalType::LIST(pf);
-	ScalarFunctionSet fset(name);
-	fset.AddFunction(ScalarFunction(name, {pf, ldt}, LogicalType::BOOLEAN, PacFilterCmpFunction<CMP, false>,
-	                                PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal));
-	fset.AddFunction(ScalarFunction(name, {pf, ldt, pf}, LogicalType::BOOLEAN, PacFilterCmpFunction<CMP, true>,
-	                                PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal));
+	ScalarFunctionSet fset {Identifier(name)};
+	fset.AddFunction(ScalarFunction(Identifier(name), {pf, ldt}, LogicalType::BOOLEAN, PacFilterCmpFunction<CMP, false>,
+	                                PacCategoricalBind, nullptr, PacCategoricalInitLocal));
+	fset.AddFunction(ScalarFunction(Identifier(name), {pf, ldt, pf}, LogicalType::BOOLEAN,
+	                                PacFilterCmpFunction<CMP, true>, PacCategoricalBind, nullptr,
+	                                PacCategoricalInitLocal));
 	CreateScalarFunctionInfo info(fset);
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Categorical comparison + probabilistic filter for PAC queries.";
@@ -420,8 +421,8 @@ static void PacSelectCmpFunction(DataChunk &args, ExpressionState &state, Vector
 	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 
-	auto result_data = FlatVector::GetData<uint64_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<uint64_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < count; i++) {
 		auto h_idx = hash_data.sel->get_index(i);
@@ -452,7 +453,7 @@ static void PacSelectCmpFunction(DataChunk &args, ExpressionState &state, Vector
 }
 
 template <PacFilterCmpOp CMP>
-static void RegisterPacSelectCmp(ExtensionLoader &loader, const string &name) {
+static void RegisterPacSelectCmp(ExtensionLoader &loader, const Identifier &name) {
 	auto pf = PacFloatLogicalType();
 	auto ldt = LogicalType::LIST(pf);
 	ScalarFunction f(name, {LogicalType::UBIGINT, pf, ldt}, LogicalType::UBIGINT, PacSelectCmpFunction<CMP>,
@@ -486,8 +487,8 @@ static void PacCoalesceFunction(DataChunk &args, ExpressionState &state, Vector 
 	auto input_entries = UnifiedVectorFormat::GetData<list_entry_t>(input_data);
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto list_entries = FlatVector::GetData<list_entry_t>(result);
-	auto &child_vec = ListVector::GetEntry(result);
+	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
+	auto &child_vec = ListVector::GetChildMutable(result);
 
 	// First pass: count total elements needed
 	idx_t total_elements = 0;
@@ -502,8 +503,8 @@ static void PacCoalesceFunction(DataChunk &args, ExpressionState &state, Vector 
 
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
-	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
-	auto &child_validity = FlatVector::Validity(child_vec);
+	auto child_data = FlatVector::GetDataMutable<PAC_FLOAT>(child_vec);
+	auto &child_validity = FlatVector::ValidityMutable(child_vec);
 	child_validity.EnsureWritable();
 
 	// Get the source child vector for non-NULL lists
@@ -579,14 +580,14 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 	idx_t count = args.size();
 
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
+	auto &bind_data = function.BindInfo()->Cast<PacCategoricalBindData>();
 	auto gen = PacRandomStream(bind_data.seed, *bind_data.random_state);
 
 	UnifiedVectorFormat list_data;
 	list_vec.ToUnifiedFormat(count, list_data);
 
-	auto result_data = FlatVector::GetData<PAC_FLOAT>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<PAC_FLOAT>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	auto &child_vec = ListVector::GetEntry(list_vec);
 	UnifiedVectorFormat child_data;
@@ -670,14 +671,14 @@ static void PacDivFunction(DataChunk &args, ExpressionState &state, Vector &resu
 	}
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto list_entries = FlatVector::GetData<list_entry_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
-	auto &result_child = ListVector::GetEntry(result);
+	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
+	auto &result_child = ListVector::GetChildMutable(result);
 
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
-	auto result_data = FlatVector::GetData<PAC_FLOAT>(result_child);
-	auto &result_child_validity = FlatVector::Validity(result_child);
+	auto result_data = FlatVector::GetDataMutable<PAC_FLOAT>(result_child);
+	auto &result_child_validity = FlatVector::ValidityMutable(result_child);
 	result_child_validity.SetAllValid(total_elements);
 
 	idx_t base = 0;
@@ -725,15 +726,15 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 	idx_t count = args.size();
 
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
-	auto &bind_data = function.bind_info->Cast<PacCategoricalBindData>();
+	auto &bind_data = function.BindInfo()->Cast<PacCategoricalBindData>();
 	auto gen = PacRandomStream(bind_data.seed, *bind_data.random_state);
 
 	UnifiedVectorFormat sum_data, cnt_data;
 	sum_vec.ToUnifiedFormat(count, sum_data);
 	cnt_vec.ToUnifiedFormat(count, cnt_data);
 
-	auto result_data = FlatVector::GetData<double>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<double>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	auto &sum_child = ListVector::GetEntry(sum_vec);
 	auto &cnt_child = ListVector::GetEntry(cnt_vec);
@@ -787,8 +788,10 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 // ============================================================================
 // Bind function for priv_filter/priv_select (reads privacy_seed and pac_mi settings)
 // ============================================================================
-static unique_ptr<FunctionData> PacCategoricalBind(ClientContext &ctx, ScalarFunction &func,
-                                                   vector<unique_ptr<Expression>> &args) {
+static unique_ptr<FunctionData> PacCategoricalBind(BindScalarFunctionInput &bind_input) {
+	auto &ctx = bind_input.GetClientContext();
+	auto &func = bind_input.GetBoundFunction();
+	auto &args = bind_input.GetArguments();
 	// Read mi from pac_mi setting
 	double mi = GetPacMiFromSetting(ctx);
 	// Default correction is 1.0 (can be overridden via explicit parameter in some functions)
@@ -1003,13 +1006,16 @@ struct PacListOps<PacListAggType::MAX> {
 // ============================================================================
 
 template <PacListAggType AGG_TYPE>
-static void PacListAggregateInit(const AggregateFunction &, data_ptr_t state_ptr) {
-	auto &state = *reinterpret_cast<PacListAggregateState *>(state_ptr);
-	state.key_hash = 0;
-	PAC_FLOAT init_val = PacListOps<AGG_TYPE>::InitValue();
-	for (idx_t i = 0; i < 64; i++) {
-		state.values[i] = init_val;
-		state.counts[i] = 0;
+static void PacListAggregateInit(AggregateStateInput &, data_ptr_t *states, idx_t count) {
+	for (idx_t i = 0; i < count; i++) {
+		auto state_ptr = states[i];
+		auto &state = *reinterpret_cast<PacListAggregateState *>(state_ptr);
+		state.key_hash = 0;
+		PAC_FLOAT init_val = PacListOps<AGG_TYPE>::InitValue();
+		for (idx_t i = 0; i < 64; i++) {
+			state.values[i] = init_val;
+			state.counts[i] = 0;
+		}
 	}
 }
 
@@ -1062,7 +1068,7 @@ static void PacListAggregateUpdate(Vector inputs[], AggregateInputData &, idx_t 
 
 	UnifiedVectorFormat sdata;
 	state_vector.ToUnifiedFormat(count, sdata);
-	auto states = reinterpret_cast<PacListAggregateState **>(sdata.data);
+	auto states = UnifiedVectorFormat::GetData<PacListAggregateState *>(sdata);
 
 	// Check if child vector is flat with all valid entries (enables dense path)
 	bool child_is_flat = child_vec.GetVectorType() == VectorType::FLAT_VECTOR && child_data.validity.AllValid();
@@ -1093,8 +1099,8 @@ static void PacListAggregateCombine(Vector &source_vec, Vector &target_vec, Aggr
 	UnifiedVectorFormat sdata, tdata;
 	source_vec.ToUnifiedFormat(count, sdata);
 	target_vec.ToUnifiedFormat(count, tdata);
-	auto sources = reinterpret_cast<PacListAggregateState **>(sdata.data);
-	auto targets = reinterpret_cast<PacListAggregateState **>(tdata.data);
+	auto sources = UnifiedVectorFormat::GetData<PacListAggregateState *>(sdata);
+	auto targets = UnifiedVectorFormat::GetData<PacListAggregateState *>(tdata);
 
 	for (idx_t i = 0; i < count; i++) {
 		auto &source = *sources[sdata.sel->get_index(i)];
@@ -1109,14 +1115,14 @@ static void PacListAggregateCombine(Vector &source_vec, Vector &target_vec, Aggr
 }
 
 template <PacListAggType AGG_TYPE>
-static void PacListAggregateFinalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count,
+static void PacListAggregateFinalize(Vector &state_vector, AggregateFinalizeInputData &, Vector &result, idx_t count,
                                      idx_t offset) {
 	UnifiedVectorFormat sdata;
 	state_vector.ToUnifiedFormat(count, sdata);
-	auto states = reinterpret_cast<PacListAggregateState **>(sdata.data);
+	auto states = UnifiedVectorFormat::GetData<PacListAggregateState *>(sdata);
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto &result_validity = FlatVector::Validity(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < count; i++) {
 		auto &state = *states[sdata.sel->get_index(i)];
@@ -1153,9 +1159,9 @@ static void PacListAggregateDestructor(Vector &, AggregateInputData &, idx_t) {
 }
 
 template <PacListAggType AGG_TYPE>
-static AggregateFunction CreatePacListAggregate(const string &name) {
+static AggregateFunction CreatePacListAggregate(const Identifier &name) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	return AggregateFunction(name, {list_double_type}, list_double_type,
+	return AggregateFunction(Identifier(name), {list_double_type}, list_double_type,
 	                         AggregateFunction::StateSize<PacListAggregateState>, PacListAggregateInit<AGG_TYPE>,
 	                         PacListAggregateUpdate<AGG_TYPE>, PacListAggregateCombine<AGG_TYPE>,
 	                         PacListAggregateFinalize<AGG_TYPE>, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr,
@@ -1196,20 +1202,20 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 
 	// priv_filter(list<bool>) -> BOOLEAN
 	ScalarFunction pac_filter_list("priv_filter", {list_bool_type}, LogicalType::BOOLEAN, PacFilterFromBoolListFunction,
-	                               PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
+	                               PacCategoricalBind, nullptr, PacCategoricalInitLocal);
 	loader.RegisterFunction(make_scalar_info(
 	    pac_filter_list, "[INTERNAL] Probabilistic filter from boolean list for categorical queries."));
 
 	// priv_coalesce(list<PAC_FLOAT>) -> list<PAC_FLOAT>
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
 	ScalarFunction priv_coalesce("priv_coalesce", {list_double_type}, list_double_type, PacCoalesceFunction);
-	priv_coalesce.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	priv_coalesce.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	loader.RegisterFunction(make_scalar_info(priv_coalesce, "[INTERNAL] Replaces NULL counter list with 64 zeros."));
 
 	// as_noised(list<PAC_FLOAT>) -> PAC_FLOAT
 	ScalarFunction as_noised("as_noised", {list_double_type}, PacFloatLogicalType(), PacNoisedFunction,
-	                         PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
-	as_noised.stability = FunctionStability::VOLATILE;
+	                         PacCategoricalBind, nullptr, PacCategoricalInitLocal);
+	as_noised.SetStability(FunctionStability::VOLATILE);
 	loader.RegisterFunction(
 	    make_scalar_info(as_noised, "[INTERNAL] Applies PAC noise to 64-element counter list, returns scalar."));
 
@@ -1219,8 +1225,8 @@ void RegisterPacCategoricalFunctions(ExtensionLoader &loader) {
 
 	// as_noised_div(list<PAC_FLOAT> sum, list<PAC_FLOAT> cnt) -> DOUBLE
 	ScalarFunction as_noised_div("as_noised_div", {list_double_type, list_double_type}, LogicalType::DOUBLE,
-	                             PacNoisedDivFunction, PacCategoricalBind, nullptr, nullptr, PacCategoricalInitLocal);
-	as_noised_div.stability = FunctionStability::VOLATILE;
+	                             PacNoisedDivFunction, PacCategoricalBind, nullptr, PacCategoricalInitLocal);
+	as_noised_div.SetStability(FunctionStability::VOLATILE);
 	loader.RegisterFunction(make_scalar_info(as_noised_div, "[INTERNAL] Fused counter-list division + noise for AVG."));
 
 	// priv_filter_<cmp>: optimized comparison + filter in a single pass

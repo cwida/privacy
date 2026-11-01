@@ -1,3 +1,5 @@
+#include "duckdb/common/vector/struct_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
 #include "aggregates/dp_laplace_noise.hpp"
 #include "aggregates/as_aggregate.hpp"
 #include "privacy_debug.hpp"
@@ -137,23 +139,23 @@ static void DpSassStabilityFunction(DataChunk &args, ExpressionState &, Vector &
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 
 	auto &entries = StructVector::GetEntries(result);
-	auto lane_count_data = FlatVector::GetData<int32_t>(*entries[0]);
-	auto valid_count_data = FlatVector::GetData<int32_t>(*entries[1]);
-	auto null_count_data = FlatVector::GetData<int32_t>(*entries[2]);
-	auto mean_data = FlatVector::GetData<double>(*entries[3]);
-	auto stddev_data = FlatVector::GetData<double>(*entries[4]);
-	auto cv_data = FlatVector::GetData<double>(*entries[5]);
-	auto min_data = FlatVector::GetData<double>(*entries[6]);
-	auto median_data = FlatVector::GetData<double>(*entries[7]);
-	auto max_data = FlatVector::GetData<double>(*entries[8]);
-	auto range_data = FlatVector::GetData<double>(*entries[9]);
-	auto mad_data = FlatVector::GetData<double>(*entries[10]);
-	auto max_abs_dev_data = FlatVector::GetData<double>(*entries[11]);
-	auto stable_stddev_1_data = FlatVector::GetData<bool>(*entries[12]);
-	auto stable_mad_1_data = FlatVector::GetData<bool>(*entries[13]);
+	auto lane_count_data = FlatVector::GetDataMutable<int32_t>(entries[0]);
+	auto valid_count_data = FlatVector::GetDataMutable<int32_t>(entries[1]);
+	auto null_count_data = FlatVector::GetDataMutable<int32_t>(entries[2]);
+	auto mean_data = FlatVector::GetDataMutable<double>(entries[3]);
+	auto stddev_data = FlatVector::GetDataMutable<double>(entries[4]);
+	auto cv_data = FlatVector::GetDataMutable<double>(entries[5]);
+	auto min_data = FlatVector::GetDataMutable<double>(entries[6]);
+	auto median_data = FlatVector::GetDataMutable<double>(entries[7]);
+	auto max_data = FlatVector::GetDataMutable<double>(entries[8]);
+	auto range_data = FlatVector::GetDataMutable<double>(entries[9]);
+	auto mad_data = FlatVector::GetDataMutable<double>(entries[10]);
+	auto max_abs_dev_data = FlatVector::GetDataMutable<double>(entries[11]);
+	auto stable_stddev_1_data = FlatVector::GetDataMutable<bool>(entries[12]);
+	auto stable_mad_1_data = FlatVector::GetDataMutable<bool>(entries[13]);
 
-	auto &result_validity = FlatVector::Validity(result);
-	auto &cv_validity = FlatVector::Validity(*entries[5]);
+	auto &result_validity = FlatVector::ValidityMutable(result);
+	auto &cv_validity = FlatVector::ValidityMutable(entries[5]);
 	for (idx_t i = 0; i < count; i++) {
 		auto list_idx = list_data.sel->get_index(i);
 		if (!list_data.validity.RowIsValid(list_idx)) {
@@ -282,8 +284,8 @@ static void DpSassRecordStabilityFunction(DataChunk &args, ExpressionState &, Ve
 	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 
-	auto result_data = FlatVector::GetData<double>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<double>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 	for (idx_t i = 0; i < count; i++) {
 		auto list_idx = list_data.sel->get_index(i);
 		auto aggregate_index_idx = aggregate_index_data.sel->get_index(i);
@@ -501,8 +503,8 @@ static void DpLaplaceNoiseFunction(DataChunk &args, ExpressionState &, Vector &r
 	// BinaryExecutor preserves a CONSTANT vector by invoking its callback once. Noise is volatile, so
 	// materialize a FLAT result and sample once per output row even when value and scale are constants.
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto result_data = FlatVector::GetData<double>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<double>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 	result_validity.Reset();
 	unique_ptr<GranularLaplaceDistribution> shared_distribution;
 	double shared_scale = 0.0;
@@ -538,7 +540,8 @@ void RegisterDpLaplaceNoiseFunction(ExtensionLoader &loader) {
 	                        DpLaplaceNoiseFunction);
 	// Every released cell needs an independent draw. VOLATILE prevents constant folding and common-
 	// subexpression elimination from reusing one draw across aggregate cells.
-	function.stability = FunctionStability::VOLATILE;
+	function.SetStability(FunctionStability::VOLATILE);
+	function.SetFallible();
 	set.AddFunction(std::move(function));
 	CreateScalarFunctionInfo info(set);
 	FunctionDescription desc;
@@ -758,7 +761,7 @@ static void DpSmoothMedianNoiseFunctionInternal(DataChunk &args, ExpressionState
 	auto &context = state.GetContext();
 	bool noise_enabled = true;
 	Value noise_val;
-	if (context.TryGetCurrentSetting("privacy_noise", noise_val) && !noise_val.IsNull()) {
+	if (context.TryGetCurrentSetting(Identifier("privacy_noise"), noise_val) && !noise_val.IsNull()) {
 		noise_enabled = noise_val.GetValue<bool>();
 	}
 
@@ -806,8 +809,8 @@ static void DpSmoothMedianNoiseFunctionInternal(DataChunk &args, ExpressionState
 	    (record_scale || has_cell_identity) ? UnifiedVectorFormat::GetData<int32_t>(aggregate_index_data) : nullptr;
 	auto aggregate_counts = has_cell_identity ? UnifiedVectorFormat::GetData<int32_t>(aggregate_count_data) : nullptr;
 	auto group_identities = has_cell_identity ? UnifiedVectorFormat::GetData<int64_t>(group_identity_data) : nullptr;
-	auto result_data = FlatVector::GetData<double>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<double>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < count; i++) {
 		auto list_idx = list_data.sel->get_index(i);
@@ -887,7 +890,7 @@ static void DpAggregateFunction(DataChunk &args, ExpressionState &state, Vector 
 	auto &context = state.GetContext();
 	bool noise_enabled = true;
 	Value noise_val;
-	if (context.TryGetCurrentSetting("privacy_noise", noise_val) && !noise_val.IsNull()) {
+	if (context.TryGetCurrentSetting(Identifier("privacy_noise"), noise_val) && !noise_val.IsNull()) {
 		noise_enabled = noise_val.GetValue<bool>();
 	}
 
@@ -911,8 +914,8 @@ static void DpAggregateFunction(DataChunk &args, ExpressionState &state, Vector 
 	auto sample_lanes_values = UnifiedVectorFormat::GetData<int32_t>(sample_lanes_data);
 	auto lower_values = UnifiedVectorFormat::GetData<double>(lower_data);
 	auto upper_values = UnifiedVectorFormat::GetData<double>(upper_data);
-	auto result_data = FlatVector::GetData<double>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<double>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < count; i++) {
 		auto list_idx = list_data.sel->get_index(i);
@@ -988,7 +991,7 @@ static void DpGuptMeanNoiseFunctionInternal(DataChunk &args, ExpressionState &st
 	auto &context = state.GetContext();
 	bool noise_enabled = true;
 	Value noise_val;
-	if (context.TryGetCurrentSetting("privacy_noise", noise_val) && !noise_val.IsNull()) {
+	if (context.TryGetCurrentSetting(Identifier("privacy_noise"), noise_val) && !noise_val.IsNull()) {
 		noise_enabled = noise_val.GetValue<bool>();
 	}
 
@@ -1030,8 +1033,8 @@ static void DpGuptMeanNoiseFunctionInternal(DataChunk &args, ExpressionState &st
 	    (record_scale || has_cell_identity) ? UnifiedVectorFormat::GetData<int32_t>(aggregate_index_data) : nullptr;
 	auto aggregate_counts = has_cell_identity ? UnifiedVectorFormat::GetData<int32_t>(aggregate_count_data) : nullptr;
 	auto group_identities = has_cell_identity ? UnifiedVectorFormat::GetData<int64_t>(group_identity_data) : nullptr;
-	auto result_data = FlatVector::GetData<double>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<double>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < count; i++) {
 		auto list_idx = list_data.sel->get_index(i);
@@ -1212,7 +1215,7 @@ static void DpNonEmptyMeanNoiseFunctionInternal(DataChunk &args, ExpressionState
 	auto &context = state.GetContext();
 	bool noise_enabled = true;
 	Value noise_val;
-	if (context.TryGetCurrentSetting("privacy_noise", noise_val) && !noise_val.IsNull()) {
+	if (context.TryGetCurrentSetting(Identifier("privacy_noise"), noise_val) && !noise_val.IsNull()) {
 		noise_enabled = noise_val.GetValue<bool>();
 	}
 
@@ -1248,8 +1251,8 @@ static void DpNonEmptyMeanNoiseFunctionInternal(DataChunk &args, ExpressionState
 	auto aggregate_indexes = UnifiedVectorFormat::GetData<int32_t>(aggregate_index_data);
 	auto aggregate_counts = record_scales ? nullptr : UnifiedVectorFormat::GetData<int32_t>(aggregate_count_data);
 	auto group_identities = record_scales ? nullptr : UnifiedVectorFormat::GetData<int64_t>(group_identity_data);
-	auto result_data = FlatVector::GetData<double>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<double>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < count; i++) {
 		auto list_idx = list_data.sel->get_index(i);

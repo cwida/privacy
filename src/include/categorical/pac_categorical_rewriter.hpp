@@ -142,20 +142,20 @@ static inline ExpressionType FlipComparison(ExpressionType cmp_type) {
 // Try to extract a double value from an expression, looking through casts.
 // Returns true and sets out_val if the expression is a constant that can be cast to DOUBLE.
 static inline bool TryGetConstantDouble(Expression *expr, double &out_val) {
-	while (expr->type == ExpressionType::OPERATOR_CAST) {
-		expr = expr->Cast<BoundCastExpression>().child.get();
+	while (expr->GetExpressionType() == ExpressionType::OPERATOR_CAST) {
+		expr = expr->Cast<BoundFunctionExpression>().GetChildrenMutable()[0].get();
 	}
-	if (expr->type != ExpressionType::VALUE_CONSTANT) {
+	if (expr->GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
 		return false;
 	}
 	auto &const_expr = expr->Cast<BoundConstantExpression>();
-	if (const_expr.value.IsNull()) {
+	if (const_expr.GetValue().IsNull()) {
 		return false;
 	}
-	Value double_val;
 	string error_msg;
-	if (const_expr.value.DefaultTryCastAs(LogicalType::DOUBLE, double_val, &error_msg)) {
-		out_val = double_val.GetValue<double>();
+	auto double_val = const_expr.GetValue().DefaultTryCastAs(LogicalType::DOUBLE, &error_msg);
+	if (double_val) {
+		out_val = double_val->GetValue<double>();
 		return true;
 	}
 	return false;
