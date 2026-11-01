@@ -98,7 +98,7 @@ struct PacCategoricalBindData : public FunctionData {
 // ============================================================================
 struct PacCategoricalLocalState : public FunctionLocalState {
 	PacRandomEngine gen;
-	explicit PacCategoricalLocalState(PacRandomEngine gen_p) : gen(std::move(gen_p)) {
+	explicit PacCategoricalLocalState(PacRandomEngine gen_p) : gen(gen_p) {
 	}
 };
 
@@ -179,16 +179,16 @@ static void PacSelectFunction(DataChunk &args, ExpressionState &state, Vector &r
 	idx_t count = args.size();
 
 	UnifiedVectorFormat hash_data;
-	args.data[0].ToUnifiedFormat(count, hash_data);
+	args.data[0].ToUnifiedFormat(hash_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 
 	auto &list_vec = args.data[1];
 	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
+	list_vec.ToUnifiedFormat(list_data);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<bool>(child_data);
 
 	auto result_data = FlatVector::GetDataMutable<uint64_t>(result);
@@ -242,13 +242,13 @@ static void PacFilterFromBoolListFunction(DataChunk &args, ExpressionState &stat
 	auto params = GetPacFilterParams(state);
 
 	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
+	list_vec.ToUnifiedFormat(list_data);
 
 	auto result_data = FlatVector::GetDataMutable<bool>(result);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<bool>(child_data);
 
 	for (idx_t i = 0; i < count; i++) {
@@ -319,22 +319,22 @@ static void PacFilterCmpFunction(DataChunk &args, ExpressionState &state, Vector
 
 	// arg0: PAC_FLOAT scalar value, arg1: LIST<PAC_FLOAT> counters, arg2 (optional): PAC_FLOAT correction
 	UnifiedVectorFormat val_data;
-	args.data[0].ToUnifiedFormat(count, val_data);
+	args.data[0].ToUnifiedFormat(val_data);
 	auto vals = UnifiedVectorFormat::GetData<PAC_FLOAT>(val_data);
 
 	auto &list_vec = args.data[1];
 	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
+	list_vec.ToUnifiedFormat(list_data);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 
 	UnifiedVectorFormat correction_data;
 	const PAC_FLOAT *corrections = nullptr;
 	if (HAS_CORRECTION_ARG) {
-		args.data[2].ToUnifiedFormat(count, correction_data);
+		args.data[2].ToUnifiedFormat(correction_data);
 		corrections = UnifiedVectorFormat::GetData<PAC_FLOAT>(correction_data);
 	}
 
@@ -407,18 +407,18 @@ static void PacSelectCmpFunction(DataChunk &args, ExpressionState &state, Vector
 
 	// arg0: UBIGINT hash, arg1: PAC_FLOAT scalar value, arg2: LIST<PAC_FLOAT> counters
 	UnifiedVectorFormat hash_data, val_data;
-	args.data[0].ToUnifiedFormat(count, hash_data);
-	args.data[1].ToUnifiedFormat(count, val_data);
+	args.data[0].ToUnifiedFormat(hash_data);
+	args.data[1].ToUnifiedFormat(val_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto vals = UnifiedVectorFormat::GetData<PAC_FLOAT>(val_data);
 
 	auto &list_vec = args.data[2];
 	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
+	list_vec.ToUnifiedFormat(list_data);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 
 	auto result_data = FlatVector::GetDataMutable<uint64_t>(result);
@@ -475,10 +475,10 @@ static void PacCoalesceFunction(DataChunk &args, ExpressionState &state, Vector 
 	idx_t count = args.size();
 
 	UnifiedVectorFormat input_data;
-	input.ToUnifiedFormat(count, input_data);
+	input.ToUnifiedFormat(input_data);
 
 	// Fast path: if no NULL lists, zero-copy pass-through (common case)
-	if (input_data.validity.AllValid()) {
+	if (input_data.validity.CannotHaveNull()) {
 		result.Reference(input);
 		return;
 	}
@@ -508,7 +508,7 @@ static void PacCoalesceFunction(DataChunk &args, ExpressionState &state, Vector 
 	child_validity.EnsureWritable();
 
 	// Get the source child vector for non-NULL lists
-	auto &input_child = ListVector::GetEntry(input);
+	auto &input_child = ListVector::GetChild(input);
 	bool child_is_flat = (input_child.GetVectorType() == VectorType::FLAT_VECTOR);
 	auto flat_src_data = child_is_flat ? FlatVector::GetData<PAC_FLOAT>(input_child) : nullptr;
 	auto *flat_src_validity = child_is_flat ? &FlatVector::Validity(input_child) : nullptr;
@@ -517,7 +517,7 @@ static void PacCoalesceFunction(DataChunk &args, ExpressionState &state, Vector 
 	UnifiedVectorFormat input_child_data;
 	const PAC_FLOAT *src_data = nullptr;
 	if (!child_is_flat) {
-		input_child.ToUnifiedFormat(ListVector::GetListSize(input), input_child_data);
+		input_child.ToUnifiedFormat(input_child_data);
 		src_data = UnifiedVectorFormat::GetData<PAC_FLOAT>(input_child_data);
 	}
 
@@ -584,14 +584,14 @@ static void PacNoisedFunction(DataChunk &args, ExpressionState &state, Vector &r
 	auto gen = PacRandomStream(bind_data.seed, *bind_data.random_state);
 
 	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
+	list_vec.ToUnifiedFormat(list_data);
 
 	auto result_data = FlatVector::GetDataMutable<PAC_FLOAT>(result);
 	auto &result_validity = FlatVector::ValidityMutable(result);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 
 	for (idx_t i = 0; i < count; i++) {
@@ -645,14 +645,14 @@ static void PacDivFunction(DataChunk &args, ExpressionState &state, Vector &resu
 	idx_t count = args.size();
 
 	UnifiedVectorFormat num_data, den_data;
-	num_vec.ToUnifiedFormat(count, num_data);
-	den_vec.ToUnifiedFormat(count, den_data);
+	num_vec.ToUnifiedFormat(num_data);
+	den_vec.ToUnifiedFormat(den_data);
 
-	auto &num_child = ListVector::GetEntry(num_vec);
-	auto &den_child = ListVector::GetEntry(den_vec);
+	auto &num_child = ListVector::GetChild(num_vec);
+	auto &den_child = ListVector::GetChild(den_vec);
 	UnifiedVectorFormat num_child_data, den_child_data;
-	num_child.ToUnifiedFormat(ListVector::GetListSize(num_vec), num_child_data);
-	den_child.ToUnifiedFormat(ListVector::GetListSize(den_vec), den_child_data);
+	num_child.ToUnifiedFormat(num_child_data);
+	den_child.ToUnifiedFormat(den_child_data);
 	auto num_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(num_child_data);
 	auto den_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(den_child_data);
 	auto num_entries = UnifiedVectorFormat::GetData<list_entry_t>(num_data);
@@ -730,17 +730,17 @@ static void PacNoisedDivFunction(DataChunk &args, ExpressionState &state, Vector
 	auto gen = PacRandomStream(bind_data.seed, *bind_data.random_state);
 
 	UnifiedVectorFormat sum_data, cnt_data;
-	sum_vec.ToUnifiedFormat(count, sum_data);
-	cnt_vec.ToUnifiedFormat(count, cnt_data);
+	sum_vec.ToUnifiedFormat(sum_data);
+	cnt_vec.ToUnifiedFormat(cnt_data);
 
 	auto result_data = FlatVector::GetDataMutable<double>(result);
 	auto &result_validity = FlatVector::ValidityMutable(result);
 
-	auto &sum_child = ListVector::GetEntry(sum_vec);
-	auto &cnt_child = ListVector::GetEntry(cnt_vec);
+	auto &sum_child = ListVector::GetChild(sum_vec);
+	auto &cnt_child = ListVector::GetChild(cnt_vec);
 	UnifiedVectorFormat sum_child_data, cnt_child_data;
-	sum_child.ToUnifiedFormat(ListVector::GetListSize(sum_vec), sum_child_data);
-	cnt_child.ToUnifiedFormat(ListVector::GetListSize(cnt_vec), cnt_child_data);
+	sum_child.ToUnifiedFormat(sum_child_data);
+	cnt_child.ToUnifiedFormat(cnt_child_data);
 	auto sum_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(sum_child_data);
 	auto cnt_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(cnt_child_data);
 
@@ -1059,19 +1059,19 @@ static void PacListAggregateUpdate(Vector inputs[], AggregateInputData &, idx_t 
 	auto &list_vec = inputs[0];
 
 	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
+	list_vec.ToUnifiedFormat(list_data);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 
 	UnifiedVectorFormat sdata;
-	state_vector.ToUnifiedFormat(count, sdata);
+	state_vector.ToUnifiedFormat(sdata);
 	auto states = UnifiedVectorFormat::GetData<PacListAggregateState *>(sdata);
 
 	// Check if child vector is flat with all valid entries (enables dense path)
-	bool child_is_flat = child_vec.GetVectorType() == VectorType::FLAT_VECTOR && child_data.validity.AllValid();
+	bool child_is_flat = child_vec.GetVectorType() == VectorType::FLAT_VECTOR && child_data.validity.CannotHaveNull();
 
 	for (idx_t i = 0; i < count; i++) {
 		auto list_idx = list_data.sel->get_index(i);
@@ -1097,8 +1097,8 @@ static void PacListAggregateUpdate(Vector inputs[], AggregateInputData &, idx_t 
 template <PacListAggType AGG_TYPE>
 static void PacListAggregateCombine(Vector &source_vec, Vector &target_vec, AggregateInputData &, idx_t count) {
 	UnifiedVectorFormat sdata, tdata;
-	source_vec.ToUnifiedFormat(count, sdata);
-	target_vec.ToUnifiedFormat(count, tdata);
+	source_vec.ToUnifiedFormat(sdata);
+	target_vec.ToUnifiedFormat(tdata);
 	auto sources = UnifiedVectorFormat::GetData<PacListAggregateState *>(sdata);
 	auto targets = UnifiedVectorFormat::GetData<PacListAggregateState *>(tdata);
 
@@ -1118,7 +1118,7 @@ template <PacListAggType AGG_TYPE>
 static void PacListAggregateFinalize(Vector &state_vector, AggregateFinalizeInputData &, Vector &result, idx_t count,
                                      idx_t offset) {
 	UnifiedVectorFormat sdata;
-	state_vector.ToUnifiedFormat(count, sdata);
+	state_vector.ToUnifiedFormat(sdata);
 	auto states = UnifiedVectorFormat::GetData<PacListAggregateState *>(sdata);
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);

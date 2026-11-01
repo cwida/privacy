@@ -439,8 +439,9 @@ unique_ptr<Expression> TryRewriteFilterComparison(OptimizerExtensionInput &input
 			arg_types.push_back(a->GetReturnType());
 		}
 		auto &catalog = Catalog::GetSystemCatalog(input.context);
-		auto &entry =
-		    catalog.GetEntry<ScalarFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, Identifier(func_name));
+		auto &entry = catalog.GetEntry<ScalarFunctionCatalogEntry>(
+		    input.context, QualifiedName(Catalog::GetSystemCatalog(input.context).GetName(),
+		                                 Identifier::DefaultSchema(), Identifier(func_name)));
 		ErrorData error;
 		FunctionBinder func_binder(input.context);
 		auto best = func_binder.BindFunction(Identifier(func_name), entry.functions, arg_types, error);

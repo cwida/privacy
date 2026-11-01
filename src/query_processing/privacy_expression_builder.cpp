@@ -417,9 +417,10 @@ unique_ptr<Expression> BindPacAggregate(OptimizerExtensionInput &input, const st
 		arg_types.push_back(correction_expr->GetReturnType());
 	}
 
-	auto &entry =
-	    Catalog::GetSystemCatalog(input.context)
-	        .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, Identifier(pac_func_name));
+	auto &entry = Catalog::GetSystemCatalog(input.context)
+	                  .GetEntry<AggregateFunctionCatalogEntry>(
+	                      input.context, QualifiedName(Catalog::GetSystemCatalog(input.context).GetName(),
+	                                                   Identifier::DefaultSchema(), Identifier(pac_func_name)));
 	auto best = function_binder.BindFunction(Identifier(entry.name), entry.functions, arg_types, error);
 	if (!best.IsValid()) {
 		throw InternalException("Privacy compiler: failed to bind " + pac_func_name);
@@ -473,7 +474,9 @@ unique_ptr<Expression> BindBitOrAggregate(OptimizerExtensionInput &input, unique
 	ErrorData error;
 	vector<LogicalType> bit_or_types = {hash_expr->GetReturnType()};
 	auto &bit_or_entry = Catalog::GetSystemCatalog(input.context)
-	                         .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, "bit_or");
+	                         .GetEntry<AggregateFunctionCatalogEntry>(
+	                             input.context, QualifiedName(Catalog::GetSystemCatalog(input.context).GetName(),
+	                                                          Identifier::DefaultSchema(), "bit_or"));
 	auto bit_or_best =
 	    function_binder.BindFunction(Identifier(bit_or_entry.name), bit_or_entry.functions, bit_or_types, error);
 	if (!bit_or_best.IsValid()) {
@@ -1201,7 +1204,9 @@ unique_ptr<Expression> BindPlainAggregate(OptimizerExtensionInput &input, const 
 		arg_types.push_back(child->GetReturnType());
 	}
 	auto &entry = Catalog::GetSystemCatalog(input.context)
-	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, Identifier(func_name));
+	                  .GetEntry<AggregateFunctionCatalogEntry>(
+	                      input.context, QualifiedName(Catalog::GetSystemCatalog(input.context).GetName(),
+	                                                   Identifier::DefaultSchema(), Identifier(func_name)));
 	auto best = function_binder.BindFunction(Identifier(entry.name), entry.functions, arg_types, error);
 	if (!best.IsValid()) {
 		throw InternalException("Privacy compiler: failed to bind aggregate '" + func_name + "'");

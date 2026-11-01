@@ -201,12 +201,12 @@ template <int NL = CLIP_NUM_LEVELS_64, bool SIGNED = true, class VALUE_TYPE = ui
 static void PacClipSumUpdate(Vector inputs[], PacClipSumStateWrapper<NL> &state, idx_t count, ArenaAllocator &allocator,
                              int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
 
-	if (hash_data.validity.AllValid() && value_data.validity.AllValid()) {
+	if (hash_data.validity.CannotHaveNull() && value_data.validity.CannotHaveNull()) {
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
@@ -231,9 +231,9 @@ template <int NL = CLIP_NUM_LEVELS_64, bool SIGNED = true, class VALUE_TYPE = ui
 static void PacClipSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator,
                                     int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data, sdata;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, sdata);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(sdata);
 
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
@@ -291,8 +291,8 @@ static void PacClipSumUpdateHugeInt(Vector inputs[], AggregateInputData &aggr, i
 		auto &state = *reinterpret_cast<PacClipSumStateWrapper<CLIP_NUM_LEVELS> *>(state_p);
 		int sample_lanes = GetPrivSampleLanes(aggr);
 		UnifiedVectorFormat hash_data, value_data;
-		inputs[0].ToUnifiedFormat(count, hash_data);
-		inputs[1].ToUnifiedFormat(count, value_data);
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(value_data);
 		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 		auto values = UnifiedVectorFormat::GetData<hugeint_t>(value_data);
 		for (idx_t i = 0; i < count; i++) {
@@ -310,9 +310,9 @@ static void PacClipSumScatterUpdateHugeInt(Vector inputs[], AggregateInputData &
                                            idx_t count) {
 	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, value_data, sdata;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, sdata);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(sdata);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<hugeint_t>(value_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<PacClipSumStateWrapper<CLIP_NUM_LEVELS> *>(sdata);
@@ -334,8 +334,8 @@ static void PacClipSumUpdateUHugeInt(Vector inputs[], AggregateInputData &aggr, 
 		auto &state = *reinterpret_cast<PacClipSumStateWrapper<CLIP_NUM_LEVELS> *>(state_p);
 		int sample_lanes = GetPrivSampleLanes(aggr);
 		UnifiedVectorFormat hash_data, value_data;
-		inputs[0].ToUnifiedFormat(count, hash_data);
-		inputs[1].ToUnifiedFormat(count, value_data);
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(value_data);
 		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 		auto values = UnifiedVectorFormat::GetData<uhugeint_t>(value_data);
 		for (idx_t i = 0; i < count; i++) {
@@ -377,9 +377,9 @@ static void PacClipSumScatterUpdateUHugeInt(Vector inputs[], AggregateInputData 
                                             idx_t count) {
 	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, value_data, sdata;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, sdata);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(sdata);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<uhugeint_t>(value_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<PacClipSumStateWrapper<CLIP_NUM_LEVELS> *>(sdata);
@@ -428,12 +428,12 @@ static void PacClipSumUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx
 		auto &state = *reinterpret_cast<PacClipSumStateWrapper<> *>(state_p);
 		int sample_lanes = GetPrivSampleLanes(aggr);
 		UnifiedVectorFormat hash_data, value_data;
-		inputs[0].ToUnifiedFormat(count, hash_data);
-		inputs[1].ToUnifiedFormat(count, value_data);
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(value_data);
 		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 		auto values = UnifiedVectorFormat::GetData<FLOAT_TYPE>(value_data);
 
-		if (hash_data.validity.AllValid() && value_data.validity.AllValid()) {
+		if (hash_data.validity.CannotHaveNull() && value_data.validity.CannotHaveNull()) {
 			for (idx_t i = 0; i < count; i++) {
 				auto h_idx = hash_data.sel->get_index(i);
 				auto v_idx = value_data.sel->get_index(i);
@@ -461,9 +461,9 @@ static void PacClipSumScatterUpdateFloat(Vector inputs[], AggregateInputData &ag
                                          idx_t count) {
 	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, value_data, sdata;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, sdata);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(sdata);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<FLOAT_TYPE>(value_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<PacClipSumStateWrapper<> *>(sdata);

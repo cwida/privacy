@@ -756,12 +756,12 @@ struct FilterlessInputVectors {
 	const INPUT_TYPE *numeric_values[VALUE_COUNT];
 
 	FilterlessInputVectors(Vector inputs[], idx_t count) {
-		inputs[0].ToUnifiedFormat(count, pu);
-		inputs[1].ToUnifiedFormat(count, active);
+		inputs[0].ToUnifiedFormat(pu);
+		inputs[1].ToUnifiedFormat(active);
 		pu_values = UnifiedVectorFormat::GetData<uint64_t>(pu);
 		active_values = UnifiedVectorFormat::GetData<bool>(active);
 		for (idx_t i = 0; i < VALUE_COUNT; i++) {
-			inputs[2 + i].ToUnifiedFormat(count, values[i]);
+			inputs[2 + i].ToUnifiedFormat(values[i]);
 			numeric_values[i] = UnifiedVectorFormat::GetData<INPUT_TYPE>(values[i]);
 		}
 	}
@@ -842,7 +842,7 @@ static void FilterlessUpdate(Vector inputs[], AggregateInputData &aggr, idx_t in
 
 static void FilterlessScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
 	UnifiedVectorFormat state_data;
-	states.ToUnifiedFormat(count, state_data);
+	states.ToUnifiedFormat(state_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<FilterlessState *>(state_data);
 	FilterlessUpdateRows<2, double>(inputs, aggr, count,
 	                                [&](idx_t row) { return state_ptrs[state_data.sel->get_index(row)]; });
@@ -858,7 +858,7 @@ static void FilterlessAvgUpdate(Vector inputs[], AggregateInputData &aggr, idx_t
 
 static void FilterlessAvgScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
 	UnifiedVectorFormat state_data;
-	states.ToUnifiedFormat(count, state_data);
+	states.ToUnifiedFormat(state_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<FilterlessAvgState *>(state_data);
 	FilterlessUpdateRows<4, double>(inputs, aggr, count,
 	                                [&](idx_t row) { return state_ptrs[state_data.sel->get_index(row)]; });
@@ -877,7 +877,7 @@ template <class INPUT_TYPE>
 static void FilterlessExactScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
                                          idx_t count) {
 	UnifiedVectorFormat state_data;
-	states.ToUnifiedFormat(count, state_data);
+	states.ToUnifiedFormat(state_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<FilterlessExactState *>(state_data);
 	FilterlessUpdateRows<2, INPUT_TYPE>(inputs, aggr, count,
 	                                    [&](idx_t row) { return state_ptrs[state_data.sel->get_index(row)]; });
@@ -1111,12 +1111,12 @@ static void FilterlessFusedAvgUpdateRows(Vector inputs[], AggregateInputData &ag
                                          STATE_GETTER get_state) {
 	UnifiedVectorFormat pu_data, active_data, answer_sum_data, answer_count_data, histogram_sum_data,
 	    histogram_count_data;
-	inputs[0].ToUnifiedFormat(count, pu_data);
-	inputs[1].ToUnifiedFormat(count, active_data);
-	inputs[2].ToUnifiedFormat(count, answer_sum_data);
-	inputs[3].ToUnifiedFormat(count, answer_count_data);
-	inputs[4].ToUnifiedFormat(count, histogram_sum_data);
-	inputs[5].ToUnifiedFormat(count, histogram_count_data);
+	inputs[0].ToUnifiedFormat(pu_data);
+	inputs[1].ToUnifiedFormat(active_data);
+	inputs[2].ToUnifiedFormat(answer_sum_data);
+	inputs[3].ToUnifiedFormat(answer_count_data);
+	inputs[4].ToUnifiedFormat(histogram_sum_data);
+	inputs[5].ToUnifiedFormat(histogram_count_data);
 	auto pus = UnifiedVectorFormat::GetData<uint64_t>(pu_data);
 	auto active = UnifiedVectorFormat::GetData<bool>(active_data);
 	auto answer_sums = UnifiedVectorFormat::GetData<typename SUM_OPERATION::input_t>(answer_sum_data);
@@ -1165,7 +1165,7 @@ template <class SUM_OPERATION>
 static void FilterlessFusedAvgScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
                                             idx_t count) {
 	UnifiedVectorFormat state_data;
-	states.ToUnifiedFormat(count, state_data);
+	states.ToUnifiedFormat(state_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<FilterlessFusedAvgState<SUM_OPERATION> *>(state_data);
 	FilterlessFusedAvgUpdateRows<SUM_OPERATION>(inputs, aggr, count,
 	                                            [&](idx_t row) { return state_ptrs[state_data.sel->get_index(row)]; });
@@ -1393,9 +1393,9 @@ template <class OPERATION, class STATE_GETTER>
 static void FilterlessLowerPairUpdateRows(Vector inputs[], idx_t count, ArenaAllocator &allocator,
                                           STATE_GETTER get_state) {
 	UnifiedVectorFormat value_data, active_data, sampled_data;
-	inputs[0].ToUnifiedFormat(count, value_data);
-	inputs[1].ToUnifiedFormat(count, active_data);
-	inputs[2].ToUnifiedFormat(count, sampled_data);
+	inputs[0].ToUnifiedFormat(value_data);
+	inputs[1].ToUnifiedFormat(active_data);
+	inputs[2].ToUnifiedFormat(sampled_data);
 	auto values = UnifiedVectorFormat::GetData<typename OPERATION::input_t>(value_data);
 	auto active = UnifiedVectorFormat::GetData<bool>(active_data);
 	auto sampled = UnifiedVectorFormat::GetData<bool>(sampled_data);
@@ -1433,7 +1433,7 @@ template <class OPERATION>
 static void FilterlessLowerPairScatterUpdate(Vector inputs[], AggregateInputData &input, idx_t, Vector &states,
                                              idx_t count) {
 	UnifiedVectorFormat state_data;
-	states.ToUnifiedFormat(count, state_data);
+	states.ToUnifiedFormat(state_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<FilterlessLowerPairState<typename OPERATION::state_t> *>(state_data);
 	FilterlessLowerPairUpdateRows<OPERATION>(inputs, count, input.allocator,
 	                                         [&](idx_t row) { return state_ptrs[state_data.sel->get_index(row)]; });

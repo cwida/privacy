@@ -115,12 +115,12 @@ template <bool IS_MAX, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
 static void PacClipMinMaxUpdate(Vector inputs[], PacClipMinMaxStateWrapper<IS_MAX> &state, idx_t count,
                                 ArenaAllocator &allocator, int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
 
-	if (hash_data.validity.AllValid() && value_data.validity.AllValid()) {
+	if (hash_data.validity.CannotHaveNull() && value_data.validity.CannotHaveNull()) {
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
@@ -144,9 +144,9 @@ template <bool IS_MAX, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
 static void PacClipMinMaxScatterUpdate(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator,
                                        int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data, sdata;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, sdata);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(sdata);
 
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<INPUT_TYPE>(value_data);
@@ -224,12 +224,12 @@ template <bool IS_MAX, typename FLOAT_TYPE, int SHIFT>
 static void PacClipMinMaxUpdateFloat(Vector inputs[], PacClipMinMaxStateWrapper<IS_MAX> &state, idx_t count,
                                      ArenaAllocator &allocator, int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<FLOAT_TYPE>(value_data);
 
-	if (hash_data.validity.AllValid() && value_data.validity.AllValid()) {
+	if (hash_data.validity.CannotHaveNull() && value_data.validity.CannotHaveNull()) {
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
@@ -253,9 +253,9 @@ template <bool IS_MAX, typename FLOAT_TYPE, int SHIFT>
 static void PacClipMinMaxScatterUpdateFloat(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator,
                                             int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data, sdata;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, sdata);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(sdata);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<FLOAT_TYPE>(value_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<PacClipMinMaxStateWrapper<IS_MAX> *>(sdata);

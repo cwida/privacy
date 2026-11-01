@@ -255,7 +255,7 @@ static unique_ptr<FunctionData> PACDDLBindFunction(ClientContext &context, Table
  */
 static void PACDDLExecuteFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	// Nothing to output - DDL was already executed in bind
-	output.SetCardinality(0);
+	output.SetChildCardinality(0);
 }
 
 // ============================================================================

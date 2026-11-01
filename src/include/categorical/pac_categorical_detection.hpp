@@ -187,7 +187,9 @@ static inline uint64_t HashBinding(const ColumnBinding &binding) {
 static inline unique_ptr<Expression> RebindAggregate(ClientContext &context, const string &func_name,
                                                      vector<unique_ptr<Expression>> children, bool is_distinct) {
 	auto &catalog = Catalog::GetSystemCatalog(context);
-	auto &func_entry = catalog.GetEntry<AggregateFunctionCatalogEntry>(context, DEFAULT_SCHEMA, Identifier(func_name));
+	auto &func_entry = catalog.GetEntry<AggregateFunctionCatalogEntry>(
+	    context, QualifiedName(Catalog::GetSystemCatalog(context).GetName(), Identifier::DefaultSchema(),
+	                           Identifier(func_name)));
 	vector<LogicalType> arg_types;
 	for (auto &child : children) {
 		arg_types.push_back(child->GetReturnType());
