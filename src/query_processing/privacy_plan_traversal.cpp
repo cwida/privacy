@@ -40,7 +40,7 @@ unique_ptr<LogicalOperator> *FindPrivacyUnitGetNode(unique_ptr<LogicalOperator> 
 			if (!pu_table_name.empty()) {
 				auto &get = cur->Cast<LogicalGet>();
 				auto tblptr = get.GetTable();
-				if (tblptr && tblptr->name == pu_table_name) {
+				if (tblptr && tblptr->name.GetIdentifierName() == pu_table_name) {
 					found_ptr = cur_ptr;
 					break;
 				}
@@ -76,7 +76,7 @@ LogicalGet *FindTableScanInSubtree(LogicalOperator *subtree, const string &table
 	if (subtree->type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = subtree->Cast<LogicalGet>();
 		auto tblptr = get.GetTable();
-		if (tblptr && StringUtil::CIEquals(tblptr->name, table_name)) {
+		if (tblptr && StringUtil::CIEquals(tblptr->name.GetIdentifierName(), table_name)) {
 			return &get;
 		}
 	}
@@ -160,7 +160,7 @@ unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperator> *roo
 		if (cur->type == LogicalOperatorType::LOGICAL_GET) {
 			auto &get = cur->Cast<LogicalGet>();
 			auto tblptr = get.GetTable();
-			if (tblptr && tblptr->name == table_name) {
+			if (tblptr && tblptr->name.GetIdentifierName() == table_name) {
 				if (parent_out) {
 					*parent_out = entry.parent;
 				}
@@ -239,7 +239,7 @@ bool HasTableInSubtree(LogicalOperator *op, const string &table_name) {
 	if (op->type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = op->Cast<LogicalGet>();
 		auto tblptr = get.GetTable();
-		if (tblptr && tblptr->name == table_name) {
+		if (tblptr && tblptr->name.GetIdentifierName() == table_name) {
 			return true;
 		}
 	}
@@ -265,7 +265,7 @@ static void CollectTableNamesInSubtree(LogicalOperator *op, std::unordered_set<s
 		auto &get = op->Cast<LogicalGet>();
 		auto tblptr = get.GetTable();
 		if (tblptr) {
-			table_names.insert(tblptr->name);
+			table_names.insert(tblptr->name.GetIdentifierName());
 		}
 	}
 	for (auto &child : op->children) {
@@ -282,7 +282,7 @@ void BuildCTETableMap(LogicalOperator *op, CTETableMap &cte_map) {
 
 	if (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
 		auto &cte = op->Cast<LogicalMaterializedCTE>();
-		idx_t cte_idx = cte.table_index;
+		idx_t cte_idx = cte.table_index.index;
 
 		// children[0] = CTE definition, children[1] = consumer
 		if (!cte.children.empty()) {
@@ -305,7 +305,7 @@ static void MergeCTERefsIntoSet(LogicalOperator *op, idx_t target_cte_idx, CTETa
 	}
 	if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		auto &ref = op->Cast<LogicalCTERef>();
-		auto it = cte_map.find(ref.cte_index);
+		auto it = cte_map.find(ref.cte_index.index);
 		if (it != cte_map.end()) {
 			cte_map[target_cte_idx].insert(it->second.begin(), it->second.end());
 		}
@@ -324,7 +324,7 @@ static void ResolveCTERefsInDefinitions(LogicalOperator *op, CTETableMap &cte_ma
 	if (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
 		auto &cte = op->Cast<LogicalMaterializedCTE>();
 		if (!cte.children.empty()) {
-			MergeCTERefsIntoSet(cte.children[0].get(), cte.table_index, cte_map);
+			MergeCTERefsIntoSet(cte.children[0].get(), cte.table_index.index, cte_map);
 		}
 	}
 	for (auto &child : op->children) {
@@ -370,7 +370,7 @@ bool HasTableInSubtreeCTE(LogicalOperator *op, const string &table_name, const C
 	if (op->type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = op->Cast<LogicalGet>();
 		auto tblptr = get.GetTable();
-		if (tblptr && tblptr->name == table_name) {
+		if (tblptr && tblptr->name.GetIdentifierName() == table_name) {
 			return true;
 		}
 	}
@@ -378,7 +378,7 @@ bool HasTableInSubtreeCTE(LogicalOperator *op, const string &table_name, const C
 	// Follow CTE references through the map
 	if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		auto &ref = op->Cast<LogicalCTERef>();
-		auto it = cte_map.find(ref.cte_index);
+		auto it = cte_map.find(ref.cte_index.index);
 		if (it != cte_map.end() && it->second.count(table_name) > 0) {
 			return true;
 		}
@@ -406,7 +406,7 @@ void FindAllNodesByTable(unique_ptr<LogicalOperator> *root, const string &table_
 	if (cur->type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = cur->Cast<LogicalGet>();
 		auto tblptr = get.GetTable();
-		if (tblptr && tblptr->name == table_name) {
+		if (tblptr && tblptr->name.GetIdentifierName() == table_name) {
 			results.push_back(root);
 		}
 	}
@@ -438,7 +438,7 @@ bool HasTableIndexInSubtree(LogicalOperator *op, idx_t table_index) {
 	// Check if this is a LogicalGet with the target table index
 	if (op->type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = op->Cast<LogicalGet>();
-		if (get.table_index == table_index) {
+		if (get.table_index.index == table_index) {
 			return true;
 		}
 	}
@@ -461,22 +461,22 @@ LogicalOperator *FindOperatorByTableIndex(LogicalOperator *op, idx_t table_index
 	}
 	if (op->type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = op->Cast<LogicalGet>();
-		if (get.table_index == table_index) {
+		if (get.table_index.index == table_index) {
 			return op;
 		}
 	} else if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
 		auto &aggr = op->Cast<LogicalAggregate>();
-		if (aggr.group_index == table_index || aggr.aggregate_index == table_index) {
+		if (aggr.group_index.index == table_index || aggr.aggregate_index.index == table_index) {
 			return op;
 		}
 	} else if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
 		auto &proj = op->Cast<LogicalProjection>();
-		if (proj.table_index == table_index) {
+		if (proj.table_index.index == table_index) {
 			return op;
 		}
 	} else if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		auto &cte_ref = op->Cast<LogicalCTERef>();
-		if (cte_ref.table_index == table_index) {
+		if (cte_ref.table_index.index == table_index) {
 			return op;
 		}
 	}
@@ -496,7 +496,7 @@ LogicalMaterializedCTE *FindMaterializedCTE(LogicalOperator *op, idx_t cte_table
 	}
 	if (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
 		auto &cte = op->Cast<LogicalMaterializedCTE>();
-		if (cte.table_index == cte_table_index) {
+		if (cte.table_index.index == cte_table_index) {
 			return &cte;
 		}
 	}
@@ -521,7 +521,7 @@ void FindAllNodesByTableIndex(unique_ptr<LogicalOperator> *root, idx_t table_ind
 	// Check if this is a LogicalGet with the target table index
 	if (cur->type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = cur->Cast<LogicalGet>();
-		if (get.table_index == table_index) {
+		if (get.table_index.index == table_index) {
 			results.push_back(root);
 		}
 	}
@@ -631,7 +631,7 @@ static bool CheckColumnsAccessible(LogicalOperator *op, idx_t table_index) {
 	// If this is the target table, it's accessible from here
 	if (op->type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = op->Cast<LogicalGet>();
-		if (get.table_index == table_index) {
+		if (get.table_index.index == table_index) {
 			return true;
 		}
 	}
@@ -732,7 +732,7 @@ static LogicalGet *FindLogicalGetByTableIndex(LogicalOperator *op, idx_t table_i
 	}
 	if (op->type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = op->Cast<LogicalGet>();
-		if (get.table_index == table_index) {
+		if (get.table_index.index == table_index) {
 			return &get;
 		}
 	}
@@ -751,7 +751,7 @@ static std::pair<string, string> GetColumnInfoFromBinding(LogicalOperator *subtr
 		return {"", ""};
 	}
 
-	auto *get = FindLogicalGetByTableIndex(subtree, binding.table_index);
+	auto *get = FindLogicalGetByTableIndex(subtree, binding.table_index.index);
 	if (!get) {
 		return {"", ""};
 	}
@@ -761,7 +761,7 @@ static std::pair<string, string> GetColumnInfoFromBinding(LogicalOperator *subtr
 		return {"", ""};
 	}
 
-	string table_name = table_entry->name;
+	string table_name = table_entry->name.GetIdentifierName();
 
 	// Get column name from the binding
 	const auto &column_ids = get->GetColumnIds();
@@ -769,7 +769,7 @@ static std::pair<string, string> GetColumnInfoFromBinding(LogicalOperator *subtr
 		return {table_name, ""};
 	}
 
-	string col_name = get->GetColumnName(column_ids[binding.column_index]);
+	string col_name = get->GetColumnName(column_ids[binding.column_index]).GetIdentifierName();
 	return {table_name, col_name};
 }
 
@@ -788,9 +788,9 @@ bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PrivacyCompatibilityRes
 			continue;
 		}
 		ExpressionIterator::EnumerateExpression(group_expr, [&](Expression &expr) {
-			if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+			if (expr.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 				auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-				group_bindings.push_back(col_ref.binding);
+				group_bindings.push_back(col_ref.BindingMutable());
 			}
 		});
 	}
@@ -805,7 +805,7 @@ bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PrivacyCompatibilityRes
 		auto &table_name = col_info.first;
 		auto &col_name = col_info.second;
 #if PRIVACY_DEBUG
-		PRIVACY_DEBUG_PRINT("AggregateGroupsByPUKey: binding [" + std::to_string(binding.table_index) + "." +
+		PRIVACY_DEBUG_PRINT("AggregateGroupsByPUKey: binding [" + std::to_string(binding.table_index.index) + "." +
 		                    std::to_string(binding.column_index) + "] -> table='" + table_name + "' col='" + col_name +
 		                    "'");
 #endif
@@ -890,6 +890,11 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 	std::unordered_set<LogicalAggregate *> include_outer_aggregates;
 
 	for (auto *agg : all_aggregates) {
+		// Correlation-domain deduplication is a GROUP BY without aggregate
+		// expressions. It must not move privacy responsibility to another node.
+		if (agg->expressions.empty()) {
+			continue;
+		}
 		// Check if this aggregate has a child aggregate (nested aggregate — direct subtree)
 		for (auto &child : agg->children) {
 			auto *inner_agg = FindFirstChildAggregate(child.get());
@@ -919,7 +924,7 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 				// This aggregate only reaches target tables via CTE_SCAN.
 				// Find the CTE definition's aggregate (the one with direct access).
 				for (auto *other_agg : all_aggregates) {
-					if (other_agg == agg) {
+					if (other_agg == agg || other_agg->expressions.empty()) {
 						continue;
 					}
 					bool other_has_direct = false;
@@ -948,6 +953,11 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 	}
 
 	for (auto *agg : all_aggregates) {
+		// Correlation-domain deduplication is a GROUP BY without aggregate
+		// expressions. It must not move privacy responsibility to another node.
+		if (agg->expressions.empty()) {
+			continue;
+		}
 		// Skip aggregates that are marked to be skipped (inner aggregates that group by PU key)
 		if (skip_aggregates.count(agg) > 0) {
 #if PRIVACY_DEBUG
@@ -1052,12 +1062,12 @@ LogicalAggregate *FindInnerAggregateWithPUKeyGroup(LogicalAggregate *target_agg,
 		// Now find which group column is the PU key and get its output binding
 		for (idx_t group_idx = 0; group_idx < inner_agg->groups.size(); group_idx++) {
 			auto &group_expr = inner_agg->groups[group_idx];
-			if (!group_expr || group_expr->type != ExpressionType::BOUND_COLUMN_REF) {
+			if (!group_expr || group_expr->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
 				continue;
 			}
 
 			auto &col_ref = group_expr->Cast<BoundColumnRefExpression>();
-			auto col_info = GetColumnInfoFromBinding(inner_agg, col_ref.binding);
+			auto col_info = GetColumnInfoFromBinding(inner_agg, col_ref.BindingMutable());
 			auto &table_name = col_info.first;
 			auto &col_name = col_info.second;
 			if (table_name.empty() || col_name.empty()) {
@@ -1076,7 +1086,7 @@ LogicalAggregate *FindInnerAggregateWithPUKeyGroup(LogicalAggregate *target_agg,
 			// Found the PU key group column
 			// The group columns are output as the first N columns of the aggregate
 			// Their bindings use the aggregate's group_index
-			ColumnBinding current_binding(inner_agg->group_index, group_idx);
+			ColumnBinding current_binding {TableIndex(inner_agg->group_index.index), ProjectionIndex(group_idx)};
 
 			// Now propagate this binding through any projections between inner_agg and target_agg
 			// The path_to_inner contains operators from outer's child down to (but not including) inner_agg
@@ -1090,12 +1100,13 @@ LogicalAggregate *FindInnerAggregateWithPUKeyGroup(LogicalAggregate *target_agg,
 					bool found = false;
 					for (idx_t expr_idx = 0; expr_idx < proj.expressions.size(); expr_idx++) {
 						auto &expr = proj.expressions[expr_idx];
-						if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+						if (expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 							auto &proj_col_ref = expr->Cast<BoundColumnRefExpression>();
-							if (proj_col_ref.binding == current_binding) {
+							if (proj_col_ref.BindingMutable() == current_binding) {
 								// This projection expression references our binding
 								// The new binding is the projection's output
-								current_binding = ColumnBinding(proj.table_index, expr_idx);
+								current_binding =
+								    ColumnBinding(TableIndex(proj.table_index.index), ProjectionIndex(expr_idx));
 								found = true;
 								break;
 							}

@@ -106,7 +106,7 @@ query III
 SELECT count(DISTINCT l) > 3000, count(DISTINCT f) > 3000, count(DISTINCT d) > 3000
 FROM (SELECT as_noised(range(64)::FLOAT[]) AS l,
              priv_finalize(range(64)::FLOAT[]) AS f,
-             as_noised_div(range(64)::FLOAT[], list_transform(range(64), x -> 1::FLOAT)) AS d
+             as_noised_div(range(64)::FLOAT[], list_transform(range(64), lambda x: 1::FLOAT)) AS d
       FROM range(4096)) t
 ----
 true	true	true
@@ -151,7 +151,7 @@ CREATE TABLE seeded_prepared(i BIGINT, l FLOAT, f FLOAT, d DOUBLE)
 statement ok
 PREPARE seeded_release AS INSERT INTO seeded_prepared
 SELECT i, as_noised(range(64)::FLOAT[]), priv_finalize(range(64)::FLOAT[]),
-       as_noised_div(range(64)::FLOAT[], list_transform(range(64), x -> 1::FLOAT))
+       as_noised_div(range(64)::FLOAT[], list_transform(range(64), lambda x: 1::FLOAT))
 FROM range(4096) t(i)
 
 statement ok

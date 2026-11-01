@@ -62,8 +62,8 @@ static LogicalType CounterListType() {
 
 // Returns true if the expression tree contains a priv_finalize call.
 static bool ExpressionContainsPacFinalize(Expression &e) {
-	if (e.type == ExpressionType::BOUND_FUNCTION &&
-	    e.Cast<BoundFunctionExpression>().function.name == "priv_finalize") {
+	if (e.GetExpressionType() == ExpressionType::BOUND_FUNCTION &&
+	    e.Cast<BoundFunctionExpression>().FunctionMutable().GetName().GetIdentifierName() == "priv_finalize") {
 		return true;
 	}
 	bool found = false;
@@ -76,9 +76,9 @@ static bool ExpressionContainsPacFinalize(Expression &e) {
 }
 
 static bool ExpressionReferencesFinalizedBinding(Expression &e, const unordered_set<uint64_t> &finalized_bindings) {
-	if (e.type == ExpressionType::BOUND_COLUMN_REF) {
+	if (e.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 		auto &col_ref = e.Cast<BoundColumnRefExpression>();
-		return finalized_bindings.count(HashBinding(col_ref.binding)) > 0;
+		return finalized_bindings.count(HashBinding(col_ref.BindingMutable())) > 0;
 	}
 	bool found = false;
 	ExpressionIterator::EnumerateChildren(e, [&](Expression &child) {
@@ -110,34 +110,35 @@ static void ConvertAggregatesRecursive(OptimizerExtensionInput &input, LogicalOp
 
 	for (idx_t i = 0; i < agg.expressions.size(); i++) {
 		auto &expr = agg.expressions[i];
-		if (expr->type != ExpressionType::BOUND_AGGREGATE) {
+		if (expr->GetExpressionType() != ExpressionType::BOUND_AGGREGATE) {
 			continue;
 		}
 
 		auto &bound_agg = expr->Cast<BoundAggregateExpression>();
-		if (!IsPacAggregate(bound_agg.function.name)) {
+		if (!IsPacAggregate(bound_agg.FunctionMutable().GetName().GetIdentifierName())) {
 			continue;
 		}
 
-		string counters_name = GetCountersVariant(bound_agg.function.name);
+		string counters_name = GetCountersVariant(bound_agg.FunctionMutable().GetName().GetIdentifierName());
 		if (counters_name.empty()) {
 			continue;
 		}
 
 		vector<unique_ptr<Expression>> children;
-		for (auto &child_expr : bound_agg.children) {
+		for (auto &child_expr : bound_agg.GetChildrenMutable()) {
 			children.push_back(child_expr->Copy());
 		}
 
 		auto new_aggr = RebindAggregate(input.context, counters_name, std::move(children), bound_agg.IsDistinct());
 		if (new_aggr) {
-			PRIVACY_DEBUG_PRINT("[PAC DERIVED WRITE] Rebound " + bound_agg.function.name + " → " +
-			                    new_aggr->Cast<BoundAggregateExpression>().function.name);
+			PRIVACY_DEBUG_PRINT("[PAC DERIVED WRITE] Rebound " + bound_agg.Function().GetName().GetIdentifierName() +
+			                    " → " +
+			                    new_aggr->Cast<BoundAggregateExpression>().Function().GetName().GetIdentifierName());
 			agg.expressions[i] = std::move(new_aggr);
 		} else {
-			bound_agg.function.name = counters_name;
-			bound_agg.function.return_type = list_type;
-			expr->return_type = list_type;
+			bound_agg.FunctionMutable().SetName(Identifier(counters_name));
+			bound_agg.FunctionMutable().SetReturnType(list_type);
+			expr->SetReturnType(list_type);
 		}
 
 		idx_t types_index = agg.groups.size() + i;
@@ -145,7 +146,7 @@ static void ConvertAggregatesRecursive(OptimizerExtensionInput &input, LogicalOp
 			agg.types[types_index] = list_type;
 		}
 
-		converted.insert(HashBinding(ColumnBinding(agg.aggregate_index, i)));
+		converted.insert(HashBinding(ColumnBinding(TableIndex(agg.aggregate_index.index), ProjectionIndex(i))));
 	}
 }
 
@@ -156,10 +157,10 @@ static void FixStaleColumnRefTypes(LogicalOperator *op, const unordered_set<uint
 	auto list_type = CounterListType();
 	LogicalOperatorVisitor::EnumerateExpressions(*op, [&](unique_ptr<Expression> *expr_ptr) {
 		std::function<void(unique_ptr<Expression> &)> Fix = [&](unique_ptr<Expression> &e) {
-			if (e->type == ExpressionType::BOUND_COLUMN_REF) {
+			if (e->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 				auto &col_ref = e->Cast<BoundColumnRefExpression>();
-				if (converted.count(HashBinding(col_ref.binding))) {
-					col_ref.return_type = list_type;
+				if (converted.count(HashBinding(col_ref.BindingMutable()))) {
+					col_ref.SetReturnType(list_type);
 				}
 			}
 			ExpressionIterator::EnumerateChildren(*e, Fix);
@@ -180,10 +181,10 @@ static void StripRedundantCasts(LogicalOperator *op) {
 	}
 	std::function<void(unique_ptr<Expression> &)> Strip = [&](unique_ptr<Expression> &e) {
 		ExpressionIterator::EnumerateChildren(*e, Strip);
-		if (e->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
-			auto &cast = e->Cast<BoundCastExpression>();
-			if (cast.child->return_type == cast.return_type) {
-				e = std::move(cast.child);
+		if (e->GetExpressionType() == ExpressionType::OPERATOR_CAST) {
+			auto &cast = e->Cast<BoundFunctionExpression>();
+			if (cast.GetChildrenMutable()[0]->GetReturnType() == cast.GetReturnType()) {
+				e = std::move(cast.GetChildrenMutable()[0]);
 			}
 		}
 	};
@@ -220,14 +221,14 @@ static void FindDerivedPuGets(LogicalOperator *op, unordered_set<idx_t> &derived
 		return;
 	}
 	auto &mgr = PrivacyMetadataManager::Get();
-	auto *meta = mgr.GetTableMetadata(entry->name);
+	auto *meta = mgr.GetTableMetadata(entry->name.GetIdentifierName());
 	if (!meta || !meta->derived_pu) {
 		return;
 	}
 	auto list_type = CounterListType();
 	for (idx_t i = 0; i < get.returned_types.size(); i++) {
 		if (get.returned_types[i] == list_type) {
-			derived_table_indices.insert(get.table_index);
+			derived_table_indices.insert(get.table_index.index);
 			return;
 		}
 	}
@@ -235,25 +236,25 @@ static void FindDerivedPuGets(LogicalOperator *op, unordered_set<idx_t> &derived
 
 // Returns true if the expression is (or contains at its root) a counter column ref.
 static bool IsCounterColumnRef(Expression &e, const LogicalType &list_type) {
-	if (e.type == ExpressionType::BOUND_COLUMN_REF && e.return_type == list_type) {
+	if (e.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF && e.GetReturnType() == list_type) {
 		return true;
 	}
 	// Also catch CAST(counter_col → scalar) inserted by the binder
-	if (e.GetExpressionClass() == ExpressionClass::BOUND_CAST) {
-		auto &cast = e.Cast<BoundCastExpression>();
-		return IsCounterColumnRef(*cast.child, list_type);
+	if (e.GetExpressionType() == ExpressionType::OPERATOR_CAST) {
+		auto &cast = e.Cast<BoundFunctionExpression>();
+		return IsCounterColumnRef(*cast.GetChildrenMutable()[0], list_type);
 	}
 	return false;
 }
 
 // Extract the raw counter column ref (stripping binder-inserted casts).
 static unique_ptr<Expression> ExtractCounterRef(unique_ptr<Expression> e, const LogicalType &list_type) {
-	if (e->type == ExpressionType::BOUND_COLUMN_REF && e->return_type == list_type) {
+	if (e->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF && e->GetReturnType() == list_type) {
 		return e;
 	}
-	if (e->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
-		auto &cast = e->Cast<BoundCastExpression>();
-		return ExtractCounterRef(std::move(cast.child), list_type);
+	if (e->GetExpressionType() == ExpressionType::OPERATOR_CAST) {
+		auto &cast = e->Cast<BoundFunctionExpression>();
+		return ExtractCounterRef(std::move(cast.GetChildrenMutable()[0]), list_type);
 	}
 	return e;
 }
@@ -262,28 +263,28 @@ static unique_ptr<Expression> ExtractCounterRef(unique_ptr<Expression> e, const 
 // Strips binder-inserted CAST(scalar→FLOAT[]) and FLOAT[] constants back to scalars.
 static unique_ptr<Expression> CastScalarToPacFloat(unique_ptr<Expression> scalar, const LogicalType &pac_float_type,
                                                    const LogicalType &list_type) {
-	if (scalar->return_type == pac_float_type) {
+	if (scalar->GetReturnType() == pac_float_type) {
 		return scalar;
 	}
 	// Strip any binder-inserted CAST to FLOAT[] (scalar→LIST<FLOAT>)
-	if (scalar->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
-		auto &cast = scalar->Cast<BoundCastExpression>();
-		if (cast.return_type == list_type && cast.child->return_type != list_type) {
-			scalar = std::move(cast.child);
+	if (scalar->GetExpressionType() == ExpressionType::OPERATOR_CAST) {
+		auto &cast = scalar->Cast<BoundFunctionExpression>();
+		if (cast.GetReturnType() == list_type && cast.GetChildrenMutable()[0]->GetReturnType() != list_type) {
+			scalar = std::move(cast.GetChildrenMutable()[0]);
 		}
 	}
 	// Also unwrap FLOAT[] constants back to scalar
-	if (scalar->type == ExpressionType::VALUE_CONSTANT) {
+	if (scalar->GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
 		auto &constant = scalar->Cast<BoundConstantExpression>();
-		if (constant.return_type == list_type && !constant.value.IsNull()) {
-			auto &list_children = ListValue::GetChildren(constant.value);
+		if (constant.GetReturnType() == list_type && !constant.GetValue().IsNull()) {
+			auto &list_children = ListValue::GetChildren(constant.GetValue());
 			if (!list_children.empty()) {
 				auto scalar_val = list_children[0].DefaultCastAs(pac_float_type);
 				return make_uniq<BoundConstantExpression>(std::move(scalar_val));
 			}
 		}
 	}
-	if (scalar->return_type != pac_float_type) {
+	if (scalar->GetReturnType() != pac_float_type) {
 		return BoundCastExpression::AddDefaultCastToType(std::move(scalar), pac_float_type);
 	}
 	return scalar;
@@ -297,7 +298,7 @@ static void SyncMaterializedCTERefTypes(LogicalOperator *op, idx_t cte_index, co
 	}
 	if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		auto &cte_ref = op->Cast<LogicalCTERef>();
-		if (cte_ref.cte_index == cte_index) {
+		if (cte_ref.cte_index.index == cte_index) {
 			auto bindings = cte_ref.GetColumnBindings();
 			for (idx_t i = 0; i < cte_types.size() && i < cte_ref.chunk_types.size(); i++) {
 				if (cte_ref.chunk_types[i] == list_type && cte_types[i] == finalized_type && i < bindings.size()) {
@@ -317,11 +318,11 @@ static void SyncMaterializedCTERefTypes(LogicalOperator *op, idx_t cte_index, co
 
 // Rewrite a comparison expression on a counter column to a priv_filter_<cmp> call.
 // Returns the rewritten expression, or nullptr if the comparison doesn't involve a counter column.
-static unique_ptr<Expression> RewriteComparisonToFilterCmp(OptimizerExtensionInput &input,
-                                                           BoundComparisonExpression &cmp, const LogicalType &list_type,
+static unique_ptr<Expression> RewriteComparisonToFilterCmp(OptimizerExtensionInput &input, BoundFunctionExpression &cmp,
+                                                           const LogicalType &list_type,
                                                            const LogicalType &finalized_type) {
-	bool left_is_counter = IsCounterColumnRef(*cmp.left, list_type);
-	bool right_is_counter = IsCounterColumnRef(*cmp.right, list_type);
+	bool left_is_counter = IsCounterColumnRef(*cmp.GetChildrenMutable()[0], list_type);
+	bool right_is_counter = IsCounterColumnRef(*cmp.GetChildrenMutable()[1], list_type);
 	if (!left_is_counter && !right_is_counter) {
 		return nullptr;
 	}
@@ -330,17 +331,19 @@ static unique_ptr<Expression> RewriteComparisonToFilterCmp(OptimizerExtensionInp
 		return nullptr;
 	}
 	bool counter_on_left = left_is_counter;
-	ExpressionType effective = counter_on_left ? FlipComparison(cmp.type) : cmp.type;
+	ExpressionType effective = counter_on_left ? FlipComparison(cmp.GetExpressionType()) : cmp.GetExpressionType();
 	const char *resolved = GetPacFilterCmpName(effective, GetPrivacyMode(input.context));
 	if (!resolved) {
 		return nullptr;
 	}
 	string func_name = resolved;
-	auto counter_ref = ExtractCounterRef(std::move(counter_on_left ? cmp.left : cmp.right), list_type);
+	auto counter_ref = ExtractCounterRef(
+	    std::move(counter_on_left ? cmp.GetChildrenMutable()[0] : cmp.GetChildrenMutable()[1]), list_type);
 	auto scalar_expr =
-	    CastScalarToPacFloat(std::move(counter_on_left ? cmp.right : cmp.left), finalized_type, list_type);
+	    CastScalarToPacFloat(std::move(counter_on_left ? cmp.GetChildrenMutable()[1] : cmp.GetChildrenMutable()[0]),
+	                         finalized_type, list_type);
 	PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Rewriting comparison to " + func_name);
-	return input.optimizer.BindScalarFunction(func_name, std::move(scalar_expr), std::move(counter_ref));
+	return input.optimizer.BindScalarFunction(Identifier(func_name), std::move(scalar_expr), std::move(counter_ref));
 }
 
 // Rewrite a BETWEEN expression on a counter column to priv_filter_<cmp> AND conjunction.
@@ -360,8 +363,10 @@ RewriteBetweenToFilterCmp(OptimizerExtensionInput &input, unique_ptr<Expression>
 	string upper_func = GetPacFilterCmpName(upper_inclusive ? ExpressionType::COMPARE_GREATERTHANOREQUALTO
 	                                                        : ExpressionType::COMPARE_GREATERTHAN,
 	                                        privacy_mode);
-	auto lower_call = input.optimizer.BindScalarFunction(lower_func, std::move(lower_scalar), std::move(counter_ref1));
-	auto upper_call = input.optimizer.BindScalarFunction(upper_func, std::move(upper_scalar), std::move(counter_ref2));
+	auto lower_call =
+	    input.optimizer.BindScalarFunction(Identifier(lower_func), std::move(lower_scalar), std::move(counter_ref1));
+	auto upper_call =
+	    input.optimizer.BindScalarFunction(Identifier(upper_func), std::move(upper_scalar), std::move(counter_ref2));
 	PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Rewriting BETWEEN to " + lower_func + " AND " + upper_func);
 	return make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND, std::move(lower_call),
 	                                             std::move(upper_call));
@@ -394,8 +399,8 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 		auto &cte = op->Cast<LogicalMaterializedCTE>();
 		WrapCounterRefsWithFinalize(input, op->children[0].get(), derived_table_indices, finalized_bindings,
 		                            child_suppress);
-		SyncMaterializedCTERefTypes(op->children[1].get(), cte.table_index, op->children[0]->types, CounterListType(),
-		                            PacFloatLogicalType(), finalized_bindings);
+		SyncMaterializedCTERefTypes(op->children[1].get(), cte.table_index.index, op->children[0]->types,
+		                            CounterListType(), PacFloatLogicalType(), finalized_bindings);
 		WrapCounterRefsWithFinalize(input, op->children[1].get(), derived_table_indices, finalized_bindings,
 		                            child_suppress);
 	} else {
@@ -415,21 +420,21 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 
 	// Fix stale column refs that were finalized by a child operator
 	std::function<void(unique_ptr<Expression> &)> FixExpr = [&](unique_ptr<Expression> &e) {
-		if (e->type == ExpressionType::BOUND_COLUMN_REF) {
+		if (e->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 			auto &col_ref = e->Cast<BoundColumnRefExpression>();
-			if (finalized_bindings.count(HashBinding(col_ref.binding))) {
-				col_ref.return_type = finalized_type;
+			if (finalized_bindings.count(HashBinding(col_ref.BindingMutable()))) {
+				col_ref.SetReturnType(finalized_type);
 			}
 		}
 		ExpressionIterator::EnumerateChildren(*e, FixExpr);
-		if (e->return_type == list_type && ExpressionReferencesFinalizedBinding(*e, finalized_bindings)) {
-			e->return_type = finalized_type;
+		if (e->GetReturnType() == list_type && ExpressionReferencesFinalizedBinding(*e, finalized_bindings)) {
+			e->SetReturnType(finalized_type);
 		}
-		if (e->GetExpressionClass() == ExpressionClass::BOUND_BETWEEN) {
-			auto &between = e->Cast<BoundBetweenExpression>();
-			FixExpr(between.input);
-			FixExpr(between.lower);
-			FixExpr(between.upper);
+		if (e->GetExpressionType() == ExpressionType::COMPARE_BETWEEN) {
+			auto &between = e->Cast<BoundFunctionExpression>();
+			FixExpr(between.GetChildrenMutable()[0]);
+			FixExpr(between.GetChildrenMutable()[1]);
+			FixExpr(between.GetChildrenMutable()[2]);
 		}
 	};
 	LogicalOperatorVisitor::EnumerateExpressions(*op, [&](unique_ptr<Expression> *expr_ptr) { FixExpr(*expr_ptr); });
@@ -438,30 +443,30 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 	// and wrap remaining counter column refs with priv_finalize.
 	std::function<void(unique_ptr<Expression> &)> WrapExpr = [&](unique_ptr<Expression> &e) {
 		// Skip already-wrapped expressions
-		if (e->type == ExpressionType::BOUND_FUNCTION) {
-			auto &func_name = e->Cast<BoundFunctionExpression>().function.name;
+		if (e->GetExpressionType() == ExpressionType::BOUND_FUNCTION) {
+			auto &func_name = e->Cast<BoundFunctionExpression>().FunctionMutable().GetName().GetIdentifierName();
 			if (func_name == "priv_finalize" || StringUtil::StartsWith(func_name, "priv_filter_")) {
 				return;
 			}
 		}
 		// Skip binder-inserted CAST(FLOAT[] → scalar) — the registered cast handles finalization
-		if (e->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
-			auto &cast = e->Cast<BoundCastExpression>();
-			if (cast.child->return_type == list_type && cast.return_type != list_type) {
+		if (e->GetExpressionType() == ExpressionType::OPERATOR_CAST) {
+			auto &cast = e->Cast<BoundFunctionExpression>();
+			if (cast.GetChildrenMutable()[0]->GetReturnType() == list_type && cast.GetReturnType() != list_type) {
 				return;
 			}
 		}
 
 		// Rewrite BoundComparisonExpression where one side is a counter column
-		if (e->GetExpressionClass() == ExpressionClass::BOUND_COMPARISON) {
-			auto &cmp = e->Cast<BoundComparisonExpression>();
+		if (BoundComparisonExpression::IsComparison(*e)) {
+			auto &cmp = e->Cast<BoundFunctionExpression>();
 			// Recurse into the scalar side first (it may contain nested expressions)
-			bool left_is_counter = IsCounterColumnRef(*cmp.left, list_type);
-			bool right_is_counter = IsCounterColumnRef(*cmp.right, list_type);
+			bool left_is_counter = IsCounterColumnRef(*cmp.GetChildrenMutable()[0], list_type);
+			bool right_is_counter = IsCounterColumnRef(*cmp.GetChildrenMutable()[1], list_type);
 			if (left_is_counter && !right_is_counter) {
-				WrapExpr(cmp.right);
+				WrapExpr(cmp.GetChildrenMutable()[1]);
 			} else if (right_is_counter && !left_is_counter) {
-				WrapExpr(cmp.left);
+				WrapExpr(cmp.GetChildrenMutable()[0]);
 			}
 			auto rewritten = RewriteComparisonToFilterCmp(input, cmp, list_type, finalized_type);
 			if (rewritten) {
@@ -472,50 +477,50 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 		}
 
 		// Rewrite BoundBetweenExpression where input is a counter column
-		if (e->GetExpressionClass() == ExpressionClass::BOUND_BETWEEN) {
-			auto &between = e->Cast<BoundBetweenExpression>();
-			if (IsCounterColumnRef(*between.input, list_type)) {
-				WrapExpr(between.lower);
-				WrapExpr(between.upper);
-				auto counter_ref1 = ExtractCounterRef(between.input->Copy(), list_type);
-				auto counter_ref2 = ExtractCounterRef(std::move(between.input), list_type);
-				e = RewriteBetweenToFilterCmp(input, std::move(counter_ref1), std::move(counter_ref2),
-				                              std::move(between.lower), std::move(between.upper),
-				                              between.lower_inclusive, between.upper_inclusive, finalized_type,
-				                              list_type);
+		if (e->GetExpressionType() == ExpressionType::COMPARE_BETWEEN) {
+			auto &between = e->Cast<BoundFunctionExpression>();
+			if (IsCounterColumnRef(*between.GetChildrenMutable()[0], list_type)) {
+				WrapExpr(between.GetChildrenMutable()[1]);
+				WrapExpr(between.GetChildrenMutable()[2]);
+				auto counter_ref1 = ExtractCounterRef(between.GetChildrenMutable()[0]->Copy(), list_type);
+				auto counter_ref2 = ExtractCounterRef(std::move(between.GetChildrenMutable()[0]), list_type);
+				e = RewriteBetweenToFilterCmp(
+				    input, std::move(counter_ref1), std::move(counter_ref2), std::move(between.GetChildrenMutable()[1]),
+				    std::move(between.GetChildrenMutable()[2]), BoundBetweenExpression::LowerInclusive(between),
+				    BoundBetweenExpression::UpperInclusive(between), finalized_type, list_type);
 				return;
 			}
 			// Non-counter BETWEEN: recurse into fields manually (not visited by EnumerateChildren)
-			WrapExpr(between.input);
-			WrapExpr(between.lower);
-			WrapExpr(between.upper);
+			WrapExpr(between.GetChildrenMutable()[0]);
+			WrapExpr(between.GetChildrenMutable()[1]);
+			WrapExpr(between.GetChildrenMutable()[2]);
 		}
 
 		ExpressionIterator::EnumerateChildren(*e, WrapExpr);
 
-		if (e->type == ExpressionType::BOUND_COLUMN_REF) {
+		if (e->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 			auto &col_ref = e->Cast<BoundColumnRefExpression>();
-			if (col_ref.return_type == list_type) {
+			if (col_ref.GetReturnType() == list_type) {
 				PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Wrapping binding (" +
-				                    std::to_string(col_ref.binding.table_index) + "," +
-				                    std::to_string(col_ref.binding.column_index) + ") with priv_finalize");
+				                    std::to_string(col_ref.Binding().table_index.index) + "," +
+				                    std::to_string(col_ref.Binding().column_index) + ") with priv_finalize");
 				e = input.optimizer.BindScalarFunction("priv_finalize", std::move(e));
 			}
 		}
 		// Retarget CAST(scalar→FLOAT[]) to CAST(scalar→FLOAT), strip no-op casts
-		if (e->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
-			auto &cast = e->Cast<BoundCastExpression>();
-			if (cast.return_type == list_type && cast.child->return_type != list_type) {
-				e = BoundCastExpression::AddDefaultCastToType(std::move(cast.child), finalized_type);
-			} else if (cast.child->return_type == cast.return_type) {
-				e = std::move(cast.child);
+		if (e->GetExpressionType() == ExpressionType::OPERATOR_CAST) {
+			auto &cast = e->Cast<BoundFunctionExpression>();
+			if (cast.GetReturnType() == list_type && cast.GetChildrenMutable()[0]->GetReturnType() != list_type) {
+				e = BoundCastExpression::AddDefaultCastToType(std::move(cast.GetChildrenMutable()[0]), finalized_type);
+			} else if (cast.GetChildrenMutable()[0]->GetReturnType() == cast.GetReturnType()) {
+				e = std::move(cast.GetChildrenMutable()[0]);
 			}
 		}
 		// Convert FLOAT[] constants back to scalar
-		if (e->type == ExpressionType::VALUE_CONSTANT) {
+		if (e->GetExpressionType() == ExpressionType::VALUE_CONSTANT) {
 			auto &constant = e->Cast<BoundConstantExpression>();
-			if (constant.return_type == list_type && !constant.value.IsNull()) {
-				auto &list_children = ListValue::GetChildren(constant.value);
+			if (constant.GetReturnType() == list_type && !constant.GetValue().IsNull()) {
+				auto &list_children = ListValue::GetChildren(constant.GetValue());
 				if (!list_children.empty()) {
 					auto scalar_val = list_children[0].DefaultCastAs(finalized_type);
 					e = make_uniq<BoundConstantExpression>(std::move(scalar_val));
@@ -530,21 +535,22 @@ static void WrapCounterRefsWithFinalize(OptimizerExtensionInput &input, LogicalO
 		auto &proj = op->Cast<LogicalProjection>();
 		for (idx_t i = 0; i < proj.expressions.size(); i++) {
 			if (i < proj.types.size()) {
-				proj.types[i] = proj.expressions[i]->return_type;
+				proj.types[i] = proj.expressions[i]->GetReturnType();
 			}
 			// Only mark as finalized if the expression actually produces a counter type.
 			// Expressions that CONTAIN priv_finalize in sub-expressions (e.g. CASE WHEN priv_finalize(x) > 100 ...)
 			// may return a different type (e.g. VARCHAR) and should NOT be marked finalized.
-			bool is_counter_output =
-			    (proj.expressions[i]->return_type == finalized_type) ||
-			    (proj.expressions[i]->return_type == list_type && ExpressionContainsPacFinalize(*proj.expressions[i]));
+			bool is_counter_output = (proj.expressions[i]->GetReturnType() == finalized_type) ||
+			                         (proj.expressions[i]->GetReturnType() == list_type &&
+			                          ExpressionContainsPacFinalize(*proj.expressions[i]));
 			if (is_counter_output) {
-				finalized_bindings.insert(HashBinding(ColumnBinding(proj.table_index, i)));
+				finalized_bindings.insert(
+				    HashBinding(ColumnBinding(TableIndex(proj.table_index.index), ProjectionIndex(i))));
 				if (i < proj.types.size() && proj.types[i] == list_type) {
 					proj.types[i] = finalized_type;
 				}
-				if (proj.expressions[i]->return_type == list_type) {
-					proj.expressions[i]->return_type = finalized_type;
+				if (proj.expressions[i]->GetReturnType() == list_type) {
+					proj.expressions[i]->SetReturnType(finalized_type);
 				}
 			}
 		}
@@ -582,15 +588,17 @@ static void RewriteCounterFiltersFromGets(OptimizerExtensionInput &input, unique
 		return;
 	}
 	auto &get = op->Cast<LogicalGet>();
-	if (!derived_table_indices.count(get.table_index)) {
+	if (!derived_table_indices.count(get.table_index.index)) {
 		return;
 	}
 	auto list_type = CounterListType();
 	auto finalized_type = PacFloatLogicalType();
 	vector<idx_t> to_pull;
-	for (auto &entry : get.table_filters.filters) {
-		auto col_idx = entry.first;
-		if (col_idx < get.returned_types.size() && get.returned_types[col_idx] == list_type) {
+	const auto &col_ids = get.GetColumnIds();
+	for (auto &entry : get.table_filters) {
+		auto col_idx = entry.GetIndex();
+		// DuckDB 2.0 keys filters by scan projection, not physical table column.
+		if (col_idx < col_ids.size() && get.GetColumnType(col_ids[col_idx]) == list_type) {
 			to_pull.push_back(col_idx);
 		}
 	}
@@ -598,43 +606,47 @@ static void RewriteCounterFiltersFromGets(OptimizerExtensionInput &input, unique
 		return;
 	}
 	auto out_bindings = op->GetColumnBindings();
-	auto &col_ids = get.GetColumnIds();
 	vector<unique_ptr<Expression>> filter_exprs;
 	for (auto filter_col_idx : to_pull) {
-		auto &filter = get.table_filters.filters[filter_col_idx];
-		auto col_type = get.returned_types[filter_col_idx];
+		auto &filter = get.table_filters.GetFilterByColumnIndexMutable(ProjectionIndex(filter_col_idx));
+		auto col_type = get.GetColumnType(col_ids[filter_col_idx]);
 		// Find the output binding for this column
 		ColumnBinding binding;
 		bool found = false;
 		for (idx_t i = 0; i < col_ids.size() && i < out_bindings.size(); i++) {
-			if (col_ids[i].GetPrimaryIndex() == filter_col_idx) {
+			if ((get.projection_ids.empty() ? i : idx_t(get.projection_ids[i])) == filter_col_idx) {
 				binding = out_bindings[i];
 				found = true;
 				break;
 			}
 		}
 		if (!found) {
-			get.table_filters.filters.erase(filter_col_idx);
-			continue;
+			// Filter-only columns may have been pruned from the scan output. Expose
+			// them again so the pulled-up privacy predicate can evaluate them.
+			D_ASSERT(!get.projection_ids.empty());
+			get.projection_ids.emplace_back(filter_col_idx);
+			binding = ColumnBinding(get.table_index, ProjectionIndex(filter_col_idx));
+			get.ResolveOperatorTypes();
 		}
 		auto col_ref = make_uniq<BoundColumnRefExpression>(col_type, binding);
-		auto expr = filter->ToExpression(*col_ref);
+		auto expr = filter.ToExpression(*col_ref);
 		// Rewrite the expression to priv_filter_<cmp> calls
-		if (expr->GetExpressionClass() == ExpressionClass::BOUND_BETWEEN) {
-			auto &between = expr->Cast<BoundBetweenExpression>();
+		if (expr->GetExpressionType() == ExpressionType::COMPARE_BETWEEN) {
+			auto &between = expr->Cast<BoundFunctionExpression>();
 			auto counter1 = make_uniq<BoundColumnRefExpression>(col_type, binding);
 			auto counter2 = make_uniq<BoundColumnRefExpression>(col_type, binding);
 			filter_exprs.push_back(RewriteBetweenToFilterCmp(
-			    input, std::move(counter1), std::move(counter2), std::move(between.lower), std::move(between.upper),
-			    between.lower_inclusive, between.upper_inclusive, finalized_type, list_type));
-		} else if (expr->GetExpressionClass() == ExpressionClass::BOUND_COMPARISON) {
-			auto &cmp = expr->Cast<BoundComparisonExpression>();
+			    input, std::move(counter1), std::move(counter2), std::move(between.GetChildrenMutable()[1]),
+			    std::move(between.GetChildrenMutable()[2]), BoundBetweenExpression::LowerInclusive(between),
+			    BoundBetweenExpression::UpperInclusive(between), finalized_type, list_type));
+		} else if (BoundComparisonExpression::IsComparison(*expr)) {
+			auto &cmp = expr->Cast<BoundFunctionExpression>();
 			auto rewritten = RewriteComparisonToFilterCmp(input, cmp, list_type, finalized_type);
 			filter_exprs.push_back(rewritten ? std::move(rewritten) : std::move(expr));
 		} else {
 			filter_exprs.push_back(std::move(expr));
 		}
-		get.table_filters.filters.erase(filter_col_idx);
+		get.table_filters.RemoveFilterByColumnIndex(ProjectionIndex(filter_col_idx));
 		PRIVACY_DEBUG_PRINT("[PAC DERIVED READ] Rewrote table_filter to priv_filter_<cmp> for counter column " +
 		                    std::to_string(filter_col_idx));
 	}

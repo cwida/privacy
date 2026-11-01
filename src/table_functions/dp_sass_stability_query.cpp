@@ -32,13 +32,13 @@ struct DpSassStabilityQueryState : public GlobalTableFunctionState {
 	idx_t offset = 0;
 };
 
-static void AddOutputColumn(vector<LogicalType> &return_types, vector<string> &names, const string &name,
+static void AddOutputColumn(vector<LogicalType> &return_types, vector<Identifier> &names, const string &name,
                             const LogicalType &type) {
-	names.push_back(name);
+	names.emplace_back(name);
 	return_types.push_back(type);
 }
 
-static void AddStabilityOutputColumns(vector<LogicalType> &return_types, vector<string> &names) {
+static void AddStabilityOutputColumns(vector<LogicalType> &return_types, vector<Identifier> &names) {
 	AddOutputColumn(return_types, names, "group_row", LogicalType::BIGINT);
 	AddOutputColumn(return_types, names, "aggregate_index", LogicalType::INTEGER);
 	AddOutputColumn(return_types, names, "aggregate_name", LogicalType::VARCHAR);
@@ -59,7 +59,7 @@ static void AddStabilityOutputColumns(vector<LogicalType> &return_types, vector<
 	AddOutputColumn(return_types, names, "stable_mad_1", LogicalType::BOOLEAN);
 }
 
-static void AddNoiseScaleOutputColumns(vector<LogicalType> &return_types, vector<string> &names) {
+static void AddNoiseScaleOutputColumns(vector<LogicalType> &return_types, vector<Identifier> &names) {
 	AddOutputColumn(return_types, names, "group_row", LogicalType::BIGINT);
 	AddOutputColumn(return_types, names, "aggregate_index", LogicalType::INTEGER);
 	AddOutputColumn(return_types, names, "aggregate_name", LogicalType::VARCHAR);
@@ -113,7 +113,7 @@ static void RunSetting(Connection &conn, const string &sql) {
 
 static void CopySetting(ClientContext &context, Connection &conn, const string &setting_name) {
 	Value value;
-	if (!context.TryGetCurrentSetting(setting_name, value) || value.IsNull()) {
+	if (!context.TryGetCurrentSetting(Identifier(setting_name), value) || value.IsNull()) {
 		return;
 	}
 	RunSetting(conn, "SET " + setting_name + " = " + value.ToSQLString());
@@ -179,7 +179,7 @@ static string BuildGroupKeyJson(QueryResult &result, const vector<Value> &row, i
 			json += ",";
 		}
 		json += "\"";
-		json += EscapeJsonString(result.names[col]);
+		json += EscapeJsonString(result.GetNames()[col].GetIdentifierName());
 		json += "\":";
 		auto &value = row[col];
 		if (value.IsNull()) {
@@ -266,8 +266,8 @@ ExecuteDiagnosticQuery(ClientContext &context, const string &sql, const string &
 		values.push_back(Value::BIGINT(static_cast<int64_t>(group_row)));
 		values.push_back(Value::INTEGER(record.aggregate_index));
 		idx_t result_name_idx = group_cols + aggregate_index;
-		if (result_columns_align && result_name_idx < result->names.size()) {
-			values.push_back(Value(result->names[result_name_idx]));
+		if (result_columns_align && result_name_idx < result->GetNames().size()) {
+			values.push_back(Value(result->GetNames()[result_name_idx].GetIdentifierName()));
 		} else {
 			values.push_back(Value("agg_" + std::to_string(record.aggregate_index)));
 		}
@@ -302,7 +302,7 @@ static vector<DpSassStabilityQueryRow> ExecuteNoiseScaleQuery(ClientContext &con
 }
 
 static unique_ptr<FunctionData> DpSassStabilityQueryBind(ClientContext &context, TableFunctionBindInput &input,
-                                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.empty() || input.inputs[0].IsNull()) {
 		throw BinderException("dp_sass_stability_query requires a non-NULL SQL string");
 	}
@@ -312,7 +312,8 @@ static unique_ptr<FunctionData> DpSassStabilityQueryBind(ClientContext &context,
 }
 
 static unique_ptr<FunctionData> DpSassNoiseScaleQueryBind(ClientContext &context, TableFunctionBindInput &input,
-                                                          vector<LogicalType> &return_types, vector<string> &names) {
+                                                          vector<LogicalType> &return_types,
+                                                          vector<Identifier> &names) {
 	if (input.inputs.empty() || input.inputs[0].IsNull()) {
 		throw BinderException("dp_sass_noise_scale_query requires a non-NULL SQL string");
 	}

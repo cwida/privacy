@@ -524,12 +524,49 @@ SELECT count(*) FROM (
         )
 );
 ----
-2
+1
+
+# Independently evaluate all 64 sampled worlds with ordinary SQL. Only supplier
+# 1 passes in at least half of the worlds. DuckDB 2.0's nullable-COUNT wrapper
+# contains two COUNT states; both must remain world-specific through its CASE.
+statement ok
+SET priv_check = false;
+
+statement ok
+SET priv_rewrite = false;
+
+query I
+WITH sampled AS (
+    SELECT l_suppkey, j AS world
+    FROM lineitem JOIN orders ON l_orderkey = o_orderkey
+    CROSS JOIN range(64) t(j)
+    WHERE ((priv_hash(hash(o_custkey)) >> j) & 1::UBIGINT) <> 0
+), counts AS (
+    SELECT world, l_suppkey, COUNT(*) AS n FROM sampled GROUP BY ALL
+), means AS (
+    SELECT world, AVG(n) AS mean_count FROM counts GROUP BY world
+), decisions AS (
+    SELECT s_suppkey, SUM((COALESCE(n, 0) > mean_count)::INTEGER) AS true_worlds
+    FROM supplier CROSS JOIN range(64) t(j)
+    LEFT JOIN counts ON j = counts.world AND s_suppkey = l_suppkey
+    LEFT JOIN means ON j = means.world
+    GROUP BY s_suppkey
+)
+SELECT COUNT(*) FROM decisions WHERE true_worlds >= 32;
+----
+1
+
+statement ok
+SET priv_rewrite = true;
+
+statement ok
+SET priv_check = true;
 
 # ============================================================================
 # Test 11: Categorical with AVG aggregate
 # Find parts where avg quantity exceeds threshold
-# NOTE: Result is 2 with proper avg decomposition (as_noised_avg → sum/count)
+# All four parts pass in a majority of worlds; both correlated and global
+# averages must remain world-specific through the comparison.
 # ============================================================================
 
 query I
@@ -551,7 +588,42 @@ SELECT count(*) FROM (
         )
 );
 ----
-2
+4
+
+# Ordinary SQL oracle: report the number of passing worlds for each part.
+statement ok
+SET priv_check = false;
+
+statement ok
+SET priv_rewrite = false;
+
+query II
+WITH sampled AS (
+    SELECT l_partkey, l_quantity, j AS world
+    FROM lineitem JOIN orders ON l_orderkey = o_orderkey
+    CROSS JOIN range(64) t(j)
+    WHERE ((priv_hash(hash(o_custkey)) >> j) & 1::UBIGINT) <> 0
+), avgs AS (
+    SELECT world, l_partkey, AVG(l_quantity) AS a FROM sampled GROUP BY ALL
+), means AS (
+    SELECT world, AVG(l_quantity) AS m FROM sampled GROUP BY world
+)
+SELECT p_partkey, SUM((a > 0.8 * m)::INTEGER) AS true_worlds
+FROM part CROSS JOIN range(64) t(j)
+LEFT JOIN avgs ON j = avgs.world AND p_partkey = l_partkey
+LEFT JOIN means ON j = means.world
+GROUP BY p_partkey ORDER BY p_partkey;
+----
+1	41
+2	37
+3	50
+4	50
+
+statement ok
+SET priv_rewrite = true;
+
+statement ok
+SET priv_check = true;
 
 # ============================================================================
 # Test 12: Correlated categorical subquery with multiple tables

@@ -89,7 +89,7 @@ static unique_ptr<Expression> BindScalarLocal(OptimizerExtensionInput &input, co
                                               vector<unique_ptr<Expression>> children) {
 	FunctionBinder function_binder(input.context);
 	ErrorData error;
-	auto expr = function_binder.BindScalarFunction(DEFAULT_SCHEMA, func_name, std::move(children), error);
+	auto expr = function_binder.BindScalarFunction(DEFAULT_SCHEMA, Identifier(func_name), std::move(children), error);
 	if (error.HasError()) {
 		throw InternalException("dp: failed to bind scalar function '" + func_name + "': " + error.Message());
 	}
@@ -103,12 +103,12 @@ static unique_ptr<Expression> BindAggregateLocal(OptimizerExtensionInput &input,
 	vector<LogicalType> arg_types;
 	arg_types.reserve(children.size());
 	for (auto &child : children) {
-		arg_types.push_back(child->return_type);
+		arg_types.push_back(child->GetReturnType());
 	}
 
 	auto &entry = Catalog::GetSystemCatalog(input.context)
-	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, func_name);
-	auto best = function_binder.BindFunction(entry.name, entry.functions, arg_types, error);
+	                  .GetEntry<AggregateFunctionCatalogEntry>(input.context, DEFAULT_SCHEMA, Identifier(func_name));
+	auto best = function_binder.BindFunction(Identifier(entry.name), entry.functions, arg_types, error);
 	if (!best.IsValid()) {
 		throw InternalException("dp: failed to bind aggregate function '" + func_name + "': " + error.Message());
 	}
@@ -130,15 +130,15 @@ static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, Logi
 	idx_t avg_idx = 0;
 	for (idx_t i = 0; i < n_original; i++) {
 		auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-		if (aggr.function.name != "avg") {
+		if (aggr.FunctionMutable().GetName().GetIdentifierName() != "avg") {
 			continue;
 		}
-		auto output_type = aggr.return_type;
+		auto output_type = aggr.GetReturnType();
 		// Preserve `FILTER (WHERE ...)` from the original AVG. For fixed-bound means,
 		// both the rewritten SUM and appended COUNT(*) receive the predicate.
-		auto count_arg = count_non_null_value ? aggr.children[0]->Copy() : nullptr;
-		auto arg = std::move(aggr.children[0]);
-		auto filter_for_sum = std::move(aggr.filter);
+		auto count_arg = count_non_null_value ? aggr.GetChildrenMutable()[0]->Copy() : nullptr;
+		auto arg = std::move(aggr.GetChildrenMutable()[0]);
+		auto filter_for_sum = std::move(aggr.GetFilterMutable());
 		auto filter_for_count = !automatic_bounds_mean && filter_for_sum ? filter_for_sum->Copy() : nullptr;
 		AvgDomain domain {0.0, 0.0};
 		if (avg_bounds) {
@@ -159,14 +159,14 @@ static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, Logi
 		}
 
 		agg->expressions[i] = BindPlainAggregate(input, "sum", std::move(arg));
-		agg->expressions[i]->Cast<BoundAggregateExpression>().filter = std::move(filter_for_sum);
+		agg->expressions[i]->Cast<BoundAggregateExpression>().GetFilterMutable() = std::move(filter_for_sum);
 
 		idx_t count_pos = DConstants::INVALID_INDEX;
 		if (!automatic_bounds_mean) {
 			count_pos = agg->expressions.size();
 			agg->expressions.push_back(count_non_null_value ? BindPlainAggregate(input, "count", std::move(count_arg))
 			                                                : BindPlainAggregate(input, "count_star", nullptr));
-			agg->expressions.back()->Cast<BoundAggregateExpression>().filter = std::move(filter_for_count);
+			agg->expressions.back()->Cast<BoundAggregateExpression>().GetFilterMutable() = std::move(filter_for_count);
 		}
 
 		AvgInfo info;
@@ -202,7 +202,7 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 			if (!table) {
 				continue;
 			}
-			string name = StringUtil::Lower(table->name);
+			string name = StringUtil::Lower(table->name.GetIdentifierName());
 			name_count[name]++;
 			if (name_count[name] > 1) {
 				throw InvalidInputException("dp: self-joins are not supported (table '" + table->name +
@@ -363,11 +363,11 @@ static void CheckDPAggregateNode(LogicalAggregate *agg, const string &mechanism_
 			throw InvalidInputException(mechanism_name + ": unsupported non-aggregate expression in aggregate node");
 		}
 		auto &aggr = expr->Cast<BoundAggregateExpression>();
-		string name = StringUtil::Lower(aggr.function.name);
+		string name = StringUtil::Lower(aggr.FunctionMutable().GetName().GetIdentifierName());
 		bool is_count = name == "count" || name == "count_star";
 		if (aggr.IsDistinct()) {
 			if ((mechanism_name != "dp_sass" && mechanism_name != "dp_elastic" && mechanism_name != "dp_standard") ||
-			    !is_count || aggr.children.size() != 1 || aggr.filter) {
+			    !is_count || aggr.GetChildrenMutable().size() != 1 || aggr.GetFilterMutable()) {
 				throw InvalidInputException(mechanism_name + ": only COUNT(DISTINCT x) is supported for DISTINCT");
 			}
 			continue;
@@ -383,14 +383,14 @@ static void CheckDPAggregateNode(LogicalAggregate *agg, const string &mechanism_
 		if (!is_count && !is_sum_avg && !(allow_min_max && is_min_max)) {
 			string supported = allow_min_max ? "COUNT, SUM, AVG, MIN, and MAX" : "COUNT, SUM, and AVG";
 			throw InvalidInputException(mechanism_name + ": only " + supported + " are supported (got '" +
-			                            aggr.function.name + "')");
+			                            aggr.FunctionMutable().GetName().GetIdentifierName() + "')");
 		}
-		if ((is_sum_avg || is_min_max) && aggr.children.size() != 1) {
+		if ((is_sum_avg || is_min_max) && aggr.GetChildrenMutable().size() != 1) {
 			throw InvalidInputException(mechanism_name + ": " + name + " must have exactly one argument");
 		}
-		if ((is_sum_avg || is_min_max) && !aggr.children[0]->return_type.IsNumeric()) {
+		if ((is_sum_avg || is_min_max) && !aggr.GetChildrenMutable()[0]->GetReturnType().IsNumeric()) {
 			throw InvalidInputException(mechanism_name + ": " + name + " argument must be a numeric type (got '" +
-			                            aggr.children[0]->return_type.ToString() + "')");
+			                            aggr.GetChildrenMutable()[0]->GetReturnType().ToString() + "')");
 		}
 	}
 }
@@ -419,7 +419,7 @@ static void CountAccessibleTableScans(LogicalOperator *op, std::unordered_map<st
 		auto &get = op->Cast<LogicalGet>();
 		auto table = get.GetTable();
 		if (table) {
-			counts[StringUtil::Lower(table->name)]++;
+			counts[StringUtil::Lower(table->name.GetIdentifierName())]++;
 		}
 		return;
 	}
@@ -453,7 +453,7 @@ static double ValidateDPSelfJoins(unique_ptr<LogicalOperator> &plan, const strin
 	for (auto *get : gets) {
 		auto table = get->GetTable();
 		if (table) {
-			all_counts[StringUtil::Lower(table->name)]++;
+			all_counts[StringUtil::Lower(table->name.GetIdentifierName())]++;
 		}
 	}
 
@@ -493,7 +493,8 @@ static double ComputeMfK(ClientContext &context, const string &table_name, const
 		// Table is empty: no rows contribute → max frequency is 0
 		return 0.0;
 	}
-	auto val = result->GetValue(0, 0);
+	auto chunk = result->Fetch();
+	auto val = chunk->GetValue(0, 0);
 	return val.IsNull() ? 0.0 : val.GetValue<double>();
 }
 
@@ -608,7 +609,8 @@ enum class DPSensitivityKind { GLOBAL, ELASTIC_SMOOTH };
 static bool AggregateContainsSum(const LogicalAggregate *agg) {
 	for (auto &expr : agg->expressions) {
 		auto &a = expr->Cast<BoundAggregateExpression>();
-		if (a.function.name == "sum" || a.function.name == "avg") {
+		if (a.FunctionMutable().GetName().GetIdentifierName() == "sum" ||
+		    a.FunctionMutable().GetName().GetIdentifierName() == "avg") {
 			return true;
 		}
 	}
@@ -618,7 +620,7 @@ static bool AggregateContainsSum(const LogicalAggregate *agg) {
 static bool AggregateContainsAvg(const LogicalAggregate *agg) {
 	for (auto &expr : agg->expressions) {
 		auto &a = expr->Cast<BoundAggregateExpression>();
-		if (a.function.name == "avg") {
+		if (a.FunctionMutable().GetName().GetIdentifierName() == "avg") {
 			return true;
 		}
 	}
@@ -629,7 +631,7 @@ static idx_t CountAvgAggregates(const LogicalAggregate *agg) {
 	idx_t count = 0;
 	for (auto &expr : agg->expressions) {
 		auto &a = expr->Cast<BoundAggregateExpression>();
-		if (a.function.name == "avg") {
+		if (a.FunctionMutable().GetName().GetIdentifierName() == "avg") {
 			count++;
 		}
 	}
@@ -640,7 +642,7 @@ static idx_t CountExplicitSumAggregates(const LogicalAggregate *agg) {
 	idx_t count = 0;
 	for (auto &expr : agg->expressions) {
 		auto &a = expr->Cast<BoundAggregateExpression>();
-		if (a.function.name == "sum") {
+		if (a.FunctionMutable().GetName().GetIdentifierName() == "sum") {
 			count++;
 		}
 	}
@@ -683,7 +685,7 @@ static vector<double> GetDpSumContributionBounds(ClientContext &context, const s
 	idx_t explicit_sum_count = 0;
 	for (idx_t i = 0; i < agg->expressions.size(); i++) {
 		auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-		if (aggr.function.name == "sum" && !FindAvgInfoForSumPos(avg_infos, i)) {
+		if (aggr.FunctionMutable().GetName().GetIdentifierName() == "sum" && !FindAvgInfoForSumPos(avg_infos, i)) {
 			explicit_sum_count++;
 		}
 	}
@@ -709,7 +711,7 @@ static vector<double> GetDpSumContributionBounds(ClientContext &context, const s
 	bool needs_scalar_sum_bound = false;
 	for (idx_t i = 0; i < agg->expressions.size(); i++) {
 		auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-		if (aggr.function.name != "sum") {
+		if (aggr.FunctionMutable().GetName().GetIdentifierName() != "sum") {
 			continue;
 		}
 		if (FindAvgInfoForSumPos(avg_infos, i)) {
@@ -727,7 +729,7 @@ static vector<double> GetDpSumContributionBounds(ClientContext &context, const s
 	idx_t sum_list_idx = 0;
 	for (idx_t i = 0; i < agg->expressions.size(); i++) {
 		auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-		if (aggr.function.name != "sum") {
+		if (aggr.FunctionMutable().GetName().GetIdentifierName() != "sum") {
 			continue;
 		}
 		if (FindAvgInfoForSumPos(avg_infos, i)) {
@@ -745,7 +747,7 @@ static unique_ptr<Expression> ClipToBounds(OptimizerExtensionInput &input, uniqu
                                            double hi, const LogicalType &restore_type) {
 	auto as_double = BoundCastExpression::AddCastToType(input.context, std::move(expr), LogicalType::DOUBLE);
 	auto is_null = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NULL, LogicalType::BOOLEAN);
-	is_null->children.push_back(as_double->Copy());
+	is_null->GetChildrenMutable().push_back(as_double->Copy());
 	auto hi_const = make_uniq<BoundConstantExpression>(Value::DOUBLE(hi));
 	auto lo_const = make_uniq<BoundConstantExpression>(Value::DOUBLE(lo));
 	auto upper = input.optimizer.BindScalarFunction("least", std::move(as_double), std::move(hi_const));
@@ -754,8 +756,8 @@ static unique_ptr<Expression> ClipToBounds(OptimizerExtensionInput &input, uniqu
 	BoundCaseCheck null_check;
 	null_check.when_expr = std::move(is_null);
 	null_check.then_expr = make_uniq<BoundConstantExpression>(Value(LogicalType::DOUBLE));
-	preserve_null->case_checks.push_back(std::move(null_check));
-	preserve_null->else_expr = std::move(clipped);
+	preserve_null->CaseChecksMutable().push_back(std::move(null_check));
+	preserve_null->ElseMutable() = std::move(clipped);
 	return BoundCastExpression::AddCastToType(input.context, std::move(preserve_null), restore_type);
 }
 
@@ -763,13 +765,14 @@ static void ClipSumInputs(OptimizerExtensionInput &input, LogicalAggregate *agg,
 	for (idx_t i = 0; i < agg->expressions.size(); i++) {
 		auto &expr = agg->expressions[i];
 		auto &aggr = expr->Cast<BoundAggregateExpression>();
-		if (aggr.function.name != "sum" || aggr.children.empty()) {
+		if (aggr.FunctionMutable().GetName().GetIdentifierName() != "sum" || aggr.GetChildrenMutable().empty()) {
 			continue;
 		}
-		auto original_type = aggr.children[0]->return_type;
+		auto original_type = aggr.GetChildrenMutable()[0]->GetReturnType();
 		D_ASSERT(i < sum_bounds.size());
 		double sum_bound = sum_bounds[i];
-		aggr.children[0] = ClipToBounds(input, std::move(aggr.children[0]), -sum_bound, sum_bound, original_type);
+		aggr.GetChildrenMutable()[0] =
+		    ClipToBounds(input, std::move(aggr.GetChildrenMutable()[0]), -sum_bound, sum_bound, original_type);
 	}
 	agg->ResolveOperatorTypes();
 }
@@ -786,7 +789,7 @@ static double GetRequiredDpBound(ClientContext &context, const string &setting_n
 	} else if (setting_name == "dp_sass_count_output_bound" || setting_name == "dp_sass_sum_output_bound" ||
 	           setting_name == "dp_sass_avg_lower_bound" || setting_name == "dp_sass_avg_upper_bound") {
 		Value val;
-		found = context.TryGetCurrentSetting(setting_name, val) && !val.IsNull();
+		found = context.TryGetCurrentSetting(Identifier(setting_name), val) && !val.IsNull();
 		if (found) {
 			bound = val.GetValue<double>();
 		}
@@ -818,7 +821,7 @@ static int64_t GetRequiredDpIntegerBound(ClientContext &context, const string &s
 static double GetRequiredFiniteSetting(ClientContext &context, const string &setting_name,
                                        const string &mechanism_name) {
 	Value val;
-	if (!context.TryGetCurrentSetting(setting_name, val) || val.IsNull()) {
+	if (!context.TryGetCurrentSetting(Identifier(setting_name), val) || val.IsNull()) {
 		throw InvalidInputException(mechanism_name + ": " + setting_name + " must be set");
 	}
 	double bound = val.GetValue<double>();
@@ -831,7 +834,7 @@ static double GetRequiredFiniteSetting(ClientContext &context, const string &set
 
 static bool TryGetFiniteSetting(ClientContext &context, const string &setting_name, double &bound) {
 	Value val;
-	if (!context.TryGetCurrentSetting(setting_name, val) || val.IsNull()) {
+	if (!context.TryGetCurrentSetting(Identifier(setting_name), val) || val.IsNull()) {
 		return false;
 	}
 	bound = val.GetValue<double>();
@@ -844,7 +847,7 @@ static bool TryGetFiniteSetting(ClientContext &context, const string &setting_na
 static vector<double> ParseFiniteSettingList(ClientContext &context, const string &setting_name, bool &found) {
 	found = false;
 	Value val;
-	if (!context.TryGetCurrentSetting(setting_name, val) || val.IsNull()) {
+	if (!context.TryGetCurrentSetting(Identifier(setting_name), val) || val.IsNull()) {
 		return {};
 	}
 	string text = val.ToString();
@@ -1029,7 +1032,7 @@ static std::pair<double, double> GetDpMinMaxBounds(ClientContext &context, const
 // Elastic Laplace scale = sensitivity / epsilon; sensitivity = es for COUNT, es * value_bound for SUM.
 static double ElasticSensitivity(idx_t aggregate_pos, const BoundAggregateExpression &aggr,
                                  const vector<double> &sum_bounds, double es) {
-	const string &name = aggr.function.name;
+	const string &name = aggr.Function().GetName().GetIdentifierName();
 	if (name == "count" || name == "count_star") {
 		return es;
 	}
@@ -1041,7 +1044,8 @@ static double ElasticSensitivity(idx_t aggregate_pos, const BoundAggregateExpres
 }
 
 static bool IsCountAggregate(const BoundAggregateExpression &aggr) {
-	return aggr.function.name == "count" || aggr.function.name == "count_star";
+	return aggr.Function().GetName().GetIdentifierName() == "count" ||
+	       aggr.Function().GetName().GetIdentifierName() == "count_star";
 }
 
 // Does the aggregate contain any COUNT/COUNT(*) (after AVG→SUM+COUNT rewrite)?
@@ -1055,7 +1059,8 @@ static bool AggregateContainsCount(const LogicalAggregate *agg) {
 }
 
 static bool IsMinMaxAggregate(const BoundAggregateExpression &aggr) {
-	return aggr.function.name == "min" || aggr.function.name == "max";
+	return aggr.Function().GetName().GetIdentifierName() == "min" ||
+	       aggr.Function().GetName().GetIdentifierName() == "max";
 }
 
 static bool AggregateContainsMinMax(const LogicalAggregate *agg) {
@@ -1108,7 +1113,7 @@ static void EnsurePuAdjacentTableAvailable(OptimizerExtensionInput &input, uniqu
 	auto &binder = input.optimizer.binder;
 	unique_ptr<LogicalOperator> current = (*start_ref)->Copy(input.context);
 	for (auto &table : tables_to_join) {
-		idx_t table_index = binder.GenerateTableIndex();
+		idx_t table_index = binder.GenerateTableIndex().index;
 		auto get = CreateLogicalGet(input.context, plan, table, table_index);
 		current = CreateLogicalJoin(check, input.context, std::move(current), std::move(get));
 	}
@@ -1155,10 +1160,10 @@ static unique_ptr<Expression> BuildPerPuExpressionAtOperator(OptimizerExtensionI
 		}
 		auto col_index = key_get->GetColumnIds()[proj_idx];
 		auto col_type = key_get->GetColumnType(col_index);
-		ColumnBinding source_binding(key_get->table_index, proj_idx);
+		ColumnBinding source_binding {TableIndex(key_get->table_index.index), ProjectionIndex(proj_idx)};
 		auto propagated =
-		    PropagateSingleBindingToOperator(*plan, key_get->table_index, source_binding, col_type, target);
-		if (propagated.table_index == DConstants::INVALID_INDEX) {
+		    PropagateSingleBindingToOperator(*plan, key_get->table_index.index, source_binding, col_type, target);
+		if (propagated.table_index.index == DConstants::INVALID_INDEX) {
 			throw InternalException(mech + ": could not propagate PU key column '" + key_column +
 			                        "' to aggregate input");
 		}
@@ -1167,18 +1172,19 @@ static unique_ptr<Expression> BuildPerPuExpressionAtOperator(OptimizerExtensionI
 
 	auto pu_group_expr = BuildXorHash(input, std::move(key_exprs));
 	pu_group_expr = BoundCastExpression::AddCastToType(input.context, std::move(pu_group_expr), LogicalType::UBIGINT);
-	pu_group_expr->alias = mech + "_pu_key";
+	pu_group_expr->SetAlias(Identifier(mech + "_pu_key"));
 	return pu_group_expr;
 }
 
 static unique_ptr<Expression> BuildRankSourceRef(const vector<LogicalType> &source_types, idx_t source_table_index,
                                                  idx_t column) {
-	return make_uniq<BoundColumnRefExpression>(source_types[column], ColumnBinding(source_table_index, column));
+	return make_uniq<BoundColumnRefExpression>(source_types[column],
+	                                           ColumnBinding(TableIndex(source_table_index), ProjectionIndex(column)));
 }
 
 static unique_ptr<Expression> BuildIsNullPredicate(unique_ptr<Expression> expr) {
 	auto is_null = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NULL, LogicalType::BOOLEAN);
-	is_null->children.push_back(std::move(expr));
+	is_null->GetChildrenMutable().push_back(std::move(expr));
 	return is_null;
 }
 
@@ -1205,22 +1211,23 @@ static unique_ptr<LogicalOperator> BuildRankCapFilter(OptimizerExtensionInput &i
 		return child;
 	}
 	auto &binder = input.optimizer.binder;
-	idx_t window_index = binder.GenerateTableIndex();
-	auto window = make_uniq<LogicalWindow>(window_index);
+	idx_t window_index = binder.GenerateTableIndex().index;
+	auto window = make_uniq<LogicalWindow>(TableIndex(window_index));
 
 	for (auto &spec : specs) {
-		auto rank = make_uniq<BoundWindowExpression>(spec.rank_type, LogicalType::BIGINT, nullptr, nullptr);
+		auto rank = BindRankingWindow(input.context, spec.rank_type);
 		for (auto col : spec.partition_cols) {
-			rank->partitions.push_back(BuildRankSourceRef(source_types, source_table_index, col));
+			rank->PartitionsMutable().push_back(BuildRankSourceRef(source_types, source_table_index, col));
 		}
 		for (auto col : spec.keep_null_cols) {
-			rank->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST,
-			                          BuildIsNullPredicate(BuildRankSourceRef(source_types, source_table_index, col)));
+			rank->OrderByMutable().emplace_back(
+			    OrderType::ASCENDING, OrderByNullType::NULLS_LAST,
+			    BuildIsNullPredicate(BuildRankSourceRef(source_types, source_table_index, col)));
 		}
 		if (spec.rank_type == ExpressionType::WINDOW_RANK_DENSE) {
 			for (auto col : spec.order_cols) {
-				rank->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST,
-				                          BuildRankSourceRef(source_types, source_table_index, col));
+				rank->OrderByMutable().emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST,
+				                                    BuildRankSourceRef(source_types, source_table_index, col));
 			}
 		} else {
 			vector<unique_ptr<Expression>> hash_children;
@@ -1229,19 +1236,21 @@ static unique_ptr<LogicalOperator> BuildRankCapFilter(OptimizerExtensionInput &i
 				hash_children.push_back(BuildRankSourceRef(source_types, source_table_index, col));
 			}
 			auto hash_expr = BindScalarLocal(input, "hash", std::move(hash_children));
-			rank->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST, std::move(hash_expr));
+			rank->OrderByMutable().emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST,
+			                                    std::move(hash_expr));
 		}
-		rank->start = WindowBoundary::UNBOUNDED_PRECEDING;
-		rank->end = WindowBoundary::CURRENT_ROW_ROWS;
+		rank->WindowStartMutable() = WindowBoundary::UNBOUNDED_PRECEDING;
+		rank->WindowEndMutable() = WindowBoundary::CURRENT_ROW_ROWS;
 		window->expressions.push_back(std::move(rank));
 	}
 	window->children.push_back(std::move(child));
 
 	vector<unique_ptr<Expression>> keep_conditions;
 	for (idx_t i = 0; i < specs.size(); i++) {
-		auto rank_ref = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ColumnBinding(window_index, i));
+		auto rank_ref = make_uniq<BoundColumnRefExpression>(
+		    LogicalType::BIGINT, ColumnBinding(TableIndex(window_index), ProjectionIndex(i)));
 		auto cap_const = make_uniq<BoundConstantExpression>(Value::BIGINT(specs[i].cap));
-		unique_ptr<Expression> keep_condition = make_uniq<BoundComparisonExpression>(
+		unique_ptr<Expression> keep_condition = BoundComparisonExpression::Create(
 		    ExpressionType::COMPARE_LESSTHANOREQUALTO, std::move(rank_ref), std::move(cap_const));
 		for (auto col : specs[i].keep_null_cols) {
 			keep_condition = make_uniq<BoundConjunctionExpression>(
@@ -1255,7 +1264,7 @@ static unique_ptr<LogicalOperator> BuildRankCapFilter(OptimizerExtensionInput &i
 		keep_expr = std::move(keep_conditions[0]);
 	} else {
 		auto conj = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND);
-		conj->children = std::move(keep_conditions);
+		conj->GetChildrenMutable() = std::move(keep_conditions);
 		keep_expr = std::move(conj);
 	}
 	auto filter = make_uniq<LogicalFilter>(std::move(keep_expr));
@@ -1265,7 +1274,7 @@ static unique_ptr<LogicalOperator> BuildRankCapFilter(OptimizerExtensionInput &i
 
 static unique_ptr<Expression> BuildIsNotNullPredicate(unique_ptr<Expression> expr) {
 	auto not_null = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NOT_NULL, LogicalType::BOOLEAN);
-	not_null->children.push_back(std::move(expr));
+	not_null->GetChildrenMutable().push_back(std::move(expr));
 	return not_null;
 }
 
@@ -1283,7 +1292,7 @@ static unique_ptr<Expression> ConjoinPredicates(vector<unique_ptr<Expression>> p
 		return std::move(present[0]);
 	}
 	auto conjunction = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND);
-	conjunction->children = std::move(present);
+	conjunction->GetChildrenMutable() = std::move(present);
 	return std::move(conjunction);
 }
 
@@ -1297,35 +1306,36 @@ static vector<unique_ptr<Expression>> PrepareVariableMDistinctListFilters(Optimi
 	}
 
 	auto &binder = input.optimizer.binder;
-	idx_t window_index = binder.GenerateTableIndex();
-	auto window = make_uniq<LogicalWindow>(window_index);
+	idx_t window_index = binder.GenerateTableIndex().index;
+	auto window = make_uniq<LogicalWindow>(TableIndex(window_index));
 	vector<idx_t> distinct_filter_indices;
 
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
 		auto &aggr = agg->expressions[ai]->Cast<BoundAggregateExpression>();
-		string name = StringUtil::Lower(aggr.function.name);
-		if (name != "count" || !aggr.IsDistinct() || aggr.children.empty()) {
+		string name = StringUtil::Lower(aggr.FunctionMutable().GetName().GetIdentifierName());
+		if (name != "count" || !aggr.IsDistinct() || aggr.GetChildrenMutable().empty()) {
 			continue;
 		}
 
-		auto rank =
-		    make_uniq<BoundWindowExpression>(ExpressionType::WINDOW_RANK_DENSE, LogicalType::BIGINT, nullptr, nullptr);
+		auto rank = BindRankingWindow(input.context, ExpressionType::WINDOW_RANK_DENSE);
 		for (auto &group : agg->groups) {
-			rank->partitions.push_back(group->Copy());
+			rank->PartitionsMutable().push_back(group->Copy());
 		}
-		rank->partitions.push_back(pu_hash_expr.Copy());
-		rank->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST, aggr.children[0]->Copy());
-		rank->start = WindowBoundary::UNBOUNDED_PRECEDING;
-		rank->end = WindowBoundary::CURRENT_ROW_ROWS;
+		rank->PartitionsMutable().push_back(pu_hash_expr.Copy());
+		rank->OrderByMutable().emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST,
+		                                    aggr.GetChildrenMutable()[0]->Copy());
+		rank->WindowStartMutable() = WindowBoundary::UNBOUNDED_PRECEDING;
+		rank->WindowEndMutable() = WindowBoundary::CURRENT_ROW_ROWS;
 		idx_t rank_pos = window->expressions.size();
 		window->expressions.push_back(std::move(rank));
 
-		auto rank_ref = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ColumnBinding(window_index, rank_pos));
+		auto rank_ref = make_uniq<BoundColumnRefExpression>(
+		    LogicalType::BIGINT, ColumnBinding(TableIndex(window_index), ProjectionIndex(rank_pos)));
 		auto cap_const = make_uniq<BoundConstantExpression>(Value::BIGINT(count_bound));
-		auto in_cap = make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_LESSTHANOREQUALTO,
-		                                                   std::move(rank_ref), std::move(cap_const));
+		auto in_cap = BoundComparisonExpression::Create(ExpressionType::COMPARE_LESSTHANOREQUALTO, std::move(rank_ref),
+		                                                std::move(cap_const));
 		vector<unique_ptr<Expression>> predicates;
-		predicates.push_back(BuildIsNotNullPredicate(aggr.children[0]->Copy()));
+		predicates.push_back(BuildIsNotNullPredicate(aggr.GetChildrenMutable()[0]->Copy()));
 		predicates.push_back(std::move(in_cap));
 		filters[ai] = ConjoinPredicates(std::move(predicates));
 		distinct_filter_indices.push_back(ai);
@@ -1358,8 +1368,8 @@ static void ApplyMaxGroupsContributed(OptimizerExtensionInput &input, LogicalAgg
 	spec.cap = max_groups;
 	vector<RankCapSpec> specs;
 	specs.push_back(std::move(spec));
-	agg->children[0] =
-	    BuildRankCapFilter(input, std::move(agg->children[0]), pre.lower_agg->types, pre.lower_agg->group_index, specs);
+	agg->children[0] = BuildRankCapFilter(input, std::move(agg->children[0]), pre.lower_agg->types,
+	                                      pre.lower_agg->group_index.index, specs);
 }
 
 // Standard (global-sensitivity) clipping. Bounds each privacy unit's total contribution to a
@@ -1386,17 +1396,17 @@ static void ApplyMaxGroupsContributed(OptimizerExtensionInput &input, LogicalAgg
 // Returns the value unchanged when there is no filter.
 static unique_ptr<Expression> FoldFilterIntoValue(const BoundAggregateExpression &aggr, unique_ptr<Expression> value,
                                                   bool else_zero) {
-	if (!aggr.filter) {
+	if (!aggr.GetFilter()) {
 		return value;
 	}
-	auto value_type = value->return_type;
+	auto value_type = value->GetReturnType();
 	auto case_expr = make_uniq<BoundCaseExpression>(value_type);
 	BoundCaseCheck check;
-	check.when_expr = aggr.filter->Copy();
+	check.when_expr = aggr.GetFilter()->Copy();
 	check.then_expr = std::move(value);
-	case_expr->case_checks.push_back(std::move(check));
-	case_expr->else_expr = make_uniq<BoundConstantExpression>(else_zero ? Value::Numeric(value_type, 0)
-	                                                                    : Value(value_type)); // 0, or NULL of the type
+	case_expr->CaseChecksMutable().push_back(std::move(check));
+	case_expr->ElseMutable() = make_uniq<BoundConstantExpression>(
+	    else_zero ? Value::Numeric(value_type, 0) : Value(value_type)); // 0, or NULL of the type
 	return std::move(case_expr);
 }
 
@@ -1453,33 +1463,36 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 		if (aggr.IsDistinct()) {
 			lower_exprs.push_back(agg->expressions[i]->Copy()); // filtered DISTINCT is rejected upstream
 		} else if (IsCountAggregate(aggr)) {
-			if (aggr.function.name == "count" && !aggr.children.empty()) {
+			if (aggr.FunctionMutable().GetName().GetIdentifierName() == "count" && !aggr.GetChildrenMutable().empty()) {
 				lower_exprs.push_back(BindPlainAggregate(
-				    input, "count", FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/false)));
+				    input, "count",
+				    FoldFilterIntoValue(aggr, aggr.GetChildrenMutable()[0]->Copy(), /*else_zero=*/false)));
 			} else {
 				// COUNT(*): no value child, so a FILTER clause binds correctly — attach it directly.
 				lower_exprs.push_back(BindPlainAggregate(input, "count_star", nullptr));
-				if (aggr.filter) {
-					lower_exprs.back()->Cast<BoundAggregateExpression>().filter = aggr.filter->Copy();
+				if (aggr.GetFilterMutable()) {
+					lower_exprs.back()->Cast<BoundAggregateExpression>().GetFilterMutable() =
+					    aggr.GetFilterMutable()->Copy();
 				}
 			}
 		} else if (IsMinMaxAggregate(aggr)) {
 			// Per-PU MIN/MAX partial. else_zero=false → filtered-out rows become NULL, which MIN/MAX skip.
 			lower_exprs.push_back(BindPlainAggregate(
-			    input, aggr.function.name, FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/false)));
+			    input, aggr.FunctionMutable().GetName().GetIdentifierName(),
+			    FoldFilterIntoValue(aggr, aggr.GetChildrenMutable()[0]->Copy(), /*else_zero=*/false)));
 		} else if (avg_sum_info && avg_sum_info->IsAutomaticBoundsMean()) {
-			auto value = FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/false);
-			bounds_parameters[i] = GetDpApproxBoundsParameters(value->return_type);
+			auto value = FoldFilterIntoValue(aggr, aggr.GetChildrenMutable()[0]->Copy(), /*else_zero=*/false);
+			bounds_parameters[i] = GetDpApproxBoundsParameters(value->GetReturnType());
 			vector<unique_ptr<Expression>> children;
 			children.push_back(
 			    BoundCastExpression::AddCastToType(input.context, std::move(value), LogicalType::DOUBLE));
 			children.push_back(make_uniq<BoundConstantExpression>(Value::BIGINT(automatic_mean_count_bound)));
 			lower_exprs.push_back(BindAggregateLocal(input, "dp_bounded_value_list", std::move(children)));
 		} else { // sum
-			auto value = FoldFilterIntoValue(aggr, aggr.children[0]->Copy(), /*else_zero=*/true);
-			bounds_parameters[i] = GetDpApproxBoundsParameters(value->return_type);
-			if (auto_bounds && (value->return_type.InternalType() == PhysicalType::FLOAT ||
-			                    value->return_type.InternalType() == PhysicalType::DOUBLE)) {
+			auto value = FoldFilterIntoValue(aggr, aggr.GetChildrenMutable()[0]->Copy(), /*else_zero=*/true);
+			bounds_parameters[i] = GetDpApproxBoundsParameters(value->GetReturnType());
+			if (auto_bounds && (value->GetReturnType().InternalType() == PhysicalType::FLOAT ||
+			                    value->GetReturnType().InternalType() == PhysicalType::DOUBLE)) {
 				lower_exprs.push_back(BindPlainAggregate(input, "priv_approx_sum", std::move(value)));
 			} else {
 				lower_exprs.push_back(BindPlainAggregate(input, "sum", std::move(value)));
@@ -1496,10 +1509,10 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 		auto &orig = agg->expressions[i]->Cast<BoundAggregateExpression>();
 		bool pos_min_max = IsMinMaxAggregate(orig);
 		auto *avg_sum_info = FindAvgInfoForSumPos(avg_infos, i);
-		string min_max_name = pos_min_max ? orig.function.name : string();
+		string min_max_name = pos_min_max ? orig.FunctionMutable().GetName().GetIdentifierName() : string();
 		auto lower_type = pre.lower_agg->types[pre.num_original_groups + 1 + i];
-		unique_ptr<Expression> lower_ref =
-		    make_uniq<BoundColumnRefExpression>(lower_type, ColumnBinding(pre.lower_agg_index, i));
+		unique_ptr<Expression> lower_ref = make_uniq<BoundColumnRefExpression>(
+		    lower_type, ColumnBinding(TableIndex(pre.lower_agg_index), ProjectionIndex(i)));
 		if (pos_min_max) {
 			// Clip the per-PU partial to [mm_lower, mm_upper], then take the overall MIN/MAX. Removing one
 			// PU shifts the extremum by at most mm_range per group → L1 sensitivity mm_range · group_bound.
@@ -1572,7 +1585,8 @@ static unique_ptr<Expression> BuildSupportKeyExpression(unique_ptr<LogicalOperat
 	}
 	auto col_index = get->GetColumnIds()[proj_idx];
 	auto col_type = get->GetColumnType(col_index);
-	return make_uniq<BoundColumnRefExpression>(col_type, ColumnBinding(get->table_index, proj_idx));
+	return make_uniq<BoundColumnRefExpression>(
+	    col_type, ColumnBinding(TableIndex(get->table_index.index), ProjectionIndex(proj_idx)));
 }
 
 static optional_idx AddSupportAggregate(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
@@ -1602,8 +1616,9 @@ static optional_idx AddSupportAggregate(OptimizerExtensionInput &input, unique_p
 static LogicalFilter *ApplySupportFilter(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                          LogicalAggregate *agg, idx_t support_pos, double threshold,
                                          double noise_scale = 0.0) {
-	auto support_ref = make_uniq<BoundColumnRefExpression>(agg->types[agg->groups.size() + support_pos],
-	                                                       ColumnBinding(agg->aggregate_index, support_pos));
+	auto support_ref = make_uniq<BoundColumnRefExpression>(
+	    agg->types[agg->groups.size() + support_pos],
+	    ColumnBinding(TableIndex(agg->aggregate_index.index), ProjectionIndex(support_pos)));
 	unique_ptr<Expression> support_expr =
 	    BoundCastExpression::AddCastToType(input.context, std::move(support_ref), LogicalType::DOUBLE);
 	if (noise_scale > 0.0 && std::isfinite(noise_scale)) {
@@ -1613,8 +1628,8 @@ static LogicalFilter *ApplySupportFilter(OptimizerExtensionInput &input, unique_
 		support_expr = BindScalarLocal(input, "dp_noise", std::move(noise_children));
 	}
 	auto threshold_const = make_uniq<BoundConstantExpression>(Value::DOUBLE(threshold));
-	auto condition = make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_GREATERTHANOREQUALTO,
-	                                                      std::move(support_expr), std::move(threshold_const));
+	auto condition = BoundComparisonExpression::Create(ExpressionType::COMPARE_GREATERTHANOREQUALTO,
+	                                                   std::move(support_expr), std::move(threshold_const));
 
 	auto filter = make_uniq<LogicalFilter>();
 	filter->expressions.push_back(std::move(condition));
@@ -1675,12 +1690,14 @@ static NoiseProjection InsertProjectionAndRemap(unique_ptr<LogicalOperator> &pla
 
 	ColumnBindingReplacer replacer;
 	for (idx_t gi = 0; gi < n_groups; gi++) {
-		replacer.replacement_bindings.emplace_back(ColumnBinding(source_group_idx, gi), ColumnBinding(proj_idx, gi),
+		replacer.replacement_bindings.emplace_back(ColumnBinding(TableIndex(source_group_idx), ProjectionIndex(gi)),
+		                                           ColumnBinding(TableIndex(proj_idx), ProjectionIndex(gi)),
 		                                           proj_types[gi]);
 	}
 	for (idx_t ai = 0; ai < n_aggs; ai++) {
-		replacer.replacement_bindings.emplace_back(ColumnBinding(source_agg_idx, source_agg_offset + ai),
-		                                           ColumnBinding(proj_idx, n_groups + ai), proj_types[n_groups + ai]);
+		replacer.replacement_bindings.emplace_back(
+		    ColumnBinding(TableIndex(source_agg_idx), ProjectionIndex(source_agg_offset + ai)),
+		    ColumnBinding(TableIndex(proj_idx), ProjectionIndex(n_groups + ai)), proj_types[n_groups + ai]);
 	}
 	replacer.stop_operator = proj_ptr;
 	replacer.VisitOperator(*plan);
@@ -1698,8 +1715,8 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
                                                 const vector<LogicalType> &output_types) {
 	idx_t n_groups = agg->groups.size();
 	idx_t n_aggs = agg_scales.size();
-	idx_t group_idx = agg->group_index;
-	idx_t agg_idx = agg->aggregate_index;
+	idx_t group_idx = agg->group_index.index;
+	idx_t agg_idx = agg->aggregate_index.index;
 
 	auto agg_types = agg->types;
 	D_ASSERT(agg_types.size() >= n_groups + n_aggs);
@@ -1721,13 +1738,15 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 	}
 
 	for (idx_t gi = 0; gi < n_groups; gi++) {
-		proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(agg_types[gi], ColumnBinding(group_idx, gi)));
+		proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(
+		    agg_types[gi], ColumnBinding(TableIndex(group_idx), ProjectionIndex(gi))));
 	}
 
 	for (idx_t ai = 0; ai < n_aggs; ai++) {
 		auto agg_col_type = agg_types[n_groups + ai];
 		const auto &out_type = output_types[ai];
-		auto col_ref = make_uniq<BoundColumnRefExpression>(agg_col_type, ColumnBinding(agg_idx, ai));
+		auto col_ref =
+		    make_uniq<BoundColumnRefExpression>(agg_col_type, ColumnBinding(TableIndex(agg_idx), ProjectionIndex(ai)));
 		double scale = agg_scales[ai];
 		if (!std::isfinite(scale)) {
 			// A non-finite scale means the sensitivity or ε overflowed (e.g. an elastic-sensitivity
@@ -1765,14 +1784,15 @@ static NoiseProjection WrapAggregateWithLaplace(OptimizerExtensionInput &input, 
 		proj_exprs.push_back(std::move(noised));
 	}
 
-	idx_t proj_idx = input.optimizer.binder.GenerateTableIndex();
-	auto projection = make_uniq<LogicalProjection>(proj_idx, std::move(proj_exprs));
+	idx_t proj_idx = input.optimizer.binder.GenerateTableIndex().index;
+	auto projection = make_uniq<LogicalProjection>(TableIndex(proj_idx), std::move(proj_exprs));
 	return InsertProjectionAndRemap(plan, std::move(projection), insert_above, proj_idx, group_idx, agg_idx, n_groups,
 	                                n_aggs, 0, "dp: could not locate noise insertion slot in plan");
 }
 
 static bool IsPlainCountStarAggregate(const BoundAggregateExpression &aggr) {
-	return aggr.function.name == "count_star" && !aggr.IsDistinct() && aggr.children.empty() && !aggr.filter;
+	return aggr.Function().GetName().GetIdentifierName() == "count_star" && !aggr.IsDistinct() &&
+	       aggr.GetChildren().empty() && !aggr.GetFilter();
 }
 
 static bool IsDPSassFastCountStarEligible(const LogicalAggregate *agg, const DPFKChain &chain) {
@@ -1847,8 +1867,8 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 
 	// Pass-through group columns
 	for (idx_t gi = 0; gi < n_groups; gi++) {
-		proj_exprs.push_back(
-		    make_uniq<BoundColumnRefExpression>(noise_proj.proj_types[gi], ColumnBinding(noise_proj.proj_idx, gi)));
+		proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(
+		    noise_proj.proj_types[gi], ColumnBinding(TableIndex(noise_proj.proj_idx), ProjectionIndex(gi))));
 	}
 
 	// For each original agg position: pass-through or compute AVG ratio
@@ -1857,15 +1877,15 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 		if (!avg_info) {
 			// Non-AVG: pass the noised value through
 			const auto &col_type = noise_proj.proj_types[n_groups + ai];
-			proj_exprs.push_back(
-			    make_uniq<BoundColumnRefExpression>(col_type, ColumnBinding(noise_proj.proj_idx, n_groups + ai)));
+			proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(
+			    col_type, ColumnBinding(TableIndex(noise_proj.proj_idx), ProjectionIndex(n_groups + ai))));
 		} else {
 			// AVG: compute CAST(noised_sum AS DOUBLE) / CAST(noised_count AS DOUBLE)
 			const AvgInfo &info = *avg_info;
 			const auto &sum_type = noise_proj.proj_types[n_groups + info.sum_pos];
 			if (info.IsAutomaticBoundsMean()) {
 				auto mean_ref = make_uniq<BoundColumnRefExpression>(
-				    sum_type, ColumnBinding(noise_proj.proj_idx, n_groups + info.sum_pos));
+				    sum_type, ColumnBinding(TableIndex(noise_proj.proj_idx), ProjectionIndex(n_groups + info.sum_pos)));
 				proj_exprs.push_back(
 				    BoundCastExpression::AddCastToType(input.context, std::move(mean_ref), LogicalType::DOUBLE));
 				continue;
@@ -1874,12 +1894,13 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 
 			auto make_sum_dbl = [&]() {
 				auto sum_ref = make_uniq<BoundColumnRefExpression>(
-				    sum_type, ColumnBinding(noise_proj.proj_idx, n_groups + info.sum_pos));
+				    sum_type, ColumnBinding(TableIndex(noise_proj.proj_idx), ProjectionIndex(n_groups + info.sum_pos)));
 				return BoundCastExpression::AddCastToType(input.context, std::move(sum_ref), LogicalType::DOUBLE);
 			};
 			auto make_cnt_dbl = [&]() {
 				auto cnt_ref = make_uniq<BoundColumnRefExpression>(
-				    cnt_type, ColumnBinding(noise_proj.proj_idx, n_groups + info.count_pos));
+				    cnt_type,
+				    ColumnBinding(TableIndex(noise_proj.proj_idx), ProjectionIndex(n_groups + info.count_pos)));
 				return BoundCastExpression::AddCastToType(input.context, std::move(cnt_ref), LogicalType::DOUBLE);
 			};
 			auto add_midpoint = [&](unique_ptr<Expression> value) -> unique_ptr<Expression> {
@@ -1902,18 +1923,18 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 				auto case_expr = make_uniq<BoundCaseExpression>(LogicalType::DOUBLE);
 				BoundCaseCheck check;
 				check.when_expr =
-				    make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_LESSTHANOREQUALTO, make_cnt_dbl(),
-				                                         make_uniq<BoundConstantExpression>(Value::DOUBLE(0.0)));
+				    BoundComparisonExpression::Create(ExpressionType::COMPARE_LESSTHANOREQUALTO, make_cnt_dbl(),
+				                                      make_uniq<BoundConstantExpression>(Value::DOUBLE(0.0)));
 				check.then_expr = make_uniq<BoundConstantExpression>(Value(LogicalType::DOUBLE));
-				case_expr->case_checks.push_back(std::move(check));
-				case_expr->else_expr = maybe_clamp(add_midpoint(std::move(ratio)), info);
+				case_expr->CaseChecksMutable().push_back(std::move(check));
+				case_expr->ElseMutable() = maybe_clamp(add_midpoint(std::move(ratio)), info);
 				proj_exprs.push_back(std::move(case_expr));
 			}
 		}
 	}
 
-	idx_t ratio_idx = input.optimizer.binder.GenerateTableIndex();
-	auto ratio_proj = make_uniq<LogicalProjection>(ratio_idx, std::move(proj_exprs));
+	idx_t ratio_idx = input.optimizer.binder.GenerateTableIndex().index;
+	auto ratio_proj = make_uniq<LogicalProjection>(TableIndex(ratio_idx), std::move(proj_exprs));
 	auto inserted = InsertProjectionAndRemap(plan, std::move(ratio_proj), insert_above, ratio_idx, noise_proj.proj_idx,
 	                                         noise_proj.proj_idx, n_groups, n_original_aggs, n_groups,
 	                                         "dp: could not locate insert point for AVG ratio projection");
@@ -1922,7 +1943,7 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 
 static string GetDpSassReleaseMethod(ClientContext &context) {
 	Value v;
-	if (!context.TryGetCurrentSetting("dp_sass_release", v) || v.IsNull()) {
+	if (!context.TryGetCurrentSetting(Identifier("dp_sass_release"), v) || v.IsNull()) {
 		return "median";
 	}
 	string method = StringUtil::Lower(v.ToString());
@@ -1934,7 +1955,7 @@ static string GetDpSassReleaseMethod(ClientContext &context) {
 
 static string GetDpSassAvgMethod(ClientContext &context) {
 	Value v;
-	if (!context.TryGetCurrentSetting("dp_sass_avg_method", v) || v.IsNull()) {
+	if (!context.TryGetCurrentSetting(Identifier("dp_sass_avg_method"), v) || v.IsNull()) {
 		return "lane_average";
 	}
 	string method = StringUtil::Lower(v.ToString());
@@ -1948,7 +1969,7 @@ static string GetDpSassAvgMethod(ClientContext &context) {
 
 static string GetDpSassSumMethod(ClientContext &context) {
 	Value v;
-	if (!context.TryGetCurrentSetting("dp_sass_sum_method", v) || v.IsNull()) {
+	if (!context.TryGetCurrentSetting(Identifier("dp_sass_sum_method"), v) || v.IsNull()) {
 		return "lane_average";
 	}
 	string method = StringUtil::Lower(v.ToString());
@@ -1966,12 +1987,11 @@ static idx_t InsertDpSassNoiseIdentityWindow(OptimizerExtensionInput &input, uni
 	if (!slot) {
 		throw InternalException("dp_sass: could not locate insertion point for aggregate-cell identity");
 	}
-	idx_t window_index = input.optimizer.binder.GenerateTableIndex();
-	auto window = make_uniq<LogicalWindow>(window_index);
-	auto row_number =
-	    make_uniq<BoundWindowExpression>(ExpressionType::WINDOW_ROW_NUMBER, LogicalType::BIGINT, nullptr, nullptr);
-	row_number->start = WindowBoundary::UNBOUNDED_PRECEDING;
-	row_number->end = WindowBoundary::CURRENT_ROW_ROWS;
+	idx_t window_index = input.optimizer.binder.GenerateTableIndex().index;
+	auto window = make_uniq<LogicalWindow>(TableIndex(window_index));
+	auto row_number = BindRankingWindow(input.context, ExpressionType::WINDOW_ROW_NUMBER);
+	row_number->WindowStartMutable() = WindowBoundary::UNBOUNDED_PRECEDING;
+	row_number->WindowEndMutable() = WindowBoundary::CURRENT_ROW_ROWS;
 	window->expressions.push_back(std::move(row_number));
 	window->children.push_back(std::move(*slot));
 	window->ResolveOperatorTypes();
@@ -2014,15 +2034,17 @@ static NoiseProjection WrapSampleMedianProjection(
 	vector<unique_ptr<Expression>> proj_exprs;
 	proj_exprs.reserve(n_groups + n_aggs);
 	for (idx_t gi = 0; gi < n_groups; gi++) {
-		proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(agg->types[gi], ColumnBinding(agg->group_index, gi)));
+		proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(
+		    agg->types[gi], ColumnBinding(TableIndex(agg->group_index.index), ProjectionIndex(gi))));
 	}
 
 	int sample_lanes = GetDpSampleLanes(input.context);
 	for (idx_t ai = 0; ai < n_aggs; ai++) {
 		idx_t agg_pos = agg_positions[ai];
 		vector<unique_ptr<Expression>> children;
-		children.push_back(make_uniq<BoundColumnRefExpression>(agg->types[n_groups + agg_pos],
-		                                                       ColumnBinding(agg->aggregate_index, agg_pos)));
+		children.push_back(make_uniq<BoundColumnRefExpression>(
+		    agg->types[n_groups + agg_pos],
+		    ColumnBinding(TableIndex(agg->aggregate_index.index), ProjectionIndex(agg_pos))));
 		if (stability_query_mode) {
 			children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(static_cast<int32_t>(ai))));
 			unique_ptr<Expression> recorded = BindScalarLocal(input, "dp_sass_record_stability", std::move(children));
@@ -2059,7 +2081,8 @@ static NoiseProjection WrapSampleMedianProjection(
 				children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(static_cast<int32_t>(ai))));
 				children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(static_cast<int32_t>(n_aggs))));
 				children.push_back(make_uniq<BoundColumnRefExpression>(
-				    LogicalType::BIGINT, ColumnBinding(noise_identity_index.GetIndex(), 0)));
+				    LogicalType::BIGINT,
+				    ColumnBinding(TableIndex(noise_identity_index.GetIndex()), ProjectionIndex(0))));
 				terminal = "dp_nonempty_mean_noise";
 			}
 		} else if (noise_scale_query_mode) {
@@ -2076,8 +2099,8 @@ static NoiseProjection WrapSampleMedianProjection(
 			D_ASSERT(noise_identity_index.IsValid());
 			children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(static_cast<int32_t>(ai))));
 			children.push_back(make_uniq<BoundConstantExpression>(Value::INTEGER(static_cast<int32_t>(n_aggs))));
-			children.push_back(make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT,
-			                                                       ColumnBinding(noise_identity_index.GetIndex(), 0)));
+			children.push_back(make_uniq<BoundColumnRefExpression>(
+			    LogicalType::BIGINT, ColumnBinding(TableIndex(noise_identity_index.GetIndex()), ProjectionIndex(0))));
 		}
 		unique_ptr<Expression> noised = BindScalarLocal(input, terminal, std::move(children));
 		if (output_types[ai] != LogicalType::DOUBLE) {
@@ -2086,10 +2109,10 @@ static NoiseProjection WrapSampleMedianProjection(
 		proj_exprs.push_back(std::move(noised));
 	}
 
-	idx_t proj_idx = input.optimizer.binder.GenerateTableIndex();
-	auto projection = make_uniq<LogicalProjection>(proj_idx, std::move(proj_exprs));
-	return InsertProjectionAndRemap(plan, std::move(projection), insert_above, proj_idx, agg->group_index,
-	                                agg->aggregate_index, n_groups, n_aggs, 0,
+	idx_t proj_idx = input.optimizer.binder.GenerateTableIndex().index;
+	auto projection = make_uniq<LogicalProjection>(TableIndex(proj_idx), std::move(proj_exprs));
+	return InsertProjectionAndRemap(plan, std::move(projection), insert_above, proj_idx, agg->group_index.index,
+	                                agg->aggregate_index.index, n_groups, n_aggs, 0,
 	                                "dp_sample_median: could not locate aggregate slot for median projection");
 }
 
@@ -2098,8 +2121,8 @@ static bool IsDpSampleCountDistinct(const LogicalAggregate *agg) {
 		return false;
 	}
 	auto &aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
-	string name = StringUtil::Lower(aggr.function.name);
-	return aggr.IsDistinct() && (name == "count" || name == "count_star") && aggr.children.size() == 1;
+	string name = StringUtil::Lower(aggr.FunctionMutable().GetName().GetIdentifierName());
+	return aggr.IsDistinct() && (name == "count" || name == "count_star") && aggr.GetChildrenMutable().size() == 1;
 }
 
 static bool IsSinglePuKeyDistinctCount(unique_ptr<LogicalOperator> &plan, LogicalAggregate *agg,
@@ -2138,15 +2161,15 @@ static bool IsSinglePuKeyDistinctCount(unique_ptr<LogicalOperator> &plan, Logica
 	}
 	auto col_index = key_get->GetColumnIds()[proj_idx];
 	auto col_type = key_get->GetColumnType(col_index);
-	ColumnBinding source_binding(key_get->table_index, proj_idx);
-	auto propagated = PropagateSingleBinding(*plan, key_get->table_index, source_binding, col_type, agg);
-	if (propagated.table_index == DConstants::INVALID_INDEX) {
+	ColumnBinding source_binding {TableIndex(key_get->table_index.index), ProjectionIndex(proj_idx)};
+	auto propagated = PropagateSingleBinding(*plan, key_get->table_index.index, source_binding, col_type, agg);
+	if (propagated.table_index.index == DConstants::INVALID_INDEX) {
 		return false;
 	}
 
 	auto &aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
 	auto key_ref = make_uniq<BoundColumnRefExpression>(col_type, propagated);
-	return Expression::Equals(*aggr.children[0], *key_ref);
+	return Expression::Equals(*aggr.GetChildrenMutable()[0], *key_ref);
 }
 
 struct DpSassContributionBounds {
@@ -2198,7 +2221,7 @@ static DpSassContributionBounds GetDpSassContributionBounds(ClientContext &conte
 	idx_t explicit_sum_count = 0;
 	for (idx_t i = 0; i < agg->expressions.size(); i++) {
 		auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-		string name = StringUtil::Lower(aggr.function.name);
+		string name = StringUtil::Lower(aggr.FunctionMutable().GetName().GetIdentifierName());
 		if (name == "sum" && !FindAvgInfoForSumPos(avg_infos, i)) {
 			explicit_sum_count++;
 		}
@@ -2224,7 +2247,7 @@ static DpSassContributionBounds GetDpSassContributionBounds(ClientContext &conte
 	idx_t sum_list_idx = 0;
 	for (idx_t i = 0; i < agg->expressions.size(); i++) {
 		auto &aggr = agg->expressions[i]->Cast<BoundAggregateExpression>();
-		string name = StringUtil::Lower(aggr.function.name);
+		string name = StringUtil::Lower(aggr.FunctionMutable().GetName().GetIdentifierName());
 		if (FindAvgInfoForSumPos(avg_infos, i)) {
 			RequireDpSassSumBound(context, bounds);
 			bounds.sum_bounds_by_aggregate[i] = bounds.sum_bound;
@@ -2252,11 +2275,11 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
                                                int64_t group_bound, bool apply_support_filter, bool variable_m) {
 	auto &binder = input.optimizer.binder;
 	auto &old_aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
-	auto distinct_value = old_aggr.children[0]->Copy();
-	auto distinct_type = distinct_value->return_type;
+	auto distinct_value = old_aggr.GetChildrenMutable()[0]->Copy();
+	auto distinct_type = distinct_value->GetReturnType();
 
-	idx_t inner_group_index = binder.GenerateTableIndex();
-	idx_t inner_agg_index = binder.GenerateTableIndex();
+	idx_t inner_group_index = binder.GenerateTableIndex().index;
+	idx_t inner_agg_index = binder.GenerateTableIndex().index;
 	vector<unique_ptr<Expression>> inner_expressions;
 	if (!variable_m) {
 		vector<unique_ptr<Expression>> mask_children;
@@ -2265,7 +2288,8 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 		auto bit_or_expr = BindBitOrAggregate(input, std::move(sample_mask), distinct_value->Copy());
 		inner_expressions.push_back(std::move(bit_or_expr));
 	}
-	auto inner_agg = make_uniq<LogicalAggregate>(inner_group_index, inner_agg_index, std::move(inner_expressions));
+	auto inner_agg = make_uniq<LogicalAggregate>(TableIndex(inner_group_index), TableIndex(inner_agg_index),
+	                                             std::move(inner_expressions));
 
 	idx_t num_original_groups = agg->groups.size();
 	for (auto &group : agg->groups) {
@@ -2277,7 +2301,7 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 	inner_agg->ResolveOperatorTypes();
 
 	auto *inner_agg_ptr = inner_agg.get();
-	idx_t inner_gi = inner_agg_ptr->group_index;
+	idx_t inner_gi = inner_agg_ptr->group_index.index;
 	unique_ptr<LogicalOperator> distinct_rows = std::move(inner_agg);
 
 	// Each inner row is one (PU, group, distinct value). Bound a PU's contribution with two
@@ -2320,20 +2344,19 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 
 	optional_idx support_window_index;
 	if (apply_support_filter) {
-		idx_t window_index = binder.GenerateTableIndex();
-		auto window = make_uniq<LogicalWindow>(window_index);
-		auto rn =
-		    make_uniq<BoundWindowExpression>(ExpressionType::WINDOW_ROW_NUMBER, LogicalType::BIGINT, nullptr, nullptr);
+		idx_t window_index = binder.GenerateTableIndex().index;
+		auto window = make_uniq<LogicalWindow>(TableIndex(window_index));
+		auto rn = BindRankingWindow(input.context, ExpressionType::WINDOW_ROW_NUMBER);
 		for (idx_t gi = 0; gi < num_original_groups; gi++) {
-			rn->partitions.push_back(BuildRankSourceRef(inner_agg_ptr->types, inner_gi, gi));
+			rn->PartitionsMutable().push_back(BuildRankSourceRef(inner_agg_ptr->types, inner_gi, gi));
 		}
-		rn->partitions.push_back(BuildRankSourceRef(inner_agg_ptr->types, inner_gi, pu_group_col));
+		rn->PartitionsMutable().push_back(BuildRankSourceRef(inner_agg_ptr->types, inner_gi, pu_group_col));
 		vector<unique_ptr<Expression>> distinct_hash_children;
 		distinct_hash_children.push_back(BuildRankSourceRef(inner_agg_ptr->types, inner_gi, distinct_col));
 		auto distinct_hash = BindScalarLocal(input, "hash", std::move(distinct_hash_children));
-		rn->orders.emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST, std::move(distinct_hash));
-		rn->start = WindowBoundary::UNBOUNDED_PRECEDING;
-		rn->end = WindowBoundary::CURRENT_ROW_ROWS;
+		rn->OrderByMutable().emplace_back(OrderType::ASCENDING, OrderByNullType::NULLS_LAST, std::move(distinct_hash));
+		rn->WindowStartMutable() = WindowBoundary::UNBOUNDED_PRECEDING;
+		rn->WindowEndMutable() = WindowBoundary::CURRENT_ROW_ROWS;
 		window->expressions.push_back(std::move(rn));
 		window->children.push_back(std::move(distinct_rows));
 		distinct_rows = std::move(window);
@@ -2344,46 +2367,49 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 		// A per-PU COUNT(DISTINCT) cannot be summed directly: two PUs in the same lane
 		// may carry the same value. Regroup by (query group, lane, value) to produce one
 		// row per lane-level distinct value, then count those rows into the m-lane list.
-		idx_t lane_group_index = binder.GenerateTableIndex();
-		idx_t lane_agg_index = binder.GenerateTableIndex();
+		idx_t lane_group_index = binder.GenerateTableIndex().index;
+		idx_t lane_agg_index = binder.GenerateTableIndex().index;
 		vector<unique_ptr<Expression>> lane_expressions;
 		if (apply_support_filter) {
-			auto rn_ref = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT,
-			                                                  ColumnBinding(support_window_index.GetIndex(), 0));
-			auto is_first = make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_EQUAL, std::move(rn_ref),
-			                                                     make_uniq<BoundConstantExpression>(Value::BIGINT(1)));
+			auto rn_ref = make_uniq<BoundColumnRefExpression>(
+			    LogicalType::BIGINT, ColumnBinding(TableIndex(support_window_index.GetIndex()), ProjectionIndex(0)));
+			auto is_first = BoundComparisonExpression::Create(ExpressionType::COMPARE_EQUAL, std::move(rn_ref),
+			                                                  make_uniq<BoundConstantExpression>(Value::BIGINT(1)));
 			auto marker = make_uniq<BoundCaseExpression>(LogicalType::BIGINT);
 			BoundCaseCheck check;
 			check.when_expr = std::move(is_first);
 			check.then_expr = make_uniq<BoundConstantExpression>(Value::BIGINT(1));
-			marker->case_checks.push_back(std::move(check));
-			marker->else_expr = make_uniq<BoundConstantExpression>(Value::BIGINT(0));
+			marker->CaseChecksMutable().push_back(std::move(check));
+			marker->ElseMutable() = make_uniq<BoundConstantExpression>(Value::BIGINT(0));
 			lane_expressions.push_back(BindPlainAggregate(input, "sum", std::move(marker)));
 		}
 
-		auto lane_agg = make_uniq<LogicalAggregate>(lane_group_index, lane_agg_index, std::move(lane_expressions));
+		auto lane_agg = make_uniq<LogicalAggregate>(TableIndex(lane_group_index), TableIndex(lane_agg_index),
+		                                            std::move(lane_expressions));
 		for (idx_t gi = 0; gi < num_original_groups; gi++) {
-			lane_agg->groups.push_back(make_uniq<BoundColumnRefExpression>(agg->groups[gi]->return_type,
-			                                                               ColumnBinding(inner_group_index, gi)));
+			lane_agg->groups.push_back(make_uniq<BoundColumnRefExpression>(
+			    agg->groups[gi]->GetReturnType(), ColumnBinding(TableIndex(inner_group_index), ProjectionIndex(gi))));
 		}
 		auto lane_source = BuildRankSourceRef(inner_agg_ptr->types, inner_gi, pu_group_col);
 		auto lane_mask =
 		    make_uniq<BoundConstantExpression>(Value::UBIGINT(static_cast<uint64_t>(GetDpSassM(input.context) - 1)));
 		lane_agg->groups.push_back(
 		    input.optimizer.BindScalarFunction("&", std::move(lane_source), std::move(lane_mask)));
-		lane_agg->groups.push_back(
-		    make_uniq<BoundColumnRefExpression>(distinct_type, ColumnBinding(inner_group_index, distinct_col)));
+		lane_agg->groups.push_back(make_uniq<BoundColumnRefExpression>(
+		    distinct_type, ColumnBinding(TableIndex(inner_group_index), ProjectionIndex(distinct_col))));
 		lane_agg->children.push_back(std::move(distinct_rows));
 		lane_agg->ResolveOperatorTypes();
 
 		for (idx_t gi = 0; gi < num_original_groups; gi++) {
-			agg->groups[gi] =
-			    make_uniq<BoundColumnRefExpression>(lane_agg->types[gi], ColumnBinding(lane_group_index, gi));
+			agg->groups[gi] = make_uniq<BoundColumnRefExpression>(
+			    lane_agg->types[gi], ColumnBinding(TableIndex(lane_group_index), ProjectionIndex(gi)));
 		}
-		auto lane_ref = make_uniq<BoundColumnRefExpression>(lane_agg->types[num_original_groups],
-		                                                    ColumnBinding(lane_group_index, num_original_groups));
+		auto lane_ref = make_uniq<BoundColumnRefExpression>(
+		    lane_agg->types[num_original_groups],
+		    ColumnBinding(TableIndex(lane_group_index), ProjectionIndex(num_original_groups)));
 		auto distinct_ref = make_uniq<BoundColumnRefExpression>(
-		    lane_agg->types[num_original_groups + 1], ColumnBinding(lane_group_index, num_original_groups + 1));
+		    lane_agg->types[num_original_groups + 1],
+		    ColumnBinding(TableIndex(lane_group_index), ProjectionIndex(num_original_groups + 1)));
 		LogicalType support_type;
 		if (apply_support_filter) {
 			support_type = lane_agg->types[lane_agg->groups.size()];
@@ -2397,7 +2423,8 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 		top_expressions.push_back(
 		    BindAggregateLocal(input, "as_sample_m_count_distinct_if", std::move(count_children)));
 		if (apply_support_filter) {
-			auto support_ref = make_uniq<BoundColumnRefExpression>(support_type, ColumnBinding(lane_agg_index, 0));
+			auto support_ref = make_uniq<BoundColumnRefExpression>(
+			    support_type, ColumnBinding(TableIndex(lane_agg_index), ProjectionIndex(0)));
 			top_expressions.push_back(BindPlainAggregate(input, "sum", std::move(support_ref)));
 		}
 		agg->expressions = std::move(top_expressions);
@@ -2405,61 +2432,64 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 		return;
 	}
 
-	idx_t merge_group_index = binder.GenerateTableIndex();
-	idx_t merge_agg_index = binder.GenerateTableIndex();
+	idx_t merge_group_index = binder.GenerateTableIndex().index;
+	idx_t merge_agg_index = binder.GenerateTableIndex().index;
 	vector<unique_ptr<Expression>> merge_expressions;
-	auto mask_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, ColumnBinding(inner_agg_index, 0));
+	auto mask_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT,
+	                                                    ColumnBinding(TableIndex(inner_agg_index), ProjectionIndex(0)));
 	merge_expressions.push_back(BindPlainAggregate(input, "bit_or", std::move(mask_ref)));
 	if (apply_support_filter) {
-		auto rn_ref =
-		    make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ColumnBinding(support_window_index.GetIndex(), 0));
-		auto is_first = make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_EQUAL, std::move(rn_ref),
-		                                                     make_uniq<BoundConstantExpression>(Value::BIGINT(1)));
+		auto rn_ref = make_uniq<BoundColumnRefExpression>(
+		    LogicalType::BIGINT, ColumnBinding(TableIndex(support_window_index.GetIndex()), ProjectionIndex(0)));
+		auto is_first = BoundComparisonExpression::Create(ExpressionType::COMPARE_EQUAL, std::move(rn_ref),
+		                                                  make_uniq<BoundConstantExpression>(Value::BIGINT(1)));
 		auto marker = make_uniq<BoundCaseExpression>(LogicalType::BIGINT);
 		BoundCaseCheck check;
 		check.when_expr = std::move(is_first);
 		check.then_expr = make_uniq<BoundConstantExpression>(Value::BIGINT(1));
-		marker->case_checks.push_back(std::move(check));
-		marker->else_expr = make_uniq<BoundConstantExpression>(Value::BIGINT(0));
+		marker->CaseChecksMutable().push_back(std::move(check));
+		marker->ElseMutable() = make_uniq<BoundConstantExpression>(Value::BIGINT(0));
 		merge_expressions.push_back(BindPlainAggregate(input, "sum", std::move(marker)));
 	}
-	auto merge_agg = make_uniq<LogicalAggregate>(merge_group_index, merge_agg_index, std::move(merge_expressions));
+	auto merge_agg = make_uniq<LogicalAggregate>(TableIndex(merge_group_index), TableIndex(merge_agg_index),
+	                                             std::move(merge_expressions));
 	for (idx_t gi = 0; gi < num_original_groups; gi++) {
-		merge_agg->groups.push_back(
-		    make_uniq<BoundColumnRefExpression>(agg->groups[gi]->return_type, ColumnBinding(inner_group_index, gi)));
+		merge_agg->groups.push_back(make_uniq<BoundColumnRefExpression>(
+		    agg->groups[gi]->GetReturnType(), ColumnBinding(TableIndex(inner_group_index), ProjectionIndex(gi))));
 	}
-	merge_agg->groups.push_back(
-	    make_uniq<BoundColumnRefExpression>(distinct_type, ColumnBinding(inner_group_index, num_original_groups + 1)));
+	merge_agg->groups.push_back(make_uniq<BoundColumnRefExpression>(
+	    distinct_type, ColumnBinding(TableIndex(inner_group_index), ProjectionIndex(num_original_groups + 1))));
 	merge_agg->children.push_back(std::move(distinct_rows));
 	merge_agg->ResolveOperatorTypes();
 
-	idx_t distinct_proj_index = binder.GenerateTableIndex();
+	idx_t distinct_proj_index = binder.GenerateTableIndex().index;
 	vector<unique_ptr<Expression>> distinct_proj_exprs;
 	distinct_proj_exprs.reserve(num_original_groups + 1 + (apply_support_filter ? 1 : 0));
 	for (idx_t gi = 0; gi < num_original_groups; gi++) {
-		distinct_proj_exprs.push_back(
-		    make_uniq<BoundColumnRefExpression>(merge_agg->types[gi], ColumnBinding(merge_group_index, gi)));
+		distinct_proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(
+		    merge_agg->types[gi], ColumnBinding(TableIndex(merge_group_index), ProjectionIndex(gi))));
 	}
 	if (apply_support_filter) {
-		distinct_proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(
-		    merge_agg->types[merge_agg->groups.size() + 1], ColumnBinding(merge_agg_index, 1)));
+		distinct_proj_exprs.push_back(
+		    make_uniq<BoundColumnRefExpression>(merge_agg->types[merge_agg->groups.size() + 1],
+		                                        ColumnBinding(TableIndex(merge_agg_index), ProjectionIndex(1))));
 	}
-	distinct_proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(merge_agg->types[merge_agg->groups.size()],
-	                                                                  ColumnBinding(merge_agg_index, 0)));
-	auto distinct_proj = make_uniq<LogicalProjection>(distinct_proj_index, std::move(distinct_proj_exprs));
+	distinct_proj_exprs.push_back(make_uniq<BoundColumnRefExpression>(
+	    merge_agg->types[merge_agg->groups.size()], ColumnBinding(TableIndex(merge_agg_index), ProjectionIndex(0))));
+	auto distinct_proj = make_uniq<LogicalProjection>(TableIndex(distinct_proj_index), std::move(distinct_proj_exprs));
 	distinct_proj->children.push_back(std::move(merge_agg));
 	distinct_proj->ResolveOperatorTypes();
 	unique_ptr<LogicalOperator> final_input = std::move(distinct_proj);
 
 	for (idx_t gi = 0; gi < num_original_groups; gi++) {
-		agg->groups[gi] =
-		    make_uniq<BoundColumnRefExpression>(final_input->types[gi], ColumnBinding(distinct_proj_index, gi));
+		agg->groups[gi] = make_uniq<BoundColumnRefExpression>(
+		    final_input->types[gi], ColumnBinding(TableIndex(distinct_proj_index), ProjectionIndex(gi)));
 	}
 
 	idx_t support_proj_pos = num_original_groups;
 	idx_t mask_proj_pos = apply_support_filter ? num_original_groups + 1 : num_original_groups;
-	auto merged_mask_ref =
-	    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, ColumnBinding(distinct_proj_index, mask_proj_pos));
+	auto merged_mask_ref = make_uniq<BoundColumnRefExpression>(
+	    LogicalType::UBIGINT, ColumnBinding(TableIndex(distinct_proj_index), ProjectionIndex(mask_proj_pos)));
 	agg->children[0] = std::move(final_input);
 	vector<unique_ptr<Expression>> top_expressions;
 	// expr[0] = the 64-counter mask, released via the smooth-sensitivity median. When partition
@@ -2468,8 +2498,9 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 	// the same projection-based path the generic aggregates use, so the noise is keyed on the group.
 	top_expressions.push_back(BindPlainAggregate(input, "as_sample_count_mask", std::move(merged_mask_ref)));
 	if (apply_support_filter) {
-		auto support_ref = make_uniq<BoundColumnRefExpression>(agg->children[0]->types[support_proj_pos],
-		                                                       ColumnBinding(distinct_proj_index, support_proj_pos));
+		auto support_ref = make_uniq<BoundColumnRefExpression>(
+		    agg->children[0]->types[support_proj_pos],
+		    ColumnBinding(TableIndex(distinct_proj_index), ProjectionIndex(support_proj_pos)));
 		top_expressions.push_back(BindPlainAggregate(input, "sum", std::move(support_ref)));
 	}
 	agg->expressions = std::move(top_expressions);
@@ -2482,20 +2513,23 @@ static void RewritePuDistinctCountToSampleMedian(OptimizerExtensionInput &input,
 	// PU rows, every remaining row contributes exactly one count to its own PU lane.
 	auto &binder = input.optimizer.binder;
 	auto &old_aggr = agg->expressions[0]->Cast<BoundAggregateExpression>();
-	auto distinct_value = old_aggr.children[0]->Copy();
-	auto distinct_type = distinct_value->return_type;
+	auto distinct_value = old_aggr.GetChildrenMutable()[0]->Copy();
+	auto distinct_type = distinct_value->GetReturnType();
 
-	idx_t inner_group_index = binder.GenerateTableIndex();
-	idx_t inner_agg_index = binder.GenerateTableIndex();
+	idx_t inner_group_index = binder.GenerateTableIndex().index;
+	idx_t inner_agg_index = binder.GenerateTableIndex().index;
 	vector<unique_ptr<Expression>> inner_expressions;
-	auto inner_agg = make_uniq<LogicalAggregate>(inner_group_index, inner_agg_index, std::move(inner_expressions));
+	auto inner_agg = make_uniq<LogicalAggregate>(TableIndex(inner_group_index), TableIndex(inner_agg_index),
+	                                             std::move(inner_expressions));
 	inner_agg->groups.push_back(std::move(pu_hash_expr));
 	inner_agg->groups.push_back(std::move(distinct_value));
 	inner_agg->children.push_back(std::move(agg->children[0]));
 	inner_agg->ResolveOperatorTypes();
 
-	auto hash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, ColumnBinding(inner_group_index, 0));
-	auto value_ref = make_uniq<BoundColumnRefExpression>(distinct_type, ColumnBinding(inner_group_index, 1));
+	auto hash_ref = make_uniq<BoundColumnRefExpression>(
+	    LogicalType::UBIGINT, ColumnBinding(TableIndex(inner_group_index), ProjectionIndex(0)));
+	auto value_ref = make_uniq<BoundColumnRefExpression>(
+	    distinct_type, ColumnBinding(TableIndex(inner_group_index), ProjectionIndex(1)));
 	vector<unique_ptr<Expression>> top_expressions;
 	vector<unique_ptr<Expression>> count_children;
 	count_children.push_back(std::move(hash_ref));
@@ -2511,11 +2545,11 @@ static void RewritePuDistinctCountToSampleMedian(OptimizerExtensionInput &input,
 }
 
 static void RemapExpressionBindingsLocal(Expression &e, const std::unordered_map<idx_t, idx_t> &map) {
-	if (e.type == ExpressionType::BOUND_COLUMN_REF) {
+	if (e.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 		auto &col_ref = e.Cast<BoundColumnRefExpression>();
-		auto it = map.find(col_ref.binding.table_index);
+		auto it = map.find(col_ref.BindingMutable().table_index.index);
 		if (it != map.end()) {
-			col_ref.binding.table_index = it->second;
+			col_ref.BindingMutable().table_index.index = it->second;
 		}
 	}
 	ExpressionIterator::EnumerateChildren(e, [&](Expression &child) { RemapExpressionBindingsLocal(child, map); });
@@ -2532,10 +2566,10 @@ static unique_ptr<Expression> CopyMaybeRemapped(const Expression &expr,
 
 static unique_ptr<Expression> CopyFilterMaybeRemapped(const BoundAggregateExpression &aggr,
                                                       const std::unordered_map<idx_t, idx_t> *index_map) {
-	if (!aggr.filter) {
+	if (!aggr.GetFilter()) {
 		return nullptr;
 	}
-	return CopyMaybeRemapped(*aggr.filter, index_map);
+	return CopyMaybeRemapped(*aggr.GetFilter(), index_map);
 }
 
 struct SampleAggregateRewrite {
@@ -2556,7 +2590,7 @@ static void BuildSampleMedianLowerExpression(OptimizerExtensionInput &input, con
                                              vector<unique_ptr<Expression>> &lower_expressions, idx_t aggregate_pos,
                                              vector<SampleAggregateRewrite> &rewrites, bool variable_m,
                                              bool nullable_sum, const Expression *extra_filter = nullptr) {
-	string name = StringUtil::Lower(aggr.function.name);
+	string name = StringUtil::Lower(aggr.Function().GetName().GetIdentifierName());
 	string sample_sum_name = nullable_sum ? (variable_m ? "as_sample_m_nullable_sum" : "as_sample_nullable_sum")
 	                                      : (variable_m ? "as_sample_m_sum" : "as_sample_sum");
 	string sample_avg_name = variable_m ? "as_sample_m_avg" : "as_sample_avg";
@@ -2569,8 +2603,8 @@ static void BuildSampleMedianLowerExpression(OptimizerExtensionInput &input, con
 		rewrites.push_back(
 		    {sample_sum_name, lower_value_pos, optional_idx(), true, 0.0, bounds.count_bound, false, 0.0, false});
 	} else if (name == "count") {
-		if (!aggr.children.empty()) {
-			children.push_back(CopyMaybeRemapped(*aggr.children[0], index_map));
+		if (!aggr.GetChildren().empty()) {
+			children.push_back(CopyMaybeRemapped(*aggr.GetChildren()[0], index_map));
 		}
 		if (variable_m && aggr.IsDistinct()) {
 			lower_expressions.push_back(
@@ -2580,7 +2614,7 @@ static void BuildSampleMedianLowerExpression(OptimizerExtensionInput &input, con
 			if (extra_filter) {
 				predicates.push_back(extra_filter->Copy());
 			}
-			lower_expressions.back()->Cast<BoundAggregateExpression>().filter =
+			lower_expressions.back()->Cast<BoundAggregateExpression>().GetFilterMutable() =
 			    ConjoinPredicates(std::move(predicates));
 			rewrites.push_back({"as_sample_m_count_distinct_values", lower_value_pos, optional_idx(), false, 0.0, 0.0,
 			                    false, 0.0, true});
@@ -2593,23 +2627,23 @@ static void BuildSampleMedianLowerExpression(OptimizerExtensionInput &input, con
 			    {sample_sum_name, lower_value_pos, optional_idx(), true, 0.0, bounds.count_bound, false, 0.0, false});
 		}
 	} else if (name == "sum") {
-		children.push_back(CopyMaybeRemapped(*aggr.children[0], index_map));
+		children.push_back(CopyMaybeRemapped(*aggr.GetChildren()[0], index_map));
 		lower_expressions.push_back(BindPlainAggregate(input, "sum", std::move(children)));
 		double sum_bound = GetDpSassSumContributionBound(bounds, aggregate_pos);
 		rewrites.push_back(
 		    {sample_sum_name, lower_value_pos, optional_idx(), true, -sum_bound, sum_bound, false, 0.0, false});
 	} else if (name == "avg") {
-		auto sum_arg = CopyMaybeRemapped(*aggr.children[0], index_map);
-		auto count_arg = CopyMaybeRemapped(*aggr.children[0], index_map);
+		auto sum_arg = CopyMaybeRemapped(*aggr.GetChildren()[0], index_map);
+		auto count_arg = CopyMaybeRemapped(*aggr.GetChildren()[0], index_map);
 		auto filter_for_sum = CopyFilterMaybeRemapped(aggr, index_map);
 		auto filter_for_count = CopyFilterMaybeRemapped(aggr, index_map);
 
 		lower_expressions.push_back(BindPlainAggregate(input, "sum", std::move(sum_arg)));
-		lower_expressions.back()->Cast<BoundAggregateExpression>().filter = std::move(filter_for_sum);
+		lower_expressions.back()->Cast<BoundAggregateExpression>().GetFilterMutable() = std::move(filter_for_sum);
 
 		idx_t lower_count_pos = lower_expressions.size();
 		lower_expressions.push_back(BindPlainAggregate(input, "count", std::move(count_arg)));
-		lower_expressions.back()->Cast<BoundAggregateExpression>().filter = std::move(filter_for_count);
+		lower_expressions.back()->Cast<BoundAggregateExpression>().GetFilterMutable() = std::move(filter_for_count);
 		rewrites.push_back({sample_avg_name, lower_value_pos, optional_idx(lower_count_pos), true, -bounds.sum_bound,
 		                    bounds.sum_bound, true, bounds.count_bound, false});
 		return;
@@ -2617,7 +2651,7 @@ static void BuildSampleMedianLowerExpression(OptimizerExtensionInput &input, con
 		// Per-PU MIN/MAX of the value; per-lane sample MIN/MAX then median/mean release. No per-lane
 		// magnitude clip — the release terminal already clamps each lane answer to the public
 		// [dp_sass_minmax_lower_bound, dp_sass_minmax_upper_bound] output domain.
-		children.push_back(CopyMaybeRemapped(*aggr.children[0], index_map));
+		children.push_back(CopyMaybeRemapped(*aggr.GetChildren()[0], index_map));
 		lower_expressions.push_back(BindPlainAggregate(input, name, std::move(children)));
 		rewrites.push_back({name == "min" ? sample_min_name : sample_max_name, lower_value_pos, optional_idx(), false,
 		                    0.0, 0.0, false, 0.0, false});
@@ -2625,7 +2659,8 @@ static void BuildSampleMedianLowerExpression(OptimizerExtensionInput &input, con
 		throw InvalidInputException("dp_sample_median: only COUNT, COUNT(DISTINCT), SUM, AVG, MIN, and MAX aggregates "
 		                            "are supported");
 	}
-	lower_expressions.back()->Cast<BoundAggregateExpression>().filter = CopyFilterMaybeRemapped(aggr, index_map);
+	lower_expressions.back()->Cast<BoundAggregateExpression>().GetFilterMutable() =
+	    CopyFilterMaybeRemapped(aggr, index_map);
 }
 
 static unique_ptr<Expression> BuildSampleMedianAggregateRef(OptimizerExtensionInput &input,
@@ -2633,7 +2668,7 @@ static unique_ptr<Expression> BuildSampleMedianAggregateRef(OptimizerExtensionIn
                                                             const SampleAggregateRewrite &rewrite) {
 	auto lower_type = pre_agg.lower_agg->types[pre_agg.num_original_groups + 1 + rewrite.lower_value_pos];
 	unique_ptr<Expression> lower_ref = make_uniq<BoundColumnRefExpression>(
-	    lower_type, ColumnBinding(pre_agg.lower_agg_index, rewrite.lower_value_pos));
+	    lower_type, ColumnBinding(TableIndex(pre_agg.lower_agg_index), ProjectionIndex(rewrite.lower_value_pos)));
 	if (!rewrite.raw_lower_value) {
 		lower_ref = BoundCastExpression::AddCastToType(input.context, std::move(lower_ref), LogicalType::DOUBLE);
 		if (rewrite.clip_value) {
@@ -2649,7 +2684,8 @@ static unique_ptr<Expression> BuildSampleMedianAggregateRef(OptimizerExtensionIn
 		auto lower_count_type =
 		    pre_agg.lower_agg->types[pre_agg.num_original_groups + 1 + rewrite.lower_count_pos.GetIndex()];
 		unique_ptr<Expression> lower_count_ref = make_uniq<BoundColumnRefExpression>(
-		    lower_count_type, ColumnBinding(pre_agg.lower_agg_index, rewrite.lower_count_pos.GetIndex()));
+		    lower_count_type,
+		    ColumnBinding(TableIndex(pre_agg.lower_agg_index), ProjectionIndex(rewrite.lower_count_pos.GetIndex())));
 		auto count_ref =
 		    BoundCastExpression::AddCastToType(input.context, std::move(lower_count_ref), LogicalType::DOUBLE);
 		if (rewrite.clip_count) {
@@ -2692,7 +2728,7 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 	bool has_variable_m_distinct = false;
 	for (auto &expr : agg->expressions) {
 		auto &aggr = expr->Cast<BoundAggregateExpression>();
-		string name = StringUtil::Lower(aggr.function.name);
+		string name = StringUtil::Lower(aggr.FunctionMutable().GetName().GetIdentifierName());
 		if (name == "count" && aggr.IsDistinct()) {
 			has_variable_m_distinct = true;
 			break;
@@ -2723,7 +2759,8 @@ static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, Logic
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
 		auto &rewrite = rewrites[ai];
 		auto &original = agg->expressions[ai]->Cast<BoundAggregateExpression>();
-		PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] rewrite " + original.function.name + " -> " + rewrite.sample_name);
+		PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] rewrite " + original.Function().GetName().GetIdentifierName() + " -> " +
+		                    rewrite.sample_name);
 		agg->expressions[ai] = BuildSampleMedianAggregateRef(input, pre_agg, rewrite);
 	}
 	agg->ResolveOperatorTypes();
@@ -2770,16 +2807,16 @@ BuildStableDpSassPuHashExpression(OptimizerExtensionInput &input, unique_ptr<Log
 		}
 		auto col_index = key_get->GetColumnIds()[proj_idx];
 		auto col_type = key_get->GetColumnType(col_index);
-		ColumnBinding source_binding(key_get->table_index, proj_idx);
-		auto propagated = PropagateSingleBinding(*plan, key_get->table_index, source_binding, col_type, agg);
-		if (propagated.table_index == DConstants::INVALID_INDEX) {
+		ColumnBinding source_binding {TableIndex(key_get->table_index.index), ProjectionIndex(proj_idx)};
+		auto propagated = PropagateSingleBinding(*plan, key_get->table_index.index, source_binding, col_type, agg);
+		if (propagated.table_index.index == DConstants::INVALID_INDEX) {
 			return nullptr;
 		}
 		key_exprs.push_back(make_uniq<BoundColumnRefExpression>(col_type, propagated));
 	}
 	auto pu_hash_expr = BuildXorHash(input, std::move(key_exprs));
 	pu_hash_expr = BoundCastExpression::AddCastToType(input.context, std::move(pu_hash_expr), LogicalType::UBIGINT);
-	pu_hash_expr->alias = "dp_sass_lane_key";
+	pu_hash_expr->SetAlias(Identifier("dp_sass_lane_key"));
 	PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] using stable hash-based sample lanes");
 	return pu_hash_expr;
 }
@@ -3037,8 +3074,8 @@ static unique_ptr<Expression> BuildFilterlessSamplePredicate(OptimizerExtensionI
 	}
 	auto shift = make_uniq<BoundConstantExpression>(Value::INTEGER(64 - sample_bits));
 	auto prefix = input.optimizer.BindScalarFunction(">>", pu_hash.Copy(), std::move(shift));
-	return make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_EQUAL, std::move(prefix),
-	                                            make_uniq<BoundConstantExpression>(Value::UBIGINT(0)));
+	return BoundComparisonExpression::Create(ExpressionType::COMPARE_EQUAL, std::move(prefix),
+	                                         make_uniq<BoundConstantExpression>(Value::UBIGINT(0)));
 }
 
 static unique_ptr<Expression> BuildFilterlessEncodedPu(OptimizerExtensionInput &input, const Expression &pu_hash,
@@ -3051,11 +3088,11 @@ static unique_ptr<Expression> BuildFilterlessEncodedPu(OptimizerExtensionInput &
 	BoundCaseCheck active_check;
 	active_check.when_expr = std::move(active);
 	active_check.then_expr = make_uniq<BoundConstantExpression>(Value::BOOLEAN(true));
-	active_value->case_checks.push_back(std::move(active_check));
-	active_value->else_expr = make_uniq<BoundConstantExpression>(Value::BOOLEAN(false));
+	active_value->CaseChecksMutable().push_back(std::move(active_check));
+	active_value->ElseMutable() = make_uniq<BoundConstantExpression>(Value::BOOLEAN(false));
 	auto active_bit = BoundCastExpression::AddCastToType(input.context, std::move(active_value), LogicalType::UBIGINT);
 	auto encoded = input.optimizer.BindScalarFunction("|", std::move(logical_pu), std::move(active_bit));
-	encoded->alias = "dp_filterless_encoded_pu";
+	encoded->SetAlias(Identifier("dp_filterless_encoded_pu"));
 	return encoded;
 }
 
@@ -3078,8 +3115,8 @@ static vector<ColumnBinding> InsertFilterlessProjection(OptimizerExtensionInput 
 		expressions.push_back(std::move(expression));
 	}
 
-	idx_t projection_index = input.optimizer.binder.GenerateTableIndex();
-	auto projection = make_uniq<LogicalProjection>(projection_index, std::move(expressions));
+	idx_t projection_index = input.optimizer.binder.GenerateTableIndex().index;
+	auto projection = make_uniq<LogicalProjection>(TableIndex(projection_index), std::move(expressions));
 	auto *slot = FindOperatorSlotByPointer(plan, insert_above);
 	if (!slot) {
 		throw InternalException("dp_filterless: could not locate encoded-PU projection point");
@@ -3091,14 +3128,15 @@ static vector<ColumnBinding> InsertFilterlessProjection(OptimizerExtensionInput 
 
 	ColumnBindingReplacer replacer;
 	for (idx_t i = 0; i < old_bindings.size(); i++) {
-		replacer.replacement_bindings.emplace_back(old_bindings[i], ColumnBinding(projection_index, i), old_types[i]);
+		replacer.replacement_bindings.emplace_back(
+		    old_bindings[i], ColumnBinding(TableIndex(projection_index), ProjectionIndex(i)), old_types[i]);
 	}
 	replacer.stop_operator = projection_ptr;
 	replacer.VisitOperator(*plan);
 	vector<ColumnBinding> result;
 	result.reserve(extra_expressions.size());
 	for (idx_t i = 0; i < extra_expressions.size(); i++) {
-		result.emplace_back(projection_index, old_bindings.size() + i);
+		result.emplace_back(TableIndex(projection_index), ProjectionIndex(old_bindings.size() + i));
 	}
 	return result;
 }
@@ -3159,8 +3197,8 @@ static unique_ptr<Expression> BuildFilterlessEncodedPuInput(OptimizerExtensionIn
 	auto encoded_bindings = InsertFilterlessProjection(input, plan, projection_child, std::move(encoded_expression));
 	auto encoded_binding = encoded_bindings[0];
 	auto propagated =
-	    PropagateSingleBinding(*plan, encoded_binding.table_index, encoded_binding, LogicalType::UBIGINT, agg);
-	if (propagated.table_index == DConstants::INVALID_INDEX) {
+	    PropagateSingleBinding(*plan, encoded_binding.table_index.index, encoded_binding, LogicalType::UBIGINT, agg);
+	if (propagated.table_index.index == DConstants::INVALID_INDEX) {
 		throw InternalException("dp_filterless: could not propagate encoded PU to aggregate input");
 	}
 	return make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
@@ -3176,16 +3214,19 @@ struct FilterlessPreAggregationInput {
 	vector<LogicalType> aggregate_types;
 
 	unique_ptr<Expression> GroupRef(idx_t index) const {
-		return make_uniq<BoundColumnRefExpression>(group_types[index], ColumnBinding(group_table_index, index));
+		return make_uniq<BoundColumnRefExpression>(
+		    group_types[index], ColumnBinding(TableIndex(group_table_index), ProjectionIndex(index)));
 	}
 
 	unique_ptr<Expression> PuRef() const {
-		return make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, ColumnBinding(group_table_index, group_count));
+		return make_uniq<BoundColumnRefExpression>(
+		    LogicalType::UBIGINT, ColumnBinding(TableIndex(group_table_index), ProjectionIndex(group_count)));
 	}
 
 	unique_ptr<Expression> AggregateRef(idx_t index) const {
 		return make_uniq<BoundColumnRefExpression>(
-		    aggregate_types[index], ColumnBinding(aggregate_table_index, component_column_offset + index));
+		    aggregate_types[index],
+		    ColumnBinding(TableIndex(aggregate_table_index), ProjectionIndex(component_column_offset + index)));
 	}
 
 	unique_ptr<Expression> ComponentRef(OptimizerExtensionInput &input, idx_t index, bool answer) const {
@@ -3211,7 +3252,7 @@ struct FilterlessPreAggregationInput {
 static FilterlessPreAggregationInput BuildFilterlessPreAggregationInput(const PuPreAggregationInfo &pre,
                                                                         idx_t component_count) {
 	FilterlessPreAggregationInput result;
-	result.group_table_index = pre.lower_agg->group_index;
+	result.group_table_index = pre.lower_agg->group_index.index;
 	result.aggregate_table_index = pre.lower_agg_index;
 	result.group_count = pre.num_original_groups;
 	result.component_column_offset = 0;
@@ -3237,18 +3278,19 @@ static FilterlessPreAggregationInput ApplyFilterlessMaxGroups(OptimizerExtension
 	// caps the group set without needing duplicate-aware DENSE_RANK. DuckDB can optimize this
 	// single hashed ordering into a bounded per-PU top-k aggregate.
 	idx_t lower_aggregate_count = component_count + 1;
-	idx_t projection_index = input.optimizer.binder.GenerateTableIndex();
+	idx_t projection_index = input.optimizer.binder.GenerateTableIndex().index;
 	vector<unique_ptr<Expression>> expressions;
 	expressions.reserve(pre.num_original_groups + 1 + lower_aggregate_count);
 	for (idx_t i = 0; i < pre.num_original_groups + 1; i++) {
-		expressions.push_back(
-		    make_uniq<BoundColumnRefExpression>(pre.lower_agg->types[i], ColumnBinding(pre.lower_agg->group_index, i)));
+		expressions.push_back(make_uniq<BoundColumnRefExpression>(
+		    pre.lower_agg->types[i], ColumnBinding(TableIndex(pre.lower_agg->group_index.index), ProjectionIndex(i))));
 	}
 	for (idx_t i = 0; i < lower_aggregate_count; i++) {
-		expressions.push_back(make_uniq<BoundColumnRefExpression>(pre.lower_agg->types[pre.num_original_groups + 1 + i],
-		                                                          ColumnBinding(pre.lower_agg_index, i)));
+		expressions.push_back(
+		    make_uniq<BoundColumnRefExpression>(pre.lower_agg->types[pre.num_original_groups + 1 + i],
+		                                        ColumnBinding(TableIndex(pre.lower_agg_index), ProjectionIndex(i))));
 	}
-	auto projection = make_uniq<LogicalProjection>(projection_index, std::move(expressions));
+	auto projection = make_uniq<LogicalProjection>(TableIndex(projection_index), std::move(expressions));
 	projection->children.push_back(std::move(agg->children[0]));
 	projection->ResolveOperatorTypes();
 	auto projection_types = projection->types;
@@ -3271,8 +3313,8 @@ static FilterlessPreAggregationInput ApplyFilterlessMaxGroups(OptimizerExtension
 	agg->children[0]->ResolveOperatorTypes();
 
 	for (idx_t i = 0; i < pre.num_original_groups; i++) {
-		agg->groups[i] =
-		    make_uniq<BoundColumnRefExpression>(pre.lower_agg->types[i], ColumnBinding(projection_index, i));
+		agg->groups[i] = make_uniq<BoundColumnRefExpression>(
+		    pre.lower_agg->types[i], ColumnBinding(TableIndex(projection_index), ProjectionIndex(i)));
 	}
 	FilterlessPreAggregationInput result;
 	result.group_table_index = projection_index;
@@ -3294,22 +3336,22 @@ static FilterlessPreAggregationInput ApplyFilterlessMaxGroups(OptimizerExtension
 static unique_ptr<Expression> BuildFilterlessActiveSupportKey(OptimizerExtensionInput &input,
                                                               const FilterlessPreAggregationInput &pre_input) {
 	auto active_count = pre_input.ActiveCountRef();
-	auto is_active = make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_GREATERTHAN, std::move(active_count),
-	                                                      make_uniq<BoundConstantExpression>(Value::BIGINT(0)));
+	auto is_active = BoundComparisonExpression::Create(ExpressionType::COMPARE_GREATERTHAN, std::move(active_count),
+	                                                   make_uniq<BoundConstantExpression>(Value::BIGINT(0)));
 	auto active_pu = make_uniq<BoundCaseExpression>(LogicalType::UBIGINT);
 	BoundCaseCheck check;
 	check.when_expr = std::move(is_active);
 	check.then_expr = pre_input.PuRef();
-	active_pu->case_checks.push_back(std::move(check));
-	active_pu->else_expr = make_uniq<BoundConstantExpression>(Value(LogicalType::UBIGINT));
+	active_pu->CaseChecksMutable().push_back(std::move(check));
+	active_pu->ElseMutable() = make_uniq<BoundConstantExpression>(Value(LogicalType::UBIGINT));
 	return active_pu;
 }
 
 static unique_ptr<Expression> BuildFilterlessIsActive(OptimizerExtensionInput &input, const Expression &encoded_pu) {
 	auto active_bit = input.optimizer.BindScalarFunction("&", encoded_pu.Copy(),
 	                                                     make_uniq<BoundConstantExpression>(Value::UBIGINT(1)));
-	return make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_NOTEQUAL, std::move(active_bit),
-	                                            make_uniq<BoundConstantExpression>(Value::UBIGINT(0)));
+	return BoundComparisonExpression::Create(ExpressionType::COMPARE_NOTEQUAL, std::move(active_bit),
+	                                         make_uniq<BoundConstantExpression>(Value::UBIGINT(0)));
 }
 
 static unique_ptr<Expression> BuildFilterlessLogicalPu(OptimizerExtensionInput &input,
@@ -3323,13 +3365,13 @@ static unique_ptr<Expression> BuildFilterlessLowerPair(OptimizerExtensionInput &
                                                        const Expression &encoded_pu, int sample_bits) {
 	vector<unique_ptr<Expression>> children;
 	if (is_count) {
-		if (aggregate.function.name == "count" && !aggregate.children.empty()) {
-			children.push_back(BuildIsNotNullPredicate(aggregate.children[0]->Copy()));
+		if (aggregate.Function().GetName().GetIdentifierName() == "count" && !aggregate.GetChildren().empty()) {
+			children.push_back(BuildIsNotNullPredicate(aggregate.GetChildren()[0]->Copy()));
 		} else {
 			children.push_back(make_uniq<BoundConstantExpression>(Value::BOOLEAN(true)));
 		}
 	} else {
-		children.push_back(aggregate.children[0]->Copy());
+		children.push_back(aggregate.GetChildren()[0]->Copy());
 	}
 	children.push_back(BuildFilterlessIsActive(input, encoded_pu));
 	children.push_back(BuildFilterlessSamplePredicate(input, encoded_pu, sample_bits));
@@ -3348,7 +3390,7 @@ void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, Optimizer
 	idx_t n_groups = agg->groups.size();
 	for (auto &expression : agg->expressions) {
 		auto &aggregate = expression->Cast<BoundAggregateExpression>();
-		if (aggregate.filter) {
+		if (aggregate.GetFilterMutable()) {
 			throw NotImplementedException("dp_filterless: aggregate FILTER clauses are not implemented yet");
 		}
 	}
@@ -3408,7 +3450,7 @@ void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, Optimizer
 		    BuildFilterlessLowerPair(input, aggregate, is_count, *encoded_pu, filterless_settings.sample_bits));
 	}
 	auto active_count = BindPlainAggregate(input, "count_star", nullptr);
-	active_count->Cast<BoundAggregateExpression>().filter = BuildFilterlessIsActive(input, *encoded_pu);
+	active_count->Cast<BoundAggregateExpression>().GetFilterMutable() = BuildFilterlessIsActive(input, *encoded_pu);
 	lower_expressions.push_back(std::move(active_count));
 
 	auto logical_pu = BuildFilterlessLogicalPu(input, std::move(encoded_pu));
@@ -3421,8 +3463,8 @@ void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, Optimizer
 	upper_expressions.reserve(original_aggregate_count + (n_groups > 0 ? 1 : 0));
 	for (idx_t i = 0; i < original_aggregate_count; i++) {
 		auto is_active =
-		    make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_GREATERTHAN, pre_input.ActiveCountRef(),
-		                                         make_uniq<BoundConstantExpression>(Value::BIGINT(0)));
+		    BoundComparisonExpression::Create(ExpressionType::COMPARE_GREATERTHAN, pre_input.ActiveCountRef(),
+		                                      make_uniq<BoundConstantExpression>(Value::BIGINT(0)));
 		vector<unique_ptr<Expression>> children;
 		children.push_back(pre_input.PuRef());
 		children.push_back(std::move(is_active));
@@ -3649,7 +3691,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	idx_t sum_count = 0;
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
 		auto &aggr = agg->expressions[ai]->Cast<BoundAggregateExpression>();
-		string name = StringUtil::Lower(aggr.function.name);
+		string name = StringUtil::Lower(aggr.FunctionMutable().GetName().GetIdentifierName());
 		if (avg_components.count(ai)) {
 			continue;
 		}
@@ -3665,9 +3707,9 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	idx_t sum_output_idx = 0;
 	for (idx_t ai = 0; ai < agg->expressions.size(); ai++) {
 		auto &aggr = agg->expressions[ai]->Cast<BoundAggregateExpression>();
-		string name = StringUtil::Lower(aggr.function.name);
+		string name = StringUtil::Lower(aggr.FunctionMutable().GetName().GetIdentifierName());
 		bool avg_sum_component = FindAvgInfoForSumPos(avg_infos, ai) != nullptr;
-		output_types.push_back(name == "avg" ? LogicalType::DOUBLE : aggr.return_type);
+		output_types.push_back(name == "avg" ? LogicalType::DOUBLE : aggr.GetReturnType());
 		if (avg_sum_component) {
 			double output_bound = GetRequiredDpBound(input.context, "dp_sass_sum_output_bound", "dp_sass");
 			lower_bounds.push_back(-output_bound);

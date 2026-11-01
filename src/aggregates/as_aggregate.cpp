@@ -1,3 +1,4 @@
+#include "duckdb/common/vector/list_vector.hpp"
 #include "aggregates/as_aggregate.hpp"
 
 #include "duckdb.hpp"
@@ -149,7 +150,7 @@ shared_ptr<PacRandomState> GetPacRandomState(ClientContext &context) {
 
 uint64_t GetPacSeed(ClientContext &context, double mi) {
 	Value value;
-	if (context.TryGetCurrentSetting("privacy_seed", value) && !value.IsNull()) {
+	if (context.TryGetCurrentSetting(Identifier("privacy_seed"), value) && !value.IsNull()) {
 		return uint64_t(value.GetValue<int64_t>());
 	}
 	return mi == 0.0 ? 42 : 42 ^ (PAC_MAGIC_HASH * uint64_t(context.ActiveTransaction().GetActiveQuery()));
@@ -402,8 +403,8 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 
 	idx_t count = args.size();
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto res = FlatVector::GetData<double>(result);
-	FlatVector::Validity(result).SetAllValid(count);
+	auto res = FlatVector::GetDataMutable<double>(result);
+	FlatVector::ValidityMutable(result).SetAllValid(count);
 
 	auto &local = ExecuteFunctionState::GetFunctionState(state)->Cast<PacAggregateLocalState>();
 	auto &gen = local.gen;
@@ -412,8 +413,8 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 	uint64_t query_hash = 0;
 	std::shared_ptr<PacPState> pstate;
 	auto &bound_expr = state.expr.Cast<BoundFunctionExpression>();
-	if (bound_expr.bind_info) {
-		auto &bd = bound_expr.bind_info->Cast<PrivBindData>();
+	if (bound_expr.BindInfo()) {
+		auto &bd = bound_expr.BindInfo()->Cast<PrivBindData>();
 		query_hash = bd.query_hash;
 		pstate = bd.pstate;
 	}
@@ -547,8 +548,8 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 	}
 }
 
-static unique_ptr<FunctionData> PacAggregateBind(ClientContext &ctx, ScalarFunction &,
-                                                 vector<unique_ptr<Expression>> &) {
+static unique_ptr<FunctionData> PacAggregateBind(BindScalarFunctionInput &bind_input) {
+	auto &ctx = bind_input.GetClientContext();
 	// mi is supplied per-row; the bind-time value is unused for noise but seeds the RNG.
 	return make_uniq<PrivBindData>(ctx, 128.0);
 }
@@ -559,8 +560,9 @@ void RegisterPacAggregateFunctions(ExtensionLoader &loader) {
 		auto fun = ScalarFunction(
 		    "pac_aggregate",
 		    {LogicalType::LIST(vals_elem), LogicalType::LIST(cnts_elem), LogicalType::DOUBLE, LogicalType::INTEGER},
-		    LogicalType::DOUBLE, fn, PacAggregateBind, nullptr, nullptr, PacAggregateInit);
-		fun.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		    LogicalType::DOUBLE, fn, PacAggregateBind, nullptr, PacAggregateInit);
+		fun.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+		fun.SetFallible();
 		loader.RegisterFunction(fun);
 	};
 
@@ -595,11 +597,12 @@ void RegisterPacAggregateFunctions(ExtensionLoader &loader) {
 #undef REG_COUNTS_FOR
 }
 
-static unique_ptr<FunctionData> PacHashBind(ClientContext &ctx, ScalarFunction &, vector<unique_ptr<Expression>> &) {
+static unique_ptr<FunctionData> PacHashBind(BindScalarFunctionInput &bind_input) {
+	auto &ctx = bind_input.GetClientContext();
 	double mi = GetPacMiFromSetting(ctx);
 	bool hash_repair = true;
 	Value hr_val;
-	if (ctx.TryGetCurrentSetting("pac_hash_repair", hr_val) && !hr_val.IsNull()) {
+	if (ctx.TryGetCurrentSetting(Identifier("pac_hash_repair"), hr_val) && !hr_val.IsNull()) {
 		hash_repair = hr_val.GetValue<bool>();
 	}
 	return make_uniq<PrivBindData>(ctx, mi, 1.0, 1.0, hash_repair);
@@ -611,8 +614,8 @@ static void PacHashFunction(DataChunk &args, ExpressionState &state, Vector &res
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
 	uint64_t query_hash = 0;
 	bool hash_repair = true;
-	if (function.bind_info) {
-		auto &bind_data = function.bind_info->Cast<PrivBindData>();
+	if (function.BindInfo()) {
+		auto &bind_data = function.BindInfo()->Cast<PrivBindData>();
 		query_hash = bind_data.query_hash;
 		hash_repair = bind_data.hash_repair;
 	}

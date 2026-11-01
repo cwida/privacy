@@ -804,15 +804,15 @@ SubtractNegStateTotals(State *, PAC_FLOAT *, uint64_t &, ArenaAllocator &) {
 
 // Generic finalize template (used by as_sum)
 template <class State, class ACC_TYPE, bool SIGNED>
-void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset);
+void PacSumFinalize(Vector &states, AggregateFinalizeInputData &input, Vector &result, idx_t count, idx_t offset);
 
 // Bind for DECIMAL as_sum
-unique_ptr<FunctionData> BindDecimalPacSum(ClientContext &ctx, AggregateFunction &function,
-                                           vector<unique_ptr<Expression>> &args);
+unique_ptr<FunctionData> BindDecimalPacSum(BindAggregateFunctionInput &input);
 
 // FinalizeCounters for as_sum
 template <class State, bool SIGNED>
-void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset);
+void PacSumAvgFinalizeCounters(Vector &states, AggregateFinalizeInputData &input, Vector &result, idx_t count,
+                               idx_t offset);
 
 } // namespace duckdb
 #endif // PAC_GODBOLT

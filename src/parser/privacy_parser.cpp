@@ -46,7 +46,7 @@ static vector<string> FindMissingColumns(const TableCatalogEntry &table, const v
 	for (const auto &col_name : column_names) {
 		bool found = false;
 		for (auto &col : table.GetColumns().Logical()) {
-			if (StringUtil::Lower(col.GetName()) == StringUtil::Lower(col_name)) {
+			if (StringUtil::Lower(col.GetName().GetIdentifierName()) == StringUtil::Lower(col_name)) {
 				found = true;
 				break;
 			}
@@ -210,7 +210,7 @@ static thread_local string g_pac_pending_table_name;
  * it persists across database sessions. For in-memory databases, no file is saved.
  */
 static unique_ptr<FunctionData> PACDDLBindFunction(ClientContext &context, TableFunctionBindInput &input,
-                                                   vector<LogicalType> &return_types, vector<string> &names) {
+                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	// Get the pending SQL from thread-local storage
 	string sql_to_execute = g_pac_pending_sql;
 	string table_name = g_pac_pending_table_name;
@@ -276,6 +276,30 @@ static void PACDDLExecuteFunction(ClientContext &context, TableFunctionInput &da
  * The order matters: DROP must be checked before ADD because DROP statements
  * also contain keywords like "protected" that might match ADD patterns.
  */
+ParserExtensionParseResult PrivacyParserExtension::PACParseTokens(ParserExtensionInfo *info,
+                                                                  const vector<SimpleToken> &tokens) {
+	string query;
+	idx_t consumed = 0;
+	for (auto &token : tokens) {
+		if (token.type == TokenType::END_OF_INPUT) {
+			break;
+		}
+		consumed++;
+		if (token.type == TokenType::TERMINATOR) {
+			break;
+		}
+		if (!query.empty()) {
+			query += ' ';
+		}
+		query += token.text;
+	}
+	auto result = PACParseFunction(info, query);
+	if (result.type == ParserExtensionResultType::PARSE_SUCCESSFUL) {
+		result.consumed_tokens = NumericCast<int64_t>(consumed);
+	}
+	return result;
+}
+
 ParserExtensionParseResult PrivacyParserExtension::PACParseFunction(ParserExtensionInfo *info, const string &query) {
 	// Clean up query - preserve spaces but remove semicolons, comments, and newlines
 	string clean_query = query;
@@ -362,8 +386,9 @@ ParserExtensionPlanResult PrivacyParserExtension::PACPlanFunction(ParserExtensio
 			// Check if table exists in the catalog
 			try {
 				auto &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
-				auto table_entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, DEFAULT_SCHEMA,
-				                                    pac_data.metadata.table_name, OnEntryNotFound::RETURN_NULL);
+				auto table_entry =
+				    catalog.GetEntry(context, CatalogType::TABLE_ENTRY, DEFAULT_SCHEMA,
+				                     Identifier(pac_data.metadata.table_name), OnEntryNotFound::RETURN_NULL);
 				if (!table_entry) {
 					throw CatalogException("Table '" + pac_data.metadata.table_name + "' does not exist");
 				}
@@ -411,8 +436,9 @@ ParserExtensionPlanResult PrivacyParserExtension::PACPlanFunction(ParserExtensio
 					                     "table '" + pac_data.metadata.table_name + "'. PAC LINK was not added.");
 
 					// Validate that referenced table exists
-					auto ref_table_entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, DEFAULT_SCHEMA,
-					                                        link.referenced_table, OnEntryNotFound::RETURN_NULL);
+					auto ref_table_entry =
+					    catalog.GetEntry(context, CatalogType::TABLE_ENTRY, DEFAULT_SCHEMA,
+					                     Identifier(link.referenced_table), OnEntryNotFound::RETURN_NULL);
 					if (!ref_table_entry) {
 						throw CatalogException("Referenced table '" + link.referenced_table + "' does not exist");
 					}
@@ -444,8 +470,9 @@ ParserExtensionPlanResult PrivacyParserExtension::PACPlanFunction(ParserExtensio
 				auto &catalog = Catalog::GetCatalog(context, DatabaseManager::GetDefaultDatabase(context));
 				for (const auto &link : pac_data.metadata.links) {
 					// Check if referenced table exists and is a PAC table
-					auto ref_table_entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, DEFAULT_SCHEMA,
-					                                        link.referenced_table, OnEntryNotFound::RETURN_NULL);
+					auto ref_table_entry =
+					    catalog.GetEntry(context, CatalogType::TABLE_ENTRY, DEFAULT_SCHEMA,
+					                     Identifier(link.referenced_table), OnEntryNotFound::RETURN_NULL);
 					if (ref_table_entry) {
 						auto ref_metadata = PrivacyMetadataManager::Get().GetTableMetadata(link.referenced_table);
 						if (ref_metadata && ref_metadata->is_privacy_unit) {

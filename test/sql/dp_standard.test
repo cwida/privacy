@@ -502,7 +502,7 @@ WHERE EXISTS (
     AND o2.store <> o1.store
 );
 ----
-dp_standard: lateral or correlated subqueries are not supported by DP mechanisms
+dp_standard: scalar or mark subqueries are not supported by DP mechanisms
 
 # --- MIN/MAX (dp_standard) ---
 # Values are clipped to the public domain [dp_minmax_lower_bound, dp_minmax_upper_bound], so global

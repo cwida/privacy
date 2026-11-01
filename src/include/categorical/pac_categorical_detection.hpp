@@ -46,8 +46,8 @@ namespace duckdb {
 // Metadata about a PAC aggregate produced by the bitslice compiler.
 // Keyed by aggregate_index in PacAggregateInfoMap.
 struct PacAggregateInfo {
-	idx_t aggregate_index;      // agg->aggregate_index
-	idx_t group_index;          // agg->group_index
+	idx_t aggregate_index;      // agg->aggregate_index.index
+	idx_t group_index;          // agg->group_index.index
 	ColumnBinding hash_binding; // the hash column binding used for this aggregate's children[0]
 };
 // Map from aggregate_index → PacAggregateInfo
@@ -179,7 +179,7 @@ inline bool IsNumericalType(const LogicalType &type) {
 
 // Hash a column binding to a unique 64-bit value for use in maps/sets
 static inline uint64_t HashBinding(const ColumnBinding &binding) {
-	return (uint64_t(binding.table_index) << 32) | binding.column_index;
+	return (uint64_t(binding.table_index.index) << 32) | binding.column_index.GetIndexUnsafe();
 }
 
 // Rebind an aggregate function by name (catalog lookup + FunctionBinder).
@@ -187,27 +187,27 @@ static inline uint64_t HashBinding(const ColumnBinding &binding) {
 static inline unique_ptr<Expression> RebindAggregate(ClientContext &context, const string &func_name,
                                                      vector<unique_ptr<Expression>> children, bool is_distinct) {
 	auto &catalog = Catalog::GetSystemCatalog(context);
-	auto &func_entry = catalog.GetEntry<AggregateFunctionCatalogEntry>(context, DEFAULT_SCHEMA, func_name);
+	auto &func_entry = catalog.GetEntry<AggregateFunctionCatalogEntry>(context, DEFAULT_SCHEMA, Identifier(func_name));
 	vector<LogicalType> arg_types;
 	for (auto &child : children) {
-		arg_types.push_back(child->return_type);
+		arg_types.push_back(child->GetReturnType());
 	}
 	ErrorData error;
 	FunctionBinder function_binder(context);
-	auto best_function = function_binder.BindFunction(func_name, func_entry.functions, arg_types, error);
+	auto best_function = function_binder.BindFunction(Identifier(func_name), func_entry.functions, arg_types, error);
 	if (!best_function.IsValid()) {
 		return nullptr;
 	}
-	AggregateFunction func = func_entry.functions.GetFunctionByOffset(best_function.GetIndex());
-	return function_binder.BindAggregateFunction(func, std::move(children), nullptr,
+	const auto &func = func_entry.functions.GetFunctionByOffset(best_function.GetIndex());
+	return function_binder.BindAggregateFunction(*func, std::move(children), nullptr,
 	                                             is_distinct ? AggregateType::DISTINCT : AggregateType::NON_DISTINCT);
 }
 
 // Walk through cast expressions to find the underlying expression.
 // Returns the innermost non-cast expression.
 static inline Expression *StripCasts(Expression *expr) {
-	while (expr->type == ExpressionType::OPERATOR_CAST) {
-		expr = expr->Cast<BoundCastExpression>().child.get();
+	while (expr->GetExpressionType() == ExpressionType::OPERATOR_CAST) {
+		expr = expr->Cast<BoundFunctionExpression>().GetChildrenMutable()[0].get();
 	}
 	return expr;
 }
@@ -215,24 +215,27 @@ static inline Expression *StripCasts(Expression *expr) {
 // Check if an expression is already wrapped in a categorical rewrite terminal function
 // This includes as_noised, priv_filter, list_transform, and list_zip
 // These functions indicate that the expression has already been processed by categorical rewriting
-static inline bool IsAlreadyWrappedInPacNoised(Expression *expr) {
+static inline bool IsAlreadyWrappedInPacNoised(const Expression *expr) {
 	if (!expr) {
 		return false;
 	}
-	if (expr->type == ExpressionType::BOUND_FUNCTION) {
+	if (expr->GetExpressionType() == ExpressionType::BOUND_FUNCTION) {
 		auto &func = expr->Cast<BoundFunctionExpression>();
 		// Check for all categorical rewrite terminal functions
-		if (func.function.name == "as_noised" || func.function.name == "as_noised_div" ||
-		    StringUtil::StartsWith(func.function.name, "priv_filter") ||
-		    StringUtil::StartsWith(func.function.name, "priv_select") || func.function.name == "priv_coalesce" ||
-		    func.function.name == "list_transform" || func.function.name == "list_zip") {
+		if (func.Function().GetName().GetIdentifierName() == "as_noised" ||
+		    func.Function().GetName().GetIdentifierName() == "as_noised_div" ||
+		    StringUtil::StartsWith(func.Function().GetName().GetIdentifierName(), "priv_filter") ||
+		    StringUtil::StartsWith(func.Function().GetName().GetIdentifierName(), "priv_select") ||
+		    func.Function().GetName().GetIdentifierName() == "priv_coalesce" ||
+		    func.Function().GetName().GetIdentifierName() == "list_transform" ||
+		    func.Function().GetName().GetIdentifierName() == "list_zip") {
 			return true;
 		}
 	}
 	// Check for CAST(terminal_function(...))
-	if (expr->type == ExpressionType::OPERATOR_CAST) {
-		auto &cast = expr->Cast<BoundCastExpression>();
-		return IsAlreadyWrappedInPacNoised(cast.child.get());
+	if (expr->GetExpressionType() == ExpressionType::OPERATOR_CAST) {
+		auto &cast = expr->Cast<BoundFunctionExpression>();
+		return IsAlreadyWrappedInPacNoised(cast.GetChildren()[0].get());
 	}
 	return false;
 }
@@ -240,15 +243,15 @@ static inline bool IsAlreadyWrappedInPacNoised(Expression *expr) {
 // Check if a CASE expression is DuckDB's scalar subquery wrapper pattern:
 // CASE WHEN count>1 THEN error(...) ELSE value END
 static inline bool IsScalarSubqueryWrapper(const BoundCaseExpression &case_expr) {
-	if (case_expr.case_checks.size() != 1 || !case_expr.else_expr) {
+	if (case_expr.CaseChecks().size() != 1 || !case_expr.ElseExpression()) {
 		return false;
 	}
-	auto &check = case_expr.case_checks[0];
+	auto &check = case_expr.CaseChecks()[0];
 	// Counter-list wrappers cast the error branch to the new result type.
 	auto *then_expr = check.then_expr ? StripCasts(check.then_expr.get()) : nullptr;
-	if (then_expr && then_expr->type == ExpressionType::BOUND_FUNCTION) {
+	if (then_expr && then_expr->GetExpressionType() == ExpressionType::BOUND_FUNCTION) {
 		auto &func = then_expr->Cast<BoundFunctionExpression>();
-		return func.function.name == "error";
+		return func.FunctionMutable().GetName().GetIdentifierName() == "error";
 	}
 	return false;
 }
@@ -264,10 +267,10 @@ static inline string FindPacAggregateInOperator(LogicalOperator *op) {
 	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
 		auto &agg = op->Cast<LogicalAggregate>();
 		for (auto &agg_expr : agg.expressions) {
-			if (agg_expr->type == ExpressionType::BOUND_AGGREGATE) {
+			if (agg_expr->GetExpressionType() == ExpressionType::BOUND_AGGREGATE) {
 				auto &bound_agg = agg_expr->Cast<BoundAggregateExpression>();
-				if (IsAnyPacAggregate(bound_agg.function.name)) {
-					return GetBasePacAggregateName(bound_agg.function.name);
+				if (IsAnyPacAggregate(bound_agg.FunctionMutable().GetName().GetIdentifierName())) {
+					return GetBasePacAggregateName(bound_agg.FunctionMutable().GetName().GetIdentifierName());
 				}
 			}
 		}
@@ -294,7 +297,7 @@ static inline LogicalOperator *RecognizeDuckDBScalarWrapper(LogicalOperator *op)
 		return nullptr;
 	}
 	auto &expr = outer_proj.expressions[0];
-	if (expr->type != ExpressionType::CASE_EXPR) {
+	if (expr->GetExpressionType() != ExpressionType::CASE_EXPR) {
 		return nullptr;
 	}
 	if (!IsScalarSubqueryWrapper(expr->Cast<BoundCaseExpression>())) {
@@ -312,11 +315,11 @@ static inline LogicalOperator *RecognizeDuckDBScalarWrapper(LogicalOperator *op)
 		return nullptr;
 	}
 	auto &agg_expr = agg.expressions[0];
-	if (agg_expr->type != ExpressionType::BOUND_AGGREGATE) {
+	if (agg_expr->GetExpressionType() != ExpressionType::BOUND_AGGREGATE) {
 		return nullptr;
 	}
 	auto &bound_agg = agg_expr->Cast<BoundAggregateExpression>();
-	if (StringUtil::Lower(bound_agg.function.name) != "first") {
+	if (StringUtil::Lower(bound_agg.FunctionMutable().GetName().GetIdentifierName()) != "first") {
 		return nullptr;
 	}
 	if (agg.children.empty()) {

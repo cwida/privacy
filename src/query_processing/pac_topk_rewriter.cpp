@@ -5,6 +5,7 @@
 // See pac_topk_rewriter.hpp for design documentation.
 //
 
+#include "duckdb/common/vector/list_vector.hpp"
 #include "query_processing/pac_topk_rewriter.hpp"
 #include "privacy_debug.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
@@ -41,8 +42,8 @@ static void PacMeanFunction(DataChunk &args, ExpressionState &state, Vector &res
 	UnifiedVectorFormat list_data;
 	list_vec.ToUnifiedFormat(count, list_data);
 
-	auto result_data = FlatVector::GetData<PAC_FLOAT>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<PAC_FLOAT>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	auto &child_vec = ListVector::GetEntry(list_vec);
 	UnifiedVectorFormat child_data;
@@ -108,11 +109,11 @@ struct PacTopKAggInfo {
 };
 
 static void RemapExpressionTableIndices(Expression &expr, const std::unordered_map<idx_t, idx_t> &index_map) {
-	if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+	if (expr.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 		auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-		auto it = index_map.find(col_ref.binding.table_index);
+		auto it = index_map.find(col_ref.BindingMutable().table_index.index);
 		if (it != index_map.end()) {
-			col_ref.binding.table_index = it->second;
+			col_ref.BindingMutable().table_index.index = it->second;
 		}
 	}
 	ExpressionIterator::EnumerateChildren(expr,
@@ -127,49 +128,49 @@ static unique_ptr<Expression> CopyExpressionWithTableMap(const Expression &expr,
 }
 
 static Expression *StripCastsMutable(Expression *expr) {
-	while (expr && expr->type == ExpressionType::OPERATOR_CAST) {
-		expr = expr->Cast<BoundCastExpression>().child.get();
+	while (expr && expr->GetExpressionType() == ExpressionType::OPERATOR_CAST) {
+		expr = expr->Cast<BoundFunctionExpression>().GetChildrenMutable()[0].get();
 	}
 	return expr;
 }
 
 static const Expression *StripCastsConst(const Expression *expr) {
-	while (expr && expr->type == ExpressionType::OPERATOR_CAST) {
-		expr = expr->Cast<BoundCastExpression>().child.get();
+	while (expr && expr->GetExpressionType() == ExpressionType::OPERATOR_CAST) {
+		expr = expr->Cast<BoundFunctionExpression>().GetChildren()[0].get();
 	}
 	return expr;
 }
 
 static bool GetDirectColumnBinding(const Expression &expr, ColumnBinding &binding) {
 	auto stripped = StripCastsConst(&expr);
-	if (!stripped || stripped->type != ExpressionType::BOUND_COLUMN_REF) {
+	if (!stripped || stripped->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
 		return false;
 	}
-	binding = stripped->Cast<BoundColumnRefExpression>().binding;
+	binding = stripped->Cast<BoundColumnRefExpression>().Binding();
 	return true;
 }
 
 static bool RemapDirectOrderExpression(unique_ptr<Expression> &expr,
                                        const std::unordered_map<uint64_t, ColumnBinding> &map) {
 	auto *stripped = StripCastsMutable(expr.get());
-	if (!stripped || stripped->type != ExpressionType::BOUND_COLUMN_REF) {
+	if (!stripped || stripped->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
 		return false;
 	}
 	auto &ref = stripped->Cast<BoundColumnRefExpression>();
-	auto it = map.find(HashBinding(ref.binding));
+	auto it = map.find(HashBinding(ref.BindingMutable()));
 	if (it == map.end()) {
 		return false;
 	}
-	ref.binding = it->second;
+	ref.BindingMutable() = it->second;
 	return true;
 }
 
 static void RemapExpressionBindingsExact(Expression &expr, const std::unordered_map<uint64_t, ColumnBinding> &map) {
-	if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+	if (expr.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 		auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-		auto it = map.find(HashBinding(col_ref.binding));
+		auto it = map.find(HashBinding(col_ref.BindingMutable()));
 		if (it != map.end()) {
-			col_ref.binding = it->second;
+			col_ref.BindingMutable() = it->second;
 		}
 	}
 	ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) { RemapExpressionBindingsExact(child, map); });
@@ -262,11 +263,12 @@ static TopKContext FindTopKContext(const unique_ptr<LogicalOperator> &plan) {
 // tracing through any number of intermediate projections.
 static bool OrderExprReferencesPacAgg(Expression &expr, const vector<PacTopKAggInfo> &pac_aggs,
                                       const vector<LogicalProjection *> &projections, idx_t proj_depth) {
-	if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+	if (expr.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 		auto &col_ref = expr.Cast<BoundColumnRefExpression>();
 		// If there are more projections to trace through, resolve the column ref
-		if (proj_depth < projections.size() && col_ref.binding.table_index == projections[proj_depth]->table_index) {
-			auto col_idx = col_ref.binding.column_index;
+		if (proj_depth < projections.size() &&
+		    col_ref.BindingMutable().table_index.index == projections[proj_depth]->table_index.index) {
+			auto col_idx = col_ref.BindingMutable().column_index;
 			if (col_idx < projections[proj_depth]->expressions.size()) {
 				auto &proj_expr = projections[proj_depth]->expressions[col_idx];
 				return OrderExprReferencesPacAgg(*proj_expr, pac_aggs, projections, proj_depth + 1);
@@ -274,15 +276,15 @@ static bool OrderExprReferencesPacAgg(Expression &expr, const vector<PacTopKAggI
 		}
 		// Direct reference to aggregate (or past all projections)
 		for (auto &info : pac_aggs) {
-			if (col_ref.binding == info.agg_binding) {
+			if (col_ref.BindingMutable() == info.agg_binding) {
 				return true;
 			}
 		}
 	}
 	// Check through casts
-	if (expr.type == ExpressionType::OPERATOR_CAST) {
-		auto &cast = expr.Cast<BoundCastExpression>();
-		return OrderExprReferencesPacAgg(*cast.child, pac_aggs, projections, proj_depth);
+	if (expr.GetExpressionType() == ExpressionType::OPERATOR_CAST) {
+		auto &cast = expr.Cast<BoundFunctionExpression>();
+		return OrderExprReferencesPacAgg(*cast.GetChildrenMutable()[0], pac_aggs, projections, proj_depth);
 	}
 	return false;
 }
@@ -292,16 +294,16 @@ static vector<PacTopKAggInfo> FindPacAggregates(LogicalAggregate &agg) {
 	vector<PacTopKAggInfo> result;
 	for (idx_t i = 0; i < agg.expressions.size(); i++) {
 		auto &expr = agg.expressions[i];
-		if (expr->type != ExpressionType::BOUND_AGGREGATE) {
+		if (expr->GetExpressionType() != ExpressionType::BOUND_AGGREGATE) {
 			continue;
 		}
 		auto &bound_agg = expr->Cast<BoundAggregateExpression>();
-		if (IsPacAggregate(bound_agg.function.name)) {
+		if (IsPacAggregate(bound_agg.FunctionMutable().GetName().GetIdentifierName())) {
 			PacTopKAggInfo info;
 			info.agg_index = i;
-			info.original_name = bound_agg.function.name;
-			info.original_type = expr->return_type;
-			info.agg_binding = ColumnBinding(agg.aggregate_index, i);
+			info.original_name = bound_agg.FunctionMutable().GetName().GetIdentifierName();
+			info.original_type = expr->GetReturnType();
+			info.agg_binding = ColumnBinding(TableIndex(agg.aggregate_index.index), ProjectionIndex(i));
 			result.push_back(std::move(info));
 		}
 	}
@@ -322,7 +324,7 @@ static bool TraceBindingThroughProjections(const ColumnBinding &binding, const v
 		return true;
 	}
 	auto *proj = projections[depth];
-	if (binding.table_index != proj->table_index) {
+	if (binding.table_index.index != proj->table_index.index) {
 		out_binding = binding;
 		return true;
 	}
@@ -331,11 +333,11 @@ static bool TraceBindingThroughProjections(const ColumnBinding &binding, const v
 		return false;
 	}
 	auto &proj_expr = proj->expressions[col_idx];
-	if (proj_expr->type != ExpressionType::BOUND_COLUMN_REF) {
+	if (proj_expr->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
 		return false;
 	}
 	auto &inner_ref = proj_expr->Cast<BoundColumnRefExpression>();
-	return TraceBindingThroughProjections(inner_ref.binding, projections, depth + 1, out_binding);
+	return TraceBindingThroughProjections(inner_ref.BindingMutable(), projections, depth + 1, out_binding);
 }
 
 // Remap column bindings in an operator's expressions after a child was rewritten.
@@ -359,11 +361,11 @@ static void RemapBindingsInOperator(LogicalOperator &op, const vector<ColumnBind
 	}
 
 	std::function<void(unique_ptr<Expression> &)> Rewrite = [&](unique_ptr<Expression> &e) {
-		if (e->type == ExpressionType::BOUND_COLUMN_REF) {
+		if (e->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 			auto &col_ref = e->Cast<BoundColumnRefExpression>();
-			auto it = remap.find(HashBinding(col_ref.binding));
+			auto it = remap.find(HashBinding(col_ref.BindingMutable()));
 			if (it != remap.end()) {
-				col_ref.binding = it->second;
+				col_ref.BindingMutable() = it->second;
 			}
 		}
 		ExpressionIterator::EnumerateChildren(*e, Rewrite);
@@ -385,8 +387,8 @@ static void RemapBindingsInOperator(LogicalOperator &op, const vector<ColumnBind
 	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN) {
 		auto &join = op.Cast<LogicalComparisonJoin>();
 		for (auto &cond : join.conditions) {
-			Rewrite(cond.left);
-			Rewrite(cond.right);
+			Rewrite(cond.LeftReference());
+			Rewrite(cond.RightReference());
 		}
 	}
 
@@ -415,7 +417,7 @@ static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, uniq
 		std::unordered_set<idx_t> pac_agg_indices;
 		for (auto &info : pac_aggs) {
 			if (info.agg_index >= agg.expressions.size() ||
-			    agg.expressions[info.agg_index]->type != ExpressionType::BOUND_AGGREGATE) {
+			    agg.expressions[info.agg_index]->GetExpressionType() != ExpressionType::BOUND_AGGREGATE) {
 				return false;
 			}
 			auto &bound_agg = agg.expressions[info.agg_index]->Cast<BoundAggregateExpression>();
@@ -430,17 +432,19 @@ static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, uniq
 		for (auto &order : topn.orders) {
 			ColumnBinding proj_binding;
 			if (!GetDirectColumnBinding(*order.expression, proj_binding) ||
-			    proj_binding.table_index != proj.table_index || proj_binding.column_index >= proj.expressions.size()) {
+			    proj_binding.table_index.index != proj.table_index.index ||
+			    proj_binding.column_index >= proj.expressions.size()) {
 				return false;
 			}
 			ColumnBinding agg_binding;
 			if (!GetDirectColumnBinding(*proj.expressions[proj_binding.column_index], agg_binding)) {
 				return false;
 			}
-			if (agg_binding.table_index == agg.group_index) {
+			if (agg_binding.table_index.index == agg.group_index.index) {
 				continue;
 			}
-			if (agg_binding.table_index != agg.aggregate_index || agg_binding.column_index >= agg.expressions.size() ||
+			if (agg_binding.table_index.index != agg.aggregate_index.index ||
+			    agg_binding.column_index >= agg.expressions.size() ||
 			    pac_agg_indices.find(agg_binding.column_index) == pac_agg_indices.end()) {
 				return false;
 			}
@@ -460,7 +464,7 @@ static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, uniq
 			for (idx_t pi = 0; pi < proj.expressions.size(); pi++) {
 				ColumnBinding binding;
 				if (GetDirectColumnBinding(*proj.expressions[pi], binding) &&
-				    binding == ColumnBinding(agg.group_index, gi)) {
+				    binding == ColumnBinding(TableIndex(agg.group_index.index), ProjectionIndex(gi))) {
 					group_proj_cols.push_back(pi);
 					found = true;
 					break;
@@ -495,9 +499,9 @@ static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, uniq
 #endif
 
 		auto &binder = input.optimizer.binder;
-		auto original_group_index = agg.group_index;
-		auto original_agg_index = agg.aggregate_index;
-		auto original_proj_index = proj.table_index;
+		auto original_group_index = agg.group_index.index;
+		auto original_agg_index = agg.aggregate_index.index;
+		auto original_proj_index = proj.table_index.index;
 		vector<LogicalType> original_agg_types = agg.types;
 		vector<LogicalType> original_proj_types = proj.types;
 
@@ -533,18 +537,18 @@ static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, uniq
 
 		std::unordered_map<uint64_t, ColumnBinding> agg_to_top_remap;
 		for (idx_t gi = 0; gi < agg.groups.size(); gi++) {
-			agg_to_top_remap[HashBinding(ColumnBinding(original_group_index, gi))] =
-			    ColumnBinding(original_group_index, gi);
+			agg_to_top_remap[HashBinding(ColumnBinding(TableIndex(original_group_index), ProjectionIndex(gi)))] =
+			    ColumnBinding(TableIndex(original_group_index), ProjectionIndex(gi));
 		}
 		for (auto &kv : order_old_to_new) {
-			agg_to_top_remap[HashBinding(ColumnBinding(original_agg_index, kv.first))] =
-			    ColumnBinding(original_agg_index, kv.second);
+			agg_to_top_remap[HashBinding(ColumnBinding(TableIndex(original_agg_index), ProjectionIndex(kv.first)))] =
+			    ColumnBinding(TableIndex(original_agg_index), ProjectionIndex(kv.second));
 		}
 
 		agg.expressions = std::move(top_expressions);
 		agg.types.clear();
 		for (auto &group : agg.groups) {
-			agg.types.push_back(group->return_type);
+			agg.types.push_back(group->GetReturnType());
 		}
 		for (auto old_idx : order_agg_indices) {
 			agg.types.push_back(original_agg_types[agg.groups.size() + old_idx]);
@@ -566,8 +570,8 @@ static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, uniq
 		}
 		std::unordered_map<uint64_t, ColumnBinding> proj_to_top_remap;
 		for (auto &kv : proj_old_to_new) {
-			proj_to_top_remap[HashBinding(ColumnBinding(original_proj_index, kv.first))] =
-			    ColumnBinding(original_proj_index, kv.second);
+			proj_to_top_remap[HashBinding(ColumnBinding(TableIndex(original_proj_index), ProjectionIndex(kv.first)))] =
+			    ColumnBinding(TableIndex(original_proj_index), ProjectionIndex(kv.second));
 		}
 		for (auto &order : topn.orders) {
 			if (!RemapDirectOrderExpression(order.expression, proj_to_top_remap)) {
@@ -581,12 +585,13 @@ static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, uniq
 		auto left_topn = std::move(plan);
 		auto join = make_uniq<LogicalComparisonJoin>(JoinType::INNER);
 		for (idx_t gi = 0; gi < group_proj_cols.size(); gi++) {
-			JoinCondition cond;
+			JoinCondition cond(nullptr, nullptr, ExpressionType::COMPARE_NOT_DISTINCT_FROM);
 			auto left_col = proj_old_to_new[group_proj_cols[gi]];
-			cond.left = make_uniq<BoundColumnRefExpression>(original_proj_types[group_proj_cols[gi]],
-			                                                ColumnBinding(original_proj_index, left_col));
-			cond.right = CopyExpressionWithTableMap(*original_groups[gi], right_index_map);
-			cond.comparison = ExpressionType::COMPARE_NOT_DISTINCT_FROM;
+			cond.LeftReference() = make_uniq<BoundColumnRefExpression>(
+			    original_proj_types[group_proj_cols[gi]],
+			    ColumnBinding(TableIndex(original_proj_index), ProjectionIndex(left_col)));
+			cond.RightReference() = CopyExpressionWithTableMap(*original_groups[gi], right_index_map);
+
 			join->conditions.push_back(std::move(cond));
 		}
 		join->children.push_back(std::move(left_topn));
@@ -601,30 +606,32 @@ static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, uniq
 			payload_expressions.push_back(CopyExpressionWithTableMap(*original_aggs[old_idx], right_index_map));
 		}
 
-		auto payload_group_index = binder.GenerateTableIndex();
-		auto payload_agg_index = binder.GenerateTableIndex();
+		auto payload_group_index = binder.GenerateTableIndex().index;
+		auto payload_agg_index = binder.GenerateTableIndex().index;
 		vector<unique_ptr<Expression>> payload_groups;
 		for (auto old_col : group_proj_cols) {
 			auto new_col = proj_old_to_new[old_col];
-			payload_groups.push_back(make_uniq<BoundColumnRefExpression>(original_proj_types[old_col],
-			                                                             ColumnBinding(original_proj_index, new_col)));
+			payload_groups.push_back(make_uniq<BoundColumnRefExpression>(
+			    original_proj_types[old_col],
+			    ColumnBinding(TableIndex(original_proj_index), ProjectionIndex(new_col))));
 		}
 		for (auto old_col : order_proj_cols) {
 			auto new_col = proj_old_to_new[old_col];
-			payload_groups.push_back(make_uniq<BoundColumnRefExpression>(original_proj_types[old_col],
-			                                                             ColumnBinding(original_proj_index, new_col)));
+			payload_groups.push_back(make_uniq<BoundColumnRefExpression>(
+			    original_proj_types[old_col],
+			    ColumnBinding(TableIndex(original_proj_index), ProjectionIndex(new_col))));
 		}
 
-		auto payload_agg =
-		    make_uniq<LogicalAggregate>(payload_group_index, payload_agg_index, std::move(payload_expressions));
+		auto payload_agg = make_uniq<LogicalAggregate>(TableIndex(payload_group_index), TableIndex(payload_agg_index),
+		                                               std::move(payload_expressions));
 		payload_agg->groups = std::move(payload_groups);
 		payload_agg->children.push_back(std::move(join));
 		payload_agg->ResolveOperatorTypes();
 
 		std::unordered_map<uint64_t, ColumnBinding> final_expr_remap;
 		for (idx_t gi = 0; gi < group_proj_cols.size(); gi++) {
-			final_expr_remap[HashBinding(ColumnBinding(original_group_index, gi))] =
-			    ColumnBinding(payload_group_index, gi);
+			final_expr_remap[HashBinding(ColumnBinding(TableIndex(original_group_index), ProjectionIndex(gi)))] =
+			    ColumnBinding(TableIndex(payload_group_index), ProjectionIndex(gi));
 		}
 		for (idx_t oi = 0; oi < order_proj_cols.size(); oi++) {
 			ColumnBinding agg_binding;
@@ -632,22 +639,22 @@ static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, uniq
 				return false;
 			}
 			final_expr_remap[HashBinding(agg_binding)] =
-			    ColumnBinding(payload_group_index, group_proj_cols.size() + oi);
+			    ColumnBinding(TableIndex(payload_group_index), ProjectionIndex(group_proj_cols.size() + oi));
 		}
 		for (auto &kv : payload_old_to_new) {
-			final_expr_remap[HashBinding(ColumnBinding(original_agg_index, kv.first))] =
-			    ColumnBinding(payload_agg_index, kv.second);
+			final_expr_remap[HashBinding(ColumnBinding(TableIndex(original_agg_index), ProjectionIndex(kv.first)))] =
+			    ColumnBinding(TableIndex(payload_agg_index), ProjectionIndex(kv.second));
 		}
 
-		auto final_proj_index = binder.GenerateTableIndex();
+		auto final_proj_index = binder.GenerateTableIndex().index;
 		vector<unique_ptr<Expression>> final_exprs;
 		std::unordered_map<uint64_t, ColumnBinding> final_order_remap;
 		for (idx_t pi = 0; pi < original_proj_exprs.size(); pi++) {
-			final_order_remap[HashBinding(ColumnBinding(original_proj_index, pi))] =
-			    ColumnBinding(final_proj_index, final_exprs.size());
+			final_order_remap[HashBinding(ColumnBinding(TableIndex(original_proj_index), ProjectionIndex(pi)))] =
+			    ColumnBinding(TableIndex(final_proj_index), ProjectionIndex(final_exprs.size()));
 			final_exprs.push_back(CopyExpressionWithBindingMap(*original_proj_exprs[pi], final_expr_remap));
 		}
-		auto final_proj = make_uniq<LogicalProjection>(final_proj_index, std::move(final_exprs));
+		auto final_proj = make_uniq<LogicalProjection>(TableIndex(final_proj_index), std::move(final_exprs));
 		final_proj->children.push_back(std::move(payload_agg));
 		final_proj->ResolveOperatorTypes();
 
@@ -684,7 +691,7 @@ static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, uniq
 			return false;
 		}
 		auto &expr = agg.expressions[info.agg_index];
-		if (expr->type != ExpressionType::BOUND_AGGREGATE) {
+		if (expr->GetExpressionType() != ExpressionType::BOUND_AGGREGATE) {
 			return false;
 		}
 		auto &bound_agg = expr->Cast<BoundAggregateExpression>();
@@ -700,13 +707,13 @@ static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, uniq
 		if (!GetDirectColumnBinding(*order.expression, binding)) {
 			return false;
 		}
-		if (binding.table_index == agg.group_index) {
+		if (binding.table_index.index == agg.group_index.index) {
 			if (binding.column_index >= agg.groups.size()) {
 				return false;
 			}
 			continue;
 		}
-		if (binding.table_index != agg.aggregate_index || binding.column_index >= agg.expressions.size()) {
+		if (binding.table_index.index != agg.aggregate_index.index || binding.column_index >= agg.expressions.size()) {
 			return false;
 		}
 		if (pac_agg_indices.find(binding.column_index) == pac_agg_indices.end()) {
@@ -744,8 +751,8 @@ static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, uniq
 #endif
 
 	auto &binder = input.optimizer.binder;
-	auto original_group_index = agg.group_index;
-	auto original_agg_index = agg.aggregate_index;
+	auto original_group_index = agg.group_index.index;
+	auto original_agg_index = agg.aggregate_index.index;
 	vector<LogicalType> original_types = agg.types;
 
 	vector<unique_ptr<Expression>> original_groups;
@@ -779,11 +786,12 @@ static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, uniq
 
 	std::unordered_map<uint64_t, ColumnBinding> top_order_remap;
 	for (idx_t gi = 0; gi < agg.groups.size(); gi++) {
-		top_order_remap[HashBinding(ColumnBinding(original_group_index, gi))] = ColumnBinding(original_group_index, gi);
+		top_order_remap[HashBinding(ColumnBinding(TableIndex(original_group_index), ProjectionIndex(gi)))] =
+		    ColumnBinding(TableIndex(original_group_index), ProjectionIndex(gi));
 	}
 	for (auto &kv : order_old_to_new) {
-		top_order_remap[HashBinding(ColumnBinding(original_agg_index, kv.first))] =
-		    ColumnBinding(original_agg_index, kv.second);
+		top_order_remap[HashBinding(ColumnBinding(TableIndex(original_agg_index), ProjectionIndex(kv.first)))] =
+		    ColumnBinding(TableIndex(original_agg_index), ProjectionIndex(kv.second));
 	}
 
 	for (auto &order : topn.orders) {
@@ -795,7 +803,7 @@ static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, uniq
 	agg.expressions = std::move(top_expressions);
 	agg.types.clear();
 	for (auto &group : agg.groups) {
-		agg.types.push_back(group->return_type);
+		agg.types.push_back(group->GetReturnType());
 	}
 	for (auto old_idx : order_agg_indices) {
 		agg.types.push_back(original_types[agg.groups.size() + old_idx]);
@@ -806,11 +814,11 @@ static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, uniq
 	auto left_topn = std::move(plan);
 	auto join = make_uniq<LogicalComparisonJoin>(JoinType::INNER);
 	for (idx_t gi = 0; gi < original_groups.size(); gi++) {
-		JoinCondition cond;
-		cond.left = make_uniq<BoundColumnRefExpression>(original_groups[gi]->return_type,
-		                                                ColumnBinding(original_group_index, gi));
-		cond.right = CopyExpressionWithTableMap(*original_groups[gi], right_index_map);
-		cond.comparison = ExpressionType::COMPARE_NOT_DISTINCT_FROM;
+		JoinCondition cond(nullptr, nullptr, ExpressionType::COMPARE_NOT_DISTINCT_FROM);
+		cond.LeftReference() = make_uniq<BoundColumnRefExpression>(
+		    original_groups[gi]->GetReturnType(), ColumnBinding(TableIndex(original_group_index), ProjectionIndex(gi)));
+		cond.RightReference() = CopyExpressionWithTableMap(*original_groups[gi], right_index_map);
+
 		join->conditions.push_back(std::move(cond));
 	}
 	join->children.push_back(std::move(left_topn));
@@ -826,56 +834,60 @@ static bool TryRewriteLatePayloadAggregates(OptimizerExtensionInput &input, uniq
 		payload_expressions.push_back(CopyExpressionWithTableMap(*original_aggs[old_idx], right_index_map));
 	}
 
-	auto payload_group_index = binder.GenerateTableIndex();
-	auto payload_agg_index = binder.GenerateTableIndex();
+	auto payload_group_index = binder.GenerateTableIndex().index;
+	auto payload_agg_index = binder.GenerateTableIndex().index;
 	vector<unique_ptr<Expression>> payload_groups;
 	payload_groups.reserve(original_groups.size() + order_agg_indices.size());
 	for (idx_t gi = 0; gi < original_groups.size(); gi++) {
-		payload_groups.push_back(make_uniq<BoundColumnRefExpression>(original_groups[gi]->return_type,
-		                                                             ColumnBinding(original_group_index, gi)));
+		payload_groups.push_back(
+		    make_uniq<BoundColumnRefExpression>(original_groups[gi]->GetReturnType(),
+		                                        ColumnBinding(TableIndex(original_group_index), ProjectionIndex(gi))));
 	}
 	for (auto old_idx : order_agg_indices) {
 		auto new_idx = order_old_to_new[old_idx];
-		payload_groups.push_back(make_uniq<BoundColumnRefExpression>(original_types[original_groups.size() + old_idx],
-		                                                             ColumnBinding(original_agg_index, new_idx)));
+		payload_groups.push_back(make_uniq<BoundColumnRefExpression>(
+		    original_types[original_groups.size() + old_idx],
+		    ColumnBinding(TableIndex(original_agg_index), ProjectionIndex(new_idx))));
 	}
 
-	auto payload_agg =
-	    make_uniq<LogicalAggregate>(payload_group_index, payload_agg_index, std::move(payload_expressions));
+	auto payload_agg = make_uniq<LogicalAggregate>(TableIndex(payload_group_index), TableIndex(payload_agg_index),
+	                                               std::move(payload_expressions));
 	payload_agg->groups = std::move(payload_groups);
 	payload_agg->children.push_back(std::move(join));
 	payload_agg->ResolveOperatorTypes();
 
-	auto final_proj_index = binder.GenerateTableIndex();
+	auto final_proj_index = binder.GenerateTableIndex().index;
 	vector<unique_ptr<Expression>> final_exprs;
 	final_exprs.reserve(original_types.size());
 	std::unordered_map<uint64_t, ColumnBinding> final_order_remap;
 	for (idx_t gi = 0; gi < original_groups.size(); gi++) {
-		auto final_binding = ColumnBinding(final_proj_index, final_exprs.size());
-		final_order_remap[HashBinding(ColumnBinding(original_group_index, gi))] = final_binding;
-		final_exprs.push_back(
-		    make_uniq<BoundColumnRefExpression>(original_types[gi], ColumnBinding(payload_group_index, gi)));
+		auto final_binding = ColumnBinding(TableIndex(final_proj_index), ProjectionIndex(final_exprs.size()));
+		final_order_remap[HashBinding(ColumnBinding(TableIndex(original_group_index), ProjectionIndex(gi)))] =
+		    final_binding;
+		final_exprs.push_back(make_uniq<BoundColumnRefExpression>(
+		    original_types[gi], ColumnBinding(TableIndex(payload_group_index), ProjectionIndex(gi))));
 	}
 	for (idx_t ai = 0; ai < original_aggs.size(); ai++) {
-		auto final_binding = ColumnBinding(final_proj_index, final_exprs.size());
-		final_order_remap[HashBinding(ColumnBinding(original_agg_index, ai))] = final_binding;
+		auto final_binding = ColumnBinding(TableIndex(final_proj_index), ProjectionIndex(final_exprs.size()));
+		final_order_remap[HashBinding(ColumnBinding(TableIndex(original_agg_index), ProjectionIndex(ai)))] =
+		    final_binding;
 		auto original_type = original_types[original_groups.size() + ai];
 		auto order_it = order_old_to_new.find(ai);
 		if (order_it != order_old_to_new.end()) {
 			auto group_pos = original_groups.size() + order_it->second;
-			final_exprs.push_back(
-			    make_uniq<BoundColumnRefExpression>(original_type, ColumnBinding(payload_group_index, group_pos)));
+			final_exprs.push_back(make_uniq<BoundColumnRefExpression>(
+			    original_type, ColumnBinding(TableIndex(payload_group_index), ProjectionIndex(group_pos))));
 			continue;
 		}
 		auto payload_it = payload_old_to_new.find(ai);
 		if (payload_it == payload_old_to_new.end()) {
 			return false;
 		}
-		final_exprs.push_back(
-		    make_uniq<BoundColumnRefExpression>(original_type, ColumnBinding(payload_agg_index, payload_it->second)));
+		final_exprs.push_back(make_uniq<BoundColumnRefExpression>(
+		    original_type, ColumnBinding(TableIndex(payload_agg_index), ProjectionIndex(payload_it->second))));
 	}
 
-	auto final_proj = make_uniq<LogicalProjection>(final_proj_index, std::move(final_exprs));
+	auto final_proj = make_uniq<LogicalProjection>(TableIndex(final_proj_index), std::move(final_exprs));
 	final_proj->children.push_back(std::move(payload_agg));
 	final_proj->ResolveOperatorTypes();
 
@@ -976,7 +988,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	for (auto &info : pac_aggs) {
 		PRIVACY_DEBUG_PRINT("PACTopKRule: Found PAC aggregate: " + info.original_name + " at index " +
 		                    std::to_string(info.agg_index) + " binding=[" +
-		                    std::to_string(info.agg_binding.table_index) + "." +
+		                    std::to_string(info.agg_binding.table_index.index) + "." +
 		                    std::to_string(info.agg_binding.column_index) + "]");
 	}
 #endif
@@ -1027,7 +1039,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	double expansion = 1.0;
 	{
 		Value exp_val;
-		if (input.context.TryGetCurrentSetting("pac_topk_expansion", exp_val) && !exp_val.IsNull()) {
+		if (input.context.TryGetCurrentSetting(Identifier("pac_topk_expansion"), exp_val) && !exp_val.IsNull()) {
 			expansion = exp_val.GetValue<double>();
 			if (expansion < 1.0) {
 				expansion = 1.0;
@@ -1054,11 +1066,12 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		auto &expr = agg.expressions[info.agg_index];
 		auto &bound_agg = expr->Cast<BoundAggregateExpression>();
 		vector<unique_ptr<Expression>> children;
-		for (auto &child_expr : bound_agg.children) {
+		for (auto &child_expr : bound_agg.GetChildrenMutable()) {
 			children.push_back(child_expr->Copy());
 		}
-		auto new_aggr = RebindAggregate(input.context, GetCountersVariant(bound_agg.function.name), std::move(children),
-		                                bound_agg.IsDistinct());
+		auto new_aggr = RebindAggregate(input.context,
+		                                GetCountersVariant(bound_agg.FunctionMutable().GetName().GetIdentifierName()),
+		                                std::move(children), bound_agg.IsDistinct());
 		if (new_aggr) {
 #if PRIVACY_DEBUG
 			PRIVACY_DEBUG_PRINT("PACTopKRule:   Rebound " + info.original_name + " -> " +
@@ -1069,11 +1082,12 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 			// Fallback: rename in place
 #if PRIVACY_DEBUG
 			PRIVACY_DEBUG_PRINT("PACTopKRule:   Fallback rename " + info.original_name + " -> " +
-			                    GetCountersVariant(bound_agg.function.name));
+			                    GetCountersVariant(bound_agg.Function().GetName().GetIdentifierName()));
 #endif
-			bound_agg.function.name = GetCountersVariant(bound_agg.function.name);
-			bound_agg.function.return_type = list_type;
-			expr->return_type = list_type;
+			bound_agg.FunctionMutable().SetName(
+			    Identifier(GetCountersVariant(bound_agg.FunctionMutable().GetName().GetIdentifierName())));
+			bound_agg.FunctionMutable().SetReturnType(list_type);
+			expr->SetReturnType(list_type);
 		}
 		// Update types in the aggregate
 		idx_t types_index = agg.groups.size() + info.agg_index;
@@ -1090,7 +1104,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 #if PRIVACY_DEBUG
 	PRIVACY_DEBUG_PRINT("PACTopKRule: Step 2 - Building mean projection");
 #endif
-	idx_t mean_proj_idx = binder.GenerateTableIndex();
+	idx_t mean_proj_idx = binder.GenerateTableIndex().index;
 	vector<unique_ptr<Expression>> mean_proj_exprs;
 
 	// Get all column bindings from the aggregate
@@ -1115,7 +1129,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		pac_mean_column_map[HashBinding(info.agg_binding)] = mean_col_idx;
 	}
 
-	auto mean_proj = make_uniq<LogicalProjection>(mean_proj_idx, std::move(mean_proj_exprs));
+	auto mean_proj = make_uniq<LogicalProjection>(TableIndex(mean_proj_idx), std::move(mean_proj_exprs));
 
 	if (ctx.has_intermediate_projection) {
 		// ==================================================================
@@ -1144,14 +1158,14 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		unordered_map<idx_t, idx_t> order_pac_refs;
 		for (idx_t oi = 0; oi < ctx.topn->orders.size(); oi++) {
 			auto *stripped = StripCasts(ctx.topn->orders[oi].expression.get());
-			auto *col_ref = stripped->type == ExpressionType::BOUND_COLUMN_REF
+			auto *col_ref = stripped->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF
 			                    ? &stripped->Cast<BoundColumnRefExpression>()
 			                    : nullptr;
 			if (!col_ref) {
 				continue;
 			}
 			ColumnBinding resolved;
-			if (TraceBindingThroughProjections(col_ref->binding, ctx.intermediate_projections, 0, resolved)) {
+			if (TraceBindingThroughProjections(col_ref->BindingMutable(), ctx.intermediate_projections, 0, resolved)) {
 				for (idx_t j = 0; j < pac_aggs.size(); j++) {
 					if (resolved == pac_aggs[j].agg_binding) {
 						order_pac_refs[oi] = j;
@@ -1164,12 +1178,12 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		// Map: outermost projection column index -> pac_aggs index (for PAC aggregate columns)
 		unordered_map<idx_t, idx_t> outermost_pac_col_map;
 		for (idx_t i = 0; i < outermost->expressions.size(); i++) {
-			if (outermost->expressions[i]->type != ExpressionType::BOUND_COLUMN_REF) {
+			if (outermost->expressions[i]->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
 				continue; // function calls (e.g. decompress) are non-PAC group columns
 			}
 			auto &ref = outermost->expressions[i]->Cast<BoundColumnRefExpression>();
 			ColumnBinding resolved;
-			if (TraceBindingThroughProjections(ref.binding, ctx.intermediate_projections, 1, resolved)) {
+			if (TraceBindingThroughProjections(ref.BindingMutable(), ctx.intermediate_projections, 1, resolved)) {
 				for (idx_t j = 0; j < pac_aggs.size(); j++) {
 					if (resolved == pac_aggs[j].agg_binding) {
 						outermost_pac_col_map[i] = j;
@@ -1194,12 +1208,12 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		// Rewrite all ColRefs in innermost projection: aggregate bindings -> MeanProj bindings.
 		// Also update return_type since PAC columns changed from e.g. BIGINT to LIST<FLOAT>.
 		std::function<void(unique_ptr<Expression> &)> UpdateRefs = [&](unique_ptr<Expression> &e) {
-			if (e->type == ExpressionType::BOUND_COLUMN_REF) {
+			if (e->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 				auto &col_ref = e->Cast<BoundColumnRefExpression>();
 				for (idx_t i = 0; i < agg_bindings.size(); i++) {
-					if (col_ref.binding == agg_bindings[i]) {
-						col_ref.binding = ColumnBinding(mean_proj_idx, i);
-						col_ref.return_type = agg.types[i];
+					if (col_ref.BindingMutable() == agg_bindings[i]) {
+						col_ref.BindingMutable() = ColumnBinding(TableIndex(mean_proj_idx), ProjectionIndex(i));
+						col_ref.SetReturnType(agg.types[i]);
 						break;
 					}
 				}
@@ -1228,13 +1242,14 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 					// Innermost: reference MeanProj's priv_mean column directly
 					idx_t mean_col = pac_mean_column_map[HashBinding(pac_aggs[j].agg_binding)];
 					proj->expressions.push_back(make_uniq<BoundColumnRefExpression>(
-					    PacFloatLogicalType(), ColumnBinding(mean_proj_idx, mean_col)));
+					    PacFloatLogicalType(), ColumnBinding(TableIndex(mean_proj_idx), ProjectionIndex(mean_col))));
 				} else {
 					// Reference the projection below's priv_mean passthrough column
 					auto *below = ctx.intermediate_projections[pi + 1];
 					idx_t below_col = pac_mean_col_indices[pi + 1][j];
 					proj->expressions.push_back(make_uniq<BoundColumnRefExpression>(
-					    PacFloatLogicalType(), ColumnBinding(below->table_index, below_col)));
+					    PacFloatLogicalType(),
+					    ColumnBinding(TableIndex(below->table_index.index), ProjectionIndex(below_col))));
 				}
 			}
 		}
@@ -1248,11 +1263,11 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 			auto &child_types = proj->children[0]->types;
 			// Update ColRef return_types based on the child operator's resolved types
 			std::function<void(unique_ptr<Expression> &)> FixTypes = [&](unique_ptr<Expression> &e) {
-				if (e->type == ExpressionType::BOUND_COLUMN_REF) {
+				if (e->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 					auto &col_ref = e->Cast<BoundColumnRefExpression>();
 					for (idx_t ci = 0; ci < child_bindings.size(); ci++) {
-						if (col_ref.binding == child_bindings[ci] && ci < child_types.size()) {
-							col_ref.return_type = child_types[ci];
+						if (col_ref.BindingMutable() == child_bindings[ci] && ci < child_types.size()) {
+							col_ref.SetReturnType(child_types[ci]);
 							break;
 						}
 					}
@@ -1281,15 +1296,16 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 				auto &expr = proj->expressions[i];
 #if PRIVACY_DEBUG
 				PRIVACY_DEBUG_PRINT("PACTopKRule:   A3b proj expr[" + std::to_string(i) +
-				                    "] type=" + std::to_string((int)expr->type) +
-				                    " return_type=" + expr->return_type.ToString() + " expr=" + expr->ToString());
+				                    "] type=" + std::to_string((int)expr->GetExpressionType()) +
+				                    " return_type=" + expr->GetReturnType().ToString() + " expr=" + expr->ToString());
 #endif
-				if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+				if (expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 					continue;
 				}
 				std::function<void(unique_ptr<Expression> &)> WrapListRefs = [&](unique_ptr<Expression> &e) {
-					if (e->type == ExpressionType::BOUND_COLUMN_REF && e->return_type.id() == LogicalTypeId::LIST) {
-						auto binding = e->Cast<BoundColumnRefExpression>().binding;
+					if (e->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF &&
+					    e->GetReturnType().id() == LogicalTypeId::LIST) {
+						auto binding = e->Cast<BoundColumnRefExpression>().BindingMutable();
 #if PRIVACY_DEBUG
 						PRIVACY_DEBUG_PRINT("PACTopKRule:     A3b WRAPPING LIST colref: " + e->ToString());
 #endif
@@ -1301,7 +1317,7 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 						bool traced =
 						    TraceBindingThroughProjections(binding, ctx.intermediate_projections, pi + 1, resolved);
 						for (auto &info : pac_aggs) {
-							if (info.original_type != e->return_type) {
+							if (info.original_type != e->GetReturnType()) {
 								if (traced && resolved == info.agg_binding) {
 									e = BoundCastExpression::AddCastToType(input.context, std::move(e),
 									                                       info.original_type);
@@ -1324,16 +1340,18 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 					// If this is a CAST whose child is a LIST colref, replace the
 					// entire CAST so the bound cast function matches the new source
 					// type (FLOAT from as_noised instead of original INT64/DECIMAL).
-					if (e->GetExpressionClass() == ExpressionClass::BOUND_CAST) {
-						auto &cast_expr = e->Cast<BoundCastExpression>();
-						if (cast_expr.child->type == ExpressionType::BOUND_COLUMN_REF &&
-						    cast_expr.child->return_type.id() == LogicalTypeId::LIST) {
-							auto target_type = cast_expr.return_type;
+					if (e->GetExpressionType() == ExpressionType::OPERATOR_CAST) {
+						auto &cast_expr = e->Cast<BoundFunctionExpression>();
+						if (cast_expr.GetChildrenMutable()[0]->GetExpressionType() ==
+						        ExpressionType::BOUND_COLUMN_REF &&
+						    cast_expr.GetChildrenMutable()[0]->GetReturnType().id() == LogicalTypeId::LIST) {
+							auto target_type = cast_expr.GetReturnType();
 #if PRIVACY_DEBUG
 							PRIVACY_DEBUG_PRINT("PACTopKRule:     A3b REPLACING CAST(LIST->" + target_type.ToString() +
 							                    ") with CAST(as_noised()->" + target_type.ToString() + ")");
 #endif
-							auto noised = input.optimizer.BindScalarFunction("as_noised", std::move(cast_expr.child));
+							auto noised = input.optimizer.BindScalarFunction(
+							    "as_noised", std::move(cast_expr.GetChildrenMutable()[0]));
 							e = BoundCastExpression::AddCastToType(input.context, std::move(noised), target_type);
 							return;
 						}
@@ -1354,12 +1372,13 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		// ------------------------------------------------------------------
 		for (auto &kv : order_pac_refs) {
 			auto *stripped = StripCasts(ctx.topn->orders[kv.first].expression.get());
-			auto *col_ref = stripped->type == ExpressionType::BOUND_COLUMN_REF
+			auto *col_ref = stripped->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF
 			                    ? &stripped->Cast<BoundColumnRefExpression>()
 			                    : nullptr;
 			if (col_ref) {
-				col_ref->binding = ColumnBinding(outermost->table_index, pac_mean_col_indices[0][kv.second]);
-				col_ref->return_type = PacFloatLogicalType();
+				col_ref->BindingMutable() = ColumnBinding(TableIndex(outermost->table_index.index),
+				                                          ProjectionIndex(pac_mean_col_indices[0][kv.second]));
+				col_ref->SetReturnType(PacFloatLogicalType());
 			}
 		}
 
@@ -1373,34 +1392,35 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		// priv_mean() applied then cast back to the original return type.
 		// Non-PAC columns are passed through unchanged.
 		// ------------------------------------------------------------------
-		idx_t noised_proj_idx = binder.GenerateTableIndex();
+		idx_t noised_proj_idx = binder.GenerateTableIndex().index;
 		vector<unique_ptr<Expression>> noised_proj_exprs;
 
 		for (idx_t i = 0; i < original_outermost_col_count; i++) {
 			auto it_pac = outermost_pac_col_map.find(i);
 			if (it_pac != outermost_pac_col_map.end()) {
 				// PAC aggregate column: apply as_noised to counter LIST, cast back to original type
-				auto counters_ref =
-				    make_uniq<BoundColumnRefExpression>(list_type, ColumnBinding(outermost->table_index, i));
+				auto counters_ref = make_uniq<BoundColumnRefExpression>(
+				    list_type, ColumnBinding(TableIndex(outermost->table_index.index), ProjectionIndex(i)));
 				auto noised = input.optimizer.BindScalarFunction("as_noised", std::move(counters_ref));
 				auto &orig_type = pac_aggs[it_pac->second].original_type;
-				if (orig_type != noised->return_type) {
+				if (orig_type != noised->GetReturnType()) {
 					noised = BoundCastExpression::AddCastToType(input.context, std::move(noised), orig_type);
 				}
 				noised_proj_exprs.push_back(std::move(noised));
 			} else {
 				// Non-PAC column: passthrough (preserves decompress result, etc.)
-				auto ref =
-				    make_uniq<BoundColumnRefExpression>(outermost->types[i], ColumnBinding(outermost->table_index, i));
+				auto ref = make_uniq<BoundColumnRefExpression>(
+				    outermost->types[i], ColumnBinding(TableIndex(outermost->table_index.index), ProjectionIndex(i)));
 				noised_proj_exprs.push_back(std::move(ref));
 			}
 		}
 
-		auto noised_proj = make_uniq<LogicalProjection>(noised_proj_idx, std::move(noised_proj_exprs));
+		auto noised_proj = make_uniq<LogicalProjection>(TableIndex(noised_proj_idx), std::move(noised_proj_exprs));
 
 		// Build order remap: original outermost projection columns -> NoisedProj columns
 		for (idx_t i = 0; i < original_outermost_col_count; i++) {
-			order_remap[HashBinding(ColumnBinding(outermost->table_index, i))] = ColumnBinding(noised_proj_idx, i);
+			order_remap[HashBinding(ColumnBinding(TableIndex(outermost->table_index.index), ProjectionIndex(i)))] =
+			    ColumnBinding(TableIndex(noised_proj_idx), ProjectionIndex(i));
 		}
 
 		// ------------------------------------------------------------------
@@ -1430,16 +1450,16 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 
 		// Step B1: Rewrite TopN ORDER BY to reference MeanProj
 		std::function<void(unique_ptr<Expression> &)> RewriteOrderExpr = [&](unique_ptr<Expression> &expr) {
-			if (expr->type == ExpressionType::BOUND_COLUMN_REF) {
+			if (expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 				auto &col_ref = expr->Cast<BoundColumnRefExpression>();
-				auto it = pac_mean_column_map.find(HashBinding(col_ref.binding));
+				auto it = pac_mean_column_map.find(HashBinding(col_ref.BindingMutable()));
 				if (it != pac_mean_column_map.end()) {
-					col_ref.binding = ColumnBinding(mean_proj_idx, it->second);
-					col_ref.return_type = PacFloatLogicalType();
+					col_ref.BindingMutable() = ColumnBinding(TableIndex(mean_proj_idx), ProjectionIndex(it->second));
+					col_ref.SetReturnType(PacFloatLogicalType());
 				} else {
 					for (idx_t i = 0; i < agg_bindings.size(); i++) {
-						if (agg_bindings[i] == col_ref.binding) {
-							col_ref.binding = ColumnBinding(mean_proj_idx, i);
+						if (agg_bindings[i] == col_ref.BindingMutable()) {
+							col_ref.BindingMutable() = ColumnBinding(TableIndex(mean_proj_idx), ProjectionIndex(i));
 							break;
 						}
 					}
@@ -1455,18 +1475,19 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 		}
 
 		// Step B2: Build NoisedProj
-		idx_t noised_proj_idx = binder.GenerateTableIndex();
+		idx_t noised_proj_idx = binder.GenerateTableIndex().index;
 		vector<unique_ptr<Expression>> noised_proj_exprs;
 
 		for (idx_t i = 0; i < agg_bindings.size(); i++) {
 			auto &binding = agg_bindings[i];
 			auto it = pac_mean_column_map.find(HashBinding(binding));
 			if (it != pac_mean_column_map.end()) {
-				auto counters_ref = make_uniq<BoundColumnRefExpression>(list_type, ColumnBinding(mean_proj_idx, i));
+				auto counters_ref = make_uniq<BoundColumnRefExpression>(
+				    list_type, ColumnBinding(TableIndex(mean_proj_idx), ProjectionIndex(i)));
 				auto noised = input.optimizer.BindScalarFunction("as_noised", std::move(counters_ref));
 				// Cast back to the original aggregate return type (e.g. BIGINT for count)
 				for (auto &info : pac_aggs) {
-					if (info.agg_binding == binding && info.original_type != noised->return_type) {
+					if (info.agg_binding == binding && info.original_type != noised->GetReturnType()) {
 						noised =
 						    BoundCastExpression::AddCastToType(input.context, std::move(noised), info.original_type);
 						break;
@@ -1474,18 +1495,20 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 				}
 				noised_proj_exprs.push_back(std::move(noised));
 			} else {
-				auto ref = make_uniq<BoundColumnRefExpression>(agg.types[i], ColumnBinding(mean_proj_idx, i));
+				auto ref = make_uniq<BoundColumnRefExpression>(
+				    agg.types[i], ColumnBinding(TableIndex(mean_proj_idx), ProjectionIndex(i)));
 				noised_proj_exprs.push_back(std::move(ref));
 			}
 		}
 
-		auto noised_proj = make_uniq<LogicalProjection>(noised_proj_idx, std::move(noised_proj_exprs));
+		auto noised_proj = make_uniq<LogicalProjection>(TableIndex(noised_proj_idx), std::move(noised_proj_exprs));
 
 		// Build order remap: original aggregate bindings -> NoisedProj columns
 		{
 			idx_t noised_col = 0;
 			for (idx_t i = 0; i < agg_bindings.size(); i++) {
-				order_remap[HashBinding(agg_bindings[i])] = ColumnBinding(noised_proj_idx, noised_col);
+				order_remap[HashBinding(agg_bindings[i])] =
+				    ColumnBinding(TableIndex(noised_proj_idx), ProjectionIndex(noised_col));
 				noised_col++;
 			}
 		}
@@ -1518,11 +1541,11 @@ void PACTopKRule::PACTopKOptimizeFunction(OptimizerExtensionInput &input, unique
 	for (auto &saved : saved_orders) {
 		auto expr = saved.expression->Copy();
 		std::function<void(unique_ptr<Expression> &)> RemapToNoised = [&](unique_ptr<Expression> &e) {
-			if (e->type == ExpressionType::BOUND_COLUMN_REF) {
+			if (e->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 				auto &ref = e->Cast<BoundColumnRefExpression>();
-				auto it = order_remap.find(HashBinding(ref.binding));
+				auto it = order_remap.find(HashBinding(ref.BindingMutable()));
 				if (it != order_remap.end()) {
-					ref.binding = it->second;
+					ref.BindingMutable() = it->second;
 				}
 			}
 			ExpressionIterator::EnumerateChildren(*e, RemapToNoised);

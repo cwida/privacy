@@ -7,7 +7,7 @@
 
 Both modes share the same DDL and require no changes to query syntax — the extension rewrites aggregate query plans transparently.
 
-This works on DuckDB v1.5 and beyond. See https://duckdb.org/install to install. Or if you do not want to install anything: this extension is also distributed in WASM, so you can run the examples also in https://shell.duckdb.org in a browser.
+This branch targets DuckDB v2.0.0. See https://duckdb.org/install to install. Or if you do not want to install anything: this extension is also distributed in WASM, so you can run the examples also in https://shell.duckdb.org in a browser.
 
 ## Install
 

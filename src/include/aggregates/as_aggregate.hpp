@@ -3,6 +3,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/common/random_engine.hpp"
+#include "duckdb/common/clustered_aggregate.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
 #include "pcg_random.hpp"
@@ -49,7 +50,8 @@ static inline int ValidateDpSampleLanes(int64_t sample_lanes) {
 
 static inline int GetDpSampleLanes(duckdb::ClientContext &ctx) {
 	duckdb::Value sample_lanes_val;
-	if (ctx.TryGetCurrentSetting("dp_sample_lanes", sample_lanes_val) && !sample_lanes_val.IsNull()) {
+	if (ctx.TryGetCurrentSetting(duckdb::Identifier("dp_sample_lanes"), sample_lanes_val) &&
+	    !sample_lanes_val.IsNull()) {
 		return ValidateDpSampleLanes(sample_lanes_val.GetValue<int64_t>());
 	}
 	return DP_SAMPLE_DEFAULT_LANES;
@@ -64,7 +66,7 @@ static inline int ValidateDpSassM(int64_t m) {
 
 static inline int GetDpSassM(duckdb::ClientContext &ctx) {
 	duckdb::Value m_val;
-	if (ctx.TryGetCurrentSetting("dp_sass_m", m_val) && !m_val.IsNull()) {
+	if (ctx.TryGetCurrentSetting(duckdb::Identifier("dp_sass_m"), m_val) && !m_val.IsNull()) {
 		return ValidateDpSassM(m_val.GetValue<int64_t>());
 	}
 	return DP_SASS_DEFAULT_M;
@@ -88,7 +90,7 @@ static inline double DpSampleRescale(int sample_lanes) {
 
 static inline bool GetDpSassRescale(duckdb::ClientContext &ctx) {
 	duckdb::Value rescale_val;
-	if (ctx.TryGetCurrentSetting("dp_sass_rescale", rescale_val) && !rescale_val.IsNull()) {
+	if (ctx.TryGetCurrentSetting(duckdb::Identifier("dp_sass_rescale"), rescale_val) && !rescale_val.IsNull()) {
 		return rescale_val.GetValue<bool>();
 	}
 	return true;
@@ -103,7 +105,7 @@ static inline int ValidatePacM(int64_t m) {
 
 static inline int GetPacSampleM(duckdb::ClientContext &ctx) {
 	duckdb::Value m_val;
-	if (ctx.TryGetCurrentSetting("pac_m", m_val) && !m_val.IsNull()) {
+	if (ctx.TryGetCurrentSetting(duckdb::Identifier("pac_m"), m_val) && !m_val.IsNull()) {
 		return ValidatePacM(m_val.GetValue<int64_t>());
 	}
 	return DP_SASS_DEFAULT_M;
@@ -111,7 +113,7 @@ static inline int GetPacSampleM(duckdb::ClientContext &ctx) {
 
 static inline bool GetPacHashRepair(duckdb::ClientContext &ctx) {
 	duckdb::Value hash_repair_val;
-	if (ctx.TryGetCurrentSetting("pac_hash_repair", hash_repair_val) && !hash_repair_val.IsNull()) {
+	if (ctx.TryGetCurrentSetting(duckdb::Identifier("pac_hash_repair"), hash_repair_val) && !hash_repair_val.IsNull()) {
 		return hash_repair_val.GetValue<bool>();
 	}
 	return true;
@@ -184,6 +186,33 @@ static inline int pac_ctzll(uint64_t x) {
 #endif
 
 namespace duckdb {
+
+// Preserve the single-state kernels for ungrouped input and selected group runs.
+template <class UPDATE>
+void ExecutePrivClusters(Vector inputs[], idx_t input_count, const ClusteredAggr &clusters, UPDATE update) {
+	vector<Vector> selected;
+	sel_t selection_data[STANDARD_VECTOR_SIZE];
+	SelectionVector selection(selection_data, STANDARD_VECTOR_SIZE);
+	for (auto &run : clusters.runs()) {
+		if (!run.sel) {
+			update(inputs, run.state, run.count);
+			continue;
+		}
+		if (selected.empty()) {
+			selected.reserve(input_count);
+			for (idx_t col = 0; col < input_count; col++) {
+				selected.emplace_back(Vector::Ref(inputs[col]));
+			}
+		}
+		for (idx_t row = 0; row < run.count; row++) {
+			selection.set_index(row, run.sel[row]);
+		}
+		for (idx_t col = 0; col < input_count; col++) {
+			selected[col].Slice(inputs[col], selection, run.count);
+		}
+		update(selected.data(), run.state, run.count);
+	}
+}
 
 // DuckDB's PCG32 core, exposed as a 64-bit URBG for the standard distributions.
 class PacRandomEngine {
@@ -313,7 +342,7 @@ uint64_t PacGenerateRandomSeed();
 // Returns 1.0/128 if not found or null.
 inline double GetPacMiFromSetting(ClientContext &ctx) {
 	Value pac_mi_val;
-	if (ctx.TryGetCurrentSetting("pac_mi", pac_mi_val) && !pac_mi_val.IsNull()) {
+	if (ctx.TryGetCurrentSetting(Identifier("pac_mi"), pac_mi_val) && !pac_mi_val.IsNull()) {
 		return pac_mi_val.GetValue<double>();
 	}
 	return 1.0 / 128; // default
@@ -357,12 +386,12 @@ struct PrivBindData : public FunctionData {
 	      sample_rescale(sample_rescale_val), utility_threshold(std::numeric_limits<double>::quiet_NaN()),
 	      random_state(GetPacRandomState(ctx)), total_update_count(0), suspicious_count(0), nonsuspicious_count(0) {
 		Value sd_val;
-		if (ctx.TryGetCurrentSetting("pac_sample_diversity_check", sd_val) && !sd_val.IsNull()) {
+		if (ctx.TryGetCurrentSetting(Identifier("pac_sample_diversity_check"), sd_val) && !sd_val.IsNull()) {
 			sample_diversity_check = sd_val.GetValue<bool>();
 		}
 		// Read utility threshold: if set (non-null), enables probabilistic NULLing of low-SNR cells
 		Value ut_val;
-		if (ctx.TryGetCurrentSetting("privacy_min_group_count", ut_val) && !ut_val.IsNull()) {
+		if (ctx.TryGetCurrentSetting(Identifier("privacy_min_group_count"), ut_val) && !ut_val.IsNull()) {
 			utility_threshold = ut_val.GetValue<double>();
 		}
 		seed = GetPacSeed(ctx, mi);
@@ -372,7 +401,7 @@ struct PrivBindData : public FunctionData {
 		if (mi > 0.0) {
 			Value pt_val;
 			bool ptracking_enabled = true; // default: enabled
-			if (ctx.TryGetCurrentSetting("pac_ptracking", pt_val) && !pt_val.IsNull()) {
+			if (ctx.TryGetCurrentSetting(Identifier("pac_ptracking"), pt_val) && !pt_val.IsNull()) {
 				ptracking_enabled = pt_val.GetValue<bool>();
 			}
 			if (ptracking_enabled) {
