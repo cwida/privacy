@@ -244,8 +244,10 @@ static inline bool IsScalarSubqueryWrapper(const BoundCaseExpression &case_expr)
 		return false;
 	}
 	auto &check = case_expr.case_checks[0];
-	if (check.then_expr && check.then_expr->type == ExpressionType::BOUND_FUNCTION) {
-		auto &func = check.then_expr->Cast<BoundFunctionExpression>();
+	// Counter-list wrappers cast the error branch to the new result type.
+	auto *then_expr = check.then_expr ? StripCasts(check.then_expr.get()) : nullptr;
+	if (then_expr && then_expr->type == ExpressionType::BOUND_FUNCTION) {
+		auto &func = then_expr->Cast<BoundFunctionExpression>();
 		return func.function.name == "error";
 	}
 	return false;

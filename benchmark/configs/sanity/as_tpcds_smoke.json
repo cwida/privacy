@@ -1,0 +1,12 @@
+{
+  "sf": 0.1,
+  "db": "benchmark/results/tpcds_smoke/data.db",
+  "queries_dir": "benchmark/results/tpcds_smoke/queries",
+  "out_dir": "benchmark/results/tpcds_smoke",
+  "schema": "benchmark/tpcds/schema.sql",
+  "threads": 4,
+  "memory_limit": "2GB",
+  "repetitions": 5,
+  "timeout_seconds": 30,
+  "extension_directory": "benchmark/results/tpcds_extensions"
+}

@@ -1,0 +1,10 @@
+PRAGMA clear_privacy_metadata;
+ALTER TABLE customer ADD PRIVACY_KEY (c_customer_sk);
+ALTER TABLE customer ADD PROTECTED (c_customer_sk);
+ALTER TABLE customer SET PU;
+ALTER TABLE store_sales ADD PRIVACY_LINK (ss_customer_sk) REFERENCES customer (c_customer_sk);
+ALTER TABLE store_returns ADD PRIVACY_LINK (sr_customer_sk) REFERENCES customer (c_customer_sk);
+ALTER TABLE catalog_sales ADD PRIVACY_LINK (cs_bill_customer_sk) REFERENCES customer (c_customer_sk);
+ALTER TABLE catalog_returns ADD PRIVACY_LINK (cr_returning_customer_sk) REFERENCES customer (c_customer_sk);
+ALTER TABLE web_sales ADD PRIVACY_LINK (ws_bill_customer_sk) REFERENCES customer (c_customer_sk);
+ALTER TABLE web_returns ADD PRIVACY_LINK (wr_returning_customer_sk) REFERENCES customer (c_customer_sk);

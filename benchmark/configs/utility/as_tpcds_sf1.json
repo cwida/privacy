@@ -1,0 +1,12 @@
+{
+  "sf": 1,
+  "db": "benchmark/results/tpcds_sf1/data.db",
+  "queries_dir": "benchmark/results/tpcds_sf1/queries",
+  "out_dir": "benchmark/results/tpcds_sf1",
+  "schema": "benchmark/tpcds/schema.sql",
+  "threads": 4,
+  "memory_limit": "4GB",
+  "repetitions": 5,
+  "timeout_seconds": 120,
+  "extension_directory": "benchmark/results/tpcds_extensions"
+}

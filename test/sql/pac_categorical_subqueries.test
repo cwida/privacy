@@ -753,3 +753,48 @@ DROP TABLE nation;
 
 statement ok
 DROP TABLE customer;
+
+# TPC-DS Q09: independent scalar aggregate subqueries in CASE branches.
+# Their first()/count_star() cardinality wrappers must expose counter-list types
+# without discarding the scalar-subquery cardinality check.
+statement ok
+CREATE PU TABLE scalar_case_pu (
+    id INTEGER, value INTEGER, PRIVACY_KEY(id), PROTECTED(id)
+);
+
+statement ok
+INSERT INTO scalar_case_pu SELECT i, 10 FROM range(128) t(i);
+
+statement ok
+CREATE TABLE scalar_case_reason (id INTEGER);
+
+statement ok
+INSERT INTO scalar_case_reason VALUES (1);
+
+query RR
+SELECT CASE WHEN (SELECT COUNT(*) FROM scalar_case_pu) > 0
+            THEN (SELECT AVG(value) FROM scalar_case_pu)
+            ELSE (SELECT AVG(2 * value) FROM scalar_case_pu) END,
+       CASE WHEN (SELECT COUNT(*) FROM scalar_case_pu) > 100000
+            THEN (SELECT AVG(value) FROM scalar_case_pu)
+            ELSE (SELECT AVG(2 * value) FROM scalar_case_pu) END
+FROM scalar_case_reason WHERE id = 1;
+----
+10.000000	20.000000
+
+statement ok
+INSERT INTO scalar_case_pu SELECT i + 128, 20 FROM range(128) t(i);
+
+statement error
+SELECT CASE WHEN (SELECT COUNT(*) FROM scalar_case_pu) > 0
+            THEN (SELECT AVG(value) FROM scalar_case_pu GROUP BY value)
+            ELSE 0 END
+FROM scalar_case_reason WHERE id = 1;
+----
+More than one row returned by a subquery used as an expression
+
+statement ok
+DROP TABLE scalar_case_reason;
+
+statement ok
+DROP TABLE scalar_case_pu;

@@ -97,6 +97,40 @@ static bool ContainsRecursiveCTE(const LogicalOperator &op) {
 	return false;
 }
 
+// UNION of finalized aggregate answers is supported. Raw sampled rows instead require a
+// branch-aligned membership column, which the current compiler cannot propagate across UNION.
+static bool ContainsUnaggregatedEntityInput(const LogicalOperator &op, const PrivacyCompatibilityResult &check) {
+	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+		return false;
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_GET) {
+		auto table = op.Cast<LogicalGet>().GetTable();
+		if (table && (check.fk_paths.count(table->name) ||
+		              std::find(check.scanned_pu_tables.begin(), check.scanned_pu_tables.end(), table->name) !=
+		                  check.scanned_pu_tables.end())) {
+			return true;
+		}
+	}
+	for (auto &child : op.children) {
+		if (ContainsUnaggregatedEntityInput(*child, check)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static bool ContainsUnsupportedUnion(const LogicalOperator &op, const PrivacyCompatibilityResult &check) {
+	if (op.type == LogicalOperatorType::LOGICAL_UNION && ContainsUnaggregatedEntityInput(op, check)) {
+		return true;
+	}
+	for (auto &child : op.children) {
+		if (ContainsUnsupportedUnion(*child, check)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool IsDPPrivacyMode(const string &privacy_mode) {
 	return privacy_mode == "dp_standard" || privacy_mode == "dp_filterless" || privacy_mode == "dp_elastic" ||
 	       privacy_mode == "dp_sass";
@@ -1070,6 +1104,15 @@ PrivacyCompatibilityResult PrivRewriteQueryCheck(unique_ptr<LogicalOperator> &pl
 		}
 
 		CheckDPQueryShape(privacy_mode, *plan);
+
+		if (privacy_mode == "pac" && ContainsUnsupportedUnion(*plan, result)) {
+			PRIVACY_DEBUG_PRINT("[PAC CHECK] UNION requires membership propagation across raw sampled branches");
+			if (is_conservative) {
+				throw InvalidInputException(
+				    "PAC rewrite: UNION over unaggregated entity-dependent rows is not supported");
+			}
+			return result;
+		}
 
 		if (ContainsRecursiveCTE(*plan)) {
 			if (is_conservative) {

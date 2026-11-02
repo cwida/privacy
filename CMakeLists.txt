@@ -121,6 +121,10 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
     add_executable(as_clickbench_benchmark benchmark/clickbench/as_clickbench_benchmark.cpp)
     target_link_libraries(as_clickbench_benchmark ${PRIVACY_LINK_LIBS})
 
+    # TPC-DS automatic-rewriter coverage and end-to-end performance
+    add_executable(as_tpcds_benchmark benchmark/tpcds/as_tpcds_benchmark.cpp)
+    target_link_libraries(as_tpcds_benchmark ${PRIVACY_LINK_LIBS})
+
     # Unified DP utility benchmark runner
     set(TPCH_STOCK_DP_QUERY_NAMES q01 q05 q06 q14 q19)
     set(TPCH_STOCK_DP_QUERY_FILES)
