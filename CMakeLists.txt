@@ -39,6 +39,7 @@ set(EXTENSION_SOURCES
     src/aggregates/as_count.cpp
     src/aggregates/as_min_max.cpp
     src/aggregates/as_sum.cpp
+    src/aggregates/as_sum_state_export.cpp
     src/aggregates/as_finalize.cpp
     src/aggregates/as_clip_sum.cpp
     src/aggregates/as_clip_min_max.cpp

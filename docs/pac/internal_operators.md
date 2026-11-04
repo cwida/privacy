@@ -175,6 +175,45 @@ No new aggregate functions, no new noise mechanisms, no plan decomposition.
 
 ---
 
+## SUM state spilling (DuckDB 2.0)
+
+`as_sum` and `as_noised_sum` expose DuckDB's native state-export/import callbacks,
+including the DECIMAL implementations selected during binding. DuckDB can export
+arena-backed hash-aggregate states to spillable columns and import them when
+combining partitions. Every aggregate in the hash table must expose a compatible
+state layout for DuckDB to select this path.
+
+The exported BLOB contains buffered values and masks, update counts, positive and
+negative integer cascade levels and overflow budgets, or floating-point counters.
+It contains no addresses. Import reconstructs owned arena allocations and retains
+the inline-level optimization. Export does not finalize, resample, or add noise;
+the native update kernels and aggregate-state sizes remain unchanged. The binary
+representation is internal to this implementation, rather than a portable state
+interchange format.
+
+Small groups also retain their one/two-value buffers during combine. Finalization
+materializes these buffers on copies using temporary storage backed by
+`ArenaAllocator::GetUnderlyingAllocator()`, so the allocations are released after
+the callback instead of accumulating in a query-long arena. The original buffered
+state remains reusable. This addresses the Q78 path where buffers expand only in
+final combine, after sink-phase spill decisions.
+
+Regression coverage extends `test/sql/pac_sum.test`: round trips include signed,
+unsigned, floating-point and DECIMAL inputs, buffered/empty states, high cascade
+levels, combining imported states, and truncated-input rejection. The pressure
+test uses 800,000 rows in 100,000 contiguous groups, three SUMs and a 32 MB memory
+limit; its complete result checksum must equal the in-memory result.
+
+```sh
+build/release/test/unittest 'test/sql/pac_sum.test'
+```
+
+For the Q78 investigation, retain the complete query, sampling settings and thread
+count when comparing builds. Record peak buffer memory, temporary storage and
+result equivalence alongside latency. Passing the state-spill regression does not
+establish that Q78 SF30 fits the target machine: joins and active aggregate
+partitions still require working memory.
+
 ## TODO
 
 - Categorical expressions (`pac_categorical` rewriter)

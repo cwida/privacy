@@ -374,3 +374,190 @@ a AS (SELECT as_sum(mask, v) AS lanes FROM t)
 SELECT count(*) FILTER (WHERE lanes[j+1] / 2 = 196605) FROM a CROSS JOIN range(64) worlds(j)
 ----
 64
+
+
+# DuckDB 2.0 state export preserves buffers, positive/negative cascades, and
+# pointer-backed counters. Values include a level above the inline-pointer area.
+statement ok
+SET priv_rewrite=false;
+
+statement ok
+SET threads=1;
+
+statement ok
+SET pac_mi=0;
+
+statement ok
+SET pac_sample_diversity_check=false;
+
+statement ok
+CREATE TABLE spill_sum_input AS
+SELECT i%5 g,priv_hash(hash(i)) h,
+       CASE WHEN i%3=0 THEN -(1::BIGINT<<48) ELSE 1024::BIGINT END v
+FROM range(10000)t(i);
+
+statement ok
+CREATE TABLE spill_sum_states AS
+SELECT g,as_sum(h,v) EXPORT_STATE s,
+       as_sum(h,v::DOUBLE) EXPORT_STATE d,
+       as_noised_sum(h,v::DECIMAL(18,2)) EXPORT_STATE dec,
+       as_sum(h,abs(v)::UBIGINT,0.75) EXPORT_STATE u
+FROM spill_sum_input GROUP BY g;
+
+query I
+SELECT count(*) FROM spill_sum_states a JOIN (
+    SELECT g,as_sum(h,v) s,as_sum(h,v::DOUBLE) d,
+           as_noised_sum(h,v::DECIMAL(18,2)) dec,
+           as_sum(h,abs(v)::UBIGINT,0.75) u
+    FROM spill_sum_input GROUP BY g
+)b USING(g)
+WHERE finalize(a.s) IS DISTINCT FROM b.s OR finalize(a.d) IS DISTINCT FROM b.d
+   OR finalize(a.dec) IS DISTINCT FROM b.dec OR finalize(a.u) IS DISTINCT FROM b.u;
+----
+0
+
+# One or two values stay buffered; NULL-only/empty groups have no inner state.
+query I
+SELECT finalize(s) IS NOT DISTINCT FROM expected FROM (
+    SELECT as_sum(h,NULL::BIGINT) EXPORT_STATE s,as_sum(h,NULL::BIGINT) expected
+    FROM spill_sum_input
+);
+----
+true
+
+query I
+SELECT finalize(s) IS NOT DISTINCT FROM expected FROM (
+    SELECT as_sum(h,v) EXPORT_STATE s,as_sum(h,v) expected
+    FROM spill_sum_input WHERE false
+);
+----
+true
+
+query I
+SELECT finalize(s) IS NOT DISTINCT FROM expected FROM (
+    SELECT as_sum(h,v) EXPORT_STATE s,as_sum(h,v) expected
+    FROM (SELECT h,v FROM spill_sum_input LIMIT 1)
+);
+----
+true
+
+query I
+SELECT finalize(s) IS NOT DISTINCT FROM expected FROM (
+    SELECT as_sum(h,v) EXPORT_STATE s,as_sum(h,v) expected
+    FROM (SELECT h,v FROM spill_sum_input LIMIT 2)
+);
+----
+true
+
+# Compare the complete result under arena pressure with an in-memory execution.
+# Mixed integer, floating-point, and DECIMAL states share the same hash table.
+statement ok
+SET memory_limit='256MB';
+
+statement ok
+CREATE TABLE spill_sum_expected AS
+SELECT count(*) n,sum(hash(a,b,c)) checksum FROM (
+    SELECT i//8 g,
+           as_sum(18446744073709551615::UBIGINT,1::BIGINT) a,
+           as_sum(18446744073709551615::UBIGINT,2::DOUBLE) b,
+           as_noised_sum(18446744073709551615::UBIGINT,3::DECIMAL(18,2)) c
+    FROM range(800000)t(i) GROUP BY g
+);
+
+statement ok
+SET debug_force_external=true;
+
+statement ok
+SET memory_limit='32MB';
+
+query II
+SELECT actual.n,actual.checksum=expected.checksum FROM (
+    SELECT count(*) n,sum(hash(a,b,c)) checksum FROM (
+        SELECT i//8 g,
+               as_sum(18446744073709551615::UBIGINT,1::BIGINT) a,
+               as_sum(18446744073709551615::UBIGINT,2::DOUBLE) b,
+               as_noised_sum(18446744073709551615::UBIGINT,3::DECIMAL(18,2)) c
+        FROM range(800000)t(i) GROUP BY g
+    )
+)actual,spill_sum_expected expected;
+----
+100000	true
+
+statement ok
+SET debug_force_external=false;
+
+statement ok
+RESET memory_limit;
+
+
+# Exported states remain combinable, including the high and negative levels.
+query I
+SELECT finalize(combine(a.s,b.s)) IS NOT DISTINCT FROM c.expected FROM
+(SELECT as_sum(h,v) EXPORT_STATE s FROM spill_sum_input WHERE g<3)a,
+(SELECT as_sum(h,v) EXPORT_STATE s FROM spill_sum_input WHERE g>=3)b,
+(SELECT as_sum(h,v) expected FROM spill_sum_input)c;
+----
+true
+
+statement error
+SELECT finalize(to_aggregate_state(''::BLOB,'as_sum',['UBIGINT','BIGINT']));
+----
+Truncated stochastic SUM state
+
+
+# DECIMAL binding replaces its implementation; retain the logical third
+# argument (sampling correction) when rebinding exported states.
+query I
+SELECT finalize(s) IS NOT DISTINCT FROM expected FROM (
+    SELECT as_noised_sum(h,v::DECIMAL(18,2),0.75) EXPORT_STATE s,
+           as_noised_sum(h,v::DECIMAL(18,2),0.75) expected
+    FROM spill_sum_input
+);
+----
+true
+
+
+# Q78-shaped failure: sparse local groups stay buffered in the sink. Combining
+# them must not manufacture a permanent full state for each final group.
+statement ok
+SET debug_force_external=true;
+
+statement ok
+SET memory_limit='32MB';
+
+query II
+SELECT count(*),count(*) FILTER (WHERE a=4 AND b=8 AND c=12) FROM (
+    SELECT i%100000 g,
+           as_noised_sum(18446744073709551615::UBIGINT,1::BIGINT) a,
+           as_noised_sum(18446744073709551615::UBIGINT,2::DOUBLE) b,
+           as_noised_sum(18446744073709551615::UBIGINT,3::DECIMAL(18,2)) c
+    FROM range(200000)t(i) GROUP BY g
+);
+----
+100000	100000
+
+statement ok
+SET debug_force_external=false;
+
+statement ok
+RESET memory_limit;
+
+# The two-value buffer boundary: combine two buffered states, or a buffered
+# destination and a materialized source. Every world must retain every value.
+query I
+SELECT count(*) FROM (
+    SELECT finalize(combine(a.s,b.s)) lanes FROM
+    (SELECT as_sum(18446744073709551615::UBIGINT,v) EXPORT_STATE s FROM (VALUES (13::BIGINT),(17))t(v))a,
+    (SELECT as_sum(18446744073709551615::UBIGINT,29::BIGINT) EXPORT_STATE s)b
+),unnest(lanes)t(v) WHERE v=118;
+----
+64
+
+query I
+SELECT count(*) FROM (
+    SELECT finalize(combine(a.s,b.s)) lanes FROM
+    (SELECT as_sum(18446744073709551615::UBIGINT,v) EXPORT_STATE s FROM (VALUES (1::BIGINT),(2))t(v))a,
+    (SELECT as_sum(18446744073709551615::UBIGINT,v) EXPORT_STATE s FROM (VALUES (3::BIGINT),(4),(5))t(v))b
+),unnest(lanes)t(v) WHERE v=30;
+----
+64
