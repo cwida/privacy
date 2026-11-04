@@ -177,11 +177,17 @@ No new aggregate functions, no new noise mechanisms, no plan decomposition.
 
 ## SUM state spilling (DuckDB 2.0)
 
-`as_sum` and `as_noised_sum` expose DuckDB's native state-export/import callbacks,
-including the DECIMAL implementations selected during binding. DuckDB can export
+The membership-mask-plus-scalar overloads of `as_sum` and `as_noised_sum` expose
+DuckDB's native state-export/import callbacks, including the DECIMAL
+implementations selected during binding. DuckDB can export
 arena-backed hash-aggregate states to spillable columns and import them when
 combining partitions. Every aggregate in the hash table must expose a compatible
 state layout for DuckDB to select this path.
+
+COUNT, MIN/MAX, AVG's COUNT component, and the list-input SUM overload do not yet
+provide these callbacks. Combining one of them with a spillable SUM in the same
+hash aggregate disables arena-state spilling for that table. These queries can
+still run in memory, but may exhaust a low memory limit even when SUM alone spills.
 
 The exported BLOB contains buffered values and masks, update counts, positive and
 negative integer cascade levels and overflow budgets, or floating-point counters.
