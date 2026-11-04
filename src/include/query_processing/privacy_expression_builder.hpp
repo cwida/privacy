@@ -124,7 +124,7 @@ PuPreAggregationInfo InsertPuPreAggregation(OptimizerExtensionInput &input, Logi
                                             vector<unique_ptr<Expression>> lower_expressions,
                                             unique_ptr<Expression> pu_hash_expr);
 
-// Bind bit_or(hash_expr) with an IS NOT NULL filter on filter_col_expr.
+// Bind bit_or(hash_expr), optionally filtering out NULL filter_col_expr values.
 // Returns the bound aggregate expression.
 unique_ptr<Expression> BindBitOrAggregate(OptimizerExtensionInput &input, unique_ptr<Expression> hash_expr,
                                           unique_ptr<Expression> filter_col_expr);

@@ -179,5 +179,5 @@ No new aggregate functions, no new noise mechanisms, no plan decomposition.
 
 - Categorical expressions (`pac_categorical` rewriter)
 - CTE handling (materialized vs inlined)
-- UNION/UNION ALL compilation
+- Additional private UNION branch shapes (multiple ownership sources and branch-local DISTINCT/LIMIT)
 - Correlated subqueries (DELIM_JOIN)

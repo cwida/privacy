@@ -34,6 +34,24 @@ All other queries that reference a PU (directly or indirectly via FK path) and c
 
 ## Bitslice Compilation (Phase 1)
 
+### Private UNION
+
+Raw `UNION ALL` branches carry a hidden, aligned membership column; concatenation
+preserves their row multiplicities. `UNION` groups by the original SQL output
+columns and combines membership with `bit_or`, so duplicate values occur once in
+each world where any contributing row is present. NULL-valued rows participate
+in this deduplication. Plain `SELECT DISTINCT` above a union uses the same mask
+union, including when it projects a subset of the original columns; `DISTINCT ON`
+remains unsupported. The membership column remains hidden from SQL results and
+can pass through materialized CTEs.
+
+This path requires one sampling-entity relation and one accessible ownership
+source per raw branch, resolved from its key or a declared link. Ambiguous
+ownership, unresolved CTE sources, and branch-local aggregation, `DISTINCT` or
+`LIMIT` are rejected. Existing unions of finalized aggregate answers retain
+their previous handling. The new raw-branch path currently runs in the `pac`
+compiler; other privacy mechanisms do not gain UNION support from this change.
+
 The bitslice compiler derives a hash expression for each aggregate and replaces it with a PAC function. This is a single unified approach with a preparatory step: if the PU table is not already part of the query, the compiler first adds FK joins to make it reachable.
 
 ### Step 1: Ensure PU Reachability

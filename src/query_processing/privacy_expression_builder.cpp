@@ -478,11 +478,12 @@ unique_ptr<Expression> BindBitOrAggregate(OptimizerExtensionInput &input, unique
 	auto bit_or_expr = function_binder.BindAggregateFunction(bit_or_func, std::move(bit_or_children), nullptr,
 	                                                         AggregateType::NON_DISTINCT);
 
-	// Add IS NOT NULL filter
-	auto not_null_filter =
-	    make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NOT_NULL, LogicalType::BOOLEAN);
-	not_null_filter->children.push_back(std::move(filter_col_expr));
-	bit_or_expr->Cast<BoundAggregateExpression>().filter = std::move(not_null_filter);
+	if (filter_col_expr) {
+		auto not_null_filter =
+		    make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NOT_NULL, LogicalType::BOOLEAN);
+		not_null_filter->children.push_back(std::move(filter_col_expr));
+		bit_or_expr->Cast<BoundAggregateExpression>().filter = std::move(not_null_filter);
+	}
 
 	return bit_or_expr;
 }
