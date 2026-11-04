@@ -388,3 +388,382 @@ DROP TABLE nation;
 
 statement ok
 PRAGMA clear_privacy_metadata;
+# Private UNION branches share one sampling-entity relation. Compare scalar stochastic
+# outputs at mi=0 to ordinary SQL evaluated on the selected sampled world.
+statement ok
+SET priv_check = false;
+
+statement ok
+SET pac_pushdown_topk = false;
+
+statement ok
+SET pac_sample_diversity_check = false;
+
+statement ok
+CREATE PU TABLE union_owner (id INTEGER, PRIVACY_KEY(id));
+
+statement ok
+CREATE TABLE union_left(owner_id INTEGER, grp INTEGER, val INTEGER, PRIVACY_LINK(owner_id) REFERENCES union_owner(id));
+
+statement ok
+CREATE TABLE union_right(owner_id INTEGER, grp INTEGER, val INTEGER, PRIVACY_LINK(owner_id) REFERENCES union_owner(id));
+
+statement ok
+INSERT INTO union_owner SELECT i FROM range(1,513)t(i);
+
+statement ok
+INSERT INTO union_left SELECT i,i%7,CASE WHEN i%11=0 THEN NULL ELSE i%17 END FROM range(1,513)t(i);
+
+statement ok
+INSERT INTO union_right SELECT i,i%7,CASE WHEN i%11=0 THEN NULL ELSE i%17 END FROM range(128,513)t(i);
+
+# all: NULL rows, duplicates and ordinary output values retain SQL semantics.
+statement ok
+SET priv_rewrite = true;
+
+statement ok
+CREATE TABLE union_actual AS SELECT grp,COUNT(*) n,COUNT(val) nv,SUM(val) total FROM (SELECT grp,val FROM union_left UNION ALL SELECT grp,val FROM union_right)u GROUP BY grp;
+
+statement ok
+SET priv_rewrite = false;
+
+statement ok
+CREATE TABLE union_expected AS SELECT grp,2*COUNT(*) n,2*COUNT(val) nv,2*SUM(val) total FROM (SELECT grp,val FROM union_left WHERE (priv_hash(hash(owner_id)) & 1)<>0 UNION ALL SELECT grp,val FROM union_right WHERE (priv_hash(hash(owner_id)) & 1)<>0)u GROUP BY grp;
+
+query I
+SELECT COUNT(*) FROM ((SELECT * FROM union_actual EXCEPT SELECT * FROM union_expected) UNION ALL (SELECT * FROM union_expected EXCEPT SELECT * FROM union_actual));
+----
+0
+
+statement ok
+DROP TABLE union_actual;
+
+statement ok
+DROP TABLE union_expected;
+
+# distinct: NULL rows, duplicates and ordinary output values retain SQL semantics.
+statement ok
+SET priv_rewrite = true;
+
+statement ok
+CREATE TABLE union_actual AS SELECT grp,COUNT(*) n,COUNT(val) nv,SUM(val) total FROM (SELECT grp,val FROM union_left UNION SELECT grp,val FROM union_right)u GROUP BY grp;
+
+statement ok
+SET priv_rewrite = false;
+
+statement ok
+CREATE TABLE union_expected AS SELECT grp,2*COUNT(*) n,2*COUNT(val) nv,2*SUM(val) total FROM (SELECT grp,val FROM union_left WHERE (priv_hash(hash(owner_id)) & 1)<>0 UNION SELECT grp,val FROM union_right WHERE (priv_hash(hash(owner_id)) & 1)<>0)u GROUP BY grp;
+
+query I
+SELECT COUNT(*) FROM ((SELECT * FROM union_actual EXCEPT SELECT * FROM union_expected) UNION ALL (SELECT * FROM union_expected EXCEPT SELECT * FROM union_actual));
+----
+0
+
+statement ok
+DROP TABLE union_actual;
+
+statement ok
+DROP TABLE union_expected;
+
+# empty: NULL rows, duplicates and ordinary output values retain SQL semantics.
+statement ok
+SET priv_rewrite = true;
+
+statement ok
+CREATE TABLE union_actual AS SELECT grp,COUNT(*) n,COUNT(val) nv,SUM(val) total FROM (SELECT grp,val FROM union_left WHERE owner_id<0 UNION ALL SELECT grp,val FROM union_right)u GROUP BY grp;
+
+statement ok
+SET priv_rewrite = false;
+
+statement ok
+CREATE TABLE union_expected AS SELECT grp,2*COUNT(*) n,2*COUNT(val) nv,2*SUM(val) total FROM (SELECT grp,val FROM union_left WHERE owner_id<0 AND (priv_hash(hash(owner_id)) & 1)<>0 UNION ALL SELECT grp,val FROM union_right WHERE (priv_hash(hash(owner_id)) & 1)<>0)u GROUP BY grp;
+
+query I
+SELECT COUNT(*) FROM ((SELECT * FROM union_actual EXCEPT SELECT * FROM union_expected) UNION ALL (SELECT * FROM union_expected EXCEPT SELECT * FROM union_actual));
+----
+0
+
+statement ok
+DROP TABLE union_actual;
+
+statement ok
+DROP TABLE union_expected;
+
+# public: NULL rows, duplicates and ordinary output values retain SQL semantics.
+statement ok
+SET priv_rewrite = true;
+
+statement ok
+CREATE TABLE union_actual AS SELECT grp,COUNT(*) n,COUNT(val) nv,SUM(val) total FROM (SELECT grp,val FROM union_left UNION ALL SELECT 8,101)u GROUP BY grp;
+
+statement ok
+SET priv_rewrite = false;
+
+statement ok
+CREATE TABLE union_expected AS SELECT grp,2*COUNT(*) n,2*COUNT(val) nv,2*SUM(val) total FROM (SELECT grp,val FROM union_left WHERE (priv_hash(hash(owner_id)) & 1)<>0 UNION ALL SELECT 8,101)u GROUP BY grp;
+
+query I
+SELECT COUNT(*) FROM ((SELECT * FROM union_actual EXCEPT SELECT * FROM union_expected) UNION ALL (SELECT * FROM union_expected EXCEPT SELECT * FROM union_actual));
+----
+0
+
+statement ok
+DROP TABLE union_actual;
+
+statement ok
+DROP TABLE union_expected;
+
+# nested: NULL rows, duplicates and ordinary output values retain SQL semantics.
+statement ok
+SET priv_rewrite = true;
+
+statement ok
+CREATE TABLE union_actual AS SELECT grp,COUNT(*) n,COUNT(val) nv,SUM(val) total FROM ((SELECT grp,val FROM union_left UNION SELECT grp,val FROM union_right) UNION (SELECT grp,val FROM union_right UNION SELECT grp,val FROM union_left))u GROUP BY grp;
+
+statement ok
+SET priv_rewrite = false;
+
+statement ok
+CREATE TABLE union_expected AS SELECT grp,2*COUNT(*) n,2*COUNT(val) nv,2*SUM(val) total FROM ((SELECT grp,val FROM union_left WHERE (priv_hash(hash(owner_id)) & 1)<>0 UNION SELECT grp,val FROM union_right WHERE (priv_hash(hash(owner_id)) & 1)<>0) UNION (SELECT grp,val FROM union_right WHERE (priv_hash(hash(owner_id)) & 1)<>0 UNION SELECT grp,val FROM union_left WHERE (priv_hash(hash(owner_id)) & 1)<>0))u GROUP BY grp;
+
+query I
+SELECT COUNT(*) FROM ((SELECT * FROM union_actual EXCEPT SELECT * FROM union_expected) UNION ALL (SELECT * FROM union_expected EXCEPT SELECT * FROM union_actual));
+----
+0
+
+statement ok
+DROP TABLE union_actual;
+
+statement ok
+DROP TABLE union_expected;
+
+# cast: NULL rows, duplicates and ordinary output values retain SQL semantics.
+statement ok
+SET priv_rewrite = true;
+
+statement ok
+CREATE TABLE union_actual AS SELECT grp,COUNT(*) n,COUNT(val) nv,SUM(val) total FROM (SELECT grp,val::BIGINT val FROM union_left UNION SELECT grp,val FROM union_right)u GROUP BY grp;
+
+statement ok
+SET priv_rewrite = false;
+
+statement ok
+CREATE TABLE union_expected AS SELECT grp,2*COUNT(*) n,2*COUNT(val) nv,2*SUM(val) total FROM (SELECT grp,val::BIGINT val FROM union_left WHERE (priv_hash(hash(owner_id)) & 1)<>0 UNION SELECT grp,val FROM union_right WHERE (priv_hash(hash(owner_id)) & 1)<>0)u GROUP BY grp;
+
+query I
+SELECT COUNT(*) FROM ((SELECT * FROM union_actual EXCEPT SELECT * FROM union_expected) UNION ALL (SELECT * FROM union_expected EXCEPT SELECT * FROM union_actual));
+----
+0
+
+statement ok
+DROP TABLE union_actual;
+
+statement ok
+DROP TABLE union_expected;
+
+# A materialized UNION and a second forwarding CTE retain the hidden mask.
+statement ok
+SET priv_rewrite = true;
+
+statement ok
+CREATE TEMP TABLE union_cte_actual AS
+WITH u AS MATERIALIZED (
+    SELECT grp,val FROM union_left UNION SELECT grp,val FROM union_right
+), forwarded AS MATERIALIZED (SELECT grp,val FROM u)
+SELECT grp,COUNT(*) n,SUM(val) total FROM forwarded GROUP BY grp;
+
+statement ok
+SET priv_rewrite = false;
+
+statement ok
+CREATE TEMP TABLE union_cte_expected AS
+SELECT grp,2*COUNT(*) n,2*SUM(val) total FROM (
+    SELECT grp,val FROM union_left WHERE (priv_hash(hash(owner_id)) & 1)<>0
+    UNION SELECT grp,val FROM union_right WHERE (priv_hash(hash(owner_id)) & 1)<>0
+)u GROUP BY grp;
+
+query I
+SELECT COUNT(*) FROM ((SELECT * FROM union_cte_actual EXCEPT SELECT * FROM union_cte_expected)
+UNION ALL (SELECT * FROM union_cte_expected EXCEPT SELECT * FROM union_cte_actual));
+----
+0
+
+statement ok
+DROP TABLE union_cte_actual;
+
+statement ok
+DROP TABLE union_cte_expected;
+
+# Branch-local DISTINCT/LIMIT must not silently discard world membership.
+statement ok
+SET priv_rewrite = true;
+
+statement error
+SELECT COUNT(*) FROM ((SELECT grp,val FROM union_left LIMIT 3) UNION ALL SELECT grp,val FROM union_right)u;
+----
+Private UNION requires raw branches without aggregation, DISTINCT or LIMIT
+
+statement error
+SELECT COUNT(*) FROM (SELECT DISTINCT grp,val FROM union_left UNION ALL SELECT grp,val FROM union_right)u;
+----
+Private UNION requires raw branches without aggregation, DISTINCT or LIMIT
+
+# DISTINCT over a projected subset of UNION ALL values merges memberships.
+statement ok
+CREATE TEMP TABLE union_outer_distinct_actual AS
+SELECT COUNT(*) n,SUM(grp) total FROM (
+    SELECT DISTINCT grp FROM (
+        SELECT grp FROM union_left UNION ALL SELECT grp FROM union_right
+    )u
+)d;
+
+statement ok
+SET priv_rewrite = false;
+
+statement ok
+CREATE TEMP TABLE union_outer_distinct_expected AS
+SELECT 2*COUNT(*) n,2*SUM(grp) total FROM (
+    SELECT DISTINCT grp FROM (
+        SELECT grp FROM union_left WHERE (priv_hash(hash(owner_id)) & 1)<>0
+        UNION ALL SELECT grp FROM union_right WHERE (priv_hash(hash(owner_id)) & 1)<>0
+    )u
+)d;
+
+query I
+SELECT COUNT(*) FROM union_outer_distinct_actual a FULL JOIN union_outer_distinct_expected e ON true
+WHERE a.n IS DISTINCT FROM e.n OR a.total IS DISTINCT FROM e.total;
+----
+0
+
+statement ok
+DROP TABLE union_outer_distinct_actual;
+
+statement ok
+DROP TABLE union_outer_distinct_expected;
+
+statement ok
+SET priv_rewrite = true;
+
+# The projected DISTINCT key can be NULL, and COUNT(*) still counts that row.
+query II
+SELECT COUNT(*),SUM(val) FROM (
+    SELECT DISTINCT val FROM (
+        SELECT grp,val FROM union_left UNION ALL SELECT grp,val FROM union_right
+    )u
+)d;
+----
+36	272
+
+statement error
+SELECT COUNT(*) FROM (
+    SELECT DISTINCT ON(grp) grp,val FROM (
+        SELECT grp,val FROM union_left UNION ALL SELECT grp,val FROM union_right
+    )u ORDER BY grp,val
+)d;
+----
+Private UNION does not support DISTINCT ON
+
+# Both branches must use the same configured PU relation.
+statement ok
+CREATE PU TABLE union_other_owner(id INTEGER, val INTEGER, PRIVACY_KEY(id));
+
+statement error
+SELECT COUNT(*) FROM (SELECT val FROM union_left UNION ALL SELECT val FROM union_other_owner)u;
+----
+single privacy-unit relation
+
+statement ok
+DROP TABLE union_other_owner;
+
+# Different entity streams joined inside one branch cannot silently choose one owner.
+statement ok
+SET priv_rewrite = true;
+
+statement error
+SELECT COUNT(*) FROM (SELECT a.val FROM union_left a JOIN union_right b ON a.grp=b.grp UNION ALL SELECT val FROM union_left)u;
+----
+Private UNION branch requires one accessible ownership source
+
+# Public rows on the preserved side need per-world unmatched-row generation.
+statement ok
+CREATE TABLE union_public(grp INTEGER);
+
+statement ok
+INSERT INTO union_public VALUES(999),(0);
+
+statement error
+SELECT COUNT(*) FROM union_public p LEFT JOIN (SELECT grp FROM union_left UNION ALL SELECT grp FROM union_right)u ON p.grp=u.grp;
+----
+Private UNION does not support world-dependent unmatched join rows
+
+statement error
+SELECT COUNT(*) FROM (SELECT grp FROM union_left UNION SELECT grp FROM union_right)u RIGHT JOIN union_public p ON p.grp=u.grp;
+----
+Private UNION does not support world-dependent unmatched join rows
+
+statement error
+SELECT COUNT(*) FROM union_public p FULL JOIN (SELECT grp FROM union_left UNION ALL SELECT grp FROM union_right)u ON p.grp=u.grp;
+----
+PAC rewrite: subqueries are not supported for PAC compilation
+
+# Also guard the raw branch, before it acquires a UNION annotation.
+statement error
+SELECT COUNT(*) FROM (SELECT p.grp FROM union_public p LEFT JOIN union_left l ON p.grp=l.grp UNION ALL SELECT grp FROM union_right)u;
+----
+Private UNION does not support world-dependent unmatched join rows
+
+statement error
+SELECT COUNT(*) FROM union_public p ANTI JOIN (SELECT grp FROM union_left UNION ALL SELECT grp FROM union_right)u ON p.grp=u.grp;
+----
+Private UNION does not support world-dependent unmatched join rows
+
+# Private rows on the preserved side retain their masks, including unmatched rows.
+statement ok
+CREATE TEMP TABLE union_preserved_actual AS
+SELECT COUNT(*) n,SUM(u.grp) total FROM (SELECT grp FROM union_left UNION ALL SELECT grp FROM union_right)u LEFT JOIN union_public p ON p.grp=u.grp;
+
+statement ok
+SET priv_rewrite=false;
+
+statement ok
+CREATE TEMP TABLE union_preserved_expected AS
+SELECT 2*COUNT(*) n,2*SUM(u.grp) total FROM (
+    SELECT grp FROM union_left WHERE (priv_hash(hash(owner_id))&1)<>0
+    UNION ALL SELECT grp FROM union_right WHERE (priv_hash(hash(owner_id))&1)<>0
+)u LEFT JOIN union_public p ON p.grp=u.grp;
+
+query I
+SELECT COUNT(*) FROM union_preserved_actual a FULL JOIN union_preserved_expected e ON true
+WHERE a.n IS DISTINCT FROM e.n OR a.total IS DISTINCT FROM e.total;
+----
+0
+
+statement ok
+DROP TABLE union_preserved_actual;
+
+statement ok
+DROP TABLE union_preserved_expected;
+
+statement ok
+DROP TABLE union_public;
+
+statement ok
+SET priv_rewrite=true;
+
+statement ok
+DROP TABLE union_left;
+
+statement ok
+DROP TABLE union_right;
+
+statement ok
+DROP TABLE union_owner;
+
+statement ok
+SET priv_check = true;
+
+statement ok
+SET pac_pushdown_topk = true;
+
+statement ok
+PRAGMA clear_privacy_metadata;

@@ -45,4 +45,7 @@ PrivacyCompatibilityResult PrivRewriteQueryCheck(unique_ptr<LogicalOperator> &pl
                                                  PACOptimizerInfo *optimizer_info = nullptr);
 
 void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &counts);
+
+// Raw entity-dependent inputs stop at aggregate boundaries.
+bool ContainsUnaggregatedEntityInput(const LogicalOperator &op, const PrivacyCompatibilityResult &check);
 } // namespace duckdb

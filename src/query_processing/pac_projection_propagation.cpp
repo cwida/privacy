@@ -6,6 +6,7 @@
 #include "privacy_debug.hpp"
 #include "utils/privacy_helpers.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_join.hpp"
@@ -41,6 +42,10 @@ static bool FindDirectPathToSource(LogicalOperator *current, idx_t target_table_
 	if (current->type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = current->Cast<LogicalGet>();
 		if (get.table_index == target_table_index) {
+			return true;
+		}
+	} else if (current->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		if (current->Cast<LogicalCTERef>().table_index == target_table_index) {
 			return true;
 		}
 	} else if (current->type == LogicalOperatorType::LOGICAL_PROJECTION) {

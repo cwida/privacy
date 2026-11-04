@@ -34,7 +34,14 @@
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
+#include "duckdb/optimizer/column_binding_replacer.hpp"
 #include "duckdb/planner/binder.hpp"
+
+#include "duckdb/planner/operator/logical_set_operation.hpp"
+
+#include "duckdb/planner/operator/logical_distinct.hpp"
+
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
 
 #include <cmath>
 
@@ -478,6 +485,368 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 	return CTEHashMatch();
 }
 
+// UNION preserves branch multiplicities; DISTINCT UNION merges membership over the
+// original SQL columns. Keep this annotation separate from the ownership key:
+// deduplicated values can be present on behalf of several entities.
+class PrivateUnionRewriter {
+public:
+	PrivateUnionRewriter(OptimizerExtensionInput &input_p, unique_ptr<LogicalOperator> &plan_p,
+	                     const PrivacyCompatibilityResult &check_p, const vector<string> &pus_p)
+	    : input(input_p), plan(plan_p), check(check_p), pus(pus_p) {
+	}
+
+	void Rewrite(unique_ptr<LogicalOperator> &op) {
+		if (op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+			auto &cte = op->Cast<LogicalMaterializedCTE>();
+			// column_count can already include ownership columns requested by other
+			// compiler passes. Append after the actual producer output instead.
+			const auto value_columns = cte.children[0]->GetColumnBindings().size();
+			Rewrite(cte.children[0]);
+			vector<pair<LogicalOperator *, ColumnBinding>> found;
+			CollectMemberships(*cte.children[0], found);
+			if (!found.empty()) {
+				const auto mask_column = value_columns;
+				AppendMembership(cte.children[0], mask_column);
+				cte.column_count = value_columns + 1;
+				vector<LogicalCTERef *> refs;
+				CollectCTERefs(plan.get(), cte.table_index, refs);
+				for (auto *ref : refs) {
+					if (ref->chunk_types.size() != value_columns) {
+						throw InvalidInputException("Private UNION CTE has unresolved ownership output columns");
+					}
+					ref->chunk_types.push_back(LogicalType::UBIGINT);
+					ref->bound_columns.push_back("private_union_membership");
+					ref->ResolveOperatorTypes();
+					memberships.emplace(ref, ColumnBinding(ref->table_index, mask_column));
+				}
+				PRIVACY_DEBUG_PRINT("[PRIVATE UNION] Exported membership through CTE " + cte.ctename);
+			}
+			Rewrite(cte.children[1]);
+			cte.ResolveOperatorTypes();
+			return;
+		}
+		for (auto &child : op->children) {
+			Rewrite(child);
+		}
+		if (op->type == LogicalOperatorType::LOGICAL_DISTINCT) {
+			RewriteDistinct(op);
+			return;
+		}
+		if (op->type != LogicalOperatorType::LOGICAL_UNION) {
+			return;
+		}
+		vector<pair<LogicalOperator *, ColumnBinding>> inherited;
+		CollectMemberships(*op, inherited);
+		if (inherited.empty() && !ContainsUnaggregatedEntityInput(*op, check)) {
+			return;
+		}
+		if (pus.size() != 1) {
+			throw InvalidInputException("Private UNION requires a single privacy-unit relation");
+		}
+		auto &setop = op->Cast<LogicalSetOperation>();
+		const auto output_index = setop.table_index;
+		const auto count = setop.column_count;
+		const bool distinct = !setop.setop_all;
+		for (auto &child : setop.children) {
+			AppendMembership(child, count);
+		}
+		setop.table_index = input.optimizer.binder.GenerateTableIndex();
+		setop.column_count++;
+		setop.setop_all = true;
+		op->ResolveOperatorTypes();
+		ProjectMembership(op, count, output_index, distinct);
+		PRIVACY_DEBUG_PRINT("[Private UNION] Aligned branch masks" +
+		                    string(distinct ? " with bit_or deduplication" : ""));
+	}
+
+	ColumnBinding FindForAggregate(LogicalAggregate &agg) {
+		vector<pair<LogicalOperator *, ColumnBinding>> found;
+		CollectMemberships(*agg.children[0], found);
+		if (found.empty()) {
+			return ColumnBinding(DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
+		}
+		if (found.size() != 1 || ContainsOutsideEntity(*agg.children[0])) {
+			throw InvalidInputException("Private UNION cannot combine independent ownership streams above a UNION");
+		}
+		CheckBranch(*agg.children[0]);
+		auto mask =
+		    PropagateSingleBinding(*plan, found[0].second.table_index, found[0].second, LogicalType::UBIGINT, &agg);
+		if (mask.table_index == DConstants::INVALID_INDEX) {
+			throw InvalidInputException("Private UNION could not propagate membership to the consuming aggregate");
+		}
+		return mask;
+	}
+
+private:
+	OptimizerExtensionInput &input;
+	unique_ptr<LogicalOperator> &plan;
+	const PrivacyCompatibilityResult &check;
+	const vector<string> &pus;
+	std::unordered_map<LogicalOperator *, ColumnBinding> memberships;
+
+	void ProjectMembership(unique_ptr<LogicalOperator> &op, idx_t count, idx_t output_index, bool distinct) {
+		auto types = op->types;
+		auto bindings = op->GetColumnBindings();
+		vector<unique_ptr<Expression>> outputs;
+		if (distinct) {
+			// Reuse DISTINCT-aggregate mask union, without filtering SQL NULLs:
+			// a NULL-valued row participates in UNION DISTINCT like any other row.
+			auto mask = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, bindings[count]);
+			auto bit_or = BindBitOrAggregate(input, std::move(mask), nullptr);
+			vector<unique_ptr<Expression>> aggregates;
+			aggregates.push_back(std::move(bit_or));
+			auto dedup =
+			    make_uniq<LogicalAggregate>(input.optimizer.binder.GenerateTableIndex(),
+			                                input.optimizer.binder.GenerateTableIndex(), std::move(aggregates));
+			for (idx_t i = 0; i < count; i++) {
+				dedup->groups.push_back(make_uniq<BoundColumnRefExpression>(types[i], bindings[i]));
+				outputs.push_back(make_uniq<BoundColumnRefExpression>(types[i], ColumnBinding(dedup->group_index, i)));
+			}
+			outputs.push_back(
+			    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, ColumnBinding(dedup->aggregate_index, 0)));
+			dedup->children.push_back(std::move(op));
+			op = std::move(dedup);
+		} else {
+			for (idx_t i = 0; i <= count; i++) {
+				outputs.push_back(make_uniq<BoundColumnRefExpression>(types[i], bindings[i]));
+			}
+		}
+		// Expose value columns followed by one hidden membership column.
+		auto projection = make_uniq<LogicalProjection>(output_index, std::move(outputs));
+		projection->children.push_back(std::move(op));
+		op = std::move(projection);
+		op->ResolveOperatorTypes();
+		memberships.emplace(op.get(), ColumnBinding(output_index, count));
+	}
+
+	void RewriteDistinct(unique_ptr<LogicalOperator> &op) {
+		vector<pair<LogicalOperator *, ColumnBinding>> found;
+		CollectMemberships(*op->children[0], found);
+		if (found.empty()) {
+			return;
+		}
+		auto &distinct = op->Cast<LogicalDistinct>();
+		if (distinct.distinct_type != DistinctType::DISTINCT) {
+			throw InvalidInputException("Private UNION does not support DISTINCT ON");
+		}
+		if (found.size() != 1 || ContainsOutsideEntity(*op->children[0])) {
+			throw InvalidInputException("Private UNION DISTINCT requires one ownership stream");
+		}
+		const auto count = distinct.distinct_targets.size();
+		auto old_bindings = op->children[0]->GetColumnBindings();
+		for (idx_t i = 0; i < count; i++) {
+			auto &expr = distinct.distinct_targets[i];
+			if (i >= old_bindings.size() || expr->type != ExpressionType::BOUND_COLUMN_REF ||
+			    expr->Cast<BoundColumnRefExpression>().binding != old_bindings[i]) {
+				throw InvalidInputException("Private UNION DISTINCT requires the visible output columns");
+			}
+		}
+		auto *child = op->children[0].get();
+		auto annotation = memberships.find(child);
+		// DuckDB's own DISTINCT modifier above UNION DISTINCT is already satisfied.
+		if (annotation != memberships.end() && child->type == LogicalOperatorType::LOGICAL_PROJECTION &&
+		    child->children[0]->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY &&
+		    annotation->second.column_index == count) {
+			op = std::move(op->children[0]);
+			return;
+		}
+		op = std::move(op->children[0]);
+		AppendMembership(op, count);
+		const auto output_index = input.optimizer.binder.GenerateTableIndex();
+		ProjectMembership(op, count, output_index, true);
+		ColumnBindingReplacer replacer;
+		for (idx_t i = 0; i < count; i++) {
+			replacer.replacement_bindings.emplace_back(old_bindings[i], ColumnBinding(output_index, i));
+		}
+		replacer.stop_operator = op.get();
+		replacer.VisitOperator(*plan);
+		PRIVACY_DEBUG_PRINT("[PRIVATE UNION] Merged masks for SELECT DISTINCT");
+	}
+
+	void CollectMemberships(LogicalOperator &op, vector<pair<LogicalOperator *, ColumnBinding>> &found) {
+		auto it = memberships.find(&op);
+		if (it != memberships.end()) {
+			found.emplace_back(&op, it->second);
+			return;
+		}
+		if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+			return;
+		}
+		for (auto &child : op.children) {
+			CollectMemberships(*child, found);
+		}
+	}
+
+	bool ContainsOutsideEntity(LogicalOperator &op) {
+		if (memberships.count(&op)) {
+			return false;
+		}
+		if (op.type == LogicalOperatorType::LOGICAL_GET) {
+			return ContainsUnaggregatedEntityInput(op, check);
+		}
+		if (op.type == LogicalOperatorType::LOGICAL_CTE_REF) {
+			throw InvalidInputException("Private UNION membership cannot cross an unresolved CTE reference");
+		}
+		if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+			return false;
+		}
+		for (auto &child : op.children) {
+			if (ContainsOutsideEntity(*child)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	void CheckBranch(LogicalOperator &op) {
+		if (memberships.count(&op)) {
+			return;
+		}
+		if (op.type == LogicalOperatorType::LOGICAL_CTE_REF) {
+			throw InvalidInputException("Private UNION membership cannot cross an unresolved CTE reference");
+		}
+		switch (op.type) {
+		case LogicalOperatorType::LOGICAL_JOIN:
+		case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
+		case LogicalOperatorType::LOGICAL_DELIM_JOIN:
+		case LogicalOperatorType::LOGICAL_ANY_JOIN:
+		case LogicalOperatorType::LOGICAL_ASOF_JOIN:
+		case LogicalOperatorType::LOGICAL_DEPENDENT_JOIN: {
+			auto &join = op.Cast<LogicalJoin>();
+			// Only the preserved side may carry membership. Otherwise a match in
+			// the shared stream can disappear in a world and create an unmatched
+			// row (or change an existence marker) that this plan never produces.
+			idx_t dependent_side;
+			switch (join.join_type) {
+			case JoinType::INNER:
+				dependent_side = DConstants::INVALID_INDEX;
+				break;
+			case JoinType::LEFT:
+			case JoinType::SEMI:
+			case JoinType::ANTI:
+			case JoinType::MARK:
+			case JoinType::SINGLE:
+				dependent_side = 1;
+				break;
+			case JoinType::RIGHT:
+			case JoinType::RIGHT_SEMI:
+			case JoinType::RIGHT_ANTI:
+				dependent_side = 0;
+				break;
+			default:
+				dependent_side = DConstants::INVALID_INDEX;
+				if (HasMembershipInput(op)) {
+					throw InvalidInputException("Private UNION does not support world-dependent unmatched join rows");
+				}
+				break;
+			}
+			if (dependent_side != DConstants::INVALID_INDEX && HasMembershipInput(*op.children[dependent_side])) {
+				throw InvalidInputException("Private UNION does not support world-dependent unmatched join rows");
+			}
+			break;
+		}
+		default:
+			break;
+		}
+		if (op.type == LogicalOperatorType::LOGICAL_LIMIT || op.type == LogicalOperatorType::LOGICAL_TOP_N ||
+		    op.type == LogicalOperatorType::LOGICAL_DISTINCT ||
+		    op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+			throw InvalidInputException("Private UNION requires raw branches without aggregation, DISTINCT or LIMIT");
+		}
+		for (auto &child : op.children) {
+			CheckBranch(*child);
+		}
+	}
+
+	bool HasMembershipInput(LogicalOperator &op) {
+		vector<pair<LogicalOperator *, ColumnBinding>> found;
+		CollectMemberships(op, found);
+		return !found.empty() || ContainsUnaggregatedEntityInput(op, check);
+	}
+
+	void AppendMembership(unique_ptr<LogicalOperator> &branch, idx_t count) {
+		CheckBranch(*branch);
+		branch->ResolveOperatorTypes();
+		auto bindings = branch->GetColumnBindings();
+		vector<unique_ptr<Expression>> outputs;
+		for (idx_t i = 0; i < count; i++) {
+			outputs.push_back(make_uniq<BoundColumnRefExpression>(branch->types[i], bindings[i]));
+		}
+		auto projection = make_uniq<LogicalProjection>(input.optimizer.binder.GenerateTableIndex(), std::move(outputs));
+		projection->children.push_back(std::move(branch));
+		branch = std::move(projection);
+		auto &target = branch->Cast<LogicalProjection>();
+		vector<pair<LogicalOperator *, ColumnBinding>> nested;
+		CollectMemberships(*target.children[0], nested);
+		ColumnBinding source;
+		if (!nested.empty()) {
+			if (nested.size() != 1 || ContainsOutsideEntity(*target.children[0])) {
+				throw InvalidInputException("Private UNION branch has ambiguous privacy-unit ownership");
+			}
+			source = nested[0].second;
+		} else if (ContainsUnaggregatedEntityInput(*target.children[0], check)) {
+			vector<LogicalGet *> gets;
+			FindAllGetNodes(target.children[0].get(), gets);
+			LogicalGet *owner = nullptr;
+			vector<string> keys;
+			for (auto *get : gets) {
+				auto table = get->GetTable();
+				if (!table) {
+					continue;
+				}
+				if (!AreTableColumnsAccessible(&target, get->table_index)) {
+					if (ContainsUnaggregatedEntityInput(*get, check)) {
+						throw InvalidInputException("Private UNION branch has inaccessible privacy-unit ownership");
+					}
+					continue;
+				}
+				auto meta = check.table_metadata.find(table->name);
+				if (meta == check.table_metadata.end()) {
+					continue;
+				}
+				vector<string> candidate;
+				if (table->name == pus[0]) {
+					candidate = meta->second.pks;
+				} else {
+					for (auto &fk : meta->second.fks) {
+						if (fk.first == pus[0]) {
+							if (!candidate.empty()) {
+								throw InvalidInputException(
+								    "Private UNION branch has ambiguous privacy-unit ownership");
+							}
+							candidate = fk.second;
+						}
+					}
+				}
+				if (!candidate.empty()) {
+					if (owner) {
+						throw InvalidInputException("Private UNION branch requires one accessible ownership source");
+					}
+					owner = get;
+					keys = std::move(candidate);
+				}
+			}
+			if (!owner) {
+				throw InvalidInputException("Private UNION could not resolve branch privacy-unit ownership");
+			}
+			source = InsertHashProjectionAboveGet(input, plan, *owner, keys, false);
+		} else {
+			// A public branch is present in every world.
+			target.expressions.push_back(
+			    make_uniq<BoundConstantExpression>(Value::UBIGINT(NumericLimits<uint64_t>::Maximum())));
+			branch->ResolveOperatorTypes();
+			return;
+		}
+		auto propagated =
+		    PropagateSingleBindingToOperator(*plan, source.table_index, source, LogicalType::UBIGINT, &target);
+		if (propagated.table_index == DConstants::INVALID_INDEX) {
+			throw InvalidInputException("Private UNION could not propagate branch membership");
+		}
+		target.expressions.push_back(make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated));
+		branch->ResolveOperatorTypes();
+	}
+};
+
 vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExtensionInput &input,
                                                                   unique_ptr<LogicalOperator> &plan,
                                                                   const vector<string> &pu_table_names,
@@ -534,6 +903,9 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 		throw InvalidInputException("PAC Compiler: no aggregate nodes with relevant tables found in plan");
 	}
 
+	PrivateUnionRewriter unions(input, plan, check, pu_table_names);
+	unions.Rewrite(plan);
+
 	// Cache for hash projections: get.table_index → hash column binding
 	std::unordered_map<idx_t, ColumnBinding> hash_cache;
 
@@ -545,6 +917,12 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 	// For each target aggregate, build hash expressions and modify it
 	vector<PrivAggregateHashInfo> result;
 	for (auto *target_agg : target_aggregates) {
+		auto union_mask = unions.FindForAggregate(*target_agg);
+		if (union_mask.table_index != DConstants::INVALID_INDEX) {
+			result.push_back(
+			    {target_agg, make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, union_mask), union_mask, 1.0});
+			continue;
+		}
 		// Build hash expressions for each privacy unit
 		vector<unique_ptr<Expression>> hash_exprs;
 

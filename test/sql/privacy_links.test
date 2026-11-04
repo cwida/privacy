@@ -455,21 +455,50 @@ INNER JOIN users u ON o.user_id = u.id;
 # Test 22: Mixed DISTINCT + non-DISTINCT aggregates (multi-branch)
 # ==============================================================================
 
-# Membership masks cannot currently cross UNION boundaries over raw sampled rows.
-# Reject both bag and distinct variants before producing stale branch bindings.
-statement error
+# Bag UNION preserves multiplicities, including when the ownership key is projected away.
+query I
 SELECT SUM(amount)
 FROM (SELECT amount FROM orders UNION ALL SELECT amount FROM orders) raw_orders;
 ----
-UNION over unaggregated entity-dependent rows is not supported
+700
 
-statement error
+# DISTINCT UNION deduplicates values and ORs their membership masks.
+statement ok
+SET priv_rewrite = false;
+
+statement ok
+CREATE TEMP TABLE union_link_reference AS
+SELECT 2*SUM(amount) total FROM (
+    SELECT DISTINCT amount FROM orders WHERE (priv_hash(hash(user_id)) & 1) <> 0
+);
+
+statement ok
+SET priv_rewrite = true;
+
+statement ok
+CREATE TEMP TABLE union_link_actual AS
 WITH raw_orders AS (
     SELECT amount FROM orders UNION SELECT amount FROM orders
 )
-SELECT SUM(amount) FROM raw_orders;
+SELECT SUM(amount) total FROM raw_orders;
+
+statement ok
+SET priv_rewrite = false;
+
+query I
+SELECT COUNT(*) FROM union_link_actual a FULL JOIN union_link_reference r ON true
+WHERE a.total IS DISTINCT FROM r.total;
 ----
-UNION over unaggregated entity-dependent rows is not supported
+0
+
+statement ok
+DROP TABLE union_link_actual;
+
+statement ok
+DROP TABLE union_link_reference;
+
+statement ok
+SET priv_rewrite = true;
 
 # An independent UNION does not carry sampled rows and remains usable in a sampled query.
 # The explicit world-0 reference accounts for two dimension rows and AS's 2x rescaling.

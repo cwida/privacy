@@ -97,9 +97,7 @@ static bool ContainsRecursiveCTE(const LogicalOperator &op) {
 	return false;
 }
 
-// UNION of finalized aggregate answers is supported. Raw sampled rows instead require a
-// branch-aligned membership column, which the current compiler cannot propagate across UNION.
-static bool ContainsUnaggregatedEntityInput(const LogicalOperator &op, const PrivacyCompatibilityResult &check) {
+bool ContainsUnaggregatedEntityInput(const LogicalOperator &op, const PrivacyCompatibilityResult &check) {
 	if (op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
 		return false;
 	}
@@ -119,12 +117,12 @@ static bool ContainsUnaggregatedEntityInput(const LogicalOperator &op, const Pri
 	return false;
 }
 
-static bool ContainsUnsupportedUnion(const LogicalOperator &op, const PrivacyCompatibilityResult &check) {
+static bool ContainsRawUnion(const LogicalOperator &op, const PrivacyCompatibilityResult &check) {
 	if (op.type == LogicalOperatorType::LOGICAL_UNION && ContainsUnaggregatedEntityInput(op, check)) {
 		return true;
 	}
 	for (auto &child : op.children) {
-		if (ContainsUnsupportedUnion(*child, check)) {
+		if (ContainsRawUnion(*child, check)) {
 			return true;
 		}
 	}
@@ -1105,11 +1103,10 @@ PrivacyCompatibilityResult PrivRewriteQueryCheck(unique_ptr<LogicalOperator> &pl
 
 		CheckDPQueryShape(privacy_mode, *plan);
 
-		if (privacy_mode == "pac" && ContainsUnsupportedUnion(*plan, result)) {
-			PRIVACY_DEBUG_PRINT("[PAC CHECK] UNION requires membership propagation across raw sampled branches");
+		if (privacy_mode == "pac" && all_privacy_units.size() != 1 && ContainsRawUnion(*plan, result)) {
+			PRIVACY_DEBUG_PRINT("[PRIVATE UNION] Raw branches require one sampling-entity relation");
 			if (is_conservative) {
-				throw InvalidInputException(
-				    "PAC rewrite: UNION over unaggregated entity-dependent rows is not supported");
+				throw InvalidInputException("Private UNION over raw rows requires a single privacy-unit relation");
 			}
 			return result;
 		}
