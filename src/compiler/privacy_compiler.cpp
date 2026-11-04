@@ -705,6 +705,49 @@ private:
 		if (op.type == LogicalOperatorType::LOGICAL_CTE_REF) {
 			throw InvalidInputException("Private UNION membership cannot cross an unresolved CTE reference");
 		}
+		switch (op.type) {
+		case LogicalOperatorType::LOGICAL_JOIN:
+		case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
+		case LogicalOperatorType::LOGICAL_DELIM_JOIN:
+		case LogicalOperatorType::LOGICAL_ANY_JOIN:
+		case LogicalOperatorType::LOGICAL_ASOF_JOIN:
+		case LogicalOperatorType::LOGICAL_DEPENDENT_JOIN: {
+			auto &join = op.Cast<LogicalJoin>();
+			// Only the preserved side may carry membership. Otherwise a match in
+			// the shared stream can disappear in a world and create an unmatched
+			// row (or change an existence marker) that this plan never produces.
+			idx_t dependent_side;
+			switch (join.join_type) {
+			case JoinType::INNER:
+				dependent_side = DConstants::INVALID_INDEX;
+				break;
+			case JoinType::LEFT:
+			case JoinType::SEMI:
+			case JoinType::ANTI:
+			case JoinType::MARK:
+			case JoinType::SINGLE:
+				dependent_side = 1;
+				break;
+			case JoinType::RIGHT:
+			case JoinType::RIGHT_SEMI:
+			case JoinType::RIGHT_ANTI:
+				dependent_side = 0;
+				break;
+			default:
+				dependent_side = DConstants::INVALID_INDEX;
+				if (HasMembershipInput(op)) {
+					throw InvalidInputException("Private UNION does not support world-dependent unmatched join rows");
+				}
+				break;
+			}
+			if (dependent_side != DConstants::INVALID_INDEX && HasMembershipInput(*op.children[dependent_side])) {
+				throw InvalidInputException("Private UNION does not support world-dependent unmatched join rows");
+			}
+			break;
+		}
+		default:
+			break;
+		}
 		if (op.type == LogicalOperatorType::LOGICAL_LIMIT || op.type == LogicalOperatorType::LOGICAL_TOP_N ||
 		    op.type == LogicalOperatorType::LOGICAL_DISTINCT ||
 		    op.type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
@@ -713,6 +756,12 @@ private:
 		for (auto &child : op.children) {
 			CheckBranch(*child);
 		}
+	}
+
+	bool HasMembershipInput(LogicalOperator &op) {
+		vector<pair<LogicalOperator *, ColumnBinding>> found;
+		CollectMemberships(op, found);
+		return !found.empty() || ContainsUnaggregatedEntityInput(op, check);
 	}
 
 	void AppendMembership(unique_ptr<LogicalOperator> &branch, idx_t count) {

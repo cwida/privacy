@@ -684,6 +684,72 @@ SELECT COUNT(*) FROM (SELECT a.val FROM union_left a JOIN union_right b ON a.grp
 ----
 Private UNION branch requires one accessible ownership source
 
+# Public rows on the preserved side need per-world unmatched-row generation.
+statement ok
+CREATE TABLE union_public(grp INTEGER);
+
+statement ok
+INSERT INTO union_public VALUES(999),(0);
+
+statement error
+SELECT COUNT(*) FROM union_public p LEFT JOIN (SELECT grp FROM union_left UNION ALL SELECT grp FROM union_right)u ON p.grp=u.grp;
+----
+Private UNION does not support world-dependent unmatched join rows
+
+statement error
+SELECT COUNT(*) FROM (SELECT grp FROM union_left UNION SELECT grp FROM union_right)u RIGHT JOIN union_public p ON p.grp=u.grp;
+----
+Private UNION does not support world-dependent unmatched join rows
+
+statement error
+SELECT COUNT(*) FROM union_public p FULL JOIN (SELECT grp FROM union_left UNION ALL SELECT grp FROM union_right)u ON p.grp=u.grp;
+----
+PAC rewrite: subqueries are not supported for PAC compilation
+
+# Also guard the raw branch, before it acquires a UNION annotation.
+statement error
+SELECT COUNT(*) FROM (SELECT p.grp FROM union_public p LEFT JOIN union_left l ON p.grp=l.grp UNION ALL SELECT grp FROM union_right)u;
+----
+Private UNION does not support world-dependent unmatched join rows
+
+statement error
+SELECT COUNT(*) FROM union_public p ANTI JOIN (SELECT grp FROM union_left UNION ALL SELECT grp FROM union_right)u ON p.grp=u.grp;
+----
+Private UNION does not support world-dependent unmatched join rows
+
+# Private rows on the preserved side retain their masks, including unmatched rows.
+statement ok
+CREATE TEMP TABLE union_preserved_actual AS
+SELECT COUNT(*) n,SUM(u.grp) total FROM (SELECT grp FROM union_left UNION ALL SELECT grp FROM union_right)u LEFT JOIN union_public p ON p.grp=u.grp;
+
+statement ok
+SET priv_rewrite=false;
+
+statement ok
+CREATE TEMP TABLE union_preserved_expected AS
+SELECT 2*COUNT(*) n,2*SUM(u.grp) total FROM (
+    SELECT grp FROM union_left WHERE (priv_hash(hash(owner_id))&1)<>0
+    UNION ALL SELECT grp FROM union_right WHERE (priv_hash(hash(owner_id))&1)<>0
+)u LEFT JOIN union_public p ON p.grp=u.grp;
+
+query I
+SELECT COUNT(*) FROM union_preserved_actual a FULL JOIN union_preserved_expected e ON true
+WHERE a.n IS DISTINCT FROM e.n OR a.total IS DISTINCT FROM e.total;
+----
+0
+
+statement ok
+DROP TABLE union_preserved_actual;
+
+statement ok
+DROP TABLE union_preserved_expected;
+
+statement ok
+DROP TABLE union_public;
+
+statement ok
+SET priv_rewrite=true;
+
 statement ok
 DROP TABLE union_left;
 

@@ -1106,8 +1106,7 @@ PrivacyCompatibilityResult PrivRewriteQueryCheck(unique_ptr<LogicalOperator> &pl
 		if (privacy_mode == "pac" && all_privacy_units.size() != 1 && ContainsRawUnion(*plan, result)) {
 			PRIVACY_DEBUG_PRINT("[PRIVATE UNION] Raw branches require one sampling-entity relation");
 			if (is_conservative) {
-				throw InvalidInputException(
-				    "Private UNION over raw rows requires a single privacy-unit relation");
+				throw InvalidInputException("Private UNION over raw rows requires a single privacy-unit relation");
 			}
 			return result;
 		}

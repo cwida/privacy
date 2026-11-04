@@ -51,6 +51,9 @@ ownership, unresolved CTE sources, and branch-local aggregation, `DISTINCT` or
 `LIMIT` are rejected. Existing unions of finalized aggregate answers retain
 their previous handling. The new raw-branch path currently runs in the `pac`
 compiler; other privacy mechanisms do not gain UNION support from this change.
+Outer and existence joins require private membership to remain on the preserved
+side; shapes requiring world-dependent unmatched rows or existence markers are
+rejected.
 
 The bitslice compiler derives a hash expression for each aggregate and replaces it with a PAC function. This is a single unified approach with a preparatory step: if the PU table is not already part of the query, the compiler first adds FK joins to make it reachable.
 
