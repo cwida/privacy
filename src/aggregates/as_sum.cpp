@@ -1,5 +1,6 @@
 #include "duckdb/common/vector/list_vector.hpp"
 #include "aggregates/as_sum.hpp"
+#include "aggregates/as_sum_state_export.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "duckdb/common/types/decimal.hpp"
 #include "duckdb/parser/parsed_data/create_aggregate_function_info.hpp"
@@ -193,6 +194,48 @@ inline void PacSumFlushBuffer(PacSumDoubleStateWrapper &src, PacSumDoubleStateWr
 	}
 }
 
+template <class WrapperT>
+static bool SumHasAllocatedState(const WrapperT &state) {
+	return state.GetState()
+#ifndef PAC_SIGNEDSUM
+	       || state.GetNegState()
+#endif
+	    ;
+}
+
+template <class WrapperT>
+static bool CombineSumBuffers(const WrapperT &src, WrapperT &dst) {
+	if (SumHasAllocatedState(src) || SumHasAllocatedState(dst)) {
+		return false;
+	}
+	auto src_count = src.n_buffered & WrapperT::BUF_MASK;
+	auto dst_count = dst.n_buffered & WrapperT::BUF_MASK;
+	if (src_count + dst_count > WrapperT::BUF_SIZE) {
+		return false;
+	}
+	for (idx_t i = 0; i < src_count; i++) {
+		dst.val_buf[dst_count + i] = src.val_buf[i];
+		dst.hash_buf[dst_count + i] = src.hash_buf[i];
+	}
+	dst.n_buffered = src_count + dst_count;
+	return true;
+}
+
+template <bool SIGNED, class WrapperT>
+static WrapperT *PrepareSumFinalization(WrapperT &source, WrapperT &temporary, ArenaAllocator &scratch,
+                                        ArenaAllocator *&allocator) {
+	auto *state = &source;
+	if (!SumHasAllocatedState(source)) {
+		// Do not leave a full state in the source arena for every one/two-row
+		// group. The source stays buffered and can safely be finalized again.
+		temporary = source;
+		state = &temporary;
+		allocator = &scratch;
+	}
+	PacSumFlushBuffer<SIGNED, WrapperT>(*state, *state, *allocator);
+	return state;
+}
+
 // Buffering update for int wrappers
 template <bool SIGNED, typename WrapperT, typename ValueT>
 AUTOVECTORIZE inline void PacSumUpdateOne(WrapperT &agg, uint64_t key_hash, ValueT value, ArenaAllocator &a) {
@@ -321,6 +364,10 @@ AUTOVECTORIZE static void PacSumCombineInt(Vector &src, Vector &dst, idx_t count
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
+		if (CombineSumBuffers(*src_wrapper[i], *dst_wrapper[i])) {
+			continue;
+		}
+		PacSumFlushBuffer<SIGNED, ScatterIntState<SIGNED>>(*dst_wrapper[i], *dst_wrapper[i], allocator);
 		// Flush src's buffer into dst's inner state (avoids allocating src inner)
 		PacSumFlushBuffer<SIGNED, ScatterIntState<SIGNED>>(*src_wrapper[i], *dst_wrapper[i], allocator);
 #endif
@@ -404,6 +451,10 @@ AUTOVECTORIZE static void PacSumCombineDouble(Vector &src, Vector &dst, idx_t co
 	auto dst_wrapper = FlatVector::GetData<ScatterDoubleState *>(dst);
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
+		if (CombineSumBuffers(*src_wrapper[i], *dst_wrapper[i])) {
+			continue;
+		}
+		PacSumFlushBuffer<true, ScatterDoubleState>(*dst_wrapper[i], *dst_wrapper[i], allocator);
 		// Flush src's buffer into dst's inner state (avoids allocating src inner)
 		PacSumFlushBuffer<true, ScatterDoubleState>(*src_wrapper[i], *dst_wrapper[i], allocator);
 #endif
@@ -435,12 +486,18 @@ void PacSumFinalize(Vector &states, AggregateFinalizeInputData &input, Vector &r
 	                                             *input.bind_data->Cast<PrivBindData>().random_state)
 	                           : PacRandomEngine(0, 0);
 
-	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
-		PacSumFlushBuffer<SIGNED, State>(*state_ptrs[i], *state_ptrs[i], input.allocator);
+	ArenaAllocator scratch(input.allocator.GetUnderlyingAllocator());
+#endif
+	for (idx_t i = 0; i < count; i++) {
+		auto *state = state_ptrs[i];
+		auto *allocator = &input.allocator;
+#ifndef PAC_NOBUFFERING
+		State temporary;
+		state = PrepareSumFinalization<SIGNED>(*state, temporary, scratch, allocator);
 #endif
 		PAC_FLOAT buf[64] = {0};
-		auto *pos = state_ptrs[i]->GetState();
+		auto *pos = state->GetState();
 		if (!pos) {
 			result_mask.SetInvalid(offset + i); // return NULL (no values seen)
 			continue;
@@ -452,12 +509,12 @@ void PacSumFinalize(Vector &states, AggregateFinalizeInputData &input, Vector &r
 		}
 #ifndef PAC_SIGNEDSUM
 		// Double-sided mode: use SFINAE helpers (cast to unsigned for int states only)
-		FlushPosState<State>(pos, input.allocator);
+		FlushPosState<State>(pos, *allocator);
 		GetPosStateTotals<State>(pos, buf);
 		uint64_t update_count = pos->update_count;
-		update_count += SubtractNegStateTotals<State, SIGNED>(state_ptrs[i], buf, key_hash, input.allocator);
+		update_count += SubtractNegStateTotals<State, SIGNED>(state, buf, key_hash, *allocator);
 #else
-		pos->Flush(input.allocator);
+		pos->Flush(*allocator);
 		pos->GetTotals(buf);
 		uint64_t update_count = pos->update_count;
 #endif
@@ -671,17 +728,23 @@ void PacSumDoubleInitialize(AggregateStateInput &, data_ptr_t *states, idx_t cou
 	}
 }
 
-// Helper to register both 2-param and 3-param (with optional mi) versions
+// State export is cold-path metadata; the update kernels and native state sizes are unchanged.
+static AggregateFunction SpillableSum(AggregateFunction function) {
+	RegisterSumStateExport(function, function.GetStateInitCallback() == PacSumDoubleInitialize);
+	return function;
+}
+
+// Helper to register both 2-param and 3-param (with optional correction) versions
 static void AddFcn(AggregateFunctionSet &set, const LogicalType &value_type, const LogicalType &result_type,
                    aggregate_size_t state_size, aggregate_initialize_t init, aggregate_update_t scatter,
                    aggregate_combine_t combine, aggregate_finalize_t finalize, aggregate_cluster_update_t update,
                    aggregate_destructor_t destructor = nullptr) {
-	set.AddFunction(AggregateFunction("as_noised_sum", {LogicalType::UBIGINT, value_type}, result_type, state_size,
-	                                  init, scatter, combine, finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING,
-	                                  update, PacSumBind, destructor));
-	set.AddFunction(AggregateFunction("as_noised_sum", {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE},
-	                                  result_type, state_size, init, scatter, combine, finalize,
-	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind, destructor));
+	set.AddFunction(SpillableSum(AggregateFunction(
+	    "as_noised_sum", {LogicalType::UBIGINT, value_type}, result_type, state_size, init, scatter, combine, finalize,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind, destructor)));
+	set.AddFunction(SpillableSum(AggregateFunction(
+	    "as_noised_sum", {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE}, result_type, state_size, init,
+	    scatter, combine, finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind, destructor)));
 }
 
 // Helper to get the right AggregateFunction for as_sum given a physical type (for DECIMAL support)
@@ -726,9 +789,14 @@ unique_ptr<FunctionData> BindDecimalPacSum(BindAggregateFunctionInput &bind_inpu
 	auto &function = bind_input.GetBoundFunction();
 	auto &args = bind_input.GetArguments();
 	auto decimal_type = args[1]->GetReturnType(); // value is arg 1 (arg 0 is hash)
-	function.ReplaceImplementation(GetPacSumAggregate(decimal_type.InternalType()));
+	function.ReplaceImplementation(SpillableSum(GetPacSumAggregate(decimal_type.InternalType())));
 	function.SetName("as_noised_sum");
 	function.GetArguments()[1] = decimal_type;
+	if (args.size() == 3) {
+		// Specialization uses a two-argument factory; retain correction in the
+		// exported call signature so FINALIZE/COMBINE can rebind it correctly.
+		function.GetArguments().push_back(LogicalType::DOUBLE);
+	}
 	function.SetReturnType(LogicalType::DECIMAL(Decimal::MAX_WIDTH_DECIMAL, DecimalType::GetScale(decimal_type)));
 	return PacBindWithScaleDivisor(ctx, args, 1.0);
 }
@@ -836,11 +904,17 @@ static void PacSumAvgFinalizeCountersInternal(Vector &states, AggregateFinalizeI
 		child_validity.SetAllValid(total_elements);
 	}
 
-	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
-		PacSumFlushBuffer<SIGNED, State>(*state_ptrs[i], *state_ptrs[i], input.allocator);
+	ArenaAllocator scratch(input.allocator.GetUnderlyingAllocator());
 #endif
-		auto *s = state_ptrs[i]->GetState();
+	for (idx_t i = 0; i < count; i++) {
+		auto *state = state_ptrs[i];
+		auto *allocator = &input.allocator;
+#ifndef PAC_NOBUFFERING
+		State temporary;
+		state = PrepareSumFinalization<SIGNED>(*state, temporary, scratch, allocator);
+#endif
+		auto *s = state->GetState();
 
 		// Set up the list entry - always needed even for NULL results
 		idx_t base = (offset + i) * 64;
@@ -858,13 +932,13 @@ static void PacSumAvgFinalizeCountersInternal(Vector &states, AggregateFinalizeI
 			update_count = s->update_count;
 #ifndef PAC_SIGNEDSUM
 			// Double-sided mode: use SFINAE helpers
-			FlushPosState<State>(s, input.allocator);
+			FlushPosState<State>(s, *allocator);
 			GetPosStateTotals<State>(s, buf);
 			// For signed int states, subtract neg_state counters element-wise
 			uint64_t dummy_key_hash = 0;
-			update_count += SubtractNegStateTotals<State, SIGNED>(state_ptrs[i], buf, dummy_key_hash, input.allocator);
+			update_count += SubtractNegStateTotals<State, SIGNED>(state, buf, dummy_key_hash, *allocator);
 #else
-			s->Flush(input.allocator);
+			s->Flush(*allocator);
 			s->GetTotals(buf);
 #endif
 		}
@@ -927,12 +1001,12 @@ static void AddCountersFcn(AggregateFunctionSet &set, const LogicalType &value_t
                            aggregate_initialize_t init, aggregate_update_t scatter, aggregate_combine_t combine,
                            aggregate_finalize_t finalize, aggregate_cluster_update_t update) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	set.AddFunction(AggregateFunction("as_sum", {LogicalType::UBIGINT, value_type}, list_double_type, state_size, init,
-	                                  scatter, combine, finalize, FunctionNullHandling::DEFAULT_NULL_HANDLING, update,
-	                                  PacSumBind));
-	set.AddFunction(AggregateFunction("as_sum", {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE},
-	                                  list_double_type, state_size, init, scatter, combine, finalize,
-	                                  FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind));
+	set.AddFunction(SpillableSum(AggregateFunction("as_sum", {LogicalType::UBIGINT, value_type}, list_double_type,
+	                                               state_size, init, scatter, combine, finalize,
+	                                               FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind)));
+	set.AddFunction(SpillableSum(AggregateFunction("as_sum", {LogicalType::UBIGINT, value_type, LogicalType::DOUBLE},
+	                                               list_double_type, state_size, init, scatter, combine, finalize,
+	                                               FunctionNullHandling::DEFAULT_NULL_HANDLING, update, PacSumBind)));
 }
 
 void RegisterPacSumCountersFunctions(ExtensionLoader &loader) {
