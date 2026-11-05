@@ -91,6 +91,9 @@ struct AggregateStateExport {
 			}
 			AggregateStateReader in(value.GetValue());
 			auto &state = *reinterpret_cast<STATE *>(input.dest_buffer + i * input.layout.total_state_size);
+			// Other aggregates can leave this shared arena at an odd byte offset.
+			// Buffered stochastic states store their count in the pointer's low bits.
+			input.allocator.AlignNext();
 			CODEC::Read(in, state, input.allocator);
 			in.Finish();
 		}
