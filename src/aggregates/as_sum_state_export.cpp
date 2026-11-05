@@ -69,16 +69,24 @@ struct SumStateExport<PacSumIntState<SIGNED>> {
 		}
 		for (int k = 0; k <= state.max_level_used; k++) {
 			in.Read(state.exact_total[k]);
-			if (in.ReadFlag()) {
-				// Retain the inline optimization when all pointer slots fit before it.
-				if (state.max_level_used < 9) {
-					state.AllocateLevel(allocator, k);
-				} else {
-					state.u.levels[k] =
-					    reinterpret_cast<uint64_t *>(allocator.Allocate(sizeof(uint64_t) * PAC_APPROX_SWAR_ELEMENTS));
-				}
-				in.ReadData(state.u.levels[k], sizeof(uint64_t) * PAC_APPROX_SWAR_ELEMENTS);
+#ifdef PAC_SIGNEDSUM
+			if (state.exact_total[k] < State::UNDERFLOW_THRESHOLD || state.exact_total[k] > State::OVERFLOW_THRESHOLD) {
+#else
+			if (state.exact_total[k] < 0 || state.exact_total[k] > PacSumIntState<false>::OVERFLOW_THRESHOLD) {
+#endif
+				throw InvalidInputException("Invalid stochastic SUM cascade budget");
 			}
+			if (!in.ReadFlag()) {
+				throw InvalidInputException("Missing stochastic SUM cascade level");
+			}
+			// Retain the inline optimization when all pointer slots fit before it.
+			if (state.max_level_used < 9) {
+				state.AllocateLevel(allocator, k);
+			} else {
+				state.u.levels[k] =
+				    reinterpret_cast<uint64_t *>(allocator.Allocate(sizeof(uint64_t) * PAC_APPROX_SWAR_ELEMENTS));
+			}
+			in.ReadData(state.u.levels[k], sizeof(uint64_t) * PAC_APPROX_SWAR_ELEMENTS);
 		}
 #elif defined(PAC_NOCASCADING)
 		in.Read(state.probabilistic_total128);
@@ -165,8 +173,12 @@ struct SumStateExport<PacSumStateWrapper<INNER, VALUE>> {
 } // namespace
 
 void RegisterSumStateExport(AggregateFunction &function, bool double_state) {
+	auto value_type = function.GetSignature().GetParameter(1).GetType().id();
 	if (double_state) {
 		AggregateStateExport<ScatterDoubleState, SumStateExport<ScatterDoubleState>>::Register(function);
+	} else if (value_type == LogicalTypeId::UTINYINT || value_type == LogicalTypeId::USMALLINT ||
+	           value_type == LogicalTypeId::UINTEGER || value_type == LogicalTypeId::UBIGINT) {
+		AggregateStateExport<ScatterIntState<false>, SumStateExport<ScatterIntState<false>>>::Register(function);
 	} else {
 		AggregateStateExport<ScatterIntState<true>, SumStateExport<ScatterIntState<true>>>::Register(function);
 	}
