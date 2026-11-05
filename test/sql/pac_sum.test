@@ -612,6 +612,29 @@ SET memory_limit='512MB'
 statement ok
 DROP TABLE mixed_spill_expected
 
+# String states allocate variable byte counts in the shared import arena.
+# Rebuilding the SUM state must realign its tagged inner-state pointer.
+statement ok
+SET memory_limit='32MB'
+
+statement ok
+SET debug_force_external=true
+
+query II
+SELECT count(*),count(*) FILTER (WHERE list_min(s)=6 AND list_max(s)=6 AND length(t)=39) FROM (
+ SELECT i//3 g,string_agg(repeat('x',13),'') t,
+ as_sum(18446744073709551615::UBIGINT,1::BIGINT) s
+ FROM range(300000)t(i) GROUP BY g
+)
+----
+100000	100000
+
+statement ok
+SET debug_force_external=false
+
+statement ok
+SET memory_limit='512MB'
+
 query II
 SELECT finalize(s)=expected,finalize(c)=expected FROM (
  SELECT as_noised_count(18446744073709551615::UBIGINT,0.75) EXPORT_STATE s,
