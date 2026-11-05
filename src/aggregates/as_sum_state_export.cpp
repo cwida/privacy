@@ -172,15 +172,24 @@ struct SumStateExport<PacSumStateWrapper<INNER, VALUE>> {
 
 } // namespace
 
-void RegisterSumStateExport(AggregateFunction &function, bool double_state) {
+void RegisterSumStateExport(AggregateFunction &function) {
 	auto value_type = function.GetSignature().GetParameter(1).GetType().id();
-	if (double_state) {
+	if (value_type == LogicalTypeId::FLOAT || value_type == LogicalTypeId::DOUBLE ||
+	    value_type == LogicalTypeId::UHUGEINT
+#ifndef PAC_EXACTSUM
+	    || value_type == LogicalTypeId::HUGEINT
+#endif
+	) {
 		AggregateStateExport<ScatterDoubleState, SumStateExport<ScatterDoubleState>>::Register(function);
 	} else if (value_type == LogicalTypeId::UTINYINT || value_type == LogicalTypeId::USMALLINT ||
 	           value_type == LogicalTypeId::UINTEGER || value_type == LogicalTypeId::UBIGINT) {
 		AggregateStateExport<ScatterIntState<false>, SumStateExport<ScatterIntState<false>>>::Register(function);
-	} else {
+	} else if (value_type == LogicalTypeId::BOOLEAN || value_type == LogicalTypeId::TINYINT ||
+	           value_type == LogicalTypeId::SMALLINT || value_type == LogicalTypeId::INTEGER ||
+	           value_type == LogicalTypeId::BIGINT || value_type == LogicalTypeId::HUGEINT) {
 		AggregateStateExport<ScatterIntState<true>, SumStateExport<ScatterIntState<true>>>::Register(function);
+	} else {
+		throw InternalException("Unsupported stochastic SUM state type %s", LogicalType(value_type).ToString());
 	}
 }
 
