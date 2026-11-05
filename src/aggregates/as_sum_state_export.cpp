@@ -173,6 +173,7 @@ struct SumStateExport<PacSumStateWrapper<INNER, VALUE>> {
 } // namespace
 
 void RegisterSumStateExport(AggregateFunction &function) {
+	// Linkers may fold identical initializer functions, so callback addresses do not identify the state layout.
 	auto value_type = function.GetSignature().GetParameter(1).GetType().id();
 	if (value_type == LogicalTypeId::FLOAT || value_type == LogicalTypeId::DOUBLE ||
 	    value_type == LogicalTypeId::UHUGEINT
