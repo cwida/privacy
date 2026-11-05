@@ -4,9 +4,6 @@
 
 require privacy
 
-# Temporary crash tracing: unlike --output-sql, debug mode executes every query.
-mode debug
-
 statement ok
 PRAGMA clear_privacy_metadata;
 
