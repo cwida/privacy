@@ -72,6 +72,9 @@ struct MinMaxStateCodec {
 			ReadInner(in, *state.EnsureState(allocator));
 		}
 		state.n_buffered |= buffered;
+		if (buffered) {
+			state.FlushBuffer(state, allocator);
+		}
 #endif
 	}
 };

@@ -303,11 +303,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	pac_topk_rule.optimizer_info = pac_info;
 	OptimizerExtension::Register(db.config, std::move(pac_topk_rule));
 
-	// Decompose user-written averages before column pruning can hide the new COUNT column.
-	// Compiler-generated averages are already decomposed by CompilePrivQuery.
+	// Register as_avg rewrite rule (post-optimizer: decomposes as_noised_avg/as_avg into sum/count + division).
+	// This post-optimizer handles user-written as_avg() in SQL. Compiler-generated as_noised_avg is already
+	// decomposed during the pre-optimizer phase (in CompilePrivQuery) so this is a no-op for those.
 	{
 		OptimizerExtension pac_avg_rule;
-		pac_avg_rule.pre_optimize_function = RewritePacAvgToDiv;
+		pac_avg_rule.optimize_function = RewritePacAvgToDiv;
 		OptimizerExtension::Register(db.config, std::move(pac_avg_rule));
 	}
 

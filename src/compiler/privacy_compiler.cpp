@@ -926,7 +926,7 @@ static void CompilePacMechanism(const PrivacyCompatibilityResult &check, Optimiz
 	// currently referenced.  If we defer decomposition to the post-optimizer
 	// (RewritePacAvgToDiv), the newly-appended count column won't be visible
 	// through those thin projections, causing "Failed to bind column reference"
-	// errors. User-written as_avg() is decomposed by its separate pre-optimizer hook.
+	// errors.  The post-optimizer still handles user-written as_avg() in SQL.
 	RewritePacAvgToDiv(input, plan);
 
 	// Clip rewrite: when priv_clip_support is set, refine PAC aggregates to use

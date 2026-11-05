@@ -94,6 +94,9 @@ struct CountStateCodec {
 			ReadInner(in, *state.EnsureState(allocator), allocator);
 		}
 		state.n_buffered |= buffered;
+		if (buffered) {
+			state.FlushBuffer(state, allocator);
+		}
 #endif
 	}
 };
@@ -873,7 +876,7 @@ void RegisterDpSampleMCountFunctions(ExtensionLoader &loader) {
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Experimental variable-m SAA counters for COUNT-like values.";
 	info.descriptions.push_back(std::move(desc));
-	RegisterCountFunctions(loader, info);
+	loader.RegisterFunction(std::move(info));
 }
 
 void RegisterDpSampleMCountDistinctFunctions(ExtensionLoader &loader) {
@@ -888,7 +891,7 @@ void RegisterDpSampleMCountDistinctFunctions(ExtensionLoader &loader) {
 	desc.description =
 	    "[INTERNAL] Experimental variable-m SAA lane counters for pre-deduplicated COUNT(DISTINCT) values.";
 	info.descriptions.push_back(std::move(desc));
-	RegisterCountFunctions(loader, info);
+	loader.RegisterFunction(std::move(info));
 
 	AggregateFunctionSet if_set("as_sample_m_count_distinct_if");
 	if_set.AddFunction(AggregateFunction("as_sample_m_count_distinct_if", {LogicalType::UBIGINT, LogicalType::BOOLEAN},
@@ -902,7 +905,7 @@ void RegisterDpSampleMCountDistinctFunctions(ExtensionLoader &loader) {
 	    "[INTERNAL] Experimental variable-m SAA lane counters for conditionally pre-deduplicated COUNT(DISTINCT) "
 	    "values.";
 	if_info.descriptions.push_back(std::move(if_desc));
-	RegisterCountFunctions(loader, if_info);
+	loader.RegisterFunction(std::move(if_info));
 }
 
 // Mixed aggregate queries cannot use the dedicated three-stage DISTINCT plan. Their
@@ -1090,7 +1093,7 @@ void RegisterDpSampleMCountDistinctValuesFunctions(ExtensionLoader &loader) {
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Experimental variable-m SAA lane counters for per-PU COUNT(DISTINCT) value lists.";
 	info.descriptions.push_back(std::move(desc));
-	RegisterCountFunctions(loader, info);
+	loader.RegisterFunction(std::move(info));
 }
 
 void RegisterDpSampleMCountIfFunctions(ExtensionLoader &loader) {
@@ -1105,7 +1108,7 @@ void RegisterDpSampleMCountIfFunctions(ExtensionLoader &loader) {
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Experimental variable-m SAA counters for lane-selected COUNT-like values.";
 	info.descriptions.push_back(std::move(desc));
-	RegisterCountFunctions(loader, info);
+	loader.RegisterFunction(std::move(info));
 }
 
 static void PacSampleMCountUpdateOne(DpSampleMCountState &state, ArenaAllocator &allocator, uint64_t hash,
@@ -1291,7 +1294,7 @@ void RegisterPacSampleMCountFunctions(ExtensionLoader &loader) {
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Variable-m PAC counters with 50% world membership.";
 	info.descriptions.push_back(std::move(desc));
-	RegisterCountFunctions(loader, info);
+	loader.RegisterFunction(std::move(info));
 }
 
 void RegisterPacSampleMCountIfFunctions(ExtensionLoader &loader) {
@@ -1306,7 +1309,7 @@ void RegisterPacSampleMCountIfFunctions(ExtensionLoader &loader) {
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Variable-m PAC counters with per-lane predicates.";
 	info.descriptions.push_back(std::move(desc));
-	RegisterCountFunctions(loader, info);
+	loader.RegisterFunction(std::move(info));
 }
 
 // ============================================================================
@@ -1358,7 +1361,7 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader) {
 	avg_desc.examples = {"SELECT c_mktsegment, as_noised_avg(priv_hash(hash(c_custkey)), c_acctbal) FROM customer "
 	                     "GROUP BY c_mktsegment"};
 	avg_info.descriptions.push_back(std::move(avg_desc));
-	RegisterCountFunctions(loader, avg_info);
+	loader.RegisterFunction(std::move(avg_info));
 
 	// as_avg(UBIGINT, value_type[, correction]) → LIST<FLOAT> — same implementation as as_count(UBIGINT, ANY)
 	auto list_float_type = LogicalType::LIST(PacFloatLogicalType());
@@ -1371,12 +1374,11 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader) {
 	    "as_avg", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, list_float_type, PacCountStateSize,
 	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
-	AddPacListAggregateOverload(counters_set, "avg");
 	CreateAggregateFunctionInfo avg_counters_info(counters_set);
 	FunctionDescription avg_counters_desc;
 	avg_counters_desc.description = "[INTERNAL] Returns 64 PAC subsample counters as LIST for categorical queries.";
 	avg_counters_info.descriptions.push_back(std::move(avg_counters_desc));
-	RegisterCountFunctions(loader, avg_counters_info);
+	loader.RegisterFunction(std::move(avg_counters_info));
 }
 
 // ============================================================================

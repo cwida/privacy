@@ -179,9 +179,8 @@ No new aggregate functions, no new noise mechanisms, no plan decomposition.
 
 The membership-mask-plus-scalar SUM, COUNT, and MIN/MAX implementations expose
 DuckDB's native state-export/import callbacks, including DECIMAL specializations.
-List-input SUM, COUNT, AVG, and MIN/MAX also provide callbacks. AVG over scalar
-inputs decomposes into the spillable SUM and COUNT implementations before column
-pruning. DuckDB can export arena-backed hash-aggregate states to spillable columns
+List-input SUM, COUNT, and MIN/MAX also provide callbacks. Scalar AVG uses the
+SUM and COUNT implementations through the existing rewrite. DuckDB can export arena-backed hash-aggregate states to spillable columns
 and import them when combining partitions. Every aggregate in a hash table must
 expose a compatible state layout for DuckDB to select this path.
 
@@ -190,17 +189,20 @@ negative integer cascade levels and overflow budgets, floating-point counters,
 COUNT SWAR bytes and overflow totals, MIN/MAX bounds, and list-aggregate values
 and counts. Folded correction arguments are retained when rebinding exported states.
 It contains no addresses. Import reconstructs owned arena allocations and retains
-the inline-level optimization. Export does not finalize, resample, or add noise;
+the inline-level optimization. COUNT and MIN/MAX expand restored buffers using their existing
+kernels only on the import path, so a subsequent combine cannot overwrite a
+restored destination buffer. SUM retains restored buffers for its buffered combiner. Export does not finalize, resample, or add noise;
 the native update kernels and aggregate-state sizes remain unchanged. The binary
 representation is internal to this implementation, rather than a portable state
 interchange format.
 
-Small groups also retain their one/two-value buffers during combine. Finalization
-materializes these buffers on copies using temporary storage backed by
-`ArenaAllocator::GetUnderlyingAllocator()`, so the allocations are released after
-the callback instead of accumulating in a query-long arena. The original buffered
-state remains reusable. This addresses the Q78 path where buffers expand only in
-final combine, after sink-phase spill decisions.
+SUM retains one/two-value buffers during combine. Finalization materializes copies
+in temporary storage backed by `ArenaAllocator::GetUnderlyingAllocator()`, releasing
+these allocations after the callback. These two optimizations address the Q78
+allocation path: expanding many small groups during final combine/finalization can
+exhaust memory after sink-phase spilling decisions. Disk spilling handles stored
+states; it does not itself bound these late allocations. COUNT and MIN/MAX retain
+their original in-memory update, combine, and finalization paths.
 
 Regression coverage extends `test/sql/pac_sum.test`: round trips include signed,
 unsigned, floating-point and DECIMAL inputs, buffered/empty states, high cascade
