@@ -212,3 +212,44 @@ DROP TABLE test_data
 # Cleanup PAC metadata at end of test
 statement ok
 PRAGMA clear_privacy_metadata;
+
+# Decompose handwritten AVG before HAVING's projection map prunes its new COUNT.
+statement ok
+SET priv_rewrite=false
+
+statement ok
+SET pac_sample_diversity_check=false
+
+query III
+SELECT g,n,a FROM (
+ SELECT i%2 g,as_noised_count(18446744073709551615::UBIGINT,i) n,
+        as_noised_avg(18446744073709551615::UBIGINT,i) a
+ FROM range(8)t(i) GROUP BY g
+ HAVING as_noised_count(18446744073709551615::UBIGINT,i)>0
+) ORDER BY g
+----
+0	8	3
+1	8	4
+
+# AVG over stochastic intermediate results must preserve each lane (TPC-DS Q65).
+query I
+WITH a AS (
+ SELECT as_avg(list_transform(range(64),lambda j:(i+j)::FLOAT)) lanes FROM range(4)t(i)
+)
+SELECT count(*) FROM a,range(64)t(j) WHERE lanes[j+1]=j+1.5
+----
+64
+
+query I
+WITH a AS (
+ SELECT as_avg(list_transform(range(64),lambda j:(i+j)::FLOAT)) EXPORT_STATE s FROM range(4)t(i)
+)
+SELECT count(*) FROM a,range(64)t(j) WHERE finalize(s)[j+1]=j+1.5
+----
+64
+
+statement ok
+SET pac_sample_diversity_check=true
+
+statement ok
+SET priv_rewrite=true
