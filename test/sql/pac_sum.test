@@ -4,9 +4,6 @@
 
 require privacy
 
-# Temporary native crash tracing; every statement still executes and is checked.
-mode debug
-
 statement ok
 PRAGMA clear_privacy_metadata;
 
