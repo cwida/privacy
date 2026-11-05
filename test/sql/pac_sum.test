@@ -644,6 +644,30 @@ SELECT finalize(s)=expected,finalize(c)=expected FROM (
 ----
 true	true
 
+# NULL exported states occur naturally after an outer join. Native finalize
+# propagates NULL, and combine keeps the non-NULL input unchanged.
+query I
+WITH s AS MATERIALIZED (
+ SELECT as_sum(18446744073709551615::UBIGINT,1::BIGINT) EXPORT_STATE x,
+ as_sum(18446744073709551615::UBIGINT,1::BIGINT) expected
+)
+SELECT finalize(CASE WHEN i=0 THEN x END) IS NOT DISTINCT FROM CASE WHEN i=0 THEN expected END
+FROM s,range(2)t(i) ORDER BY i
+----
+true
+true
+
+query I
+WITH s AS MATERIALIZED (
+ SELECT as_sum(18446744073709551615::UBIGINT,1::BIGINT) EXPORT_STATE x,
+ as_sum(18446744073709551615::UBIGINT,1::BIGINT) expected
+)
+SELECT finalize(combine(CASE WHEN i=0 THEN x END,CASE WHEN i=1 THEN x END)) IS NOT DISTINCT FROM expected
+FROM s,range(2)t(i) ORDER BY i
+----
+true
+true
+
 statement ok
 SET pac_sample_diversity_check=true
 

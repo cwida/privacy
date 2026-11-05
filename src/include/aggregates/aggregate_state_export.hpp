@@ -87,7 +87,9 @@ struct AggregateStateExport {
 		for (idx_t i = 0; i < input.input_vec.size(); i++) {
 			auto value = values[i];
 			if (!value.IsValid()) {
-				throw InvalidInputException("NULL stochastic aggregate state");
+				// Keep the caller-initialized empty state. finalize propagates NULL,
+				// while combine treats one NULL input as the identity.
+				continue;
 			}
 			AggregateStateReader in(value.GetValue());
 			auto &state = *reinterpret_cast<STATE *>(input.dest_buffer + i * input.layout.total_state_size);
