@@ -4,6 +4,6 @@
 
 namespace duckdb {
 
-void RegisterSumStateExport(AggregateFunction &function, bool double_state);
+void RegisterSumStateExport(AggregateFunction &function);
 
 } // namespace duckdb

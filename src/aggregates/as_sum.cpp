@@ -734,7 +734,7 @@ void PacSumDoubleInitialize(AggregateStateInput &, data_ptr_t *states, idx_t cou
 
 // State export is cold-path metadata; the update kernels and native state sizes are unchanged.
 static AggregateFunction SpillableSum(AggregateFunction function) {
-	RegisterSumStateExport(function, function.GetStateInitCallback() == PacSumDoubleInitialize);
+	RegisterSumStateExport(function);
 	return function;
 }
 
