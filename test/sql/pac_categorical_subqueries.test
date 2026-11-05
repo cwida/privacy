@@ -870,3 +870,62 @@ DROP TABLE scalar_case_reason;
 
 statement ok
 DROP TABLE scalar_case_pu;
+
+# Mixed DISTINCT/non-DISTINCT branches copy DuckDB 2.0 correlated CTEs.
+# A copied CTE_SCAN must reference the copied definition (TPC-DS Q94).
+statement ok
+SET privacy_seed=42
+
+statement ok
+SET pac_hash_repair=true
+
+statement ok
+SET pac_mi=0
+
+statement ok
+SET pac_sample_diversity_check=false
+
+statement ok
+SET threads=1
+
+statement ok
+CREATE PU TABLE cte_person(id BIGINT,PRIVACY_KEY(id))
+
+statement ok
+CREATE TABLE cte_fact(owner BIGINT,k BIGINT,warehouse BIGINT,v BIGINT)
+
+statement ok
+CREATE TABLE cte_returns(k BIGINT)
+
+statement ok
+ALTER TABLE cte_fact ADD PRIVACY_LINK(owner) REFERENCES cte_person(id)
+
+statement ok
+INSERT INTO cte_person SELECT i FROM range(32)t(i)
+
+statement ok
+INSERT INTO cte_fact SELECT i//2,i//2,i%2,1 FROM range(64)t(i)
+
+statement ok
+INSERT INTO cte_returns VALUES(0),(10),(16)
+
+# The ordinary world-zero SQL reference gives 15 surviving orders, two facts each;
+# both stochastic aggregates apply the existing 2x sampling correction.
+query II
+SELECT count(DISTINCT f.k),sum(f.v) FROM cte_fact f
+WHERE EXISTS(SELECT 1 FROM cte_fact x WHERE x.k=f.k AND x.warehouse<>f.warehouse)
+AND NOT EXISTS(SELECT 1 FROM cte_returns r WHERE r.k=f.k)
+----
+30	60
+
+statement ok
+DROP TABLE cte_fact
+
+statement ok
+DROP TABLE cte_returns
+
+statement ok
+DROP TABLE cte_person
+
+statement ok
+SET pac_sample_diversity_check=true

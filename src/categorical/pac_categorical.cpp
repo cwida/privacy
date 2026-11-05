@@ -1,3 +1,4 @@
+#include "aggregates/aggregate_state_export.hpp"
 //
 // PAC Categorical Query Support - Implementation
 //
@@ -824,6 +825,19 @@ struct PacListAggregateState {
 	uint64_t counts[64];  // Count of non-null values (for avg/count)
 };
 
+struct ListStateCodec {
+	static void Write(AggregateStateWriter &out, const PacListAggregateState &state) {
+		out.Write(state.key_hash);
+		out.Write(state.values);
+		out.Write(state.counts);
+	}
+	static void Read(AggregateStateReader &in, PacListAggregateState &state, ArenaAllocator &) {
+		in.Read(state.key_hash);
+		in.Read(state.values);
+		in.Read(state.counts);
+	}
+};
+
 // ============================================================================
 // Template-specialized operations for each aggregate type
 // These are designed to be inlined and auto-vectorized by the compiler
@@ -1161,16 +1175,20 @@ static void PacListAggregateDestructor(Vector &, AggregateInputData &, idx_t) {
 template <PacListAggType AGG_TYPE>
 static AggregateFunction CreatePacListAggregate(const Identifier &name) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
-	return AggregateFunction(Identifier(name), {list_double_type}, list_double_type,
-	                         AggregateFunction::StateSize<PacListAggregateState>, PacListAggregateInit<AGG_TYPE>,
-	                         PacListAggregateUpdate<AGG_TYPE>, PacListAggregateCombine<AGG_TYPE>,
-	                         PacListAggregateFinalize<AGG_TYPE>, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr,
-	                         nullptr, PacListAggregateDestructor);
+	auto function = AggregateFunction(
+	    Identifier(name), {list_double_type}, list_double_type, AggregateFunction::StateSize<PacListAggregateState>,
+	    PacListAggregateInit<AGG_TYPE>, PacListAggregateUpdate<AGG_TYPE>, PacListAggregateCombine<AGG_TYPE>,
+	    PacListAggregateFinalize<AGG_TYPE>, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, nullptr,
+	    PacListAggregateDestructor);
+	AggregateStateExport<PacListAggregateState, ListStateCodec>::Register(function);
+	return function;
 }
 
 void AddPacListAggregateOverload(AggregateFunctionSet &set, const string &aggr_type) {
 	if (aggr_type == "sum") {
 		set.AddFunction(CreatePacListAggregate<PacListAggType::SUM>(set.name));
+	} else if (aggr_type == "avg") {
+		set.AddFunction(CreatePacListAggregate<PacListAggType::AVG>(set.name));
 	} else if (aggr_type == "count") {
 		set.AddFunction(CreatePacListAggregate<PacListAggType::COUNT>(set.name));
 	} else if (aggr_type == "min") {

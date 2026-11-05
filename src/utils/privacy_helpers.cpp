@@ -221,6 +221,13 @@ void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_map<idx_
 		if (map.find(cteref_ptr->table_index.index) != map.end()) {
 			cteref_ptr->table_index.index = map.at(cteref_ptr->table_index.index);
 		}
+		// A copied reader must point at the copied definition, while references
+		// to definitions outside this subtree retain their original identity.
+		auto definition = map.find(cteref_ptr->cte_index.index);
+		if (definition != map.end()) {
+			cteref_ptr->cte_index.index = definition->second;
+		}
+
 	} else if (auto dg_ptr = dynamic_cast<LogicalDelimGet *>(node)) {
 		if (map.find(dg_ptr->table_index.index) != map.end()) {
 			dg_ptr->table_index.index = map.at(dg_ptr->table_index.index);

@@ -502,7 +502,7 @@ true
 statement error
 SELECT finalize(to_aggregate_state(''::BLOB,'as_sum',['UBIGINT','BIGINT']));
 ----
-Truncated stochastic SUM state
+Truncated stochastic aggregate state
 
 
 # DECIMAL binding replaces its implementation; retain the logical third
@@ -561,3 +561,71 @@ SELECT count(*) FROM (
 ),unnest(lanes)t(v) WHERE v=30;
 ----
 64
+
+# All stochastic aggregates in a hash table must provide a state layout.
+# Exercise COUNT's SWAR overflow, MIN/MAX, AVG decomposition and list-input states.
+statement ok
+SET priv_rewrite=false
+
+statement ok
+SET pac_mi=0
+
+statement ok
+SET pac_sample_diversity_check=false
+
+statement ok
+SET threads=1
+
+statement ok
+SET memory_limit='512MB'
+
+statement ok
+CREATE TABLE mixed_spill_expected AS
+SELECT count(*) n,sum(hash(s,c,a,mn,mx)) checksum FROM (
+ SELECT i//8 g,as_sum(18446744073709551615::UBIGINT,1::BIGINT) s,
+ as_count(18446744073709551615::UBIGINT) c,
+ as_noised_avg(18446744073709551615::UBIGINT,2::DOUBLE) a,
+ as_min(18446744073709551615::UBIGINT,i%8) mn,
+ as_max(18446744073709551615::UBIGINT,i%8) mx
+ FROM range(800000)t(i) GROUP BY g
+)
+
+statement ok
+SET memory_limit='32MB'
+
+query I
+SELECT r.n=e.n AND r.checksum=e.checksum FROM mixed_spill_expected e,(
+ SELECT count(*) n,sum(hash(s,c,a,mn,mx)) checksum FROM (
+ SELECT i//8 g,as_sum(18446744073709551615::UBIGINT,1::BIGINT) s,
+ as_count(18446744073709551615::UBIGINT) c,
+ as_noised_avg(18446744073709551615::UBIGINT,2::DOUBLE) a,
+ as_min(18446744073709551615::UBIGINT,i%8) mn,
+ as_max(18446744073709551615::UBIGINT,i%8) mx
+ FROM range(800000)t(i) GROUP BY g
+ ))r
+----
+true
+
+statement ok
+SET memory_limit='512MB'
+
+statement ok
+DROP TABLE mixed_spill_expected
+
+query II
+SELECT finalize(s)=expected,finalize(c)=expected FROM (
+ SELECT as_noised_count(18446744073709551615::UBIGINT,0.75) EXPORT_STATE s,
+ as_noised_count(18446744073709551615::UBIGINT,1::BIGINT,0.75) EXPORT_STATE c,
+ as_noised_count(18446744073709551615::UBIGINT,0.75) expected FROM range(1000)
+)
+----
+true	true
+
+statement ok
+SET pac_sample_diversity_check=true
+
+statement ok
+SET memory_limit='80%'
+
+statement ok
+SET priv_rewrite=true

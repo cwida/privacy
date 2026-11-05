@@ -1,6 +1,7 @@
 #include "duckdb/common/vector/list_vector.hpp"
 #include <locale>
 #include "aggregates/as_count.hpp"
+#include "aggregates/aggregate_state_export.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "duckdb/common/types/value_map.hpp"
 #include "duckdb/parser/parsed_data/create_aggregate_function_info.hpp"
@@ -31,6 +32,72 @@ using ScatterState = PacCountState;
 using ScatterState = PacCountStateWrapper;
 #endif
 
+// Preserve SWAR bytes and overflow totals separately: exporting must not flush or
+// mutate a live aggregate, and the totals pointer is local to the process.
+struct CountStateCodec {
+	static void WriteInner(AggregateStateWriter &out, const PacCountState &state) {
+#ifndef PAC_NOCASCADING
+		out.Write(state.probabilistic_total8);
+		out.Write(state.swar_fill);
+#endif
+		out.Write(state.key_hash);
+		out.Write(state.update_count);
+		out.Write(uint8_t(state.probabilistic_total != nullptr));
+		if (state.probabilistic_total) {
+			out.WriteData(state.probabilistic_total, 64 * sizeof(uint64_t));
+		}
+	}
+	static void ReadInner(AggregateStateReader &in, PacCountState &state, ArenaAllocator &allocator) {
+#ifndef PAC_NOCASCADING
+		in.Read(state.probabilistic_total8);
+		in.Read(state.swar_fill);
+		if (state.swar_fill >= 255) {
+			throw InvalidInputException("Invalid stochastic COUNT SWAR fill");
+		}
+#endif
+		in.Read(state.key_hash);
+		in.Read(state.update_count);
+		if (in.ReadFlag()) {
+			in.ReadData(state.EnsureTotals(allocator), 64 * sizeof(uint64_t));
+		}
+	}
+	static void Write(AggregateStateWriter &out, const ScatterState &state) {
+#if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
+		WriteInner(out, state);
+#else
+		auto buffered = state.n_buffered & 7;
+		out.Write(uint8_t(buffered));
+		for (idx_t i = 0; i < buffered; i++) {
+			out.Write(state.hash_buf[i]);
+		}
+		auto *inner = state.GetState();
+		out.Write(uint8_t(inner != nullptr));
+		if (inner) {
+			WriteInner(out, *inner);
+		}
+#endif
+	}
+	static void Read(AggregateStateReader &in, ScatterState &state, ArenaAllocator &allocator) {
+		memset(&state, 0, sizeof(state));
+#if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
+		ReadInner(in, state, allocator);
+#else
+		uint8_t buffered;
+		in.Read(buffered);
+		if (buffered > 3) {
+			throw InvalidInputException("Invalid stochastic COUNT buffer size");
+		}
+		for (idx_t i = 0; i < buffered; i++) {
+			in.Read(state.hash_buf[i]);
+		}
+		if (in.ReadFlag()) {
+			ReadInner(in, *state.EnsureState(allocator), allocator);
+		}
+		state.n_buffered |= buffered;
+#endif
+	}
+};
+
 // State functions - uses ScatterState for both simple and scatter
 static idx_t PacCountStateSize(AggregateStateInput &) {
 	return sizeof(ScatterState);
@@ -41,6 +108,26 @@ static void PacCountInitialize(AggregateStateInput &, data_ptr_t *states, idx_t 
 		auto state_ptr = states[i];
 		memset(state_ptr, 0, sizeof(ScatterState));
 	}
+}
+
+static AggregateStateLayout CountStateLayout(AggregateLayoutInput &input) {
+	auto layout = AggregateStateExport<ScatterState, CountStateCodec>::Layout(input);
+	// COUNT's ANY argument affects updates only. Rebinding a finalized state
+	// needs its folded correction, including the two-argument shorthand.
+	if (input.function.GetLogicalArguments().size() == 2 && input.bind_data) {
+		layout.constant_parameters.emplace(1, Value::DOUBLE(input.bind_data->Cast<PrivBindData>().correction));
+	}
+	return layout;
+}
+
+static void RegisterCountFunctions(ExtensionLoader &loader, CreateAggregateFunctionInfo &info) {
+	info.functions.ApplyToFunctions([](AggregateFunction &function) {
+		if (function.GetStateInitCallback() == PacCountInitialize) {
+			AggregateStateExport<ScatterState, CountStateCodec>::Register(function);
+			function.GetCallbacks().get_state_type = CountStateLayout;
+		}
+	});
+	loader.RegisterFunction(std::move(info));
 }
 
 void PacCountUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, const ClusteredAggr &clusters,
@@ -366,7 +453,7 @@ void RegisterPacCountFunctions(ExtensionLoader &loader) {
 	desc.examples = {
 	    "SELECT c_mktsegment, as_noised_count(priv_hash(hash(c_custkey))) FROM customer GROUP BY c_mktsegment"};
 	info.descriptions.push_back(std::move(desc));
-	loader.RegisterFunction(std::move(info));
+	RegisterCountFunctions(loader, info);
 }
 
 // ============================================================================
@@ -469,7 +556,7 @@ void RegisterDpSampleCountFunctions(ExtensionLoader &loader) {
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Returns 64 sample-median DP counters for COUNT-like values.";
 	info.descriptions.push_back(std::move(desc));
-	loader.RegisterFunction(std::move(info));
+	RegisterCountFunctions(loader, info);
 
 	AggregateFunctionSet mask_set("as_sample_count_mask");
 	mask_set.AddFunction(AggregateFunction(
@@ -480,7 +567,7 @@ void RegisterDpSampleCountFunctions(ExtensionLoader &loader) {
 	FunctionDescription mask_desc;
 	mask_desc.description = "[INTERNAL] Returns 64 sample-median DP counters from precomputed sample masks.";
 	mask_info.descriptions.push_back(std::move(mask_desc));
-	loader.RegisterFunction(std::move(mask_info));
+	RegisterCountFunctions(loader, mask_info);
 }
 
 // Shared storage for variable-m count aggregates. It lazily allocates one counter per
@@ -786,7 +873,7 @@ void RegisterDpSampleMCountFunctions(ExtensionLoader &loader) {
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Experimental variable-m SAA counters for COUNT-like values.";
 	info.descriptions.push_back(std::move(desc));
-	loader.RegisterFunction(std::move(info));
+	RegisterCountFunctions(loader, info);
 }
 
 void RegisterDpSampleMCountDistinctFunctions(ExtensionLoader &loader) {
@@ -801,7 +888,7 @@ void RegisterDpSampleMCountDistinctFunctions(ExtensionLoader &loader) {
 	desc.description =
 	    "[INTERNAL] Experimental variable-m SAA lane counters for pre-deduplicated COUNT(DISTINCT) values.";
 	info.descriptions.push_back(std::move(desc));
-	loader.RegisterFunction(std::move(info));
+	RegisterCountFunctions(loader, info);
 
 	AggregateFunctionSet if_set("as_sample_m_count_distinct_if");
 	if_set.AddFunction(AggregateFunction("as_sample_m_count_distinct_if", {LogicalType::UBIGINT, LogicalType::BOOLEAN},
@@ -815,7 +902,7 @@ void RegisterDpSampleMCountDistinctFunctions(ExtensionLoader &loader) {
 	    "[INTERNAL] Experimental variable-m SAA lane counters for conditionally pre-deduplicated COUNT(DISTINCT) "
 	    "values.";
 	if_info.descriptions.push_back(std::move(if_desc));
-	loader.RegisterFunction(std::move(if_info));
+	RegisterCountFunctions(loader, if_info);
 }
 
 // Mixed aggregate queries cannot use the dedicated three-stage DISTINCT plan. Their
@@ -1003,7 +1090,7 @@ void RegisterDpSampleMCountDistinctValuesFunctions(ExtensionLoader &loader) {
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Experimental variable-m SAA lane counters for per-PU COUNT(DISTINCT) value lists.";
 	info.descriptions.push_back(std::move(desc));
-	loader.RegisterFunction(std::move(info));
+	RegisterCountFunctions(loader, info);
 }
 
 void RegisterDpSampleMCountIfFunctions(ExtensionLoader &loader) {
@@ -1018,7 +1105,7 @@ void RegisterDpSampleMCountIfFunctions(ExtensionLoader &loader) {
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Experimental variable-m SAA counters for lane-selected COUNT-like values.";
 	info.descriptions.push_back(std::move(desc));
-	loader.RegisterFunction(std::move(info));
+	RegisterCountFunctions(loader, info);
 }
 
 static void PacSampleMCountUpdateOne(DpSampleMCountState &state, ArenaAllocator &allocator, uint64_t hash,
@@ -1204,7 +1291,7 @@ void RegisterPacSampleMCountFunctions(ExtensionLoader &loader) {
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Variable-m PAC counters with 50% world membership.";
 	info.descriptions.push_back(std::move(desc));
-	loader.RegisterFunction(std::move(info));
+	RegisterCountFunctions(loader, info);
 }
 
 void RegisterPacSampleMCountIfFunctions(ExtensionLoader &loader) {
@@ -1219,7 +1306,7 @@ void RegisterPacSampleMCountIfFunctions(ExtensionLoader &loader) {
 	FunctionDescription desc;
 	desc.description = "[INTERNAL] Variable-m PAC counters with per-lane predicates.";
 	info.descriptions.push_back(std::move(desc));
-	loader.RegisterFunction(std::move(info));
+	RegisterCountFunctions(loader, info);
 }
 
 // ============================================================================
@@ -1246,7 +1333,7 @@ void RegisterPacCountCountersFunctions(ExtensionLoader &loader) {
 	FunctionDescription counters_desc;
 	counters_desc.description = "[INTERNAL] Returns 64 PAC subsample counters as LIST for categorical queries.";
 	counters_info.descriptions.push_back(std::move(counters_desc));
-	loader.RegisterFunction(std::move(counters_info));
+	RegisterCountFunctions(loader, counters_info);
 }
 
 // ============================================================================
@@ -1271,7 +1358,7 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader) {
 	avg_desc.examples = {"SELECT c_mktsegment, as_noised_avg(priv_hash(hash(c_custkey)), c_acctbal) FROM customer "
 	                     "GROUP BY c_mktsegment"};
 	avg_info.descriptions.push_back(std::move(avg_desc));
-	loader.RegisterFunction(std::move(avg_info));
+	RegisterCountFunctions(loader, avg_info);
 
 	// as_avg(UBIGINT, value_type[, correction]) → LIST<FLOAT> — same implementation as as_count(UBIGINT, ANY)
 	auto list_float_type = LogicalType::LIST(PacFloatLogicalType());
@@ -1284,11 +1371,12 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader) {
 	    "as_avg", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, list_float_type, PacCountStateSize,
 	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
+	AddPacListAggregateOverload(counters_set, "avg");
 	CreateAggregateFunctionInfo avg_counters_info(counters_set);
 	FunctionDescription avg_counters_desc;
 	avg_counters_desc.description = "[INTERNAL] Returns 64 PAC subsample counters as LIST for categorical queries.";
 	avg_counters_info.descriptions.push_back(std::move(avg_counters_desc));
-	loader.RegisterFunction(std::move(avg_counters_info));
+	RegisterCountFunctions(loader, avg_counters_info);
 }
 
 // ============================================================================
@@ -1316,7 +1404,7 @@ void RegisterPacNoisedClipCountFunctions(ExtensionLoader &loader) {
 	    FunctionNullHandling::SPECIAL_HANDLING, PacCountColumnUpdate, PacCountBind));
 
 	CreateAggregateFunctionInfo info(fcn_set);
-	loader.RegisterFunction(std::move(info));
+	RegisterCountFunctions(loader, info);
 }
 
 void RegisterPacClipCountFunctions(ExtensionLoader &loader) {
@@ -1334,7 +1422,7 @@ void RegisterPacClipCountFunctions(ExtensionLoader &loader) {
 	AddPacListAggregateOverload(fcn_set, "clip_count");
 
 	CreateAggregateFunctionInfo info(fcn_set);
-	loader.RegisterFunction(std::move(info));
+	RegisterCountFunctions(loader, info);
 }
 
 } // namespace duckdb

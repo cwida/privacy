@@ -62,6 +62,9 @@ static void RewritePacAvgAggregate(OptimizerExtensionInput &input, unique_ptr<Lo
 			continue;
 		}
 		auto &aggr = agg.expressions[i]->Cast<BoundAggregateExpression>();
+		if (aggr.GetChildren().size() == 1) {
+			continue; // List AVG already has its own aggregate implementation.
+		}
 		if (aggr.FunctionMutable().GetName().GetIdentifierName() == "as_noised_avg" ||
 		    aggr.FunctionMutable().GetName().GetIdentifierName() == "as_avg") {
 			avg_positions.push_back(i);

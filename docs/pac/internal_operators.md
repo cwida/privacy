@@ -175,22 +175,20 @@ No new aggregate functions, no new noise mechanisms, no plan decomposition.
 
 ---
 
-## SUM state spilling (DuckDB 2.0)
+## Stochastic aggregate state spilling (DuckDB 2.0)
 
-The membership-mask-plus-scalar overloads of `as_sum` and `as_noised_sum` expose
-DuckDB's native state-export/import callbacks, including the DECIMAL
-implementations selected during binding. DuckDB can export
-arena-backed hash-aggregate states to spillable columns and import them when
-combining partitions. Every aggregate in the hash table must expose a compatible
-state layout for DuckDB to select this path.
-
-COUNT, MIN/MAX, AVG's COUNT component, and the list-input SUM overload do not yet
-provide these callbacks. Combining one of them with a spillable SUM in the same
-hash aggregate disables arena-state spilling for that table. These queries can
-still run in memory, but may exhaust a low memory limit even when SUM alone spills.
+The membership-mask-plus-scalar SUM, COUNT, and MIN/MAX implementations expose
+DuckDB's native state-export/import callbacks, including DECIMAL specializations.
+List-input SUM, COUNT, AVG, and MIN/MAX also provide callbacks. AVG over scalar
+inputs decomposes into the spillable SUM and COUNT implementations before column
+pruning. DuckDB can export arena-backed hash-aggregate states to spillable columns
+and import them when combining partitions. Every aggregate in a hash table must
+expose a compatible state layout for DuckDB to select this path.
 
 The exported BLOB contains buffered values and masks, update counts, positive and
-negative integer cascade levels and overflow budgets, or floating-point counters.
+negative integer cascade levels and overflow budgets, floating-point counters,
+COUNT SWAR bytes and overflow totals, MIN/MAX bounds, and list-aggregate values
+and counts. Folded correction arguments are retained when rebinding exported states.
 It contains no addresses. Import reconstructs owned arena allocations and retains
 the inline-level optimization. Export does not finalize, resample, or add noise;
 the native update kernels and aggregate-state sizes remain unchanged. The binary

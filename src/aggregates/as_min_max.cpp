@@ -1,5 +1,6 @@
 #include "duckdb/common/vector/list_vector.hpp"
 #include "aggregates/as_min_max.hpp"
+#include "aggregates/aggregate_state_export.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "duckdb/parser/parsed_data/create_aggregate_function_info.hpp"
 
@@ -17,6 +18,63 @@ using MinMaxState = PacMinMaxState<T, IS_MAX>;
 template <typename T, bool IS_MAX>
 using MinMaxState = PacMinMaxStateWrapper<T, IS_MAX>;
 #endif
+
+template <typename T, bool IS_MAX>
+struct MinMaxStateCodec {
+	using State = MinMaxState<T, IS_MAX>;
+	using Inner = PacMinMaxState<T, IS_MAX>;
+	static void WriteInner(AggregateStateWriter &out, const Inner &state) {
+		out.Write(uint8_t(state.initialized));
+		out.Write(state.update_count);
+		out.Write(state.key_hash);
+		out.Write(state.global_bound);
+		out.Write(state.extremes);
+	}
+	static void ReadInner(AggregateStateReader &in, Inner &state) {
+		state.initialized = in.ReadFlag();
+		in.Read(state.update_count);
+		in.Read(state.key_hash);
+		in.Read(state.global_bound);
+		in.Read(state.extremes);
+	}
+	static void Write(AggregateStateWriter &out, const State &state) {
+#ifdef PAC_NOBUFFERING
+		WriteInner(out, state);
+#else
+		auto buffered = state.n_buffered & State::BUF_MASK;
+		out.Write(uint8_t(buffered));
+		for (idx_t i = 0; i < buffered; i++) {
+			out.Write(state.val_buf[i]);
+			out.Write(state.hash_buf[i]);
+		}
+		auto *inner = state.GetState();
+		out.Write(uint8_t(inner != nullptr));
+		if (inner) {
+			WriteInner(out, *inner);
+		}
+#endif
+	}
+	static void Read(AggregateStateReader &in, State &state, ArenaAllocator &allocator) {
+		memset(&state, 0, sizeof(state));
+#ifdef PAC_NOBUFFERING
+		ReadInner(in, state);
+#else
+		uint8_t buffered;
+		in.Read(buffered);
+		if (buffered > State::BUF_SIZE) {
+			throw InvalidInputException("Invalid stochastic MIN/MAX buffer size");
+		}
+		for (idx_t i = 0; i < buffered; i++) {
+			in.Read(state.val_buf[i]);
+			in.Read(state.hash_buf[i]);
+		}
+		if (in.ReadFlag()) {
+			ReadInner(in, *state.EnsureState(allocator));
+		}
+		state.n_buffered |= buffered;
+#endif
+	}
+};
 
 // ============================================================================
 // Update functions
@@ -187,6 +245,7 @@ static unique_ptr<FunctionData> PacMinMaxBind(BindAggregateFunctionInput &bind_i
 		function.SetStateClusterUpdateCallback(PacMinMaxUpdate<CPP_TYPE, IS_MAX>);                                     \
 		function.SetStateCombineCallback(PacMinMaxCombine<CPP_TYPE, IS_MAX>);                                          \
 		function.SetStateFinalizeCallback(PacMinMaxFinalize<CPP_TYPE, IS_MAX>);                                        \
+		AggregateStateExport<MinMaxState<CPP_TYPE, IS_MAX>, MinMaxStateCodec<CPP_TYPE, IS_MAX>>::Register(function);   \
 		break
 
 	switch (physical_type) {
@@ -293,6 +352,7 @@ static unique_ptr<FunctionData> PacMinMaxCountersBind(BindAggregateFunctionInput
 		function.SetStateClusterUpdateCallback(PacMinMaxUpdate<CPP_TYPE, IS_MAX>);                                     \
 		function.SetStateCombineCallback(PacMinMaxCombine<CPP_TYPE, IS_MAX>);                                          \
 		function.SetStateFinalizeCallback(PacMinMaxFinalizeCounters<CPP_TYPE, IS_MAX>);                                \
+		AggregateStateExport<MinMaxState<CPP_TYPE, IS_MAX>, MinMaxStateCodec<CPP_TYPE, IS_MAX>>::Register(function);   \
 		break
 
 	switch (physical_type) {

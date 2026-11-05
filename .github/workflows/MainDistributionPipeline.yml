@@ -19,6 +19,7 @@ jobs:
       duckdb_version: v2.0.0
       ci_tools_version: ebdcc1961780b0ce1272a0d7637dc58447c34885
       extension_name: privacy
+      test_config: '{"test_env_variables": {"T": "\"test/*\" --test-flags=--output-sql=true"}}'
 
   code-quality-check:
     name: Code Quality Check
