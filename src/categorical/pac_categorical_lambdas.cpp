@@ -6,6 +6,7 @@
 // Created by ila on 3/13/26.
 //
 #include "categorical/pac_categorical_lambdas.hpp"
+#include "privacy_debug.hpp"
 #include "aggregates/as_aggregate.hpp"
 #include "utils/privacy_helpers.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
@@ -166,8 +167,7 @@ CloneForLambdaBody(ClientContext &context, Expression *expr, const unordered_map
 	} else if (expr->GetExpressionType() == ExpressionType::CASE_EXPR) {
 		auto &case_expr = expr->Cast<BoundCaseExpression>();
 		if (IsScalarSubqueryWrapper(case_expr)) {
-			return CloneForLambdaBody(context, case_expr.ElseMutable().get(), pac_binding_map, captures, capture_map,
-			                          counter_bindings, struct_type);
+			PRIVACY_DEBUG_PRINT("Categorical lambda: preserving scalar-subquery cardinality check");
 		}
 		// Regular CASE - recurse into all branches
 		// Start with original return type, will update based on cloned branches

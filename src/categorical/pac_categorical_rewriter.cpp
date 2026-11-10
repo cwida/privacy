@@ -174,16 +174,16 @@ static void PrepareFilterPatternSlot(LogicalProjection &proj, idx_t i,
 		if (expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 			proj.types[i] = list_type;
 		} else if (expr->GetExpressionType() == ExpressionType::BOUND_FUNCTION) {
-			proj.types[i] = expr->return_type;
+			proj.types[i] = expr->GetReturnType();
 		} else if (expr->GetExpressionType() == ExpressionType::CASE_EXPR &&
 		           IsScalarSubqueryWrapper(expr->Cast<BoundCaseExpression>())) {
 			// first(value) now returns a counter list, but DuckDB's scalar-subquery
 			// cardinality-check CASE still has its original scalar result type.
 			auto &wrapper = expr->Cast<BoundCaseExpression>();
-			if (wrapper.Else().return_type == list_type) {
+			if (wrapper.Else().GetReturnType() == list_type) {
 				wrapper.CaseChecksMutable()[0].then_expr = BoundCastExpression::AddDefaultCastToType(
 				    std::move(wrapper.CaseChecksMutable()[0].then_expr), list_type);
-				wrapper.return_type = list_type;
+				wrapper.SetReturnType(list_type);
 				proj.types[i] = list_type;
 				PRIVACY_DEBUG_PRINT("Categorical rewrite: preserving counter lists through scalar-subquery wrapper");
 			}

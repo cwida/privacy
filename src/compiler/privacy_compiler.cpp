@@ -564,7 +564,7 @@ public:
 		vector<pair<LogicalOperator *, ColumnBinding>> found;
 		CollectMemberships(*agg.children[0], found);
 		if (found.empty()) {
-			return ColumnBinding(DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
+			return ColumnBinding();
 		}
 		if (found.size() != 1 || ContainsOutsideEntity(*agg.children[0])) {
 			throw InvalidInputException("Private UNION cannot combine independent ownership streams above a UNION");
@@ -638,7 +638,7 @@ private:
 		for (idx_t i = 0; i < count; i++) {
 			auto &expr = distinct.distinct_targets[i];
 			if (i >= old_bindings.size() || expr->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF ||
-			    expr->Cast<BoundColumnRefExpression>().binding != old_bindings[i]) {
+			    expr->Cast<BoundColumnRefExpression>().Binding() != old_bindings[i]) {
 				throw InvalidInputException("Private UNION DISTINCT requires the visible output columns");
 			}
 		}
@@ -647,7 +647,7 @@ private:
 		// DuckDB's own DISTINCT modifier above UNION DISTINCT is already satisfied.
 		if (annotation != memberships.end() && child->type == LogicalOperatorType::LOGICAL_PROJECTION &&
 		    child->children[0]->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY &&
-		    annotation->second.column_index.index == count) {
+		    annotation->second.column_index == ProjectionIndex(count)) {
 			op = std::move(op->children[0]);
 			return;
 		}
@@ -919,7 +919,7 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 	vector<PrivAggregateHashInfo> result;
 	for (auto *target_agg : target_aggregates) {
 		auto union_mask = unions.FindForAggregate(*target_agg);
-		if (union_mask.table_index != DConstants::INVALID_INDEX) {
+		if (union_mask.table_index.index != DConstants::INVALID_INDEX) {
 			result.push_back(
 			    {target_agg, make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, union_mask), union_mask, 1.0});
 			continue;

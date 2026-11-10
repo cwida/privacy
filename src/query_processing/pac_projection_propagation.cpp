@@ -47,7 +47,7 @@ static bool FindDirectPathToSource(LogicalOperator *current, idx_t target_table_
 			return true;
 		}
 	} else if (current->type == LogicalOperatorType::LOGICAL_CTE_REF) {
-		if (current->Cast<LogicalCTERef>().table_index == target_table_index) {
+		if (current->Cast<LogicalCTERef>().table_index.index == target_table_index) {
 			return true;
 		}
 	} else if (current->type == LogicalOperatorType::LOGICAL_PROJECTION) {

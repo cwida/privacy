@@ -103,7 +103,7 @@ bool ContainsUnaggregatedEntityInput(const LogicalOperator &op, const PrivacyCom
 	}
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
 		auto table = op.Cast<LogicalGet>().GetTable();
-		if (table && (check.fk_paths.count(table->name) ||
+		if (table && (check.fk_paths.count(table->name.GetIdentifierName()) ||
 		              std::find(check.scanned_pu_tables.begin(), check.scanned_pu_tables.end(), table->name) !=
 		                  check.scanned_pu_tables.end())) {
 			return true;
