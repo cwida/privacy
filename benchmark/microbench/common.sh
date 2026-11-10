@@ -3,7 +3,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINARIES_DIR="$SCRIPT_DIR/binaries"
-RESULTS_DIR="$SCRIPT_DIR/results"
+RESULTS_DIR="${RESULTS_DIR:-$SCRIPT_DIR/results}"
 # Default binary (with all optimizations enabled)
 DEFAULT_BINARY="$BINARIES_DIR/duckdb_default"
 TEST_DB="$BINARIES_DIR/test_data.duckdb"
@@ -14,9 +14,13 @@ BENCH_RUNS=${BENCH_RUNS:-3}
 THREADS=${THREADS:-1}  # Default to single-threaded to avoid partitioning issues
 
 # Query setup commands
-QUERY_SETUP="SET pac_mi=0.0; SET threads=4; SET max_memory='30G'; SET max_temp_directory_size='90GB';"
+QUERY_SETUP="${QUERY_SETUP:-SET pac_mi=0.0; SET threads=4; SET max_memory='30G'; SET max_temp_directory_size='90GB';}"
 
 mkdir -p "$RESULTS_DIR"
+
+median_seconds() {
+    sort -n | awk '{a[NR]=$1} END {if (NR % 2) print a[(NR+1)/2]; else if (NR) print (a[NR/2]+a[NR/2+1])/2}'
+}
 
 # Run a benchmark query and extract timing
 # Args: binary, query, [runs]
@@ -98,8 +102,8 @@ except:
     fi
 
     # Calculate medians
-    local wall_median=$(printf '%s\n' "${wall_times[@]}" | sort -n | awk 'NR==int((NR+1)/2)')
-    local agg_median=$(printf '%s\n' "${agg_times[@]}" | sort -n | awk 'NR==int((NR+1)/2)')
+    local wall_median=$(printf '%s\n' "${wall_times[@]}" | median_seconds)
+    local agg_median=$(printf '%s\n' "${agg_times[@]}" | median_seconds)
 
     echo "$wall_median,$agg_median,${wall_times[*]},${agg_times[*]}"
 }
@@ -274,8 +278,8 @@ except:
     fi
 
     # Calculate medians
-    local wall_median=$(printf '%s\n' "${wall_times[@]}" | sort -n | awk 'NR==int((NR+1)/2)')
-    local agg_median=$(printf '%s\n' "${agg_times[@]}" | sort -n | awk 'NR==int((NR+1)/2)')
+    local wall_median=$(printf '%s\n' "${wall_times[@]}" | median_seconds)
+    local agg_median=$(printf '%s\n' "${agg_times[@]}" | median_seconds)
 
     echo "$wall_median,$agg_median,${wall_times[*]},${agg_times[*]}"
 }
