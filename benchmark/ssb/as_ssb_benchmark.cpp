@@ -267,8 +267,8 @@ int main(int argc, char **argv) {
 		double import_ms = Ms(start);
 		Query(con, "CHECKPOINT");
 		// Explicit column protection permits grouping by customer city/nation while retaining key protection.
-		Query(con, "ALTER TABLE customer ADD PRIVACY_KEY(c_custkey); ALTER TABLE customer SET PU; "
-		           "ALTER TABLE customer ADD PROTECTED(c_custkey); "
+		Query(con, "ALTER TABLE customer ADD PRIVACY_KEY(c_custkey); "
+		           "ALTER TABLE customer ADD PROTECTED(c_custkey); ALTER TABLE customer SET PU; "
 		           "ALTER TABLE lineorder ADD PRIVACY_LINK(lo_custkey) REFERENCES customer(c_custkey)");
 		for (auto name : {"q11", "q12", "q13", "q21", "q22", "q23", "q31", "q32", "q33", "q34", "q41", "q42", "q43"}) {
 			string sql = Read(ssb + "/queries/" + name + ".sql");

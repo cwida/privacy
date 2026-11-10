@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Build variants without deleting the analytical build or its measured binaries.
 set -euo pipefail
+# The current rerun retries analytical setup failures before timing microbenchmarks.
+while systemctl is-active --quiet asa-analytical-retry-20261110.service; do sleep 10; done
 results="${1:?Usage: run_graviton.sh NEW_RESULTS_DIR}"
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 test ! -e "$results" || { echo "Refusing existing results: $results" >&2; exit 1; }
