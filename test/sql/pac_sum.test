@@ -668,6 +668,23 @@ FROM s,range(2)t(i) ORDER BY i
 true
 true
 
+# Clustered updates reuse their selected views across groups. Exercise a partial
+# chunk, nullable values, dictionary selections, and constant hash/value inputs.
+query II
+SELECT count(*),count(*) FILTER (WHERE list_extract(s,1)=2*expected
+ AND list_min(k)=2*3*n AND list_max(k)=2*3*n AND list_min(z)=0 AND list_max(z)=0)
+FROM (
+ SELECT i%13 g,
+ as_sum(CASE WHEN i%2=0 THEN 18446744073709551615::UBIGINT ELSE 1::UBIGINT END,
+        CASE WHEN i%5=0 THEN NULL ELSE (i%101)::INTEGER END) s,
+ as_sum(18446744073709551615::UBIGINT,3::INTEGER) k,
+ as_sum(18446744073709551615::UBIGINT,NULL::INTEGER) z,
+ sum(CASE WHEN i%5=0 THEN NULL ELSE (i%101)::INTEGER END) expected,count(*) n
+ FROM range(10000)t(i) WHERE i%7<>0 GROUP BY g
+)
+----
+13	13
+
 statement ok
 SET pac_sample_diversity_check=true
 
