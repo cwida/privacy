@@ -22,6 +22,38 @@ median_seconds() {
     sort -n | awk '{a[NR]=$1} END {if (NR % 2) print a[(NR+1)/2]; else if (NR) print (a[NR/2]+a[NR/2+1])/2}'
 }
 
+aggregate_profile_seconds() {
+    python3 - "$1" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as file:
+    profile = json.load(file)
+
+def aggregate_time(node):
+    kind = node.get("operator_type", node.get("type", ""))
+    matched = any(name in kind for name in ("UNGROUPED", "GROUP_BY", "AGGREGATE"))
+    seconds = node.get("operator_timing", node.get("timing", 0.0)) if matched else 0.0
+    count = int(matched)
+    for child in node.get("children", []):
+        child_seconds, child_count = aggregate_time(child)
+        seconds += child_seconds
+        count += child_count
+    return seconds, count
+
+seconds = 0.0
+count = 0
+# DuckDB 2.0 places the operator tree under "operator" and renames its fields.
+for root in profile.get("operator", [profile]):
+    root_seconds, root_count = aggregate_time(root)
+    seconds += root_seconds
+    count += root_count
+if not count:
+    raise ValueError("No aggregate operator found in the query profile")
+print(f"{seconds:.3f}")
+PY
+}
+
 # Run a benchmark query and extract timing
 # Args: binary, query, [runs]
 # Returns: wall_median,agg_median,wall_times,agg_times
@@ -37,13 +69,14 @@ run_bench() {
 
     # Warmup
     for ((i=0; i<WARMUP_RUNS; i++)); do
-        "$binary" -c "$QUERY_SETUP $query" >/dev/null 2>&1
+        "$binary" -c "$QUERY_SETUP $query" >/dev/null 2>> "$RESULTS_DIR/errors.log"
     done
 
     # Benchmark runs with profiling
     local wall_times=()
     local agg_times=()
-    local profile_file=$(mktemp)
+    local profile_dir=$(mktemp -d)
+    local profile_file="$profile_dir/profile.json"
     local query_failed=0
     local timeout_threshold=25.0
 
@@ -51,10 +84,10 @@ run_bench() {
         local start=$(python3 -c 'import time; print(time.time())')
         if ! "$binary" -c "
             $QUERY_SETUP
-            PRAGMA enable_profiling='json';
-            PRAGMA profiling_output='$profile_file';
+            SET enable_profiling='json';
+            SET profiling_output='$profile_file';
             $query
-        " >/dev/null 2>&1; then
+        " >/dev/null 2>> "$RESULTS_DIR/errors.log"; then
             query_failed=1
             break
         fi
@@ -62,29 +95,11 @@ run_bench() {
         local elapsed=$(python3 -c "print(f'{$end - $start:.3f}')")
         wall_times+=("$elapsed")
 
-        # Extract aggregate operator time from JSON profile
-        local agg_time=$(python3 -c "
-import json
-import sys
-try:
-    with open('$profile_file') as f:
-        data = json.load(f)
-
-    def find_agg_time(node):
-        total = 0.0
-        op_type = node.get('operator_type', '')
-        # Match aggregate operators
-        if 'UNGROUPED' in op_type or 'GROUP_BY' in op_type or 'AGGREGATE' in op_type:
-            total += node.get('operator_timing', 0.0)
-        for child in node.get('children', []):
-            total += find_agg_time(child)
-        return total
-
-    agg_sec = find_agg_time(data)
-    print(f'{agg_sec:.3f}')
-except:
-    print('0.000')
-" 2>/dev/null)
+        local agg_time
+        if ! agg_time=$(aggregate_profile_seconds "$profile_file" 2>> "$RESULTS_DIR/errors.log"); then
+            query_failed=1
+            break
+        fi
         agg_times+=("$agg_time")
 
         # Stop repeating if query took longer than threshold
@@ -94,6 +109,7 @@ except:
     done
 
     rm -f "$profile_file"
+    rmdir "$profile_dir"
 
     # If any benchmark run failed, return error indicator
     if [[ $query_failed -eq 1 ]]; then
@@ -204,7 +220,7 @@ run_bench_db() {
     # Warmup - check if query succeeds
     local warmup_failed=0
     for ((i=0; i<WARMUP_RUNS; i++)); do
-        if ! "$binary" "$TEST_DB" -c "$QUERY_SETUP $query" >/dev/null 2>&1; then
+        if ! "$binary" "$TEST_DB" -c "$QUERY_SETUP $query" >/dev/null 2>> "$RESULTS_DIR/errors.log"; then
             warmup_failed=1
             break
         fi
@@ -219,7 +235,8 @@ run_bench_db() {
     # Benchmark runs with profiling
     local wall_times=()
     local agg_times=()
-    local profile_file=$(mktemp)
+    local profile_dir=$(mktemp -d)
+    local profile_file="$profile_dir/profile.json"
     local query_failed=0
     local timeout_threshold=25.0
 
@@ -227,10 +244,10 @@ run_bench_db() {
         local start=$(python3 -c 'import time; print(time.time())')
         if ! "$binary" "$TEST_DB" -c "
             $QUERY_SETUP
-            PRAGMA enable_profiling='json';
-            PRAGMA profiling_output='$profile_file';
+            SET enable_profiling='json';
+            SET profiling_output='$profile_file';
             $query
-        " >/dev/null 2>&1; then
+        " >/dev/null 2>> "$RESULTS_DIR/errors.log"; then
             query_failed=1
             break
         fi
@@ -238,29 +255,11 @@ run_bench_db() {
         local elapsed=$(python3 -c "print(f'{$end - $start:.3f}')")
         wall_times+=("$elapsed")
 
-        # Extract aggregate operator time from JSON profile
-        local agg_time=$(python3 -c "
-import json
-import sys
-try:
-    with open('$profile_file') as f:
-        data = json.load(f)
-
-    def find_agg_time(node):
-        total = 0.0
-        op_type = node.get('operator_type', '')
-        # Match aggregate operators
-        if 'UNGROUPED' in op_type or 'GROUP_BY' in op_type or 'AGGREGATE' in op_type:
-            total += node.get('operator_timing', 0.0)
-        for child in node.get('children', []):
-            total += find_agg_time(child)
-        return total
-
-    agg_sec = find_agg_time(data)
-    print(f'{agg_sec:.3f}')
-except:
-    print('0.000')
-" 2>/dev/null)
+        local agg_time
+        if ! agg_time=$(aggregate_profile_seconds "$profile_file" 2>> "$RESULTS_DIR/errors.log"); then
+            query_failed=1
+            break
+        fi
         agg_times+=("$agg_time")
 
         # Stop repeating if query took longer than threshold
@@ -270,6 +269,7 @@ except:
     done
 
     rm -f "$profile_file"
+    rmdir "$profile_dir"
 
     # If any benchmark run failed, return error indicator
     if [[ $query_failed -eq 1 ]]; then
