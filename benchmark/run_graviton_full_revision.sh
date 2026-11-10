@@ -15,7 +15,7 @@ git rev-parse HEAD > "$results/repro/source_commit.txt"
 git status --short > "$results/repro/source_status.txt"
 git submodule status > "$results/repro/submodules.txt"
 { uname -a; lscpu; free -h; lsblk -o NAME,SIZE,MODEL,MOUNTPOINTS; df -h "$root"; clang-22 --version; } > "$results/repro/environment.txt"
-for unit in asa-main-prepare-20261110 asa-duckdb2-build-20261110 asa-data-prepare-20261110; do
+for unit in asa-main-prepare-20261110 asa-duckdb2-build-20261110 asa-data-prepare-20261110 asa-data-prepare-retry-20261110 asa-duckdb2-validated-20261110; do
   while systemctl is-active --quiet "$unit"; do sleep 10; done
 done
 test "$(cat "$root/repro/main_prepare/exit_code")" = 0

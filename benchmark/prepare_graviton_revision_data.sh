@@ -4,6 +4,7 @@ root="${1:?Usage: prepare_graviton_revision_data.sh ROOT}"
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mkdir -p "$root/data" "$root/repro/data_prepare"
 exec > >(tee -a "$root/repro/data_prepare/run.log") 2>&1
+printf 'running\n' > "$root/repro/data_prepare/exit_code"
 trap 'printf "%s\n" "$?" > "$root/repro/data_prepare/exit_code"' EXIT
 cd "$repo"
 if [ ! -d "$root/ssb-dbgen" ]; then
