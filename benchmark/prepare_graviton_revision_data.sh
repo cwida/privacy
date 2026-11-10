@@ -16,6 +16,7 @@ make -C "$root/ssb-dbgen" dbgen CC=clang-22 \
 if [ ! -f "$root/data/ssb_sf30/generation_complete" ]; then
   bash benchmark/ssb/prepare.sh "$root/ssb-dbgen" "$root/data/ssb_sf30" 30
 fi
+while pgrep -x apt-get >/dev/null; do sleep 5; done
 python3 -m venv --system-site-packages "$root/prepare-env"
 "$root/prepare-env/bin/python" -m pip freeze > "$root/repro/data_prepare/python_requirements.txt"
 for workload in damico2006 ahrq2016; do
