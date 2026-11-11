@@ -86,7 +86,6 @@ install(
 # Test runners and benchmarks - only build for native platforms, not WASM or
 # Windows (Windows lacks unistd.h and other POSIX features used by the benchmark
 # code)
-set(PRIVACY_LINK_LIBS duckdb_static)
 
 if(NOT EMSCRIPTEN AND NOT WIN32)
   # Build a single unified test executable that invokes all tests via
@@ -96,56 +95,49 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
     src/test/test_runner.cpp src/test/test_plan_traversal.cpp
     src/test/test_schema_metadata.cpp src/test/test_compiler_functions.cpp
     src/test/test_privacy_parser.cpp)
-  target_link_libraries(pac_test_runner PRIVATE ${PRIVACY_LINK_LIBS})
 
   # TPCH + AS benchmark runner
   add_executable(as_tpch_benchmark benchmark/tpch/as_tpch_benchmark.cpp)
-  target_link_libraries(as_tpch_benchmark PRIVATE ${PRIVACY_LINK_LIBS})
 
   # WIP rebuttal experiment: four-way MEPS balanced repeated replication
   # benchmark
   add_executable(meps_brr_poc benchmark/meps_brr/meps_brr_poc.cpp)
-  target_link_libraries(meps_brr_poc PRIVATE ${PRIVACY_LINK_LIBS})
 
   # WIP rebuttal experiment: standard joined SSB queries and 64 sampled worlds
   add_executable(as_ssb_benchmark benchmark/ssb/as_ssb_benchmark.cpp)
-  target_link_libraries(as_ssb_benchmark PRIVATE ${PRIVACY_LINK_LIBS})
 
   # ClickBench + AS benchmark runner
   add_executable(as_clickbench_benchmark
                  benchmark/clickbench/as_clickbench_benchmark.cpp)
-  target_link_libraries(as_clickbench_benchmark PRIVATE ${PRIVACY_LINK_LIBS})
 
-    # TPC-DS automatic-rewriter coverage and end-to-end performance
-    add_executable(as_tpcds_benchmark benchmark/tpcds/as_tpcds_benchmark.cpp)
-    target_link_libraries(as_tpcds_benchmark PRIVATE ${PRIVACY_LINK_LIBS})
+  # TPC-DS automatic-rewriter coverage and end-to-end performance
+  add_executable(as_tpcds_benchmark benchmark/tpcds/as_tpcds_benchmark.cpp)
 
-    # Unified DP utility benchmark runner
-    set(TPCH_STOCK_DP_QUERY_NAMES q01 q05 q06 q14 q19)
-    set(TPCH_STOCK_DP_QUERY_FILES)
-    foreach(QUERY_NAME IN LISTS TPCH_STOCK_DP_QUERY_NAMES)
-        string(TOUPPER ${QUERY_NAME} QUERY_NAME_UPPER)
-        set(QUERY_FILE "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/dp/tpch_queries/${QUERY_NAME}.sql")
-        list(APPEND TPCH_STOCK_DP_QUERY_FILES "${QUERY_FILE}")
-        file(READ
-            "${QUERY_FILE}"
-            "TPCH_${QUERY_NAME_UPPER}_SQL")
-    endforeach()
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-        ${TPCH_STOCK_DP_QUERY_FILES})
-    set(TPCH_QUERY_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
-    file(MAKE_DIRECTORY "${TPCH_QUERY_GENERATED_DIR}")
-    configure_file(
-        benchmark/include/tpch_stock_queries.hpp.in
-        "${TPCH_QUERY_GENERATED_DIR}/tpch_stock_queries.hpp"
-        @ONLY)
-    add_executable(dp_benchmark_runner benchmark/dp/dp_benchmark_runner.cpp)
-    target_include_directories(dp_benchmark_runner PRIVATE "${TPCH_QUERY_GENERATED_DIR}")
-    target_link_libraries(dp_benchmark_runner PRIVATE ${PRIVACY_LINK_LIBS})
+  # Unified DP utility benchmark runner
+  set(TPCH_STOCK_DP_QUERY_NAMES q01 q05 q06 q14 q19)
+  set(TPCH_STOCK_DP_QUERY_FILES)
+  foreach(QUERY_NAME IN LISTS TPCH_STOCK_DP_QUERY_NAMES)
+    string(TOUPPER ${QUERY_NAME} QUERY_NAME_UPPER)
+    set(QUERY_FILE
+        "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/dp/tpch_queries/${QUERY_NAME}.sql"
+    )
+    list(APPEND TPCH_STOCK_DP_QUERY_FILES "${QUERY_FILE}")
+    file(READ "${QUERY_FILE}" "TPCH_${QUERY_NAME_UPPER}_SQL")
+  endforeach()
+  set_property(
+    DIRECTORY
+    APPEND
+    PROPERTY CMAKE_CONFIGURE_DEPENDS ${TPCH_STOCK_DP_QUERY_FILES})
+  set(TPCH_QUERY_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+  file(MAKE_DIRECTORY "${TPCH_QUERY_GENERATED_DIR}")
+  configure_file(benchmark/include/tpch_stock_queries.hpp.in
+                 "${TPCH_QUERY_GENERATED_DIR}/tpch_stock_queries.hpp" @ONLY)
+  add_executable(dp_benchmark_runner benchmark/dp/dp_benchmark_runner.cpp)
+  target_include_directories(dp_benchmark_runner
+                             PRIVATE "${TPCH_QUERY_GENERATED_DIR}")
 
   # IMDb/JOB benchmark runner
   add_executable(imdb_benchmark benchmark/imdb/imdb_benchmark.cpp)
-  target_link_libraries(imdb_benchmark PRIVATE ${PRIVACY_LINK_LIBS})
 
   foreach(
     PRIVACY_RUNNER IN
@@ -157,6 +149,7 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
           as_tpcds_benchmark
           dp_benchmark_runner
           imdb_benchmark)
+    target_link_libraries(${PRIVACY_RUNNER} PRIVATE duckdb_static)
     link_extension_libraries(${PRIVACY_RUNNER} PRIVATE)
   endforeach()
 endif()

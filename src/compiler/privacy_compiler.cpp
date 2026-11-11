@@ -520,7 +520,8 @@ public:
 					ref->ResolveOperatorTypes();
 					memberships.emplace(ref, ColumnBinding(ref->table_index, ProjectionIndex(mask_column)));
 				}
-				PRIVACY_DEBUG_PRINT("[PRIVATE UNION] Exported membership through CTE " + cte.ctename.GetIdentifierName());
+				PRIVACY_DEBUG_PRINT("[PRIVATE UNION] Exported membership through CTE " +
+				                    cte.ctename.GetIdentifierName());
 			}
 			Rewrite(cte.children[1]);
 			cte.ResolveOperatorTypes();
@@ -570,8 +571,8 @@ public:
 			throw InvalidInputException("Private UNION cannot combine independent ownership streams above a UNION");
 		}
 		CheckBranch(*agg.children[0]);
-		auto mask =
-		    PropagateSingleBinding(*plan, found[0].second.table_index.index, found[0].second, LogicalType::UBIGINT, &agg);
+		auto mask = PropagateSingleBinding(*plan, found[0].second.table_index.index, found[0].second,
+		                                   LogicalType::UBIGINT, &agg);
 		if (mask.table_index.index == DConstants::INVALID_INDEX) {
 			throw InvalidInputException("Private UNION could not propagate membership to the consuming aggregate");
 		}
@@ -601,10 +602,11 @@ private:
 			                                input.optimizer.binder.GenerateTableIndex(), std::move(aggregates));
 			for (idx_t i = 0; i < count; i++) {
 				dedup->groups.push_back(make_uniq<BoundColumnRefExpression>(types[i], bindings[i]));
-				outputs.push_back(make_uniq<BoundColumnRefExpression>(types[i], ColumnBinding(dedup->group_index, ProjectionIndex(i))));
+				outputs.push_back(make_uniq<BoundColumnRefExpression>(
+				    types[i], ColumnBinding(dedup->group_index, ProjectionIndex(i))));
 			}
-			outputs.push_back(
-			    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, ColumnBinding(dedup->aggregate_index, ProjectionIndex(0))));
+			outputs.push_back(make_uniq<BoundColumnRefExpression>(
+			    LogicalType::UBIGINT, ColumnBinding(dedup->aggregate_index, ProjectionIndex(0))));
 			dedup->children.push_back(std::move(op));
 			op = std::move(dedup);
 		} else {
@@ -657,7 +659,8 @@ private:
 		ProjectMembership(op, count, output_index, true);
 		ColumnBindingReplacer replacer;
 		for (idx_t i = 0; i < count; i++) {
-			replacer.replacement_bindings.emplace_back(old_bindings[i], ColumnBinding(output_index, ProjectionIndex(i)));
+			replacer.replacement_bindings.emplace_back(old_bindings[i],
+			                                           ColumnBinding(output_index, ProjectionIndex(i)));
 		}
 		replacer.stop_operator = op.get();
 		replacer.VisitOperator(*plan);

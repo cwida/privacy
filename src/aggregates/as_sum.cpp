@@ -658,8 +658,8 @@ void PacSumScatterUpdateDouble(Vector inputs[], AggregateInputData &aggr_input_d
 
 static void DpSampleSumUpdateDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t input_count,
                                     const ClusteredAggr &clusters, idx_t count) {
-	PacSumUpdateClusters<ScatterDoubleState, true, double, double>(
-	    inputs, clusters, aggr_input_data.allocator, GetPrivSampleLanes(aggr_input_data));
+	PacSumUpdateClusters<ScatterDoubleState, true, double, double>(inputs, clusters, aggr_input_data.allocator,
+	                                                               GetPrivSampleLanes(aggr_input_data));
 }
 
 static void DpSampleSumScatterUpdateDouble(Vector inputs[], AggregateInputData &aggr_input_data, idx_t, Vector &states,
