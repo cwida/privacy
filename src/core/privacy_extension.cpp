@@ -32,6 +32,7 @@
 #include "table_functions/dp_sass_stability_query.hpp"
 #include "query_processing/pac_topk_rewriter.hpp"
 #include "query_processing/pac_avg_rewriter.hpp"
+#include "query_processing/as_correlation_optimizer.hpp"
 #include "privacy_debug.hpp"
 
 namespace duckdb {
@@ -286,6 +287,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 		          << "\n";
 #endif
 	}
+
+	RegisterASCorrelationOptimizer(db);
 
 	// Register PAC optimizer rule
 	auto priv_rewrite_rule = PACRewriteRule();

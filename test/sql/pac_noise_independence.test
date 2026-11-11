@@ -197,3 +197,114 @@ WHERE a.rowid < 1000 AND b.rowid >= 1000 AND a.c IS DISTINCT FROM b.c
 
 statement ok
 DEALLOCATE seeded_count
+
+# Correlated scalar releases must draw independently for repeated outer keys,
+# even when their deterministic aggregate counters are shared.
+statement ok
+SET priv_rewrite=false
+
+statement ok
+CREATE TABLE correlated_noise_input AS
+SELECT 0::INTEGER AS k, i AS e, 1 + i % 7 AS v FROM range(128) t(i)
+
+statement ok
+CREATE TABLE correlated_noise_outer AS
+SELECT i AS id, 0::INTEGER AS k, CASE WHEN i % 2 = 0 THEN 'KEEP' ELSE 'DROP' END AS label
+FROM range(4096) t(i)
+
+statement ok
+CREATE TABLE correlated_noise_result AS
+SELECT o.id,
+       (SELECT as_noised(as_sum(priv_hash(hash(i.e)), i.v))
+        FROM correlated_noise_input i WHERE i.k = o.k) AS s,
+       (SELECT as_noised_div(as_sum(priv_hash(hash(i.e)), i.v),
+                             as_count(priv_hash(hash(i.e)), i.v))
+        FROM correlated_noise_input i WHERE i.k = o.k) AS d
+FROM correlated_noise_outer o
+
+query II
+SELECT count(DISTINCT s) > 3000, count(DISTINCT d) > 3000
+FROM correlated_noise_result
+----
+true	true
+
+# With noise suppressed, the rewrite must exactly preserve empty inputs,
+# NULL correlation keys, duplicate keys, and multiple scalar subqueries.
+statement ok
+INSERT INTO correlated_noise_outer VALUES (4096, 1, 'KEEP'), (4097, NULL, 'DROP')
+
+statement ok
+SET pac_mi=0
+
+statement ok
+SET disabled_optimizers='extension'
+
+statement ok
+CREATE TABLE correlated_noise_reference AS
+SELECT o.id,
+       (SELECT as_noised(as_sum(priv_hash(hash(i.e)), i.v))
+        FROM correlated_noise_input i WHERE i.k = o.k) AS s,
+       (SELECT as_noised_div(as_sum(priv_hash(hash(i.e)), i.v),
+                             as_count(priv_hash(hash(i.e)), i.v))
+        FROM correlated_noise_input i WHERE i.k = o.k) AS d
+FROM correlated_noise_outer o
+
+statement ok
+SET disabled_optimizers=''
+
+statement ok
+CREATE TABLE correlated_noise_actual AS
+SELECT o.id,
+       (SELECT as_noised(as_sum(priv_hash(hash(i.e)), i.v))
+        FROM correlated_noise_input i WHERE i.k = o.k) AS s,
+       (SELECT as_noised_div(as_sum(priv_hash(hash(i.e)), i.v),
+                             as_count(priv_hash(hash(i.e)), i.v))
+        FROM correlated_noise_input i WHERE i.k = o.k) AS d
+FROM correlated_noise_outer o
+
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM correlated_noise_actual EXCEPT ALL SELECT * FROM correlated_noise_reference)
+  UNION ALL
+  (SELECT * FROM correlated_noise_reference EXCEPT ALL SELECT * FROM correlated_noise_actual)
+) differences
+----
+0
+
+
+# Pure outer predicates can move before the shared counters, while the noisy
+# comparison and its potentially throwing arithmetic retain their output layout.
+statement ok
+SET disabled_optimizers='extension'
+
+statement ok
+CREATE TABLE correlated_filtered_reference AS
+SELECT o.id FROM correlated_noise_outer o
+WHERE o.label = 'KEEP' AND o.id * 5 < (
+    SELECT as_noised_div(as_sum(priv_hash(hash(i.e)), i.v),
+                         as_count(priv_hash(hash(i.e)), i.v))
+    FROM correlated_noise_input i WHERE i.k = o.k
+)
+
+statement ok
+SET disabled_optimizers=''
+
+query I
+SELECT count(*) FROM (
+  (SELECT o.id FROM correlated_noise_outer o
+   WHERE o.label = 'KEEP' AND o.id * 5 < (
+       SELECT as_noised_div(as_sum(priv_hash(hash(i.e)), i.v),
+                            as_count(priv_hash(hash(i.e)), i.v))
+       FROM correlated_noise_input i WHERE i.k = o.k
+   ) EXCEPT ALL SELECT * FROM correlated_filtered_reference)
+  UNION ALL
+  (SELECT * FROM correlated_filtered_reference EXCEPT ALL
+   SELECT o.id FROM correlated_noise_outer o
+   WHERE o.label = 'KEEP' AND o.id * 5 < (
+       SELECT as_noised_div(as_sum(priv_hash(hash(i.e)), i.v),
+                            as_count(priv_hash(hash(i.e)), i.v))
+       FROM correlated_noise_input i WHERE i.k = o.k
+   ))
+) differences
+----
+0

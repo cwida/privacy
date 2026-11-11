@@ -870,3 +870,79 @@ DROP TABLE scalar_case_reason;
 
 statement ok
 DROP TABLE scalar_case_pu;
+
+
+# Right-anti membership filters must preserve ownership joins, duplicates,
+# NULL-safe matches, and the output layout when the build/probe sides change.
+# as_count scales each world by two for 50% sampling; divide out that scale.
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET priv_rewrite=false;
+
+statement ok
+SET pac_sample_diversity_check=false;
+
+statement ok
+CREATE TABLE anti_owners AS SELECT i::BIGINT k FROM range(1000) r(i);
+
+statement ok
+CREATE TABLE anti_facts AS
+SELECT (i % 1000)::BIGINT k, (i % 7)::INTEGER v FROM range(10000) r(i);
+
+statement ok
+CREATE TABLE anti_outer(k BIGINT, v INTEGER);
+
+statement ok
+INSERT INTO anti_outer VALUES (10, 3), (10, 3), (11, 4), (2000, 1), (NULL, 1), (12, 0);
+
+query I
+SELECT list_extract(as_count(3::UBIGINT), 1) / 2
+FROM anti_outer a
+WHERE a.v > 0 AND NOT EXISTS (
+    SELECT 1 FROM anti_owners o JOIN anti_facts f ON o.k = f.k
+    WHERE f.k = a.k AND f.v <> a.v AND f.v > 1
+);
+----
+2
+
+# NULL=NULL must remain a match when neither join key is proven non-null.
+statement ok
+CREATE TABLE anti_nullable(k BIGINT, v INTEGER);
+
+statement ok
+INSERT INTO anti_nullable VALUES (NULL, 2), (10, 3), (11, 4);
+
+query I
+SELECT list_extract(as_count(3::UBIGINT), 1) / 2
+FROM anti_outer a
+WHERE a.v > 0 AND NOT EXISTS (
+    SELECT 1 FROM anti_nullable n
+    WHERE n.k IS NOT DISTINCT FROM a.k AND n.v <> a.v
+);
+----
+4
+
+# A LIMIT is a barrier: filtering below it can change which evidence row exists.
+query I
+SELECT list_extract(as_count(3::UBIGINT), 1) / 2
+FROM anti_outer a
+WHERE a.v > 0 AND NOT EXISTS (
+    SELECT 1 FROM (SELECT * FROM anti_nullable ORDER BY k NULLS FIRST LIMIT 1) n
+    WHERE n.k IS NOT DISTINCT FROM a.k AND n.v <> a.v
+);
+----
+4
+
+statement ok
+DROP TABLE anti_nullable;
+
+statement ok
+DROP TABLE anti_outer;
+
+statement ok
+DROP TABLE anti_facts;
+
+statement ok
+DROP TABLE anti_owners;

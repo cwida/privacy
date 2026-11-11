@@ -51,6 +51,7 @@ set(EXTENSION_SOURCES
     src/compiler/privacy_mechanisms.cpp
     src/compiler/privacy_compiler_helpers.cpp
     src/query_processing/pac_avg_rewriter.cpp
+    src/query_processing/as_correlation_optimizer.cpp
     src/query_processing/privacy_expression_builder.cpp
     src/query_processing/privacy_plan_traversal.cpp
     src/query_processing/pac_projection_propagation.cpp

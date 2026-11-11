@@ -1,0 +1,469 @@
+#include "query_processing/as_correlation_optimizer.hpp"
+
+#include "duckdb/common/enums/optimizer_type.hpp"
+#include "duckdb/execution/operator/join/physical_comparison_join.hpp"
+#include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/function/builtin_function_lookup.hpp"
+#include "duckdb/function/function_binder.hpp"
+#include "duckdb/main/config.hpp"
+#include "duckdb/main/settings.hpp"
+#include "duckdb/optimizer/column_binding_replacer.hpp"
+#include "duckdb/optimizer/join_filter_pushdown_optimizer.hpp"
+#include "duckdb/optimizer/optimizer.hpp"
+#include "duckdb/optimizer/optimizer_extension.hpp"
+#include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/expression_barrier.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/planner/logical_operator_visitor.hpp"
+#include "duckdb/planner/operator/logical_comparison_join.hpp"
+#include "duckdb/planner/operator/logical_aggregate.hpp"
+#include "duckdb/planner/operator/logical_dependent_join.hpp"
+#include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/planner_extension.hpp"
+#include "privacy_debug.hpp"
+
+namespace duckdb {
+
+static bool ContainsASAggregate(LogicalOperator &op) {
+	bool found = false;
+	LogicalOperatorVisitor::EnumerateExpressions(op, [&](unique_ptr<Expression> *expr) {
+		ExpressionIterator::VisitExpression<BoundAggregateExpression>(**expr, [&](const BoundAggregateExpression &agg) {
+			found |= StringUtil::StartsWith(agg.Function().GetName().GetIdentifierName(), "as_");
+		});
+	});
+	for (auto &child : op.children) {
+		found |= ContainsASAggregate(*child);
+	}
+	return found;
+}
+
+static bool ContainsReorderingBarrier(LogicalOperator &op) {
+	bool found = false;
+	LogicalOperatorVisitor::EnumerateExpressions(op, [&](unique_ptr<Expression> *expr) {
+		found |= (*expr)->IsVolatile() || ExpressionBarrier::Contains(**expr);
+	});
+	for (auto &child : op.children) {
+		found |= ContainsReorderingBarrier(*child);
+	}
+	return found;
+}
+
+// The outer filter may still be one AND expression containing the noisy
+// predicate. Separate safe predicates on passthrough columns before the input
+// becomes a materialized correlation domain, so noise is drawn only after them.
+static void PushCorrelatedInputFilters(ClientContext &context, LogicalFilter &filter) {
+	if (filter.children[0]->type != LogicalOperatorType::LOGICAL_PROJECTION) {
+		return;
+	}
+	auto &projection = filter.children[0]->Cast<LogicalProjection>();
+	if (projection.children[0]->type != LogicalOperatorType::LOGICAL_DEPENDENT_JOIN || projection.expressions.empty() ||
+	    projection.expressions[0]->GetExpressionClass() != ExpressionClass::BOUND_FUNCTION ||
+	    !projection.expressions[0]->IsVolatile()) {
+		return;
+	}
+	auto release_name =
+	    projection.expressions[0]->Cast<BoundFunctionExpression>().Function().GetName().GetIdentifierName();
+	if (release_name != "as_noised" && release_name != "as_noised_div") {
+		return;
+	}
+	auto &join = projection.children[0]->Cast<LogicalDependentJoin>();
+	if (join.join_type != JoinType::SINGLE || !join.perform_delim || join.HasProjectionMap()) {
+		return;
+	}
+	auto input_bindings = join.children[0]->GetColumnBindings();
+	filter.SplitPredicates();
+	vector<unique_ptr<Expression>> remaining;
+	vector<unique_ptr<Expression>> selected;
+	for (auto &expression : filter.expressions) {
+		// Literal casts have not passed through constant folding at post-bind.
+		// Evaluate only these casts before checking whether a predicate can throw.
+		ExpressionIterator::EnumerateExpression(expression, [&](unique_ptr<Expression> &node) {
+			if (BoundCastExpression::IsCast(*node) && node->IsFoldable() &&
+			    BoundCastExpression::Child(node->Cast<BoundFunctionExpression>()).GetExpressionClass() ==
+			        ExpressionClass::BOUND_CONSTANT) {
+				Value value;
+				if (ExpressionExecutor::TryEvaluateScalar(context, *node, value)) {
+					node = make_uniq<BoundConstantExpression>(std::move(value));
+				}
+			}
+		});
+		bool safe = !expression->IsVolatile() && !expression->CanThrow() && !ExpressionBarrier::Contains(*expression);
+		ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
+		    *expression, [&](const BoundColumnRefExpression &ref) {
+			    if (ref.Depth() != 0 || ref.Binding().table_index != projection.table_index ||
+			        projection.GetExpression(ref.Binding()).GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+				    safe = false;
+				    return;
+			    }
+			    auto binding = projection.GetExpression(ref.Binding()).Cast<BoundColumnRefExpression>().Binding();
+			    safe &= std::find(input_bindings.begin(), input_bindings.end(), binding) != input_bindings.end();
+		    });
+		if (!safe) {
+			remaining.push_back(std::move(expression));
+			continue;
+		}
+		ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
+		    expression, [&](BoundColumnRefExpression &ref, unique_ptr<Expression> &expr) {
+			    expr = projection.GetExpression(ref.Binding()).Copy();
+		    });
+		selected.push_back(std::move(expression));
+	}
+	filter.expressions = std::move(remaining);
+	if (!selected.empty()) {
+		auto input_filter = make_uniq<LogicalFilter>();
+		input_filter->expressions = std::move(selected);
+		input_filter->children.push_back(std::move(join.children[0]));
+		join.children[0] = std::move(input_filter);
+		PRIVACY_DEBUG_PRINT("[AS] Applied deterministic outer filters before shared counter aggregation");
+	}
+}
+
+// A volatile scalar release belongs to each outer row, but the counter
+// aggregates underneath it are deterministic and can be shared by correlation
+// key. Move only the release above SINGLE before DuckDB chooses its domain.
+static void LiftCorrelatedNoise(PlannerExtensionInput &input, unique_ptr<LogicalOperator> &op,
+                                BindingReplacementGraph &replacements) {
+	for (idx_t i = 0; i < op->children.size(); i++) {
+		BindingReplacementGraph child_replacements;
+		ColumnBindingRewrite::RewriteChild(
+		    op, i, [&](unique_ptr<LogicalOperator> &child, BindingReplacementGraph &child_changes) {
+			    LiftCorrelatedNoise(input, child, child_changes);
+			    child_replacements.Merge(child_changes);
+		    });
+		replacements.Merge(child_replacements);
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
+		PushCorrelatedInputFilters(input.context, op->Cast<LogicalFilter>());
+	}
+	if (op->type != LogicalOperatorType::LOGICAL_DEPENDENT_JOIN || op->HasProjectionMap()) {
+		return;
+	}
+	auto &join = op->Cast<LogicalDependentJoin>();
+	if (join.join_type != JoinType::SINGLE || join.condition || join.correlated_columns.empty() ||
+	    join.children[1]->type != LogicalOperatorType::LOGICAL_PROJECTION) {
+		return;
+	}
+	auto &projection = join.children[1]->Cast<LogicalProjection>();
+	if (projection.expressions.size() != 1 ||
+	    projection.expressions[0]->GetExpressionClass() != ExpressionClass::BOUND_FUNCTION ||
+	    projection.children[0]->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY ||
+	    !projection.children[0]->Cast<LogicalAggregate>().groups.empty() ||
+	    ContainsReorderingBarrier(*projection.children[0])) {
+		return;
+	}
+	auto &release = projection.expressions[0]->Cast<BoundFunctionExpression>();
+	auto name = release.Function().GetName().GetIdentifierName();
+	if ((name != "as_noised" && name != "as_noised_div") ||
+	    release.Function().GetStability() != FunctionStability::VOLATILE) {
+		return;
+	}
+	for (auto &argument : release.GetChildren()) {
+		if (argument->IsVolatile() || ExpressionBarrier::Contains(*argument)) {
+			return;
+		}
+		bool correlated = false;
+		ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
+		    *argument, [&](const BoundColumnRefExpression &ref) { correlated |= ref.Depth() != 0; });
+		if (correlated) {
+			return;
+		}
+	}
+	CorrelatedColumns shared_columns;
+	for (idx_t i = 0; i < join.correlated_columns.size(); i++) {
+		if (!join.perform_delim && i == join.correlated_columns.GetDelimIndex()) {
+			continue;
+		}
+		auto &column = join.correlated_columns[i];
+		// Keep DuckDB's row-identity strategy for nested, non-deduplicable keys.
+		if (column.type.IsNested()) {
+			return;
+		}
+		shared_columns.AddColumnToBack(column);
+	}
+	if (shared_columns.empty()) {
+		return;
+	}
+	join.ResolveOperatorTypes();
+	auto left_bindings = join.children[0]->GetColumnBindings();
+	auto release_index = projection.table_index;
+	projection.table_index = input.binder.GenerateTableIndex();
+	auto expression = std::move(projection.expressions[0]);
+	projection.expressions = std::move(expression->Cast<BoundFunctionExpression>().GetChildrenMutable());
+	for (idx_t i = 0; i < projection.expressions.size(); i++) {
+		expression->Cast<BoundFunctionExpression>().GetChildrenMutable().push_back(make_uniq<BoundColumnRefExpression>(
+		    projection.expressions[i]->GetReturnType(), ColumnBinding(projection.table_index, ProjectionIndex(i))));
+	}
+	vector<unique_ptr<Expression>> expressions;
+	expressions.push_back(std::move(expression));
+	for (idx_t i = 0; i < left_bindings.size(); i++) {
+		expressions.push_back(make_uniq<BoundColumnRefExpression>(join.children[0]->types[i], left_bindings[i]));
+		replacements.Add(left_bindings[i], ColumnBinding(release_index, ProjectionIndex(i + 1)));
+	}
+	join.correlated_columns = std::move(shared_columns);
+	join.perform_delim = true;
+	auto lifted = make_uniq<LogicalProjection>(release_index, std::move(expressions));
+	lifted->children.push_back(std::move(op));
+	op = std::move(lifted);
+	op->ResolveOperatorTypes();
+	PRIVACY_DEBUG_PRINT(
+	    "[AS] Shared deterministic correlated counters while retaining one volatile release per outer row");
+}
+
+static void ShareCorrelatedNoiseInputs(PlannerExtensionInput &input, BoundStatement &statement) {
+	if (!statement.plan || !Settings::Get<EnableOptimizerSetting>(input.context) ||
+	    DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::EXTENSION) ||
+	    !ContainsASAggregate(*statement.plan)) {
+		return;
+	}
+	BindingReplacementGraph replacements;
+	LiftCorrelatedNoise(input, statement.plan, replacements);
+}
+
+// Unlike an ordinary anti join, RIGHT_ANTI preserves the build side. Probe rows
+// with no possible build-side match may therefore be filtered without changing
+// any output row. Carry that restriction to both sides of an inner ownership join.
+static void GetOwnershipFilterTargets(LogicalOperator &op, vector<JoinFilterPushdownColumn> columns,
+                                      vector<PushdownFilterTarget> &targets) {
+	if (columns.empty()) {
+		return;
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		auto &projection = op.Cast<LogicalProjection>();
+		vector<JoinFilterPushdownColumn> projected;
+		for (auto &column : columns) {
+			if (column.probe_column_index.table_index == projection.table_index &&
+			    JoinFilterPushdownUtil::PushdownJoinFilterExpression(
+			        projection.GetExpression(column.probe_column_index), column)) {
+				projected.push_back(std::move(column));
+			}
+		}
+		if (!projected.empty()) {
+			GetOwnershipFilterTargets(*op.children[0], std::move(projected), targets);
+		}
+		return;
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_FILTER) {
+		GetOwnershipFilterTargets(*op.children[0], std::move(columns), targets);
+		return;
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &join = op.Cast<LogicalComparisonJoin>();
+		if (join.join_type != JoinType::INNER) {
+			return;
+		}
+		for (auto &condition : join.conditions) {
+			if (!condition.IsComparison() || condition.GetComparisonType() != ExpressionType::COMPARE_EQUAL ||
+			    condition.GetLHS().GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+			    condition.GetRHS().GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+			    condition.GetLHS().GetReturnType() != condition.GetRHS().GetReturnType()) {
+				continue;
+			}
+			auto left = condition.GetLHS().Cast<BoundColumnRefExpression>().Binding();
+			auto right = condition.GetRHS().Cast<BoundColumnRefExpression>().Binding();
+			auto count = columns.size();
+			for (idx_t i = 0; i < count; i++) {
+				if (columns[i].probe_column_index != left && columns[i].probe_column_index != right) {
+					continue;
+				}
+				auto other = columns[i];
+				other.probe_column_index = other.probe_column_index == left ? right : left;
+				bool present = false;
+				for (auto &column : columns) {
+					present |= column.probe_column_index == other.probe_column_index &&
+					           column.join_filter_idx == other.join_filter_idx;
+				}
+				if (!present) {
+					columns.push_back(std::move(other));
+				}
+			}
+		}
+		for (auto &child : op.children) {
+			auto bindings = child->GetColumnBindings();
+			vector<JoinFilterPushdownColumn> child_columns;
+			for (auto &column : columns) {
+				for (auto &binding : bindings) {
+					if (binding == column.probe_column_index) {
+						child_columns.push_back(column);
+						break;
+					}
+				}
+			}
+			if (!child_columns.empty()) {
+				GetOwnershipFilterTargets(*child, std::move(child_columns), targets);
+			}
+		}
+		return;
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_GET) {
+		JoinFilterPushdownOptimizer::GetPushdownFilterTargets(op, std::move(columns), targets);
+	}
+}
+
+// A scan on the build side can finish before its parent anti join publishes
+// runtime filters. Keep a wide, weakly filtered scan on the probe side when a
+// smaller key-only source can build the ownership lookup instead.
+static idx_t ScanCardinality(LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_GET) {
+		return op.has_estimated_cardinality ? op.estimated_cardinality : 0;
+	}
+	if ((op.type == LogicalOperatorType::LOGICAL_PROJECTION || op.type == LogicalOperatorType::LOGICAL_FILTER) &&
+	    op.children.size() == 1) {
+		return ScanCardinality(*op.children[0]);
+	}
+	return 0;
+}
+
+static void PrepareOwnershipProbe(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &op) {
+	if (op->type == LogicalOperatorType::LOGICAL_PROJECTION || op->type == LogicalOperatorType::LOGICAL_FILTER) {
+		PrepareOwnershipProbe(input, op->children[0]);
+		return;
+	}
+	if (op->type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		return;
+	}
+	auto &join = op->Cast<LogicalComparisonJoin>();
+	if (join.join_type != JoinType::INNER || join.children[0]->types.size() != 1 ||
+	    join.children[1]->types.size() <= 1 || !JoinFilterPushdownOptimizer::IsFiltering(join.children[1]) ||
+	    ContainsReorderingBarrier(*join.children[0])) {
+		return;
+	}
+	auto left_rows = ScanCardinality(*join.children[0]);
+	auto right_rows = ScanCardinality(*join.children[1]);
+	if (!left_rows || left_rows >= right_rows / 2 || !join.children[1]->has_estimated_cardinality ||
+	    join.children[1]->estimated_cardinality < left_rows / 2) {
+		return;
+	}
+	auto old_bindings = join.GetColumnBindings();
+	std::swap(join.children[0], join.children[1]);
+	std::swap(join.left_projection_map, join.right_projection_map);
+	for (auto &condition : join.conditions) {
+		if (condition.IsComparison()) {
+			condition.Swap();
+		}
+	}
+	join.filter_pushdown.reset();
+	JoinFilterPushdownOptimizer filters(input.optimizer);
+	filters.VisitOperator(join);
+	auto bindings = join.GetColumnBindings();
+	auto layout = make_uniq<LogicalFilter>();
+	for (auto &old_binding : old_bindings) {
+		for (idx_t i = 0; i < bindings.size(); i++) {
+			if (bindings[i] == old_binding) {
+				layout->projection_map.emplace_back(i);
+				break;
+			}
+		}
+	}
+	D_ASSERT(layout->projection_map.size() == old_bindings.size());
+	layout->children.push_back(std::move(op));
+	op = std::move(layout);
+	op->ResolveOperatorTypes();
+	PRIVACY_DEBUG_PRINT("[AS] Kept the filtered ownership scan on the anti-join probe pipeline");
+}
+
+static void AddAntiJoinFilters(OptimizerExtensionInput &input, LogicalOperator &op) {
+	for (auto &child : op.children) {
+		AddAntiJoinFilters(input, *child);
+	}
+	if (op.type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		return;
+	}
+	auto &join = op.Cast<LogicalComparisonJoin>();
+	if (join.join_type != JoinType::RIGHT_ANTI || join.filter_pushdown ||
+	    !JoinFilterPushdownOptimizer::IsFiltering(join.children[1]) || ContainsReorderingBarrier(*join.children[0])) {
+		return;
+	}
+	// Null-safe equality can be normalized only with a non-null proof. Without
+	// that proof, filtering NULL probe keys could remove a real NULL=NULL match.
+	for (auto &condition : join.conditions) {
+		if (!condition.IsComparison() || condition.GetComparisonType() != ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
+			continue;
+		}
+		if ((condition.GetLeftStats() && !condition.GetLeftStats()->CanHaveNull()) ||
+		    (condition.GetRightStats() && !condition.GetRightStats()->CanHaveNull())) {
+			condition =
+			    JoinCondition(condition.GetLHS().Copy(), condition.GetRHS().Copy(), ExpressionType::COMPARE_EQUAL);
+		}
+	}
+	PhysicalComparisonJoin::ReorderConditions(join.conditions);
+	auto info = make_uniq<JoinFilterPushdownInfo>();
+	vector<JoinFilterPushdownColumn> columns;
+	for (idx_t i = 0; i < join.conditions.size(); i++) {
+		auto &condition = join.conditions[i];
+		if (!condition.IsComparison() || condition.GetComparisonType() != ExpressionType::COMPARE_EQUAL) {
+			continue;
+		}
+		JoinFilterPushdownColumn column;
+		if (!JoinFilterPushdownUtil::PushdownJoinFilterExpression(condition.GetLHS(), column)) {
+			continue;
+		}
+		column.join_filter_idx = info->join_condition.size();
+		columns.push_back(std::move(column));
+		info->join_condition.push_back(i);
+	}
+	if (columns.empty()) {
+		return;
+	}
+	if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::BUILD_SIDE_PROBE_SIDE)) {
+		PrepareOwnershipProbe(input, join.children[0]);
+	}
+	vector<PushdownFilterTarget> targets;
+	GetOwnershipFilterTargets(*join.children[0], std::move(columns), targets);
+	if (targets.empty()) {
+		return;
+	}
+	for (auto &index : info->join_condition) {
+		for (auto name : {"min", "max"}) {
+			vector<unique_ptr<Expression>> arguments;
+			arguments.push_back(join.conditions[index].GetRHS().Copy());
+			auto function = GetBuiltinAggregateFunction(input.context, name, {arguments[0]->GetReturnType()});
+			FunctionBinder binder(input.context);
+			auto aggregate = binder.BindAggregateFunction(std::move(function), std::move(arguments), nullptr,
+			                                              AggregateType::NON_DISTINCT);
+			if (aggregate->GetChildren().size() != 1) {
+				return;
+			}
+			info->min_max_aggregates.push_back(std::move(aggregate));
+		}
+	}
+	for (auto &target : targets) {
+		auto &get = target.get;
+		if (!get.dynamic_filters) {
+			get.dynamic_filters = make_shared_ptr<DynamicTableFilterSet>();
+		}
+		JoinFilterPushdownFilter filter;
+		filter.dynamic_filters = get.dynamic_filters;
+		filter.columns = std::move(target.columns);
+		if (get.has_estimated_cardinality) {
+			filter.estimated_scan_cardinality = get.estimated_cardinality;
+		}
+		info->probe_info.push_back(std::move(filter));
+	}
+	info->build_side_has_filter = true;
+	join.filter_pushdown = std::move(info);
+	PRIVACY_DEBUG_PRINT("[AS] Pushed right-anti membership keys into ownership join inputs");
+}
+
+static void OptimizeASCorrelations(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
+	if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_FILTER_PUSHDOWN) &&
+	    ContainsASAggregate(*plan)) {
+		AddAntiJoinFilters(input, *plan);
+	}
+}
+
+void RegisterASCorrelationOptimizer(DatabaseInstance &db) {
+	PlannerExtension planner;
+	planner.post_bind_function = ShareCorrelatedNoiseInputs;
+	PlannerExtension::Register(DBConfig::GetConfig(db), std::move(planner));
+	OptimizerExtension extension;
+	extension.optimize_function = OptimizeASCorrelations;
+	OptimizerExtension::Register(DBConfig::GetConfig(db), std::move(extension));
+}
+
+} // namespace duckdb
