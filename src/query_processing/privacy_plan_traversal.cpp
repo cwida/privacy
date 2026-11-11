@@ -11,6 +11,7 @@
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/planner/operator/logical_materialized_cte.hpp"
+#include "duckdb/planner/operator/logical_set_operation.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/common/exception.hpp"
@@ -477,6 +478,10 @@ LogicalOperator *FindOperatorByTableIndex(LogicalOperator *op, idx_t table_index
 	} else if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		auto &cte_ref = op->Cast<LogicalCTERef>();
 		if (cte_ref.table_index.index == table_index) {
+			return op;
+		}
+	} else if (op->type == LogicalOperatorType::LOGICAL_UNION) {
+		if (op->Cast<LogicalSetOperation>().table_index == table_index) {
 			return op;
 		}
 	}

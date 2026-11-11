@@ -412,6 +412,15 @@ static void TraceBindingToSources(LogicalOperator &root, const ColumnBinding &bi
 				TraceBindingToSources(root, body_bindings[binding.column_index], visit_source_binding);
 			}
 		}
+	} else if (source_op->type == LogicalOperatorType::LOGICAL_UNION) {
+		// A union output can originate from any branch, including when an outer
+		// projection or GROUP BY refers only to the union's output binding.
+		for (auto &child : source_op->children) {
+			auto bindings = child->GetColumnBindings();
+			if (binding.column_index < bindings.size()) {
+				TraceBindingToSources(root, bindings[binding.column_index], visit_source_binding);
+			}
+		}
 	}
 }
 
@@ -536,7 +545,8 @@ static void CheckOutputColumnsNotFromPU(LogicalOperator &current_op, LogicalOper
 	} else if (current_op.type == LogicalOperatorType::LOGICAL_ORDER_BY ||
 	           current_op.type == LogicalOperatorType::LOGICAL_TOP_N ||
 	           current_op.type == LogicalOperatorType::LOGICAL_LIMIT ||
-	           current_op.type == LogicalOperatorType::LOGICAL_DISTINCT) {
+	           current_op.type == LogicalOperatorType::LOGICAL_DISTINCT ||
+	           current_op.type == LogicalOperatorType::LOGICAL_UNION) {
 		for (auto &child : current_op.children) {
 			CheckOutputColumnsNotFromPU(*child, plan_root, pu_tables, tables_with_protected_cols);
 		}
@@ -615,7 +625,8 @@ CheckOutputColumnsNotProtected(LogicalOperator &current_op, LogicalOperator &pla
 	} else if (current_op.type == LogicalOperatorType::LOGICAL_ORDER_BY ||
 	           current_op.type == LogicalOperatorType::LOGICAL_TOP_N ||
 	           current_op.type == LogicalOperatorType::LOGICAL_LIMIT ||
-	           current_op.type == LogicalOperatorType::LOGICAL_DISTINCT) {
+	           current_op.type == LogicalOperatorType::LOGICAL_DISTINCT ||
+	           current_op.type == LogicalOperatorType::LOGICAL_UNION) {
 		for (auto &child : current_op.children) {
 			CheckOutputColumnsNotProtected(*child, plan_root, protected_columns);
 		}

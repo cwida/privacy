@@ -634,6 +634,11 @@ ALTER TABLE sass_m_complex_pu ADD PRIVACY_KEY (uid);
 statement ok
 ALTER TABLE sass_m_complex_pu SET PU;
 
+# Fixture construction copies protected keys intentionally; user queries below
+# run with rewriting enabled. A top-level UNION must not bypass this policy.
+statement ok
+SET priv_rewrite = false;
+
 statement ok
 CREATE TABLE sass_m_complex_facts AS
 SELECT uid, cohort, marker::INTEGER AS marker
@@ -641,6 +646,9 @@ FROM sass_m_complex_pu, range(5) t(marker)
 UNION ALL
 SELECT uid, cohort, NULL::INTEGER AS marker
 FROM sass_m_complex_pu;
+
+statement ok
+SET priv_rewrite = true;
 
 statement ok
 ALTER TABLE sass_m_complex_facts ADD PRIVACY_LINK (uid) REFERENCES sass_m_complex_pu (uid);
