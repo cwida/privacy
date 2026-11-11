@@ -481,7 +481,7 @@ LogicalOperator *FindOperatorByTableIndex(LogicalOperator *op, idx_t table_index
 			return op;
 		}
 	} else if (op->type == LogicalOperatorType::LOGICAL_UNION) {
-		if (op->Cast<LogicalSetOperation>().table_index == table_index) {
+		if (op->Cast<LogicalSetOperation>().table_index.index == table_index) {
 			return op;
 		}
 	}
