@@ -423,6 +423,24 @@ LIMIT 1;
 # Test 20: UNION ALL with PRIVACY_LINK chain aggregates
 # ==============================================================================
 
+# These are stochastic branch results, not exact full-data totals. Check the
+# reference by independently filtering world zero and applying AS's 2x scaling.
+statement ok
+SET priv_rewrite = false;
+
+query I
+SELECT 2 * SUM(oi.quantity)
+FROM order_items oi JOIN orders o ON oi.order_id = o.id
+WHERE (priv_hash(hash(o.user_id)) & 1) <> 0
+UNION ALL
+SELECT 2 * SUM(amount) FROM orders WHERE (priv_hash(hash(user_id)) & 1) <> 0;
+----
+2900
+350
+
+statement ok
+SET priv_rewrite = true;
+
 query I
 SELECT SUM(oi.quantity)
 FROM order_items oi
@@ -432,8 +450,8 @@ SELECT SUM(o.amount)
 FROM orders o
 INNER JOIN users u ON o.user_id = u.id;
 ----
-2450
-300
+2900
+350
 
 # ==============================================================================
 # Test 21: UNION with deduplication
@@ -448,8 +466,8 @@ SELECT COUNT(*)
 FROM orders o
 INNER JOIN users u ON o.user_id = u.id;
 ----
-100
-25
+120
+30
 
 # ==============================================================================
 # Test 22: Mixed DISTINCT + non-DISTINCT aggregates (multi-branch)
@@ -557,6 +575,146 @@ ORDER BY oi.grp
 LIMIT 1;
 ----
 0	0
+
+# ==============================================================================
+# Test 25: Top-level UNION must run privacy checks in every mechanism (#37).
+# Protected output is forbidden in either branch and through an outer projection.
+# Missing mechanism parameters must still be checked under a UNION.
+# ==============================================================================
+
+query II
+EXPLAIN SELECT COUNT(*) FROM users UNION ALL SELECT 0;
+----
+physical_plan	<REGEX>:[\s\S]*as_noised_count[\s\S]*
+
+query T rowsort
+SELECT 'a' AS value UNION ALL SELECT 'b';
+----
+a
+b
+
+statement error
+EXPLAIN SELECT name FROM users UNION ALL SELECT 'public';
+----
+protected column
+
+statement error
+CREATE TABLE exposed_union AS SELECT name FROM users UNION ALL SELECT 'public';
+----
+protected column
+
+statement error
+SELECT name FROM users UNION ALL SELECT 'public';
+----
+protected column
+
+statement error
+SELECT 'public' UNION SELECT name FROM users;
+----
+protected column
+
+statement error
+SELECT name FROM (SELECT name FROM users UNION ALL SELECT 'public') combined;
+----
+protected column
+
+statement error
+SELECT name, COUNT(*) FROM (SELECT name FROM users UNION ALL SELECT 'public') combined GROUP BY name;
+----
+protected column
+
+statement ok
+SET privacy_mode = 'dp_standard';
+
+statement ok
+SET dp_count_bound = NULL;
+
+statement error
+SELECT name FROM users UNION ALL SELECT 'public';
+----
+protected column
+
+statement error
+SELECT 'public' UNION SELECT name FROM users;
+----
+protected column
+
+statement error
+SELECT COUNT(DISTINCT id) FROM users UNION ALL SELECT 0;
+----
+dp_count_bound must be set
+
+statement error
+SELECT COUNT(*) FROM users UNION ALL SELECT COUNT(*) FROM orders;
+----
+expected exactly one aggregate
+
+statement ok
+SET privacy_mode = 'dp_elastic';
+
+statement ok
+SET dp_delta = NULL;
+
+statement error
+SELECT name FROM users UNION ALL SELECT 'public';
+----
+protected column
+
+statement error
+SELECT 'public' UNION SELECT name FROM users;
+----
+protected column
+
+statement error
+SELECT COUNT(DISTINCT id) FROM users UNION ALL SELECT 0;
+----
+dp_delta must be set
+
+statement ok
+SET privacy_mode = 'dp_sass';
+
+statement ok
+SET dp_count_bound = 1;
+
+statement ok
+SET dp_epsilon = 1;
+
+statement ok
+SET dp_delta = 0.000001;
+
+statement ok
+SET dp_sass_count_output_bound = NULL;
+
+statement error
+SELECT name FROM users UNION ALL SELECT 'public';
+----
+protected column
+
+statement error
+SELECT 'public' UNION SELECT name FROM users;
+----
+protected column
+
+statement error
+SELECT COUNT(DISTINCT id) FROM users UNION ALL SELECT 0;
+----
+dp_sass_count_output_bound must be set
+
+statement ok
+SET privacy_mode = 'dp_filterless';
+
+statement error
+SELECT name FROM users UNION ALL SELECT 'public';
+----
+protected column
+
+statement error
+SELECT 'public' UNION SELECT name FROM users;
+----
+protected column
+
+statement ok
+SET privacy_mode = 'pac';
 
 # ==============================================================================
 # Cleanup

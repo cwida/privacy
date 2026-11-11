@@ -370,9 +370,8 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 		                    std::to_string((int)check_plan->children[0]->type));
 		check_plan = check_plan->children[0].get();
 	}
-	// TODO: why this particular collection of operators? Maybe check against DDL or DML
-	// For DISTINCT, look through to the child — SELECT DISTINCT has PROJECTION underneath,
-	// but UNION's deduplication has LOGICAL_UNION underneath and should not enter PAC.
+	// DISTINCT and UNION are SELECT plans too: their branches must pass the same
+	// privacy checks as a standalone projection or aggregate.
 	if (check_plan->type == LogicalOperatorType::LOGICAL_DISTINCT && !check_plan->children.empty()) {
 		check_plan = check_plan->children[0].get();
 	}
@@ -381,6 +380,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	    check_plan->type != LogicalOperatorType::LOGICAL_ORDER_BY &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_TOP_N &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_LIMIT &&
+	    check_plan->type != LogicalOperatorType::LOGICAL_UNION &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY &&
 	    check_plan->type != LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
 		PRIVACY_DEBUG_PRINT("[PAC TRACE] check_plan type NOT in allowed list, returning early");
