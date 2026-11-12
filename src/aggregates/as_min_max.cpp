@@ -22,20 +22,28 @@ using MinMaxState = PacMinMaxStateWrapper<T, IS_MAX>;
 template <typename T, bool IS_MAX>
 struct MinMaxStateCodec {
 	using State = MinMaxState<T, IS_MAX>;
-	using Inner = PacMinMaxState<T, IS_MAX>;
+#ifdef PAC_NOBUFFERING
+	using Inner = State;
+#else
+	using Inner = typename State::State;
+#endif
 	static void WriteInner(AggregateStateWriter &out, const Inner &state) {
 		out.Write(uint8_t(state.initialized));
 		out.Write(state.update_count);
 		out.Write(state.key_hash);
 		out.Write(state.global_bound);
-		out.Write(state.extremes);
+		T values[64];
+		state.GetValues(values);
+		out.Write(values);
 	}
 	static void ReadInner(AggregateStateReader &in, Inner &state) {
 		state.initialized = in.ReadFlag();
 		in.Read(state.update_count);
 		in.Read(state.key_hash);
 		in.Read(state.global_bound);
-		in.Read(state.extremes);
+		T values[64];
+		in.Read(values);
+		state.SetValues(values);
 	}
 	static void Write(AggregateStateWriter &out, const State &state) {
 #ifdef PAC_NOBUFFERING
@@ -96,14 +104,22 @@ static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t inp
 		inputs[1].ToUnifiedFormat(value_data);
 		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 		auto values = UnifiedVectorFormat::GetData<T>(value_data);
-
-		for (idx_t i = 0; i < count; i++) {
+		idx_t first = 0;
+		while (first < count && (!hash_data.validity.RowIsValid(hash_data.sel->get_index(first)) ||
+		                         !value_data.validity.RowIsValid(value_data.sel->get_index(first)))) {
+			first++;
+		}
+		if (first == count) {
+			return;
+		}
+		auto &direct = *static_cast<PacMinMaxState<T, IS_MAX> *>(agg.EnsureState(aggr.allocator));
+		for (idx_t i = first; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
 			if (hash_data.validity.RowIsValid(h_idx) && value_data.validity.RowIsValid(v_idx)) {
 				// min/max do not use buffering for global aggregates (without GROUP BY) because it was  slower
-				PacMinMaxUpdateOne<T, IS_MAX>(agg, TransformPacUpdateHash(hashes[h_idx], sample_lanes), values[v_idx],
-				                              aggr.allocator);
+				PacMinMaxUpdateOne<T, IS_MAX>(direct, TransformPacUpdateHash(hashes[h_idx], sample_lanes),
+				                              values[v_idx], aggr.allocator);
 			}
 		}
 	});
@@ -312,20 +328,14 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateFinalizeInputData
 
 		uint64_t key_hash = s->key_hash;
 		PAC_FLOAT *dst = &child_data[base];
-		// Undo SWAR interleaving: extremes[swar_pos] corresponds to bit j of key_hash
-		constexpr int SZ = sizeof(T) <= 8 ? static_cast<int>(sizeof(T)) : 8;
-		constexpr int ELEMS = 8 / SZ;
-		constexpr int SHIFTS = 64 / ELEMS;
+		// Access logical world order independently of the internal lane width.
 		for (idx_t j = 0; j < 64; j++) {
-			idx_t child_idx = i * 64 + j;
-			int swar_pos = (static_cast<int>(j) % SHIFTS) * ELEMS + static_cast<int>(j) / SHIFTS;
 			if ((key_hash >> j) & 1) {
 				// Counter was updated - return the value (no scaling for min/max)
-				dst[j] = ToDouble(s->extremes[swar_pos]);
+				dst[j] = ToDouble(s->GetValue(j));
 			} else {
 				// Counter was never updated - return 0
-				D_ASSERT(s->extremes[swar_pos] ==
-				         (IS_MAX ? std::numeric_limits<T>::lowest() : std::numeric_limits<T>::max()));
+				D_ASSERT(s->GetValue(j) == (IS_MAX ? std::numeric_limits<T>::lowest() : std::numeric_limits<T>::max()));
 				dst[j] = 0.0;
 			}
 		}

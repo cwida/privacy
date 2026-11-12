@@ -489,3 +489,76 @@ detected absence of sample diversity
 # Cleanup PAC metadata at end of test
 statement ok
 PRAGMA clear_privacy_metadata;
+
+# Exact compact MIN/MAX states retain the SQL type and promote on late outliers.
+statement ok
+SET priv_rewrite=false;
+
+statement ok
+SET pac_mi=0;
+
+statement ok
+SET pac_sample_diversity_check=false;
+
+statement ok
+SET threads=1;
+
+# Three narrow updates first create a compact state; another world subsequently
+# receives an out-of-range value. Unknown worlds must retain full-type neutrals.
+statement ok
+CREATE TABLE compact_extreme_input AS
+SELECT i%103 g, i//103 step,
+ CASE WHEN i//103<3 THEN 1::UBIGINT WHEN i//103<6 THEN 2::UBIGINT
+      WHEN i//103=6 THEN NULL WHEN i//103=7 THEN 0::UBIGINT ELSE hash(i) END h,
+ CASE WHEN i//103<3 THEN (i//103-1)::BIGINT
+      WHEN i//103<6 THEN CASE i%4 WHEN 0 THEN (-9223372036854775808)::BIGINT
+           WHEN 1 THEN 9223372036854775807::BIGINT WHEN 2 THEN -129 ELSE 256 END
+      WHEN i//103=8 THEN NULL ELSE (i%31-15)::BIGINT END v
+FROM range(1236)t(i);
+
+query I
+WITH a AS(SELECT g,as_min(h,v)mi,as_max(h,v)ma FROM compact_extreme_input GROUP BY g),
+ b AS(SELECT g,j,min(CASE WHEN ((h>>j)&1)=1 THEN v END)::FLOAT mi,
+       max(CASE WHEN ((h>>j)&1)=1 THEN v END)::FLOAT ma
+      FROM compact_extreme_input,range(64)t(j) GROUP BY g,j)
+SELECT count(*) FROM a JOIN b USING(g)
+WHERE a.mi[j+1] IS DISTINCT FROM coalesce(b.mi,0) OR a.ma[j+1] IS DISTINCT FROM coalesce(b.ma,0);
+----
+0
+
+statement ok
+CREATE TABLE compact_unsigned_input AS
+SELECT g,step,h,CASE WHEN step<3 THEN 127::UBIGINT
+ WHEN step<6 THEN CASE WHEN g%2=0 THEN 256::UBIGINT ELSE 18446744073709551615::UBIGINT END
+ ELSE v::UBIGINT END v FROM compact_extreme_input WHERE step<6;
+
+query I
+WITH a AS(SELECT g,as_min(h,v)mi,as_max(h,v)ma FROM compact_unsigned_input GROUP BY g),
+ b AS(SELECT g,j,min(CASE WHEN ((h>>j)&1)=1 THEN v END)::FLOAT mi,
+       max(CASE WHEN ((h>>j)&1)=1 THEN v END)::FLOAT ma
+      FROM compact_unsigned_input,range(64)t(j) GROUP BY g,j)
+SELECT count(*) FROM a JOIN b USING(g)
+WHERE a.mi[j+1] IS DISTINCT FROM coalesce(b.mi,0) OR a.ma[j+1] IS DISTINCT FROM coalesce(b.ma,0);
+----
+0
+
+# Both still-narrow and already-promoted states use the full-width wire format.
+query I
+WITH a AS(SELECT g,as_max(h,v) EXPORT_STATE s FROM compact_extreme_input WHERE step<3 GROUP BY g),
+ b AS(SELECT g,as_max(h,v)c FROM compact_extreme_input WHERE step<3 GROUP BY g)
+SELECT count(*) FROM a JOIN b USING(g) WHERE finalize(a.s) IS DISTINCT FROM b.c;
+----
+0
+
+query I
+WITH a AS(SELECT g,as_min(h,v) EXPORT_STATE s FROM compact_extreme_input GROUP BY g),
+ b AS(SELECT g,as_min(h,v)c FROM compact_extreme_input GROUP BY g)
+SELECT count(*) FROM a JOIN b USING(g) WHERE finalize(a.s) IS DISTINCT FROM b.c;
+----
+0
+
+statement ok
+DROP TABLE compact_unsigned_input;
+
+statement ok
+DROP TABLE compact_extreme_input;

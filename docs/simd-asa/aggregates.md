@@ -78,7 +78,15 @@ as_max(UBIGINT key_hash, ANY value) → LIST<FLOAT>
 Stochastic MIN/MAX: each counter holds the running extreme, updated by predication
 (`value·bit + extreme·(1−bit)` then min/max). A pruning optimisation tracks the worst
 extreme across all 64 counters and skips incoming values that cannot improve any
-counter, refreshing the bound periodically.
+counter or introduce a previously unseen world, refreshing the bound periodically.
+
+Buffered `BIGINT`/`UBIGINT` groups use exact 8-bit extrema while their buffered
+values fit, widening to the original 64-bit state before an out-of-range update.
+SQL input/output types and buffered values retain their original width. The
+sparse-group wrapper remains 40 bytes; narrow and wide inner states occupy 96 and
+544 bytes, respectively. Promotion can retain the old narrow arena allocation.
+Ungrouped updates and other input types use the full-width kernels. Export writes
+original-width values, so merging and importing do not depend on the stored width.
 
 ### `as_avg`
 

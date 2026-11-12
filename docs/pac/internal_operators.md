@@ -201,8 +201,10 @@ in temporary storage backed by `ArenaAllocator::GetUnderlyingAllocator()`, relea
 these allocations after the callback. These two optimizations address the Q78
 allocation path: expanding many small groups during final combine/finalization can
 exhaust memory after sink-phase spilling decisions. Disk spilling handles stored
-states; it does not itself bound these late allocations. COUNT and MIN/MAX retain
-their original in-memory update, combine, and finalization paths.
+states; it does not itself bound these late allocations. COUNT uses exact narrow
+overflow totals before widening. Buffered 64-bit integer MIN/MAX groups can also
+use exact narrow states, with original-width transport and merge destinations;
+see [stochastic aggregates](../simd-asa/aggregates.md).
 
 Regression coverage extends `test/sql/pac_sum.test`: round trips include signed,
 unsigned, floating-point and DECIMAL inputs, buffered/empty states, high cascade

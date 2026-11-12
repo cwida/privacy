@@ -176,7 +176,37 @@ inline void UpdateExtremesScalar(T *extremes, uint64_t key_hash, T value) {
 // Simple min/max state - T[64] extremes array
 // ============================================================================
 template <typename T, bool IS_MAX>
-struct PacMinMaxState {
+struct PacMinMaxState;
+template <typename T, bool IS_MAX>
+struct PacMinMaxNarrowState;
+
+// The width tag occupies padding in the original metadata header. Payloads are
+// separate, correctly sized C++ objects; wide states retain their original size.
+template <typename T, bool IS_MAX>
+struct PacMinMaxStateHeader {
+	bool initialized;
+	bool compact;
+	uint64_t update_count;
+	uint64_t key_hash;
+	T global_bound;
+
+	void Initialize();
+	void Update(uint64_t h, T value);
+	void RecomputeBound();
+	T GetValue(idx_t bit) const;
+	void GetTotals(PAC_FLOAT *dst) const;
+	void GetValues(T *dst) const;
+	void SetValues(const T *src);
+	void CombineWith(const PacMinMaxStateHeader &src);
+};
+
+template <typename T, bool IS_MAX>
+struct PacMinMaxState : PacMinMaxStateHeader<T, IS_MAX> {
+	using PacMinMaxStateHeader<T, IS_MAX>::initialized;
+	using PacMinMaxStateHeader<T, IS_MAX>::compact;
+	using PacMinMaxStateHeader<T, IS_MAX>::update_count;
+	using PacMinMaxStateHeader<T, IS_MAX>::key_hash;
+	using PacMinMaxStateHeader<T, IS_MAX>::global_bound;
 	using ValueType = T;
 
 	static inline T InitValue() {
@@ -186,13 +216,10 @@ struct PacMinMaxState {
 		return IS_MAX ? NumericLimits<T>::Minimum() : NumericLimits<T>::Maximum();
 	}
 
-	bool initialized;
-	uint64_t update_count;
-	uint64_t key_hash; // OR of all key_hashes seen (for PacNoiseInNull)
-	T global_bound;
 	T extremes[64];
 
 	void Initialize() {
+		compact = false;
 		T init = InitValue();
 		for (int i = 0; i < 64; i++) {
 			extremes[i] = init;
@@ -220,6 +247,18 @@ struct PacMinMaxState {
 	// Convert extremes to sequential bit order, undoing the SWAR interleaving.
 	// SWAR bit extraction maps: extremes[j] ← bit (j/ELEMS + (j%ELEMS)*SHIFTS) of key_hash
 	// where ELEMS = 8/sizeof(T), SHIFTS = 64/ELEMS. We permute so dst[bit] = extremes[swar_pos(bit)].
+	T GetValue(idx_t bit) const {
+		constexpr idx_t SZ = sizeof(T) <= 8 ? sizeof(T) : 8;
+		constexpr idx_t ELEMS = 8 / SZ;
+		constexpr idx_t SHIFTS = 64 / ELEMS;
+		return extremes[(bit % SHIFTS) * ELEMS + bit / SHIFTS];
+	}
+	void GetValues(T *dst) const {
+		memcpy(dst, extremes, sizeof(extremes));
+	}
+	void SetValues(const T *src) {
+		memcpy(extremes, src, sizeof(extremes));
+	}
 	void GetTotals(PAC_FLOAT *dst) const {
 		constexpr int SZ = sizeof(T) <= 8 ? static_cast<int>(sizeof(T)) : 8;
 		constexpr int ELEMS = 8 / SZ;
@@ -337,6 +376,124 @@ DEFINE_UPDATE_HUGE(uhugeint_t, false)
 #undef DEFINE_UPDATE
 #undef DEFINE_UPDATE_HUGE
 
+// Only buffered 64-bit integer states use compact payloads. SQL input/output,
+// bounds, and buffered values retain T; all other kernels keep the wide layout.
+template <typename T, bool IS_MAX>
+struct PacMinMaxNarrowState : PacMinMaxStateHeader<T, IS_MAX> {
+	using Narrow = typename std::conditional<std::is_signed<T>::value, int8_t, uint8_t>::type;
+	Narrow extremes[64];
+};
+
+template <typename T, bool IS_MAX>
+void PacMinMaxStateHeader<T, IS_MAX>::Initialize() {
+	if (!compact) {
+		static_cast<PacMinMaxState<T, IS_MAX> *>(this)->Initialize();
+		return;
+	}
+	using Small = PacMinMaxNarrowState<T, IS_MAX>;
+	using N = typename Small::Narrow;
+	auto *small = static_cast<Small *>(this);
+	for (idx_t i = 0; i < 64; i++) {
+		small->extremes[i] = IS_MAX ? NumericLimits<N>::Minimum() : NumericLimits<N>::Maximum();
+	}
+	global_bound = PacMinMaxState<T, IS_MAX>::InitValue();
+	update_count = key_hash = 0;
+	initialized = true;
+}
+
+template <typename T, bool IS_MAX>
+void PacMinMaxStateHeader<T, IS_MAX>::Update(uint64_t h, T value) {
+	if (!compact) {
+		static_cast<PacMinMaxState<T, IS_MAX> *>(this)->Update(h, value);
+		return;
+	}
+	using Small = PacMinMaxNarrowState<T, IS_MAX>;
+	using N = typename Small::Narrow;
+	auto *small = static_cast<Small *>(this);
+#ifdef PAC_NOSIMD
+	UpdateExtremesScalar<N, IS_MAX>(small->extremes, h, static_cast<N>(value));
+#else
+	UpdateExtremesSIMD<N, uint8_t, int8_t, 8, 0x0101010101010101ULL, IS_MAX, false, std::is_signed<T>::value>(
+	    small->extremes, h, static_cast<N>(value));
+#endif
+}
+
+template <typename T, bool IS_MAX>
+T PacMinMaxStateHeader<T, IS_MAX>::GetValue(idx_t bit) const {
+	if (!compact) {
+		return static_cast<const PacMinMaxState<T, IS_MAX> *>(this)->GetValue(bit);
+	}
+	if (!((key_hash >> bit) & 1)) {
+		return PacMinMaxState<T, IS_MAX>::InitValue();
+	}
+	auto *small = static_cast<const PacMinMaxNarrowState<T, IS_MAX> *>(this);
+	return static_cast<T>(small->extremes[(bit % 8) * 8 + bit / 8]);
+}
+
+template <typename T, bool IS_MAX>
+void PacMinMaxStateHeader<T, IS_MAX>::RecomputeBound() {
+	if (!compact) {
+		static_cast<PacMinMaxState<T, IS_MAX> *>(this)->RecomputeBound();
+		return;
+	}
+#ifndef PAC_NOBOUNDOPT
+	if ((++update_count & (BOUND_RECOMPUTE_INTERVAL - 1)) == 0) {
+		T bound = GetValue(0);
+		for (idx_t bit = 1; bit < 64; bit++) {
+			bound = PAC_WORSE(bound, GetValue(bit));
+		}
+		global_bound = bound;
+	}
+#endif
+}
+
+template <typename T, bool IS_MAX>
+void PacMinMaxStateHeader<T, IS_MAX>::GetTotals(PAC_FLOAT *dst) const {
+	if (!compact) {
+		static_cast<const PacMinMaxState<T, IS_MAX> *>(this)->GetTotals(dst);
+		return;
+	}
+	auto *small = static_cast<const PacMinMaxNarrowState<T, IS_MAX> *>(this);
+	const auto neutral = static_cast<PAC_FLOAT>(ToDouble(PacMinMaxState<T, IS_MAX>::InitValue()));
+	for (idx_t bit = 0; bit < 64; bit++) {
+		auto value = static_cast<PAC_FLOAT>(small->extremes[(bit % 8) * 8 + bit / 8]);
+		dst[bit] = ((key_hash >> bit) & 1) ? value : neutral;
+	}
+}
+
+template <typename T, bool IS_MAX>
+void PacMinMaxStateHeader<T, IS_MAX>::GetValues(T *dst) const {
+	// Header consumers are 64-bit integers, whose wide SWAR order is bit order.
+	for (idx_t bit = 0; bit < 64; bit++) {
+		dst[bit] = GetValue(bit);
+	}
+}
+
+template <typename T, bool IS_MAX>
+void PacMinMaxStateHeader<T, IS_MAX>::SetValues(const T *src) {
+	D_ASSERT(!compact);
+	static_cast<PacMinMaxState<T, IS_MAX> *>(this)->SetValues(src);
+}
+
+template <typename T, bool IS_MAX>
+void PacMinMaxStateHeader<T, IS_MAX>::CombineWith(const PacMinMaxStateHeader &src) {
+	D_ASSERT(!compact);
+	auto &wide = *static_cast<PacMinMaxState<T, IS_MAX> *>(this);
+	if (!src.compact) {
+		wide.CombineWith(*static_cast<const PacMinMaxState<T, IS_MAX> *>(&src));
+		return;
+	}
+	if (!src.initialized) {
+		return;
+	}
+	key_hash |= src.key_hash;
+	update_count += src.update_count;
+	for (idx_t bit = 0; bit < 64; bit++) {
+		wide.extremes[bit] = PAC_BETTER(wide.extremes[bit], src.GetValue(bit));
+	}
+	wide.RecomputeBound();
+}
+
 // ============================================================================
 // PacMinMaxUpdateOne: direct state update (always available)
 // ============================================================================
@@ -360,7 +517,10 @@ inline void PacMinMaxUpdateOne(PacMinMaxState<T, IS_MAX> &state, uint64_t key_ha
 // ============================================================================
 template <typename T, bool IS_MAX>
 struct PacMinMaxStateWrapper {
-	using State = PacMinMaxState<T, IS_MAX>;
+	static constexpr bool COMPACT = std::is_integral<T>::value && sizeof(T) == 8;
+	using Wide = PacMinMaxState<T, IS_MAX>;
+	using Small = PacMinMaxNarrowState<T, IS_MAX>;
+	using State = typename std::conditional<COMPACT, PacMinMaxStateHeader<T, IS_MAX>, Wide>::type;
 	static constexpr int BUF_SIZE = sizeof(T) <= 8 ? 2 : 1;
 	static constexpr uint64_t BUF_MASK = sizeof(T) <= 8 ? 3ULL : 1ULL;
 
@@ -375,9 +535,40 @@ struct PacMinMaxStateWrapper {
 		return reinterpret_cast<State *>(reinterpret_cast<uintptr_t>(state) & ~7ULL);
 	}
 
-	State *EnsureState(ArenaAllocator &a) {
+	State *EnsureState(ArenaAllocator &a, const T *values = nullptr, idx_t count = 0) {
 		State *s = GetState();
-		if (!s) {
+		if constexpr (COMPACT) {
+			if (!s || s->compact) {
+				bool fits = values != nullptr;
+				using N = typename Small::Narrow;
+				for (idx_t i = 0; fits && i < count; i++) {
+					fits = values[i] >= static_cast<T>(NumericLimits<N>::Minimum()) &&
+					       values[i] <= static_cast<T>(NumericLimits<N>::Maximum());
+				}
+				if (!s) {
+					if (fits) {
+						auto *narrow = new (a.AllocateAligned(sizeof(Small))) Small {};
+						narrow->compact = true;
+						s = narrow;
+					} else {
+						s = new (a.AllocateAligned(sizeof(Wide))) Wide {};
+					}
+					state = s;
+				} else if (!fits) {
+					auto *wide = new (a.AllocateAligned(sizeof(Wide))) Wide {};
+					wide->Initialize();
+					wide->key_hash = s->key_hash;
+					wide->update_count = s->update_count;
+					wide->global_bound = s->global_bound;
+					for (idx_t bit = 0; bit < 64; bit++) {
+						wide->extremes[bit] = s->GetValue(bit);
+					}
+					auto buffered = n_buffered & BUF_MASK;
+					state = s = wide;
+					n_buffered |= buffered;
+				}
+			}
+		} else if (!s) {
 			s = reinterpret_cast<State *>(a.Allocate(sizeof(State)));
 			memset(s, 0, sizeof(State));
 			state = s;
@@ -400,7 +591,7 @@ struct PacMinMaxStateWrapper {
 		// Flush THIS wrapper's buffer into dst_wrapper's inner state
 		uint64_t cnt = n_buffered & BUF_MASK;
 		if (cnt > 0) {
-			State &dst = *dst_wrapper.EnsureState(a);
+			State &dst = *dst_wrapper.EnsureState(a, val_buf, cnt);
 			// OR the buffered hash values into key_hash
 			for (uint64_t i = 0; i < cnt; i++) {
 				dst.key_hash |= hash_buf[i];
@@ -415,27 +606,31 @@ struct PacMinMaxStateWrapper {
 template <typename T, bool IS_MAX>
 AUTOVECTORIZE inline void PacMinMaxBufferOrUpdateOne(PacMinMaxStateWrapper<T, IS_MAX> &agg, uint64_t key_hash, T value,
                                                      ArenaAllocator &a) {
-	using State = PacMinMaxState<T, IS_MAX>;
 	using Wrapper = PacMinMaxStateWrapper<T, IS_MAX>;
+	using State = typename Wrapper::State;
 
 #ifndef PAC_NOBOUNDOPT
 	// Bounds check if we already have a state with a valid bound
+	// Neutral-valued rows can still introduce previously unseen worlds.
 	State *s = agg.GetState();
-	if (s && s->initialized && !PAC_IS_BETTER(value, s->global_bound)) {
+	if (s && s->initialized && !PAC_IS_BETTER(value, s->global_bound) && (s->key_hash & key_hash) == key_hash) {
 		return;
 	}
 #endif
 	uint64_t cnt = agg.n_buffered & Wrapper::BUF_MASK;
 	if (DUCKDB_UNLIKELY(cnt == Wrapper::BUF_SIZE)) {
-		State &dst = *agg.EnsureState(a);
 		T vals[Wrapper::BUF_SIZE + 1];
 		uint64_t hashes[Wrapper::BUF_SIZE + 1];
 		for (int i = 0; i < Wrapper::BUF_SIZE; i++) {
 			vals[i] = agg.val_buf[i];
-			dst.key_hash |= (hashes[i] = agg.hash_buf[i]);
+			hashes[i] = agg.hash_buf[i];
 		}
 		vals[Wrapper::BUF_SIZE] = value;
-		dst.key_hash |= (hashes[Wrapper::BUF_SIZE] = key_hash);
+		hashes[Wrapper::BUF_SIZE] = key_hash;
+		State &dst = *agg.EnsureState(a, vals, Wrapper::BUF_SIZE + 1);
+		for (idx_t i = 0; i <= Wrapper::BUF_SIZE; i++) {
+			dst.key_hash |= hashes[i];
+		}
 		Wrapper::FlushBufferInternal(dst, vals, hashes, Wrapper::BUF_SIZE + 1);
 		agg.n_buffered &= ~Wrapper::BUF_MASK;
 	} else {
@@ -448,7 +643,7 @@ AUTOVECTORIZE inline void PacMinMaxBufferOrUpdateOne(PacMinMaxStateWrapper<T, IS
 // Wrapper update without buffering (for non-grouped updates)
 template <typename T, bool IS_MAX>
 inline void PacMinMaxUpdateOne(PacMinMaxStateWrapper<T, IS_MAX> &agg, uint64_t key_hash, T value, ArenaAllocator &a) {
-	PacMinMaxUpdateOne(*agg.EnsureState(a), key_hash, value, a);
+	PacMinMaxUpdateOne(*static_cast<PacMinMaxState<T, IS_MAX> *>(agg.EnsureState(a)), key_hash, value, a);
 }
 #endif // PAC_NOBUFFERING
 
