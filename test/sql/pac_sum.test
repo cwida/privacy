@@ -303,6 +303,49 @@ DROP TABLE test_data
 statement ok
 SET pac_sample_diversity_check = false
 
+# Signed SUM variants must isolate two's-complement carries between worlds.
+query I
+SELECT count(*) FROM (
+    SELECT as_sum(18446744073709551615::UBIGINT,v) lanes
+    FROM (VALUES (-1::BIGINT),(1::BIGINT))t(v)
+),unnest(lanes)t(v) WHERE v=0
+----
+64
+
+# Cancellation in the full stream does not bound each world's subtotal. Both
+# worlds exceed a signed 16-bit lane even though the full-stream sum is zero.
+query II
+WITH a AS (
+    SELECT as_sum(CASE WHEN i%2=0 THEN 1 ELSE 2 END::UBIGINT,
+                  CASE WHEN i%2=0 THEN -4095 ELSE 4095 END::BIGINT) lanes
+    FROM range(18)t(i)
+)
+SELECT (lanes[1]/2)::BIGINT,(lanes[2]/2)::BIGINT FROM a
+----
+-36855	36855
+
+# A negative cascade's carry magnitude rounds up, not down. These small values
+# introduce no per-value truncation in either signed or dual-unsigned SUM.
+query I
+SELECT count(*) FROM (
+    SELECT as_sum(18446744073709551615::UBIGINT,-1::BIGINT) lanes FROM range(32768)
+),unnest(lanes)t(v) WHERE v=-65536
+----
+64
+
+# Exported partial states are forced past the two-value buffer so this tests
+# packed-state combine, not replay of buffered inputs.
+query I
+SELECT count(*) FROM (
+    SELECT finalize(combine(a.s,b.s)) lanes FROM
+    (SELECT as_sum(18446744073709551615::UBIGINT,CASE WHEN i=0 THEN -1 ELSE 0 END::BIGINT) EXPORT_STATE s
+     FROM range(3)t(i))a,
+    (SELECT as_sum(18446744073709551615::UBIGINT,CASE WHEN i=0 THEN 1 ELSE 0 END::BIGINT) EXPORT_STATE s
+     FROM range(3)t(i))b
+),unnest(lanes)t(v) WHERE v=0
+----
+64
+
 statement ok
 CREATE TABLE signed_worlds AS
 SELECT CASE WHEN i % 2 = 0 THEN 18446744073709551615::UBIGINT ELSE 1::UBIGINT END AS mask,
