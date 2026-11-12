@@ -34,7 +34,8 @@ PacSumUpdateOneInternal(PacSumIntState<SIGNED> &state, uint64_t key_hash, typena
 	state.AddToExactTotal(level, static_cast<int32_t>(shifted_val), allocator);
 	AddToTotalsSWAR<int16_t, uint16_t, PAC_APPROX_SWAR_MASK>(state.u.levels[level], shifted_val, key_hash);
 #elif defined(PAC_NOCASCADING)
-	AddToTotalsSimple(state.probabilistic_total128, value, key_hash); // directly add the value to the final total
+	// hugeint_t's int64_t constructor would sign-extend unsigned values >=2^63.
+	AddToTotalsSimple(state.probabilistic_total128, Hugeint::Convert(value), key_hash);
 #else
 	// EXACT ALGORITHM: decide based on the (integer) value, in which level to aggregate
 	// (ensure the level is allocated). Note that SIGNED stuff will be compiled away for unsigned types.
