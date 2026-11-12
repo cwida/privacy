@@ -165,9 +165,14 @@ AUTOVECTORIZE inline void UpdateExtremesSIMD(uhugeint_t *extremes, uint64_t key_
 // Simple branching update for PAC_NOSIMD benchmarking
 template <typename T, bool IS_MAX>
 inline void UpdateExtremesScalar(T *extremes, uint64_t key_hash, T value) {
+	constexpr idx_t SZ = sizeof(T) <= 8 ? sizeof(T) : 8;
+	constexpr idx_t ELEMS = 8 / SZ;
+	constexpr idx_t SHIFTS = 64 / ELEMS;
 	for (int i = 0; i < 64; i++) {
 		if ((key_hash >> i) & 1) { // IF..THEN cannot be simd-ized (and is 50%:has heavy branch misprediction cost)
-			extremes[i] = PAC_BETTER(value, extremes[i]);
+			// Finalization expects the same interleaved layout as SIMD updates.
+			auto &extreme = extremes[(i % SHIFTS) * ELEMS + i / SHIFTS];
+			extreme = PAC_BETTER(value, extreme);
 		}
 	}
 }

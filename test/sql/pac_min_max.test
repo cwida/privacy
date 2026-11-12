@@ -503,6 +503,20 @@ SET pac_sample_diversity_check=false;
 statement ok
 SET threads=1;
 
+# Scalar updates and finalization must agree on the compact lane permutation.
+query I
+WITH a AS (
+ SELECT g,as_min(h,(j-32+r)::BIGINT) mi,as_max(h,(j-32+r)::BIGINT) ma,
+        as_min(h,(j+r)::UBIGINT) umi,as_max(h,(j+r)::UBIGINT) uma
+ FROM (SELECT g,j,r,(1::UBIGINT<<j)::UBIGINT h
+       FROM range(103)t(g),range(64)w(j),range(3)v(r)) input GROUP BY g
+)
+SELECT count(*) FROM a,range(64)t(j)
+WHERE mi[j+1] IS DISTINCT FROM (j-32)::FLOAT OR ma[j+1] IS DISTINCT FROM (j-30)::FLOAT
+   OR umi[j+1] IS DISTINCT FROM j::FLOAT OR uma[j+1] IS DISTINCT FROM (j+2)::FLOAT;
+----
+0
+
 # Three narrow updates first create a compact state; another world subsequently
 # receives an out-of-range value. Unknown worlds must retain full-type neutrals.
 statement ok
