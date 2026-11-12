@@ -76,6 +76,10 @@ build/release/extension/privacy/dp_benchmark_runner \
 The runners create the configured output parent directories. Existing result files are replaced only after input
 discovery and database initialization succeed.
 
+For development builds using locally compiled TPCH/TPC-DS generator extensions, explicitly set
+`PRIVACY_BENCHMARK_ALLOW_UNSIGNED_EXTENSIONS=1` when invoking the benchmark runners. This permits those unsigned
+generators only in the benchmark process; signature verification remains the default when the variable is unset.
+
 ### TPC-H AS performance
 
 The main SF30 benchmark measures DuckDB, SIMD-AS with `m=64`, the naive sampling implementation, and a simple-hash

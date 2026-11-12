@@ -464,7 +464,9 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 		} else {
 			Log(string("Will create/populate DuckDB database: ") + db_actual);
 		}
-		DuckDB db(db_actual.c_str());
+		DBConfig db_config;
+		ConfigureBenchmarkDatabase(db_config);
+		DuckDB db(db_actual.c_str(), &db_config);
 		Connection con(db);
 
 		// Set thread count

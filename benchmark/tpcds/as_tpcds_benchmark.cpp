@@ -71,7 +71,9 @@ int main(int argc, char **argv) {
 		EnsureOutputParentDirectory(db_path);
 		EnsureDirectory(queries);
 		EnsureDirectory(output);
-		DuckDB db(db_path.c_str());
+		DBConfig db_config;
+		ConfigureBenchmarkDatabase(db_config);
+		DuckDB db(db_path.c_str(), &db_config);
 		Connection con(db);
 		Query(con, "SET threads=" + std::to_string(threads));
 		Query(con, "SET memory_limit=" + Quote(JsonString(config, "memory_limit", "4GB")));

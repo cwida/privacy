@@ -409,7 +409,9 @@ int RunASClickBenchBenchmark(const string &db_path, const string &queries_dir, c
 			throw std::runtime_error("No baseline ClickBench queries found");
 		}
 
-		DuckDB db(db_actual.c_str());
+		DBConfig db_config;
+		ConfigureBenchmarkDatabase(db_config);
+		DuckDB db(db_actual.c_str(), &db_config);
 		Connection con(db);
 		con.Query("LOAD privacy;");
 		con.Query("SET threads TO " + std::to_string(threads) + ";");
