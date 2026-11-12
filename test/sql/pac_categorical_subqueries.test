@@ -946,3 +946,219 @@ DROP TABLE anti_facts;
 
 statement ok
 DROP TABLE anti_owners;
+
+# Reuse one filtered outer domain across EXISTS/NOT EXISTS ownership lookups.
+# Duplicate owners/facts retain their bag multiplicity; orphan facts remain
+# excluded by the original ownership joins. Compare every counter with the
+# ordinary optimizer, rather than relying on noisy scalar output.
+statement ok
+CREATE TABLE domain_owners AS
+SELECT i::BIGINT k, (i % 2 = 0) keep FROM range(2000) r(i);
+
+statement ok
+INSERT INTO domain_owners VALUES (10, true), (10, false), (NULL, true);
+
+statement ok
+CREATE TABLE domain_facts AS
+SELECT (i % 2000)::BIGINT k, (i // 2000)::INTEGER supplier, (i // 2000 = 0) late
+FROM range(10000) r(i);
+
+statement ok
+INSERT INTO domain_facts VALUES
+    (10, 0, true), (3000, 0, true), (3000, 1, false),
+    (NULL, 0, true), (NULL, 1, false), (12, NULL, false);
+
+statement ok
+CREATE VIEW domain_result AS
+SELECT f.supplier, as_count(hash(o.k)) counters
+FROM domain_facts f JOIN domain_owners o ON f.k = o.k
+WHERE o.keep AND f.late
+  AND EXISTS (
+      SELECT 1 FROM domain_facts w JOIN domain_owners ow ON w.k = ow.k
+      WHERE w.k = f.k AND w.supplier <> f.supplier)
+  AND NOT EXISTS (
+      SELECT 1 FROM domain_facts w JOIN domain_owners ow ON w.k = ow.k
+      WHERE w.k = f.k AND w.supplier <> f.supplier AND w.late)
+GROUP BY f.supplier;
+
+statement ok
+SET disabled_optimizers='extension';
+
+statement ok
+CREATE TEMP TABLE domain_expected AS SELECT * FROM domain_result;
+
+statement ok
+SET disabled_optimizers='';
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM domain_result EXCEPT ALL SELECT * FROM domain_expected)
+    UNION ALL
+    (SELECT * FROM domain_expected EXCEPT ALL SELECT * FROM domain_result)
+);
+----
+0
+
+statement ok
+SET threads=4;
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM domain_result EXCEPT ALL SELECT * FROM domain_expected)
+    UNION ALL
+    (SELECT * FROM domain_expected EXCEPT ALL SELECT * FROM domain_result)
+);
+----
+0
+
+# Null-safe membership predicates do not make NULL ownership keys joinable.
+statement ok
+CREATE VIEW domain_nullable_result AS
+SELECT f.supplier, as_count(hash(o.k)) counters
+FROM domain_facts f JOIN domain_owners o ON f.k = o.k
+WHERE o.keep AND f.late
+  AND EXISTS (
+      SELECT 1 FROM domain_facts w JOIN domain_owners ow ON w.k = ow.k
+      WHERE w.k IS NOT DISTINCT FROM f.k AND w.supplier IS DISTINCT FROM f.supplier)
+  AND NOT EXISTS (
+      SELECT 1 FROM domain_facts w JOIN domain_owners ow ON w.k = ow.k
+      WHERE w.k IS NOT DISTINCT FROM f.k AND w.supplier IS DISTINCT FROM f.supplier AND w.late)
+GROUP BY f.supplier;
+
+statement ok
+SET disabled_optimizers='extension';
+
+statement ok
+CREATE TEMP TABLE domain_nullable_expected AS SELECT * FROM domain_nullable_result;
+
+statement ok
+SET disabled_optimizers='';
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM domain_nullable_result EXCEPT ALL SELECT * FROM domain_nullable_expected)
+    UNION ALL
+    (SELECT * FROM domain_nullable_expected EXCEPT ALL SELECT * FROM domain_nullable_result)
+);
+----
+0
+
+statement ok
+DROP VIEW domain_nullable_result;
+
+# An input that reads an existing CTE must stay inside that CTE's scope.
+statement ok
+CREATE VIEW domain_cte_result AS
+WITH shared_facts AS MATERIALIZED (SELECT * FROM domain_facts)
+SELECT f.supplier, as_count(hash(o.k)) counters
+FROM shared_facts f JOIN domain_owners o ON f.k = o.k
+WHERE o.keep AND f.late
+  AND EXISTS (
+      SELECT 1 FROM domain_facts w JOIN domain_owners ow ON w.k = ow.k
+      WHERE w.k = f.k AND w.supplier <> f.supplier)
+  AND NOT EXISTS (
+      SELECT 1 FROM domain_facts w JOIN domain_owners ow ON w.k = ow.k
+      WHERE w.k = f.k AND w.supplier <> f.supplier AND w.late)
+GROUP BY f.supplier;
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM domain_cte_result EXCEPT ALL SELECT * FROM domain_expected)
+    UNION ALL
+    (SELECT * FROM domain_expected EXCEPT ALL SELECT * FROM domain_cte_result)
+);
+----
+0
+
+statement ok
+DROP VIEW domain_cte_result;
+
+statement ok
+DROP VIEW domain_result;
+
+statement ok
+DROP TABLE domain_nullable_expected;
+
+statement ok
+DROP TABLE domain_expected;
+
+statement ok
+DROP TABLE domain_facts;
+
+statement ok
+DROP TABLE domain_owners;
+
+# Stored sorted keys cross the core partitioning pass's fixed cardinality and
+# row-group thresholds. Compression would otherwise hide the grouping key.
+statement ok
+SET threads=1;
+
+statement ok
+CREATE TABLE partition_input AS
+SELECT i::BIGINT k, (i % 7)::INTEGER v FROM range(5000000) r(i);
+
+statement ok
+CREATE VIEW partition_result AS
+SELECT as_count(hash(k)) counters
+FROM (
+    SELECT k, SUM(v) total
+    FROM partition_input
+    GROUP BY k HAVING SUM(v) > 3
+) g;
+
+statement ok
+SET disabled_optimizers='extension';
+
+statement ok
+CREATE TEMP TABLE partition_expected AS SELECT * FROM partition_result;
+
+statement ok
+SET disabled_optimizers='';
+
+statement ok
+SET explain_output='optimized_only';
+
+query TT
+EXPLAIN SELECT * FROM partition_result;
+----
+logical_opt	<REGEX>:[\s\S]*(Union|UNION)[\s\S]*
+
+# Check every world against ordinary optimization, including the HAVING filter.
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM partition_result EXCEPT ALL SELECT * FROM partition_expected)
+    UNION ALL
+    (SELECT * FROM partition_expected EXCEPT ALL SELECT * FROM partition_result)
+);
+----
+0
+
+statement ok
+SET disabled_optimizers='partitioned_execution';
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM partition_result EXCEPT ALL SELECT * FROM partition_expected)
+    UNION ALL
+    (SELECT * FROM partition_expected EXCEPT ALL SELECT * FROM partition_result)
+);
+----
+0
+
+statement ok
+SET disabled_optimizers='';
+
+statement ok
+SET explain_output='physical_only';
+
+statement ok
+SET threads=4;
+
+statement ok
+DROP VIEW partition_result;
+
+statement ok
+DROP TABLE partition_expected;
+
+statement ok
+DROP TABLE partition_input;

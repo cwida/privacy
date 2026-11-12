@@ -11,6 +11,7 @@
 #include "duckdb/optimizer/join_filter_pushdown_optimizer.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/optimizer/optimizer_extension.hpp"
+#include "duckdb/optimizer/partitioned_execution.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
@@ -22,6 +23,8 @@
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_dependent_join.hpp"
+#include "duckdb/planner/operator/logical_cteref.hpp"
+#include "duckdb/planner/operator/logical_materialized_cte.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
@@ -316,7 +319,311 @@ static idx_t ScanCardinality(LogicalOperator &op) {
 	    op.children.size() == 1) {
 		return ScanCardinality(*op.children[0]);
 	}
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN &&
+	    op.Cast<LogicalComparisonJoin>().join_type == JoinType::SEMI &&
+	    op.children[1]->type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		return ScanCardinality(*op.children[0]);
+	}
 	return 0;
+}
+
+static void RestoreOutputLayout(unique_ptr<LogicalOperator> &op, const vector<ColumnBinding> &old_bindings) {
+	auto bindings = op->GetColumnBindings();
+	auto layout = make_uniq<LogicalFilter>();
+	for (auto &old_binding : old_bindings) {
+		for (idx_t i = 0; i < bindings.size(); i++) {
+			if (bindings[i] == old_binding) {
+				layout->projection_map.emplace_back(i);
+				break;
+			}
+		}
+	}
+	D_ASSERT(layout->projection_map.size() == old_bindings.size());
+	layout->children.push_back(std::move(op));
+	op = std::move(layout);
+	op->ResolveOperatorTypes();
+}
+
+// (A SEMI/ANTI B) INNER F = (A INNER F) SEMI/ANTI B when F's
+// predicates use only A and F. Apply the filtered scan before testing existence,
+// so its reduced domain can also restrict the ownership joins in B.
+static bool PushFilteredJoin(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &op) {
+	if (op->type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		return false;
+	}
+	auto &inner = op->Cast<LogicalComparisonJoin>();
+	if (inner.join_type != JoinType::INNER) {
+		return false;
+	}
+	for (idx_t side = 0; side < 2; side++) {
+		if (!ScanCardinality(*inner.children[1 - side]) ||
+		    !JoinFilterPushdownOptimizer::IsFiltering(inner.children[1 - side]) ||
+		    inner.children[side]->type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+			continue;
+		}
+		auto &membership = inner.children[side]->Cast<LogicalComparisonJoin>();
+		idx_t preserved;
+		if (membership.join_type == JoinType::SEMI || membership.join_type == JoinType::ANTI) {
+			preserved = 0;
+		} else if (membership.join_type == JoinType::RIGHT_SEMI || membership.join_type == JoinType::RIGHT_ANTI) {
+			preserved = 1;
+		} else {
+			continue;
+		}
+		bool safe = !ContainsReorderingBarrier(inner);
+		for (auto join : {&inner, &membership}) {
+			for (auto &condition : join->conditions) {
+				safe &= condition.IsComparison() && !condition.GetLHS().CanThrow() && !condition.GetRHS().CanThrow();
+			}
+		}
+		if (!safe) {
+			continue;
+		}
+		auto old_bindings = inner.GetColumnBindings();
+		auto result = std::move(inner.children[side]);
+		inner.children[side] = std::move(result->children[preserved]);
+		// The membership predicate still needs columns pruned from the old final
+		// INNER output. Retain them below it and restore the original layout above.
+		inner.left_projection_map.clear();
+		inner.right_projection_map.clear();
+		membership.left_projection_map.clear();
+		membership.right_projection_map.clear();
+		inner.filter_pushdown.reset();
+		PushFilteredJoin(input, op);
+		if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_FILTER_PUSHDOWN)) {
+			JoinFilterPushdownOptimizer filters(input.optimizer);
+			filters.VisitOperator(*op);
+		}
+		result->children[preserved] = std::move(op);
+		op = std::move(result);
+		RestoreOutputLayout(op, old_bindings);
+		PRIVACY_DEBUG_PRINT("[AS] Applied a filtered join before semi/anti membership checks");
+		return true;
+	}
+	return false;
+}
+
+static void PushFilteredJoins(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &op) {
+	for (auto &child : op->children) {
+		PushFilteredJoins(input, child);
+	}
+	PushFilteredJoin(input, op);
+}
+
+// Resolve a witness key through projections to a key-only ownership lookup.
+// Restricting this lookup to outer-domain keys cannot change an existence test.
+static unique_ptr<LogicalOperator> *FindDomainLookup(unique_ptr<LogicalOperator> &op, const Expression &key,
+                                                     unique_ptr<Expression> &lookup_key) {
+	JoinFilterPushdownColumn column;
+	if (!JoinFilterPushdownUtil::PushdownJoinFilterExpression(key, column)) {
+		return nullptr;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
+		auto &projection = op->Cast<LogicalProjection>();
+		if (column.probe_column_index.table_index != projection.table_index) {
+			return nullptr;
+		}
+		auto projected = key.Copy();
+		ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
+		    projected, [&](BoundColumnRefExpression &ref, unique_ptr<Expression> &expression) {
+			    expression = projection.GetExpression(ref.Binding()).Copy();
+		    });
+		return FindDomainLookup(op->children[0], *projected, lookup_key);
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
+		return FindDomainLookup(op->children[0], key, lookup_key);
+	}
+	if (op->type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		return nullptr;
+	}
+	auto &join = op->Cast<LogicalComparisonJoin>();
+	if (join.join_type != JoinType::INNER) {
+		return nullptr;
+	}
+	for (auto &condition : join.conditions) {
+		if (!condition.IsComparison() || condition.GetComparisonType() != ExpressionType::COMPARE_EQUAL ||
+		    condition.GetLHS().GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+		    condition.GetRHS().GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+		    condition.GetLHS().GetReturnType() != condition.GetRHS().GetReturnType()) {
+			continue;
+		}
+		auto left = condition.GetLHS().Cast<BoundColumnRefExpression>().Binding();
+		auto right = condition.GetRHS().Cast<BoundColumnRefExpression>().Binding();
+		if (column.probe_column_index != left && column.probe_column_index != right) {
+			continue;
+		}
+		for (idx_t side = 0; side < 2; side++) {
+			if (join.children[side]->types.size() == 1 && ScanCardinality(*join.children[side])) {
+				if (key.CanThrow()) {
+					return nullptr;
+				}
+				lookup_key = key.Copy();
+				ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
+				    lookup_key, [&](BoundColumnRefExpression &ref, unique_ptr<Expression> &expression) {
+					    expression = (side == 0 ? condition.GetLHS() : condition.GetRHS()).Copy();
+				    });
+				return &join.children[side];
+			}
+		}
+	}
+	return nullptr;
+}
+
+static bool IsNullPreservingKey(const Expression &key) {
+	if (key.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+		return true;
+	}
+	if (!BoundCastExpression::IsCast(key)) {
+		return false;
+	}
+	auto &cast = key.Cast<BoundFunctionExpression>();
+	return BoundCastExpression::CastIsInvertible(BoundCastExpression::SourceType(cast), cast.GetReturnType()) &&
+	       IsNullPreservingKey(BoundCastExpression::Child(cast));
+}
+
+static void AddAntiJoinFilter(OptimizerExtensionInput &input, LogicalComparisonJoin &join, bool filtered_domain);
+
+static bool ContainsDomainReference(const LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_CTE_REF || op.type == LogicalOperatorType::LOGICAL_DELIM_GET) {
+		return true;
+	}
+	for (auto &child : op.children) {
+		if (ContainsDomainReference(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// A single materialized outer stream supplies both the output rows and the key
+// domain of multiple existence tests. Explicit semi joins restrict key-only
+// ownership builds before their hash tables are allocated, rather than relying
+// on runtime filters that may arrive after those builds have already finished.
+static bool ShareMembershipDomain(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
+                                  unique_ptr<LogicalOperator> &op) {
+	vector<LogicalComparisonJoin *> memberships;
+	auto rows = &op;
+	while (true) {
+		if ((*rows)->type == LogicalOperatorType::LOGICAL_FILTER && (*rows)->expressions.empty()) {
+			rows = &(*rows)->children[0];
+			continue;
+		}
+		if ((*rows)->type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+			break;
+		}
+		auto &join = (*rows)->Cast<LogicalComparisonJoin>();
+		if (join.join_type == JoinType::SEMI || join.join_type == JoinType::ANTI) {
+			memberships.push_back(&join);
+			rows = &join.children[0];
+		} else if (join.join_type == JoinType::RIGHT_SEMI || join.join_type == JoinType::RIGHT_ANTI) {
+			memberships.push_back(&join);
+			rows = &join.children[1];
+		} else {
+			break;
+		}
+	}
+	if (memberships.size() >= 2 && (*rows)->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN &&
+	    (*rows)->Cast<LogicalComparisonJoin>().join_type == JoinType::INNER &&
+	    ((ScanCardinality(*(*rows)->children[0]) && JoinFilterPushdownOptimizer::IsFiltering((*rows)->children[0])) ||
+	     (ScanCardinality(*(*rows)->children[1]) && JoinFilterPushdownOptimizer::IsFiltering((*rows)->children[1]))) &&
+	    !ContainsReorderingBarrier(*op) && !ContainsDomainReference(**rows)) {
+		auto bindings = (*rows)->GetColumnBindings();
+		vector<unique_ptr<LogicalOperator> *> lookups;
+		vector<unique_ptr<Expression>> lookup_keys;
+		vector<idx_t> domain_keys;
+		vector<ExpressionType> comparisons;
+		vector<JoinCondition *> domain_conditions;
+		for (auto membership : memberships) {
+			auto preserved = membership->join_type == JoinType::SEMI || membership->join_type == JoinType::ANTI ? 0 : 1;
+			for (auto &condition : membership->conditions) {
+				if (!condition.IsComparison() ||
+				    (condition.GetComparisonType() != ExpressionType::COMPARE_EQUAL &&
+				     condition.GetComparisonType() != ExpressionType::COMPARE_NOT_DISTINCT_FROM)) {
+					continue;
+				}
+				auto &domain_key = preserved == 0 ? condition.GetLHS() : condition.GetRHS();
+				auto &witness_key = preserved == 0 ? condition.GetRHS() : condition.GetLHS();
+				if (domain_key.GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+				    !domain_key.GetReturnType().IsIntegral()) {
+					continue;
+				}
+				auto binding = domain_key.Cast<BoundColumnRefExpression>().Binding();
+				auto entry = std::find(bindings.begin(), bindings.end(), binding);
+				if (entry == bindings.end()) {
+					continue;
+				}
+				unique_ptr<Expression> key;
+				auto lookup = FindDomainLookup(membership->children[1 - preserved], witness_key, key);
+				if (!lookup || key->GetReturnType() != domain_key.GetReturnType()) {
+					continue;
+				}
+				// The strict ownership equality already excludes NULL keys. A
+				// lossless cast preserves that proof even after introducing CTE refs.
+				auto comparison = condition.GetComparisonType();
+				if (comparison == ExpressionType::COMPARE_NOT_DISTINCT_FROM && IsNullPreservingKey(*key)) {
+					comparison = ExpressionType::COMPARE_EQUAL;
+				}
+				lookups.push_back(lookup);
+				lookup_keys.push_back(std::move(key));
+				domain_keys.push_back(idx_t(entry - bindings.begin()));
+				comparisons.push_back(comparison);
+				domain_conditions.push_back(&condition);
+				break;
+			}
+		}
+		if (lookups.size() == memberships.size()) {
+			auto cte_index = input.optimizer.binder.GenerateTableIndex();
+			auto row_index = input.optimizer.binder.GenerateTableIndex();
+			auto types = (*rows)->types;
+			vector<Identifier> names;
+			for (idx_t i = 0; i < types.size(); i++) {
+				names.emplace_back("domain_" + std::to_string(i));
+			}
+			auto producer = std::move(*rows);
+			*rows = make_uniq<LogicalCTERef>(row_index, cte_index, types, names);
+			for (idx_t i = 0; i < lookups.size(); i++) {
+				auto &condition = *domain_conditions[i];
+				if (condition.GetComparisonType() != comparisons[i]) {
+					condition = JoinCondition(condition.GetLHS().Copy(), condition.GetRHS().Copy(), comparisons[i]);
+				}
+				auto domain_index = input.optimizer.binder.GenerateTableIndex();
+				auto reference = make_uniq<LogicalCTERef>(domain_index, cte_index, types, names);
+				auto key_index = domain_keys[i];
+				auto key = make_uniq<BoundColumnRefExpression>(types[key_index],
+				                                               ColumnBinding(domain_index, ProjectionIndex(key_index)));
+				auto filter = make_uniq<LogicalComparisonJoin>(JoinType::SEMI);
+				filter->conditions.emplace_back(std::move(lookup_keys[i]), std::move(key), comparisons[i]);
+				filter->children.push_back(std::move(*lookups[i]));
+				filter->children.push_back(std::move(reference));
+				filter->ResolveOperatorTypes();
+				if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_FILTER_PUSHDOWN)) {
+					JoinFilterPushdownOptimizer filters(input.optimizer);
+					filters.VisitOperator(*filter);
+				}
+				*lookups[i] = std::move(filter);
+			}
+			ColumnBindingReplacer replacer;
+			replacer.AddReplacements(bindings, (*rows)->GetColumnBindings());
+			replacer.VisitOperator(*plan);
+			plan = make_uniq<LogicalMaterializedCTE>(Identifier("as_membership_domain"), cte_index, types.size(),
+			                                         std::move(producer), std::move(plan),
+			                                         CTEMaterialize::CTE_MATERIALIZE_ALWAYS);
+			plan->ResolveOperatorTypes();
+			if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_FILTER_PUSHDOWN)) {
+				for (auto membership : memberships) {
+					AddAntiJoinFilter(input, *membership, true);
+				}
+			}
+			PRIVACY_DEBUG_PRINT("[AS] Shared the correlation domain across ownership lookups");
+			return true;
+		}
+	}
+	for (auto &child : op->children) {
+		if (ShareMembershipDomain(input, plan, child)) {
+			return true;
+		}
+	}
+	return false;
 }
 
 static void PrepareOwnershipProbe(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &op) {
@@ -350,33 +657,14 @@ static void PrepareOwnershipProbe(OptimizerExtensionInput &input, unique_ptr<Log
 	join.filter_pushdown.reset();
 	JoinFilterPushdownOptimizer filters(input.optimizer);
 	filters.VisitOperator(join);
-	auto bindings = join.GetColumnBindings();
-	auto layout = make_uniq<LogicalFilter>();
-	for (auto &old_binding : old_bindings) {
-		for (idx_t i = 0; i < bindings.size(); i++) {
-			if (bindings[i] == old_binding) {
-				layout->projection_map.emplace_back(i);
-				break;
-			}
-		}
-	}
-	D_ASSERT(layout->projection_map.size() == old_bindings.size());
-	layout->children.push_back(std::move(op));
-	op = std::move(layout);
-	op->ResolveOperatorTypes();
+	RestoreOutputLayout(op, old_bindings);
 	PRIVACY_DEBUG_PRINT("[AS] Kept the filtered ownership scan on the anti-join probe pipeline");
 }
 
-static void AddAntiJoinFilters(OptimizerExtensionInput &input, LogicalOperator &op) {
-	for (auto &child : op.children) {
-		AddAntiJoinFilters(input, *child);
-	}
-	if (op.type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
-		return;
-	}
-	auto &join = op.Cast<LogicalComparisonJoin>();
+static void AddAntiJoinFilter(OptimizerExtensionInput &input, LogicalComparisonJoin &join, bool filtered_domain) {
 	if (join.join_type != JoinType::RIGHT_ANTI || join.filter_pushdown ||
-	    !JoinFilterPushdownOptimizer::IsFiltering(join.children[1]) || ContainsReorderingBarrier(*join.children[0])) {
+	    (!filtered_domain && !JoinFilterPushdownOptimizer::IsFiltering(join.children[1])) ||
+	    ContainsReorderingBarrier(*join.children[0])) {
 		return;
 	}
 	// Null-safe equality can be normalized only with a non-null proof. Without
@@ -450,11 +738,71 @@ static void AddAntiJoinFilters(OptimizerExtensionInput &input, LogicalOperator &
 	PRIVACY_DEBUG_PRINT("[AS] Pushed right-anti membership keys into ownership join inputs");
 }
 
+static void AddAntiJoinFilters(OptimizerExtensionInput &input, LogicalOperator &op) {
+	for (auto &child : op.children) {
+		AddAntiJoinFilters(input, *child);
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		AddAntiJoinFilter(input, op.Cast<LogicalComparisonJoin>(), false);
+	}
+}
+
 static void OptimizeASCorrelations(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
-	if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_FILTER_PUSHDOWN) &&
-	    ContainsASAggregate(*plan)) {
+	if (!ContainsASAggregate(*plan)) {
+		return;
+	}
+	if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_ORDER)) {
+		PushFilteredJoins(input, plan);
+		ShareMembershipDomain(input, plan, plan);
+	}
+	if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_FILTER_PUSHDOWN)) {
 		AddAntiJoinFilters(input, *plan);
 	}
+}
+
+// Compression projections hide grouping keys from the later partitioning pass.
+// Partition deterministic ordinary inputs before compression, leaving stochastic
+// aggregates and correlated/CTE plans to the existing optimization pipeline.
+static void PartitionOrdinaryASInputs(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &root,
+                                      unique_ptr<LogicalOperator> &op) {
+	if (op->type == LogicalOperatorType::LOGICAL_DEPENDENT_JOIN ||
+	    op->type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+	    op->type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE ||
+	    op->type == LogicalOperatorType::LOGICAL_RECURSIVE_CTE) {
+		return;
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY && !ContainsASAggregate(*op) &&
+	    !ContainsReorderingBarrier(*op)) {
+		// The core tracer supports only projection/filter chains ending in one scan.
+		// Match that shape here so its recursive traversal cannot enter a CTE or
+		// correlated subtree before the guards above have seen it.
+		auto *source = op->children[0].get();
+		while ((source->type == LogicalOperatorType::LOGICAL_PROJECTION ||
+		        source->type == LogicalOperatorType::LOGICAL_FILTER) &&
+		       source->children.size() == 1) {
+			source = source->children[0].get();
+		}
+		if (source->type == LogicalOperatorType::LOGICAL_GET && source->children.empty()) {
+			auto original_type = op->type;
+			PartitionedExecution partitioned_execution(input.optimizer, root);
+			partitioned_execution.Optimize(op);
+			if (op->type != original_type) {
+				PRIVACY_DEBUG_PRINT("[AS] Partitioned deterministic aggregate input before compression");
+			}
+			return;
+		}
+	}
+	for (auto &child : op->children) {
+		PartitionOrdinaryASInputs(input, root, child);
+	}
+}
+
+static void PartitionASInputs(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
+	if (!ContainsASAggregate(*plan) ||
+	    DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::PARTITIONED_EXECUTION)) {
+		return;
+	}
+	PartitionOrdinaryASInputs(input, plan, plan);
 }
 
 void RegisterASCorrelationOptimizer(DatabaseInstance &db) {
@@ -462,6 +810,7 @@ void RegisterASCorrelationOptimizer(DatabaseInstance &db) {
 	planner.post_bind_function = ShareCorrelatedNoiseInputs;
 	PlannerExtension::Register(DBConfig::GetConfig(db), std::move(planner));
 	OptimizerExtension extension;
+	extension.pre_optimize_function = PartitionASInputs;
 	extension.optimize_function = OptimizeASCorrelations;
 	OptimizerExtension::Register(DBConfig::GetConfig(db), std::move(extension));
 }

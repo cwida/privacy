@@ -324,8 +324,7 @@ struct PacSumIntState {
 		}
 		// Negative subtotals use arithmetic shift, so their carry magnitude
 		// can be ceil(budget / 16) rather than floor(budget / 16).
-		int32_t cascade_amount =
-		    (exact_total[k] + (SIGNED ? PAC_APPROX_LEVEL_MASK : 0)) >> PAC_APPROX_LEVEL_SHIFT;
+		int32_t cascade_amount = (exact_total[k] + (SIGNED ? PAC_APPROX_LEVEL_MASK : 0)) >> PAC_APPROX_LEVEL_SHIFT;
 		AddToExactTotal(k + 1, cascade_amount, allocator);
 
 		CounterT *src = reinterpret_cast<CounterT * PAC_RESTRICT>(u.levels[k]);
