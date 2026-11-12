@@ -1,6 +1,9 @@
 #!/bin/bash
 # Common functions for the aggregation microbenchmarks
 
+# Benchmarks must fully consume results, including when invoked by a coding agent.
+export DUCKDB_AGENT_MODE=0
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BINARIES_DIR="$SCRIPT_DIR/binaries"
 RESULTS_DIR="${RESULTS_DIR:-$SCRIPT_DIR/results}"

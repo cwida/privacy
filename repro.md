@@ -56,6 +56,7 @@ Rscript --vanilla plot_microbenchmark.R
 
 The seven variants are `default`, `nobuffering`, `noboundopt`, `signedsum`, `exactsum`, `nocascading`, and `nosimd`.
 Results and the R plotting program remain self-contained in that directory.
+The runner disables DuckDB shell agent mode so large result sets are fully consumed when invoked by a coding agent.
 
 ## Standalone Benchmarks
 
