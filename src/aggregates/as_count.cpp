@@ -41,8 +41,8 @@ struct CountStateCodec {
 #endif
 		out.Write(state.key_hash);
 		out.Write(state.update_count);
-		out.Write(uint8_t(state.probabilistic_total != nullptr));
-		if (state.probabilistic_total) {
+		out.Write(uint8_t(state.HasTotals()));
+		if (state.HasTotals()) {
 			// Keep the exported format independent of the in-memory counter width.
 			if (state.HasNarrowTotals()) {
 				uint64_t totals[64];
@@ -283,15 +283,15 @@ void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t c
 			PacCountState &ds = *da[i]->EnsureState(aggr.allocator);
 			ds.key_hash |= ss->key_hash;
 #ifndef PAC_NOCASCADING
-			bool src_has_totals = (ss->probabilistic_total != nullptr) || (ss->swar_fill > 0);
+			bool src_has_totals = ss->HasTotals() || (ss->swar_fill > 0);
 #else
-			bool src_has_totals = (ss->probabilistic_total != nullptr);
+			bool src_has_totals = ss->HasTotals();
 #endif
 			if (src_has_totals) {
 				uint64_t *dst_totals = ds.EnsureTotals(aggr.allocator);
 				ds.FlushLevel(aggr.allocator); // flush directly into the wide merge destination
 				ss->FlushSWARInto(dst_totals); // src SWAR → dst totals (no src alloc!)
-				if (ss->probabilistic_total) {
+				if (ss->HasTotals()) {
 					for (int j = 0; j < 64; j++) {
 						dst_totals[j] += ss->Total(j);
 					}

@@ -307,3 +307,11 @@ DROP TABLE compact_count_expected;
 
 statement ok
 DROP TABLE compact_count_input;
+
+# Empty and zero-mask states retain their counters when exported and combined.
+query II
+SELECT list_min(finalize(combine(a.s,b.s))),list_max(finalize(combine(a.s,b.s)))
+FROM (SELECT as_count(NULL::UBIGINT) EXPORT_STATE s FROM range(0))a,
+     (SELECT as_count(0::UBIGINT) EXPORT_STATE s FROM range(1000))b;
+----
+0	0

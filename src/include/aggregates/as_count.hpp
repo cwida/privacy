@@ -87,11 +87,24 @@ struct PacCountState {
 	uint64_t probabilistic_total8[8]; // SWAR packed uint8_t counters
 	uint16_t swar_fill;               // entries in SWAR buffer since last flush (0-254)
 #endif
-	uint64_t key_hash;             // OR of all key_hashes seen (for PacNoiseInNull)
-	uint64_t update_count;         // exact number of rows processed
+	uint64_t key_hash;     // OR of all key_hashes seen (for PacNoiseInNull)
+	uint64_t update_count; // exact number of rows processed
+#ifdef PAC_NOCASCADING
+	// Fixed-width counters belong in the hash-table row, where DuckDB accounts
+	// for their size without repeatedly exporting arena-backed states.
+	uint64_t probabilistic_total[64];
+#else
 	uint64_t *probabilistic_total; // low bit tags exact uint16_t totals; otherwise uint64_t[64]
+#endif
 
 #ifndef PAC_GODBOLT
+	bool HasTotals() const {
+#ifdef PAC_NOCASCADING
+		return true;
+#else
+		return probabilistic_total != nullptr;
+#endif
+	}
 	bool HasNarrowTotals() const {
 #ifdef PAC_NOCASCADING
 		return false;
@@ -106,12 +119,7 @@ struct PacCountState {
 		return HasNarrowTotals() ? NarrowTotals()[bit] : probabilistic_total[bit];
 	}
 	uint64_t *EnsureTotals(ArenaAllocator &a) {
-#ifdef PAC_NOCASCADING
-		if (!probabilistic_total) {
-			probabilistic_total = reinterpret_cast<uint64_t *>(a.Allocate(64 * sizeof(uint64_t)));
-			memset(probabilistic_total, 0, 64 * sizeof(uint64_t));
-		}
-#else
+#ifndef PAC_NOCASCADING
 		if (!probabilistic_total || HasNarrowTotals()) {
 			auto narrow = HasNarrowTotals() ? NarrowTotals() : nullptr;
 			auto totals = reinterpret_cast<uint64_t *>(a.AllocateAligned(64 * sizeof(uint64_t)));
@@ -202,7 +210,7 @@ struct PacCountState {
 			for (idx_t bit = 0; bit < 64; bit++) {
 				dst[bit] = static_cast<PAC_FLOAT>(totals[bit]);
 			}
-		} else if (probabilistic_total) {
+		} else if (HasTotals()) {
 			ToDoubleArray(probabilistic_total, dst);
 		} else {
 			memset(dst, 0, 64 * sizeof(PAC_FLOAT));

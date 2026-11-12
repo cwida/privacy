@@ -55,6 +55,11 @@ Implemented with **SWAR** (SIMD Within A Register): 8 packed `uint8_t` counters 
 allocation is deferred and updates are buffered in small groups to cut cache misses
 (important when there are very many groups).
 
+The `PAC_NOCASCADING` ablation directly updates 64 `uint64_t` counters stored
+inline in the aggregate record. This exposes their full size to DuckDB's memory
+reservation rather than allocating them in the aggregate arena. `PAC_NOSIMD`
+uses the same layout with scalar conditional updates; neither enables cascading.
+
 ### `as_sum`
 
 ```
