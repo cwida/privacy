@@ -10,7 +10,6 @@ namespace duckdb {
 
 static unique_ptr<FunctionData> PacCountBind(BindAggregateFunctionInput &bind_input) {
 	auto &ctx = bind_input.GetClientContext();
-	auto &func = bind_input.GetBoundFunction();
 	auto &args = bind_input.GetArguments();
 	// Correction is always the last arg when it's a foldable numeric constant
 	idx_t corr_idx = args.size(); // sentinel: no correction
@@ -268,34 +267,6 @@ static void DpSampleCountMaskScatterUpdate(Vector inputs[], AggregateInputData &
 #endif
 		}
 	}
-}
-
-static void CombineScatterState(ScatterState &src, ScatterState &dst, AggregateInputData &aggr) {
-#if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
-	src.FlushBuffer(dst, aggr.allocator);
-#endif
-	PacCountState *ss = src.GetState();
-	if (!ss) {
-		return;
-	}
-	PacCountState &ds = *dst.EnsureState(aggr.allocator);
-	ds.key_hash |= ss->key_hash;
-#ifndef PAC_NOCASCADING
-	bool src_has_totals = (ss->probabilistic_total != nullptr) || (ss->swar_fill > 0);
-#else
-	bool src_has_totals = (ss->probabilistic_total != nullptr);
-#endif
-	if (src_has_totals) {
-		uint64_t *dst_totals = ds.EnsureTotals(aggr.allocator);
-		ds.FlushLevel(aggr.allocator);
-		ss->FlushSWARInto(dst_totals);
-		if (ss->probabilistic_total) {
-			for (int j = 0; j < 64; j++) {
-				dst_totals[j] += ss->Total(j);
-			}
-		}
-	}
-	ds.update_count += ss->update_count;
 }
 
 // Combine - flush src's buffer into dst (don't allocate src), then merge states

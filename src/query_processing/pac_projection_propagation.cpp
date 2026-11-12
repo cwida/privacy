@@ -14,7 +14,6 @@
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_delim_get.hpp"
 #include "duckdb/planner/operator/logical_materialized_cte.hpp"
-#include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 
@@ -55,11 +54,6 @@ static bool FindDirectPathToSource(LogicalOperator *current, idx_t target_table_
 		if (proj.table_index.index == target_table_index) {
 			return true;
 		}
-	}
-
-	else if (current->type == LogicalOperatorType::LOGICAL_CTE_REF &&
-	         current->Cast<LogicalCTERef>().table_index.index == target_table_index) {
-		return true;
 	}
 
 	// If this is a nested aggregate, check if it IS the target or if the target is below it.

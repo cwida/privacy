@@ -10,19 +10,6 @@
 
 namespace duckdb {
 // ============================================================================
-// State type selection for scatter updates
-// ============================================================================
-#ifdef PAC_NOBUFFERING
-template <bool SIGNED>
-using ScatterIntState = PacSumIntState<SIGNED>;
-using ScatterDoubleState = PacSumDoubleState;
-#else
-template <bool SIGNED>
-using ScatterIntState = PacSumIntStateWrapper<SIGNED>;
-using ScatterDoubleState = PacSumDoubleStateWrapper;
-#endif
-
-// ============================================================================
 // Inner state update functions (work directly on PacSumIntState/PacSumDoubleState)
 // ============================================================================
 

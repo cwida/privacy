@@ -745,7 +745,7 @@ using PacSumDoubleStateWrapper = PacSumStateWrapper<PacSumDoubleState, double>;
 
 // Forward declarations for as_sum functions
 
-// State type selection (defined in as_sum.cpp, needed by as_avg.cpp)
+// State type selection shared by SUM updates and state transport.
 #ifdef PAC_NOBUFFERING
 template <bool SIGNED>
 using ScatterIntState = PacSumIntState<SIGNED>;

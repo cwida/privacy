@@ -9,7 +9,6 @@
 #include "categorical/pac_categorical_lambdas.hpp"
 #include "aggregates/as_aggregate.hpp"
 #include "utils/privacy_helpers.hpp"
-#include "privacy_debug.hpp"
 #include "duckdb/optimizer/column_binding_replacer.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/operator/logical_order.hpp"

@@ -315,7 +315,7 @@ NULL
 
 # Test correlated subquery where outer query scans FK table (orders) directly
 # and inner subquery aggregates on a deeper FK table (lineitem)
-# This tests the AddColumnToDelimJoin fix where:
+# This tests DELIM_JOIN binding propagation where:
 # - Outer query scans orders (has FK to customer via o_custkey)
 # - Inner subquery scans lineitem (has FK to orders via l_orderkey)
 # - The o_custkey column needs to be added to DELIM_JOIN correlation

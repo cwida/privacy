@@ -285,45 +285,4 @@ DelimColumnResult AddBindingToDelimJoin(unique_ptr<LogicalOperator> &plan, idx_t
 	return result;
 }
 
-// Thin wrapper: resolve column name to binding, then delegate to AddBindingToDelimJoin
-DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, LogicalGet &source_get,
-                                       const string &column_name, LogicalAggregate *target_agg) {
-	DelimColumnResult invalid_result;
-	invalid_result.binding =
-	    ColumnBinding(TableIndex(DConstants::INVALID_INDEX), ProjectionIndex(DConstants::INVALID_INDEX));
-	invalid_result.type = LogicalType::INVALID;
-
-	// Ensure the column is projected in source_get
-	idx_t col_proj_idx = EnsureProjectedColumn(source_get, column_name);
-	if (col_proj_idx == DConstants::INVALID_INDEX) {
-		return invalid_result;
-	}
-
-	// Get the column type
-	auto col_index = source_get.GetColumnIds()[col_proj_idx];
-	auto col_type = source_get.GetColumnType(col_index);
-
-	// Determine the output binding for the source_get
-	idx_t output_col_idx;
-	if (source_get.projection_ids.empty()) {
-		output_col_idx = col_proj_idx;
-	} else {
-		output_col_idx = DConstants::INVALID_INDEX;
-		for (idx_t i = 0; i < source_get.projection_ids.size(); i++) {
-			if (source_get.projection_ids[i] == col_proj_idx) {
-				output_col_idx = source_get.projection_ids[i];
-				break;
-			}
-		}
-		if (output_col_idx == DConstants::INVALID_INDEX) {
-			source_get.projection_ids.push_back(ProjectionIndex(col_proj_idx));
-			output_col_idx = col_proj_idx;
-			source_get.ResolveOperatorTypes();
-		}
-	}
-
-	ColumnBinding source_binding {TableIndex(source_get.table_index.index), ProjectionIndex(output_col_idx)};
-	return AddBindingToDelimJoin(plan, source_get.table_index.index, source_binding, col_type, target_agg);
-}
-
 } // namespace duckdb

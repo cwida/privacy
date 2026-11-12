@@ -1,8 +1,6 @@
 #include "aggregates/as_sum_state_export.hpp"
 #include "aggregates/as_sum.hpp"
 #include "aggregates/aggregate_state_export.hpp"
-#include "duckdb/common/vector/flat_vector.hpp"
-#include "duckdb/common/vector/string_vector.hpp"
 
 namespace duckdb {
 namespace {
