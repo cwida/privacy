@@ -212,3 +212,98 @@ DROP TABLE test_nullable
 
 statement ok
 DROP TABLE test_all_nulls
+
+# Exact narrow overflow totals, promotion, and canonical state transport.
+statement ok
+SET priv_rewrite=false;
+
+statement ok
+SET pac_sample_diversity_check=false;
+
+query III
+SELECT n,list_min(c),list_max(c) FROM (
+ SELECT n,as_count(18446744073709551615::UBIGINT)c
+ FROM (VALUES(254),(255),(256),(1000),(65535),(65536),(65789),(65790),(131070))sizes(n),
+ LATERAL range(n)t(i) GROUP BY n
+) ORDER BY n;
+----
+254	508	508
+255	510	510
+256	512	512
+1000	2000	2000
+65535	131070	131070
+65536	131072	131072
+65789	131578	131578
+65790	131580	131580
+131070	262140	262140
+
+# Check every world against ordinary SQL, including the SWAR permutation.
+query I
+SELECT count(*) FROM (
+ SELECT as_count(hash(i))c FROM range(200000)t(i)
+)a,(
+ SELECT j,2*sum(((hash(i)>>j)&1)::BIGINT)expected
+ FROM range(200000)t(i),range(64)b(j) GROUP BY j
+)b WHERE a.c[b.j+1] IS DISTINCT FROM b.expected;
+----
+0
+
+# Narrow states export as full-width counters; combining them can exceed 16 bits.
+query II
+SELECT list_min(c),list_max(c) FROM (
+ SELECT finalize(combine(a.s,b.s))c FROM
+ (SELECT as_count(18446744073709551615::UBIGINT) EXPORT_STATE s FROM range(40000))a,
+ (SELECT as_count(18446744073709551615::UBIGINT) EXPORT_STATE s FROM range(40000))b
+);
+----
+160000	160000
+
+query II
+SELECT n,finalize(s)=expected FROM (
+ SELECT n,as_count(18446744073709551615::UBIGINT) EXPORT_STATE s,
+ as_count(18446744073709551615::UBIGINT)expected
+ FROM (VALUES(2),(1000),(65535),(65790))sizes(n),LATERAL range(n)t(i) GROUP BY n
+) ORDER BY n;
+----
+2	true
+1000	true
+65535	true
+65790	true
+
+# Materialized input exercises parallel combine, nullable inputs, and column COUNT.
+statement ok
+CREATE TABLE compact_count_input AS
+SELECT i%1000 g,CASE WHEN i%7=0 THEN NULL ELSE hash(i) END h,
+ CASE WHEN i%11=0 THEN NULL ELSE i END v FROM range(1000000)t(i);
+
+statement ok
+SET threads=4;
+
+statement ok
+CREATE TABLE compact_count_expected AS
+SELECT g,as_count(h)c,as_count(h,v)cv FROM compact_count_input GROUP BY g;
+
+statement ok
+SET debug_force_external=true;
+
+statement ok
+SET memory_limit='32MB';
+
+query I
+SELECT count(*) FROM compact_count_expected a JOIN (
+ SELECT g,as_count(h)c,as_count(h,v)cv FROM compact_count_input GROUP BY g
+)b USING(g) WHERE a.c IS DISTINCT FROM b.c OR a.cv IS DISTINCT FROM b.cv;
+----
+0
+
+statement ok
+SET debug_force_external=false;
+
+statement ok
+RESET memory_limit;
+
+statement ok
+DROP TABLE compact_count_expected;
+
+statement ok
+DROP TABLE compact_count_input;

@@ -44,7 +44,16 @@ struct CountStateCodec {
 		out.Write(state.update_count);
 		out.Write(uint8_t(state.probabilistic_total != nullptr));
 		if (state.probabilistic_total) {
-			out.WriteData(state.probabilistic_total, 64 * sizeof(uint64_t));
+			// Keep the exported format independent of the in-memory counter width.
+			if (state.HasNarrowTotals()) {
+				uint64_t totals[64];
+				for (idx_t bit = 0; bit < 64; bit++) {
+					totals[bit] = state.Total(bit);
+				}
+				out.Write(totals);
+			} else {
+				out.WriteData(state.probabilistic_total, 64 * sizeof(uint64_t));
+			}
 		}
 	}
 	static void ReadInner(AggregateStateReader &in, PacCountState &state, ArenaAllocator &allocator) {
@@ -277,12 +286,12 @@ static void CombineScatterState(ScatterState &src, ScatterState &dst, AggregateI
 	bool src_has_totals = (ss->probabilistic_total != nullptr);
 #endif
 	if (src_has_totals) {
-		ds.FlushLevel(aggr.allocator);
 		uint64_t *dst_totals = ds.EnsureTotals(aggr.allocator);
+		ds.FlushLevel(aggr.allocator);
 		ss->FlushSWARInto(dst_totals);
 		if (ss->probabilistic_total) {
 			for (int j = 0; j < 64; j++) {
-				dst_totals[j] += ss->probabilistic_total[j];
+				dst_totals[j] += ss->Total(j);
 			}
 		}
 	}
@@ -308,12 +317,12 @@ void PacCountCombine(Vector &src, Vector &dst, AggregateInputData &aggr, idx_t c
 			bool src_has_totals = (ss->probabilistic_total != nullptr);
 #endif
 			if (src_has_totals) {
-				ds.FlushLevel(aggr.allocator); // flush dst SWAR first
 				uint64_t *dst_totals = ds.EnsureTotals(aggr.allocator);
+				ds.FlushLevel(aggr.allocator); // flush directly into the wide merge destination
 				ss->FlushSWARInto(dst_totals); // src SWAR → dst totals (no src alloc!)
 				if (ss->probabilistic_total) {
 					for (int j = 0; j < 64; j++) {
-						dst_totals[j] += ss->probabilistic_total[j];
+						dst_totals[j] += ss->Total(j);
 					}
 				}
 			}

@@ -52,7 +52,8 @@ void RegisterPacClipCountFunctions(ExtensionLoader &);
 // because key_hash is also uint64_t. We apply the below mask to key_hash to extract the lowest bit of each byte:
 
 // PAC_COUNT uses SWAR (SIMD Within A Register) for fast probabilistic counting.
-// 8 uint64_t hold 64 packed uint8_t counters. On overflow (255), flush to uint64_t[64].
+// 8 uint64_t hold 64 packed uint8_t counters. Cascade into exact uint16_t totals,
+// promoting to uint64_t totals when the update count exceeds the narrow range.
 #endif
 #define PAC_COUNT_MASK                                                                                                 \
 	(1ULL | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) | (1ULL << 56))
@@ -63,7 +64,7 @@ void RegisterPacClipCountFunctions(ExtensionLoader &);
 // This technique is known as SWAR: SIMD Within A Register
 //
 // You can only add 255 times before the bytes in this uint64_t start touching each other (causing overflow).
-// So after 255 iterations, the probabilistic_total8[64] are added to uint64_t probabilistic_total[64] and reset to 0.
+// So after 255 iterations, probabilistic_total8[64] is added to the next level and reset to 0.
 //
 // The idea is that we get very fast performance 255 times and slower performance once every 256 only.
 //
@@ -88,14 +89,42 @@ struct PacCountState {
 #endif
 	uint64_t key_hash;             // OR of all key_hashes seen (for PacNoiseInNull)
 	uint64_t update_count;         // exact number of rows processed
-	uint64_t *probabilistic_total; // lazily allocated 64-element array (null until needed)
+	uint64_t *probabilistic_total; // low bit tags exact uint16_t totals; otherwise uint64_t[64]
 
 #ifndef PAC_GODBOLT
+	bool HasNarrowTotals() const {
+#ifdef PAC_NOCASCADING
+		return false;
+#else
+		return (reinterpret_cast<uintptr_t>(probabilistic_total) & 1) != 0;
+#endif
+	}
+	uint16_t *NarrowTotals() const {
+		return reinterpret_cast<uint16_t *>(reinterpret_cast<uintptr_t>(probabilistic_total) & ~uintptr_t(1));
+	}
+	uint64_t Total(idx_t bit) const {
+		return HasNarrowTotals() ? NarrowTotals()[bit] : probabilistic_total[bit];
+	}
 	uint64_t *EnsureTotals(ArenaAllocator &a) {
+#ifdef PAC_NOCASCADING
 		if (!probabilistic_total) {
 			probabilistic_total = reinterpret_cast<uint64_t *>(a.Allocate(64 * sizeof(uint64_t)));
 			memset(probabilistic_total, 0, 64 * sizeof(uint64_t));
 		}
+#else
+		if (!probabilistic_total || HasNarrowTotals()) {
+			auto narrow = HasNarrowTotals() ? NarrowTotals() : nullptr;
+			auto totals = reinterpret_cast<uint64_t *>(a.AllocateAligned(64 * sizeof(uint64_t)));
+			if (narrow) {
+				for (idx_t bit = 0; bit < 64; bit++) {
+					totals[bit] = narrow[bit];
+				}
+			} else {
+				memset(totals, 0, 64 * sizeof(uint64_t));
+			}
+			probabilistic_total = totals;
+		}
+#endif
 		return probabilistic_total;
 	}
 	void FlushLevel(ArenaAllocator &a) {
@@ -103,13 +132,29 @@ struct PacCountState {
 		if (swar_fill == 0) {
 			return;
 		}
-		uint64_t *totals = EnsureTotals(a);
 		// Undo SWAR interleaving: src[n] holds count for bit (n/8 + (n%8)*8), not bit n.
 		// Permute so probabilistic_total[bit] gets the count for actual key_hash bit 'bit'.
 		const uint8_t *src = reinterpret_cast<const uint8_t *>(probabilistic_total8);
-		for (int bit = 0; bit < 64; bit++) {
-			int swar_pos = (bit % 8) * 8 + bit / 8;
-			totals[bit] += src[swar_pos];
+		// No lane can exceed the number of updates, even for an all-one mask.
+		// Narrow totals avoid forcing DuckDB's arena-pressure spill path for
+		// moderate groups; promote before this exact bound exceeds uint16_t.
+		if ((!probabilistic_total || HasNarrowTotals()) && update_count + swar_fill <= UINT16_MAX) {
+			if (!probabilistic_total) {
+				auto narrow = reinterpret_cast<uint16_t *>(a.AllocateAligned(64 * sizeof(uint16_t)));
+				memset(narrow, 0, 64 * sizeof(uint16_t));
+				probabilistic_total = reinterpret_cast<uint64_t *>(reinterpret_cast<uintptr_t>(narrow) | 1);
+			}
+			auto totals = NarrowTotals();
+			for (int bit = 0; bit < 64; bit++) {
+				int swar_pos = (bit % 8) * 8 + bit / 8;
+				totals[bit] += src[swar_pos];
+			}
+		} else {
+			auto totals = EnsureTotals(a);
+			for (int bit = 0; bit < 64; bit++) {
+				int swar_pos = (bit % 8) * 8 + bit / 8;
+				totals[bit] += src[swar_pos];
+			}
 		}
 		memset(probabilistic_total8, 0, sizeof(probabilistic_total8));
 		update_count += swar_fill; // accumulate exact count (only place update_count grows in SWAR path)
@@ -133,11 +178,7 @@ struct PacCountState {
 	}
 	// Read allocated totals + unflushed SWAR into dst without allocating (for Finalize)
 	void GetTotalsWithSWAR(PAC_FLOAT *dst) const {
-		if (probabilistic_total) {
-			ToDoubleArray(probabilistic_total, dst);
-		} else {
-			memset(dst, 0, 64 * sizeof(PAC_FLOAT));
-		}
+		GetTotals(dst);
 #ifndef PAC_NOCASCADING
 		if (swar_fill > 0) {
 			const uint8_t *src = reinterpret_cast<const uint8_t *>(probabilistic_total8);
@@ -156,7 +197,12 @@ struct PacCountState {
 #endif
 	}
 	void GetTotals(PAC_FLOAT *dst) const {
-		if (probabilistic_total) {
+		if (HasNarrowTotals()) {
+			auto totals = NarrowTotals();
+			for (idx_t bit = 0; bit < 64; bit++) {
+				dst[bit] = static_cast<PAC_FLOAT>(totals[bit]);
+			}
+		} else if (probabilistic_total) {
 			ToDoubleArray(probabilistic_total, dst);
 		} else {
 			memset(dst, 0, 64 * sizeof(PAC_FLOAT));
