@@ -19,8 +19,10 @@
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/expression_barrier.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/logical_operator_visitor.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
+#include "duckdb/planner/operator/logical_cross_product.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_dependent_join.hpp"
 #include "duckdb/planner/operator/logical_cteref.hpp"
@@ -410,6 +412,101 @@ static void PushFilteredJoins(OptimizerExtensionInput &input, unique_ptr<Logical
 	PushFilteredJoin(input, op);
 }
 
+static bool ContainsSamplingHash(LogicalOperator &op) {
+	bool found = false;
+	auto visit = [&](unique_ptr<Expression> &expr) {
+		ExpressionIterator::EnumerateExpression(expr, [&](Expression &node) {
+			if (node.GetExpressionClass() == ExpressionClass::BOUND_FUNCTION) {
+				found |= node.Cast<BoundFunctionExpression>().Function().GetName() == Identifier("priv_hash");
+			}
+		});
+	};
+	LogicalOperatorVisitor::EnumerateExpressions(op, [&](unique_ptr<Expression> *expr) { visit(*expr); });
+	if (op.type == LogicalOperatorType::LOGICAL_GET) {
+		auto visit_filter = [&](TableFilter &filter) {
+			if (filter.filter_type == TableFilterType::EXPRESSION_FILTER) {
+				visit(filter.Cast<ExpressionFilter>().expr);
+			}
+		};
+		auto &filters = op.Cast<LogicalGet>().table_filters;
+		for (auto &filter : filters) {
+			visit_filter(filter.Filter());
+		}
+		for (auto &filter : filters.GetMultiColumnFilters()) {
+			visit_filter(*filter);
+		}
+	}
+	for (auto &child : op.children) {
+		found |= ContainsSamplingHash(*child);
+	}
+	return found;
+}
+
+// (A CROSS B) JOIN C can avoid constructing A x B when C joins both inputs.
+// Keep the original A,B,C column order by forming A JOIN (B JOIN C).
+static void RemoveSamplingCrossProducts(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &op) {
+	for (auto &child : op->children) {
+		RemoveSamplingCrossProducts(input, child);
+	}
+	if (op->type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		return;
+	}
+	auto &join = op->Cast<LogicalComparisonJoin>();
+	if (join.join_type != JoinType::INNER || join.children[0]->type != LogicalOperatorType::LOGICAL_CROSS_PRODUCT ||
+	    ContainsReorderingBarrier(join)) {
+		return;
+	}
+	auto &cross = join.children[0]->Cast<LogicalCrossProduct>();
+	auto a_size = cross.children[0]->EstimateCardinality(input.context);
+	auto c_size = join.children[1]->EstimateCardinality(input.context);
+	if (!c_size || c_size >= a_size) {
+		return;
+	}
+	auto a = cross.children[0]->GetColumnBindings();
+	auto b = cross.children[1]->GetColumnBindings();
+	vector<bool> to_inner;
+	idx_t inner_count = 0;
+	for (auto &condition : join.conditions) {
+		if (!condition.IsComparison() || condition.GetComparisonType() != ExpressionType::COMPARE_EQUAL ||
+		    condition.GetLHS().GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+		    condition.GetRHS().GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+			return;
+		}
+		auto key = condition.GetLHS().Cast<BoundColumnRefExpression>().Binding();
+		bool is_b = std::find(b.begin(), b.end(), key) != b.end();
+		if (!is_b && std::find(a.begin(), a.end(), key) == a.end()) {
+			return;
+		}
+		to_inner.push_back(is_b);
+		inner_count += is_b;
+	}
+	if (!inner_count || inner_count == join.conditions.size()) {
+		return;
+	}
+	auto old_bindings = join.GetColumnBindings();
+	auto inner = make_uniq<LogicalComparisonJoin>(JoinType::INNER);
+	vector<JoinCondition> outer_conditions;
+	for (idx_t i = 0; i < join.conditions.size(); i++) {
+		(to_inner[i] ? inner->conditions : outer_conditions).push_back(std::move(join.conditions[i]));
+	}
+	inner->children.push_back(std::move(cross.children[1]));
+	inner->children.push_back(std::move(join.children[1]));
+	auto left = std::move(cross.children[0]);
+	join.children[0] = std::move(left);
+	join.children[1] = std::move(inner);
+	join.conditions = std::move(outer_conditions);
+	join.left_projection_map.clear();
+	join.right_projection_map.clear();
+	join.filter_pushdown.reset();
+	join.ResolveOperatorTypes();
+	if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_FILTER_PUSHDOWN)) {
+		JoinFilterPushdownOptimizer filters(input.optimizer);
+		filters.VisitOperator(join);
+	}
+	RestoreOutputLayout(op, old_bindings);
+	PRIVACY_DEBUG_PRINT("[AS] Joined the smaller sampling input before a Cartesian product");
+}
+
 // Resolve a witness key through projections to a key-only ownership lookup.
 // Restricting this lookup to outer-domain keys cannot change an existence test.
 static unique_ptr<LogicalOperator> *FindDomainLookup(unique_ptr<LogicalOperator> &op, const Expression &key,
@@ -748,7 +845,14 @@ static void AddAntiJoinFilters(OptimizerExtensionInput &input, LogicalOperator &
 }
 
 static void OptimizeASCorrelations(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
-	if (!ContainsASAggregate(*plan)) {
+	auto has_aggregate = ContainsASAggregate(*plan);
+	if (!has_aggregate && !ContainsSamplingHash(*plan)) {
+		return;
+	}
+	if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_ORDER)) {
+		RemoveSamplingCrossProducts(input, plan);
+	}
+	if (!has_aggregate) {
 		return;
 	}
 	if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_ORDER)) {
