@@ -282,6 +282,16 @@ static ColumnBinding PropagateColumnThroughSubtree(LogicalOperator *root, Logica
 			current = ColumnBinding(TableIndex(proj.table_index.index), ProjectionIndex(new_idx));
 			proj.ResolveOperatorTypes();
 		} else if (op != &get) {
+			if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+				auto &agg = op->Cast<LogicalAggregate>();
+				for (idx_t j = 0; j < agg.groups.size(); j++) {
+					if (agg.groups[j]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+					    agg.groups[j]->Cast<BoundColumnRefExpression>().Binding() == current) {
+						current = ColumnBinding(agg.group_index, ProjectionIndex(j));
+						break;
+					}
+				}
+			}
 			// For non-projection operators, check that the binding passes through
 			auto bindings = op->GetColumnBindings();
 			bool found = false;
@@ -360,22 +370,12 @@ static bool ExpandCTEWithColumns(LogicalOperator *plan_root, const LogicalCTERef
 			return false;
 		}
 
-		// Add column to GET's column_ids
-		idx_t new_col_idx = get->GetColumnIds().size();
-		get->AddColumnId(col_oid);
-
-		// Add to projection_ids if the GET uses them
-		if (!get->projection_ids.empty()) {
-			get->projection_ids.push_back(ProjectionIndex(new_col_idx));
+		// Reuse an existing key binding, including keys projected under an alias.
+		// A duplicate GET column would not match the aggregate's grouping binding.
+		auto get_output_idx = EnsureProjectedColumn(*get, col_name);
+		if (get_output_idx == DConstants::INVALID_INDEX) {
+			return false;
 		}
-
-		get->ResolveOperatorTypes();
-
-		// The GET now outputs this column at binding (get->table_index.index, new_output_idx)
-		// If projection_ids is non-empty, the output index is projection_ids.size()-1
-		// Otherwise it's column_ids.size()-1
-		idx_t get_output_idx =
-		    get->projection_ids.empty() ? (get->GetColumnIds().size() - 1) : (get->projection_ids.size() - 1);
 		ColumnBinding get_binding {TableIndex(get->table_index.index), ProjectionIndex(get_output_idx)};
 
 		// Propagate through intermediate operators (projections, filters) in the CTE definition.

@@ -517,3 +517,25 @@ WHERE a.total=e.total;
 
 statement ok
 SET priv_rewrite=true;
+
+# An aliased ownership key already used by GROUP BY keeps its existing binding.
+# Adding a duplicate scan column would fail to cross that grouping boundary.
+statement ok
+CREATE TEMP TABLE cte_aliased_key_actual AS
+WITH per_owner AS MATERIALIZED (
+ SELECT owner AS pid,sum(v) AS total FROM cte_copy_facts GROUP BY owner
+)
+SELECT avg(total) AS av FROM per_owner;
+
+statement ok
+SET priv_rewrite=false;
+
+query I
+SELECT a.av=e.av FROM cte_aliased_key_actual a,
+(SELECT as_noised_avg(priv_hash(hash(pid)),total) AS av FROM
+ (SELECT owner AS pid,sum(v) AS total FROM cte_copy_facts GROUP BY owner) p) e;
+----
+true
+
+statement ok
+SET priv_rewrite=true;
