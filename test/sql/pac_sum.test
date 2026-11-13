@@ -8,6 +8,9 @@ statement ok
 PRAGMA clear_privacy_metadata;
 
 statement ok
+SET temp_directory='{TEST_DIR}/stochastic_sum_spill';
+
+statement ok
 PRAGMA enable_verification
 
 # Set deterministic seed for cross-CPU reproducibility
