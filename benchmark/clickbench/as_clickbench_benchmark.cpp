@@ -215,7 +215,7 @@ static string RewriteAsFunctionCall(const string &name, const vector<string> &ar
 }
 
 static bool ContainsVariableMUnsupportedAggregate(const string &sql) {
-	return sql.find("as_min") != string::npos || sql.find("as_max") != string::npos;
+	return sql.find("as_noised_min") != string::npos || sql.find("as_noised_max") != string::npos;
 }
 
 static string RewriteAsQueryForSampleAggregation(const string &sql, int sample_count) {
