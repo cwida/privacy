@@ -158,29 +158,32 @@ static unique_ptr<FunctionData> PacClipBindWithScale(ClientContext &ctx, vector<
 	}
 	int clip_support = 0;
 	Value dc_val;
-	if (ctx.TryGetCurrentSetting("priv_clip_support", dc_val) && !dc_val.IsNull()) {
+	if (ctx.TryGetCurrentSetting(Identifier("priv_clip_support"), dc_val) && !dc_val.IsNull()) {
 		clip_support = static_cast<int>(dc_val.GetValue<int64_t>());
 	}
 	bool clip_scale_val = false;
 	Value cs_val;
-	if (ctx.TryGetCurrentSetting("priv_clip_scale", cs_val) && !cs_val.IsNull()) {
+	if (ctx.TryGetCurrentSetting(Identifier("priv_clip_scale"), cs_val) && !cs_val.IsNull()) {
 		clip_scale_val = cs_val.GetValue<bool>();
 	}
 	return make_uniq<PacClipBindData>(ctx, mi, correction, clip_support, float_scale, clip_scale_val);
 }
 
-static unique_ptr<FunctionData> PacClipBind(ClientContext &ctx, AggregateFunction &,
-                                            vector<unique_ptr<Expression>> &args) {
+static unique_ptr<FunctionData> PacClipBind(BindAggregateFunctionInput &bind_input) {
+	auto &ctx = bind_input.GetClientContext();
+	auto &args = bind_input.GetArguments();
 	return PacClipBindWithScale(ctx, args, "as_clip");
 }
 
-static unique_ptr<FunctionData> PacClipBindFloat(ClientContext &ctx, AggregateFunction &,
-                                                 vector<unique_ptr<Expression>> &args) {
+static unique_ptr<FunctionData> PacClipBindFloat(BindAggregateFunctionInput &bind_input) {
+	auto &ctx = bind_input.GetClientContext();
+	auto &args = bind_input.GetArguments();
 	return PacClipBindWithScale(ctx, args, "as_clip", CLIP_FLOAT_SCALE);
 }
 
-static unique_ptr<FunctionData> PacClipBindDouble(ClientContext &ctx, AggregateFunction &,
-                                                  vector<unique_ptr<Expression>> &args) {
+static unique_ptr<FunctionData> PacClipBindDouble(BindAggregateFunctionInput &bind_input) {
+	auto &ctx = bind_input.GetClientContext();
+	auto &args = bind_input.GetArguments();
 	return PacClipBindWithScale(ctx, args, "as_clip", CLIP_DOUBLE_SCALE);
 }
 

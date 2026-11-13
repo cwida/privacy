@@ -8,6 +8,9 @@ statement ok
 PRAGMA clear_privacy_metadata;
 
 statement ok
+SET temp_directory='{TEST_DIR}/stochastic_sum_spill';
+
+statement ok
 PRAGMA enable_verification
 
 # Set deterministic seed for cross-CPU reproducibility
@@ -303,6 +306,49 @@ DROP TABLE test_data
 statement ok
 SET pac_sample_diversity_check = false
 
+# Signed SUM variants must isolate two's-complement carries between worlds.
+query I
+SELECT count(*) FROM (
+    SELECT as_sum(18446744073709551615::UBIGINT,v) lanes
+    FROM (VALUES (-1::BIGINT),(1::BIGINT))t(v)
+),unnest(lanes)t(v) WHERE v=0
+----
+64
+
+# Cancellation in the full stream does not bound each world's subtotal. Both
+# worlds exceed a signed 16-bit lane even though the full-stream sum is zero.
+query II
+WITH a AS (
+    SELECT as_sum(CASE WHEN i%2=0 THEN 1 ELSE 2 END::UBIGINT,
+                  CASE WHEN i%2=0 THEN -4095 ELSE 4095 END::BIGINT) lanes
+    FROM range(18)t(i)
+)
+SELECT (lanes[1]/2)::BIGINT,(lanes[2]/2)::BIGINT FROM a
+----
+-36855	36855
+
+# A negative cascade's carry magnitude rounds up, not down. These small values
+# introduce no per-value truncation in either signed or dual-unsigned SUM.
+query I
+SELECT count(*) FROM (
+    SELECT as_sum(18446744073709551615::UBIGINT,-1::BIGINT) lanes FROM range(32768)
+),unnest(lanes)t(v) WHERE v=-65536
+----
+64
+
+# Exported partial states are forced past the two-value buffer so this tests
+# packed-state combine, not replay of buffered inputs.
+query I
+SELECT count(*) FROM (
+    SELECT finalize(combine(a.s,b.s)) lanes FROM
+    (SELECT as_sum(18446744073709551615::UBIGINT,CASE WHEN i=0 THEN -1 ELSE 0 END::BIGINT) EXPORT_STATE s
+     FROM range(3)t(i))a,
+    (SELECT as_sum(18446744073709551615::UBIGINT,CASE WHEN i=0 THEN 1 ELSE 0 END::BIGINT) EXPORT_STATE s
+     FROM range(3)t(i))b
+),unnest(lanes)t(v) WHERE v=0
+----
+64
+
 statement ok
 CREATE TABLE signed_worlds AS
 SELECT CASE WHEN i % 2 = 0 THEN 18446744073709551615::UBIGINT ELSE 1::UBIGINT END AS mask,
@@ -374,3 +420,375 @@ a AS (SELECT as_sum(mask, v) AS lanes FROM t)
 SELECT count(*) FILTER (WHERE lanes[j+1] / 2 = 196605) FROM a CROSS JOIN range(64) worlds(j)
 ----
 64
+
+
+# DuckDB 2.0 state export preserves buffers, positive/negative cascades, and
+# pointer-backed counters. Values include a level above the inline-pointer area.
+statement ok
+SET priv_rewrite=false;
+
+statement ok
+SET threads=1;
+
+statement ok
+SET pac_mi=0;
+
+statement ok
+SET pac_sample_diversity_check=false;
+
+statement ok
+CREATE TABLE spill_sum_input AS
+SELECT i%5 g,priv_hash(hash(i)) h,
+       CASE WHEN i%3=0 THEN -(1::BIGINT<<48) ELSE 1024::BIGINT END v
+FROM range(10000)t(i);
+
+statement ok
+CREATE TABLE spill_sum_states AS
+SELECT g,as_sum(h,v) EXPORT_STATE s,
+       as_sum(h,v::DOUBLE) EXPORT_STATE d,
+       as_noised_sum(h,v::DECIMAL(18,2)) EXPORT_STATE dec,
+       as_sum(h,abs(v)::UBIGINT,0.75) EXPORT_STATE u
+FROM spill_sum_input GROUP BY g;
+
+query I
+SELECT count(*) FROM spill_sum_states a JOIN (
+    SELECT g,as_sum(h,v) s,as_sum(h,v::DOUBLE) d,
+           as_noised_sum(h,v::DECIMAL(18,2)) dec,
+           as_sum(h,abs(v)::UBIGINT,0.75) u
+    FROM spill_sum_input GROUP BY g
+)b USING(g)
+WHERE finalize(a.s) IS DISTINCT FROM b.s OR finalize(a.d) IS DISTINCT FROM b.d
+   OR finalize(a.dec) IS DISTINCT FROM b.dec OR finalize(a.u) IS DISTINCT FROM b.u;
+----
+0
+
+# One or two values stay buffered; NULL-only/empty groups have no inner state.
+query I
+SELECT finalize(s) IS NOT DISTINCT FROM expected FROM (
+    SELECT as_sum(h,NULL::BIGINT) EXPORT_STATE s,as_sum(h,NULL::BIGINT) expected
+    FROM spill_sum_input
+);
+----
+true
+
+query I
+SELECT finalize(s) IS NOT DISTINCT FROM expected FROM (
+    SELECT as_sum(h,v) EXPORT_STATE s,as_sum(h,v) expected
+    FROM spill_sum_input WHERE false
+);
+----
+true
+
+query I
+SELECT finalize(s) IS NOT DISTINCT FROM expected FROM (
+    SELECT as_sum(h,v) EXPORT_STATE s,as_sum(h,v) expected
+    FROM (SELECT h,v FROM spill_sum_input LIMIT 1)
+);
+----
+true
+
+query I
+SELECT finalize(s) IS NOT DISTINCT FROM expected FROM (
+    SELECT as_sum(h,v) EXPORT_STATE s,as_sum(h,v) expected
+    FROM (SELECT h,v FROM spill_sum_input LIMIT 2)
+);
+----
+true
+
+# Compare the complete result under arena pressure with an in-memory execution.
+# Mixed integer, floating-point, and DECIMAL states share the same hash table.
+statement ok
+SET memory_limit='256MB';
+
+statement ok
+CREATE TABLE spill_sum_expected AS
+SELECT count(*) n,sum(hash(a,b,c)) checksum FROM (
+    SELECT i//8 g,
+           as_sum(18446744073709551615::UBIGINT,1::BIGINT) a,
+           as_sum(18446744073709551615::UBIGINT,2::DOUBLE) b,
+           as_noised_sum(18446744073709551615::UBIGINT,3::DECIMAL(18,2)) c
+    FROM range(800000)t(i) GROUP BY g
+);
+
+statement ok
+SET debug_force_external=true;
+
+statement ok
+SET memory_limit='32MB';
+
+query II
+SELECT actual.n,actual.checksum=expected.checksum FROM (
+    SELECT count(*) n,sum(hash(a,b,c)) checksum FROM (
+        SELECT i//8 g,
+               as_sum(18446744073709551615::UBIGINT,1::BIGINT) a,
+               as_sum(18446744073709551615::UBIGINT,2::DOUBLE) b,
+               as_noised_sum(18446744073709551615::UBIGINT,3::DECIMAL(18,2)) c
+        FROM range(800000)t(i) GROUP BY g
+    )
+)actual,spill_sum_expected expected;
+----
+100000	true
+
+statement ok
+SET debug_force_external=false;
+
+statement ok
+RESET memory_limit;
+
+
+# Exported states remain combinable, including the high and negative levels.
+query I
+SELECT finalize(combine(a.s,b.s)) IS NOT DISTINCT FROM c.expected FROM
+(SELECT as_sum(h,v) EXPORT_STATE s FROM spill_sum_input WHERE g<3)a,
+(SELECT as_sum(h,v) EXPORT_STATE s FROM spill_sum_input WHERE g>=3)b,
+(SELECT as_sum(h,v) expected FROM spill_sum_input)c;
+----
+true
+
+statement error
+SELECT finalize(to_aggregate_state(''::BLOB,'as_sum',['UBIGINT','BIGINT']));
+----
+Truncated stochastic aggregate state
+
+
+# DECIMAL binding replaces its implementation; retain the logical third
+# argument (sampling correction) when rebinding exported states.
+query I
+SELECT finalize(s) IS NOT DISTINCT FROM expected FROM (
+    SELECT as_noised_sum(h,v::DECIMAL(18,2),0.75) EXPORT_STATE s,
+           as_noised_sum(h,v::DECIMAL(18,2),0.75) expected
+    FROM spill_sum_input
+);
+----
+true
+
+
+# Q78-shaped failure: sparse local groups stay buffered in the sink. Combining
+# them must not manufacture a permanent full state for each final group.
+statement ok
+SET debug_force_external=true;
+
+statement ok
+SET memory_limit='32MB';
+
+query II
+SELECT count(*),count(*) FILTER (WHERE a=4 AND b=8 AND c=12) FROM (
+    SELECT i%100000 g,
+           as_noised_sum(18446744073709551615::UBIGINT,1::BIGINT) a,
+           as_noised_sum(18446744073709551615::UBIGINT,2::DOUBLE) b,
+           as_noised_sum(18446744073709551615::UBIGINT,3::DECIMAL(18,2)) c
+    FROM range(200000)t(i) GROUP BY g
+);
+----
+100000	100000
+
+statement ok
+SET debug_force_external=false;
+
+statement ok
+RESET memory_limit;
+
+# The two-value buffer boundary: combine two buffered states, or a buffered
+# destination and a materialized source. Every world must retain every value.
+query I
+SELECT count(*) FROM (
+    SELECT finalize(combine(a.s,b.s)) lanes FROM
+    (SELECT as_sum(18446744073709551615::UBIGINT,v) EXPORT_STATE s FROM (VALUES (13::BIGINT),(17))t(v))a,
+    (SELECT as_sum(18446744073709551615::UBIGINT,29::BIGINT) EXPORT_STATE s)b
+),unnest(lanes)t(v) WHERE v=118;
+----
+64
+
+query I
+SELECT count(*) FROM (
+    SELECT finalize(combine(a.s,b.s)) lanes FROM
+    (SELECT as_sum(18446744073709551615::UBIGINT,v) EXPORT_STATE s FROM (VALUES (1::BIGINT),(2))t(v))a,
+    (SELECT as_sum(18446744073709551615::UBIGINT,v) EXPORT_STATE s FROM (VALUES (3::BIGINT),(4),(5))t(v))b
+),unnest(lanes)t(v) WHERE v=30;
+----
+64
+
+# All stochastic aggregates in a hash table must provide a state layout.
+# Exercise COUNT's SWAR overflow, MIN/MAX, AVG decomposition and list-input states.
+statement ok
+SET priv_rewrite=false
+
+statement ok
+SET pac_mi=0
+
+statement ok
+SET pac_sample_diversity_check=false
+
+statement ok
+SET threads=1
+
+statement ok
+SET memory_limit='512MB'
+
+statement ok
+CREATE TABLE mixed_spill_expected AS
+SELECT count(*) n,sum(hash(s,c,a,mn,mx)) checksum FROM (
+ SELECT i//8 g,as_sum(18446744073709551615::UBIGINT,1::BIGINT) s,
+ as_count(18446744073709551615::UBIGINT) c,
+ as_noised_avg(18446744073709551615::UBIGINT,2::DOUBLE) a,
+ as_min(18446744073709551615::UBIGINT,i%8) mn,
+ as_max(18446744073709551615::UBIGINT,i%8) mx
+ FROM range(800000)t(i) GROUP BY g
+)
+
+statement ok
+SET memory_limit='32MB'
+
+query I
+SELECT r.n=e.n AND r.checksum=e.checksum FROM mixed_spill_expected e,(
+ SELECT count(*) n,sum(hash(s,c,a,mn,mx)) checksum FROM (
+ SELECT i//8 g,as_sum(18446744073709551615::UBIGINT,1::BIGINT) s,
+ as_count(18446744073709551615::UBIGINT) c,
+ as_noised_avg(18446744073709551615::UBIGINT,2::DOUBLE) a,
+ as_min(18446744073709551615::UBIGINT,i%8) mn,
+ as_max(18446744073709551615::UBIGINT,i%8) mx
+ FROM range(800000)t(i) GROUP BY g
+ ))r
+----
+true
+
+statement ok
+SET memory_limit='512MB'
+
+statement ok
+DROP TABLE mixed_spill_expected
+
+# String states allocate variable byte counts in the shared import arena.
+# Rebuilding the SUM state must realign its tagged inner-state pointer.
+statement ok
+SET memory_limit='32MB'
+
+statement ok
+SET debug_force_external=true
+
+query II
+SELECT count(*),count(*) FILTER (WHERE list_min(s)=6 AND list_max(s)=6 AND length(t)=39) FROM (
+ SELECT i//3 g,string_agg(repeat('x',13),'') t,
+ as_sum(18446744073709551615::UBIGINT,1::BIGINT) s
+ FROM range(300000)t(i) GROUP BY g
+)
+----
+100000	100000
+
+statement ok
+SET debug_force_external=false
+
+statement ok
+SET memory_limit='512MB'
+
+query II
+SELECT finalize(s)=expected,finalize(c)=expected FROM (
+ SELECT as_noised_count(18446744073709551615::UBIGINT,0.75) EXPORT_STATE s,
+ as_noised_count(18446744073709551615::UBIGINT,1::BIGINT,0.75) EXPORT_STATE c,
+ as_noised_count(18446744073709551615::UBIGINT,0.75) expected FROM range(1000)
+)
+----
+true	true
+
+# NULL exported states occur naturally after an outer join. Native finalize
+# propagates NULL, and combine keeps the non-NULL input unchanged.
+query I
+WITH s AS MATERIALIZED (
+ SELECT as_sum(18446744073709551615::UBIGINT,1::BIGINT) EXPORT_STATE x,
+ as_sum(18446744073709551615::UBIGINT,1::BIGINT) expected
+)
+SELECT finalize(CASE WHEN i=0 THEN x END) IS NOT DISTINCT FROM CASE WHEN i=0 THEN expected END
+FROM s,range(2)t(i) ORDER BY i
+----
+true
+true
+
+query I
+WITH s AS MATERIALIZED (
+ SELECT as_sum(18446744073709551615::UBIGINT,1::BIGINT) EXPORT_STATE x,
+ as_sum(18446744073709551615::UBIGINT,1::BIGINT) expected
+)
+SELECT finalize(combine(CASE WHEN i=0 THEN x END,CASE WHEN i=1 THEN x END)) IS NOT DISTINCT FROM expected
+FROM s,range(2)t(i) ORDER BY i
+----
+true
+true
+
+# Clustered updates reuse their selected views across groups. Exercise a partial
+# chunk, nullable values, dictionary selections, and constant hash/value inputs.
+query II
+SELECT count(*),count(*) FILTER (WHERE list_extract(s,1)=2*expected
+ AND list_min(k)=2*3*n AND list_max(k)=2*3*n AND list_min(z)=0 AND list_max(z)=0)
+FROM (
+ SELECT i%13 g,
+ as_sum(CASE WHEN i%2=0 THEN 18446744073709551615::UBIGINT ELSE 1::UBIGINT END,
+        CASE WHEN i%5=0 THEN NULL ELSE (i%101)::INTEGER END) s,
+ as_sum(18446744073709551615::UBIGINT,3::INTEGER) k,
+ as_sum(18446744073709551615::UBIGINT,NULL::INTEGER) z,
+ sum(CASE WHEN i%5=0 THEN NULL ELSE (i%101)::INTEGER END) expected,count(*) n
+ FROM range(10000)t(i) WHERE i%7<>0 GROUP BY g
+)
+----
+13	13
+
+# Negative-only groups still have participating worlds. The scalar finalizer
+# must include the negative state's mask before its empty-world check.
+query II
+SELECT as_noised_sum(1::UBIGINT,v)=-30,as_noised_avg(1::UBIGINT,v)=-7.5
+FROM (VALUES(-5::BIGINT),(-10::BIGINT))t(v)
+----
+true	true
+
+# A numeric constant is AVG's value, not COUNT's optional correction.
+query II
+SELECT as_noised_avg(1::UBIGINT,-5::DOUBLE)=-5,
+list_extract(as_avg(1::UBIGINT,-5::DOUBLE),1)=-5 FROM range(10)
+----
+true	true
+
+query II
+SELECT count(*),count(*) FILTER (WHERE s=-10*n AND a=-5)
+FROM (
+ SELECT i%1000 g,as_noised_sum(1::UBIGINT,-5::BIGINT) s,
+ as_noised_avg(1::UBIGINT,-5::BIGINT) a,count(*) n
+ FROM range(10000)t(i) GROUP BY g
+)
+----
+1000	1000
+
+query I
+SELECT finalize(s) FROM (
+ SELECT as_noised_sum(1::UBIGINT,-5::BIGINT) EXPORT_STATE s FROM range(10)
+)
+----
+-100
+
+statement ok
+SET pac_mi=0.125
+
+# Positive and negative masks together cover every world: no NULL coin may
+# treat the positive mask alone as the set of participating worlds.
+query III
+SELECT count(*),count(*) FILTER (WHERE s IS NULL),count(*) FILTER (WHERE c IS NULL)
+FROM (
+ SELECT i//20 g,
+ as_noised_sum(CASE WHEN i%20=0 THEN 1::UBIGINT ELSE 18446744073709551614::UBIGINT END,
+               CASE WHEN i%20=0 THEN 1::BIGINT ELSE -1::BIGINT END) s,
+ as_noised_clip_sum(CASE WHEN i%20=0 THEN 1::UBIGINT ELSE 18446744073709551614::UBIGINT END,
+                    CASE WHEN i%20=0 THEN 1::BIGINT ELSE -1::BIGINT END) c
+ FROM range(20000)t(i) GROUP BY g
+)
+----
+1000	0	0
+
+statement ok
+SET pac_mi=0
+
+statement ok
+SET pac_sample_diversity_check=true
+
+statement ok
+SET memory_limit='80%'
+
+statement ok
+SET priv_rewrite=true

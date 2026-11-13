@@ -1,3 +1,4 @@
+#include "duckdb/common/vector/list_vector.hpp"
 #include "aggregates/as_aggregate.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/function/scalar_function.hpp"
@@ -18,27 +19,22 @@ static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector 
 	auto &context = state.GetContext();
 	double mi = GetPacMiFromSetting(context);
 
-	Value pac_seed_val;
-	uint64_t seed = (context.TryGetCurrentSetting("privacy_seed", pac_seed_val) && !pac_seed_val.IsNull())
-	                    ? uint64_t(pac_seed_val.GetValue<int64_t>())
-	                    : 42;
-	if (mi != 0.0) {
-		seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(context.ActiveTransaction().GetActiveQuery());
-	}
+	uint64_t seed = GetPacSeed(context, mi);
 	uint64_t query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
+	auto gen = PacRandomStream(seed, *GetPacRandomState(context));
 
 	auto &list_vec = args.data[0];
 	idx_t count = args.size();
 
 	UnifiedVectorFormat list_data;
-	list_vec.ToUnifiedFormat(count, list_data);
+	list_vec.ToUnifiedFormat(list_data);
 
-	auto result_data = FlatVector::GetData<PAC_FLOAT>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<PAC_FLOAT>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
-	auto &child_vec = ListVector::GetEntry(list_vec);
+	auto &child_vec = ListVector::GetChild(list_vec);
 	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(ListVector::GetListSize(list_vec), child_data);
+	child_vec.ToUnifiedFormat(child_data);
 	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 
 	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
@@ -63,9 +59,6 @@ static void PacFinalizeFunction(DataChunk &args, ExpressionState &state, Vector 
 			counters[j] = child_data.validity.RowIsValid(child_idx) ? child_values[child_idx] : 0;
 		}
 
-		// RNG seeded per row using seed + list offset (stable across DataChunk batches)
-		std::mt19937_64 gen(seed ^ (entry.offset * PAC_MAGIC_HASH));
-
 		result_data[i] = PacNoisySampleFrom64Counters(counters, mi, 1.0, gen, 0ULL, query_hash, nullptr);
 	}
 }
@@ -74,6 +67,7 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 	auto list_type = LogicalType::LIST(PacFloatLogicalType());
 	auto scalar_type = PacFloatLogicalType();
 	ScalarFunction priv_finalize("priv_finalize", {list_type}, scalar_type, PacFinalizeFunction);
+	priv_finalize.SetStability(FunctionStability::VOLATILE);
 	loader.RegisterFunction(priv_finalize);
 
 	// Register implicit casts LIST<FLOAT> → FLOAT and LIST<FLOAT> → DOUBLE so the binder
@@ -83,19 +77,20 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 		double mi = 0.0;
 		uint64_t seed = 42;
 		uint64_t query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
+		PacRandomEngine gen(seed, 0);
 
 		UnifiedVectorFormat list_data;
-		source.ToUnifiedFormat(count, list_data);
+		source.ToUnifiedFormat(list_data);
 
-		auto &child_vec = ListVector::GetEntry(source);
+		auto &child_vec = ListVector::GetChild(source);
 		UnifiedVectorFormat child_data;
-		child_vec.ToUnifiedFormat(ListVector::GetListSize(source), child_data);
+		child_vec.ToUnifiedFormat(child_data);
 		auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
 		auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
 
 		// Write to a PAC_FLOAT temp buffer, then cast to the result type if needed
 		vector<PAC_FLOAT> tmp(count);
-		auto &result_validity = FlatVector::Validity(result);
+		auto &result_validity = FlatVector::ValidityMutable(result);
 
 		for (idx_t i = 0; i < count; i++) {
 			auto list_idx = list_data.sel->get_index(i);
@@ -113,18 +108,17 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 				auto child_idx = child_data.sel->get_index(entry.offset + j);
 				counters[j] = child_data.validity.RowIsValid(child_idx) ? child_values[child_idx] : 0;
 			}
-			std::mt19937_64 gen(seed ^ (entry.offset * PAC_MAGIC_HASH));
 			tmp[i] = PacNoisySampleFrom64Counters(counters, mi, 1.0, gen, 0ULL, query_hash, nullptr);
 		}
 
 		// Copy to result — handles both FLOAT and DOUBLE result types
 		if (result.GetType().id() == LogicalTypeId::FLOAT) {
-			auto result_data = FlatVector::GetData<float>(result);
+			auto result_data = FlatVector::GetDataMutable<float>(result);
 			for (idx_t i = 0; i < count; i++) {
 				result_data[i] = static_cast<float>(tmp[i]);
 			}
 		} else {
-			auto result_data = FlatVector::GetData<double>(result);
+			auto result_data = FlatVector::GetDataMutable<double>(result);
 			for (idx_t i = 0; i < count; i++) {
 				result_data[i] = static_cast<double>(tmp[i]);
 			}
@@ -140,16 +134,16 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader) {
 	// The post-optimizer rewrites these comparisons to priv_filter_<cmp> calls before
 	// execution, so the cast is never actually run in comparison contexts.
 	auto scalar_to_list_cast = [](Vector &source, Vector &result, idx_t count, CastParameters &parameters) -> bool {
-		auto &child_vec = ListVector::GetEntry(result);
-		auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
-		auto list_entries = FlatVector::GetData<list_entry_t>(result);
+		auto &child_vec = ListVector::GetChildMutable(result);
+		auto child_data = FlatVector::GetDataMutable<PAC_FLOAT>(child_vec);
+		auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
 		UnifiedVectorFormat source_data;
-		source.ToUnifiedFormat(count, source_data);
+		source.ToUnifiedFormat(source_data);
 		idx_t offset = 0;
 		for (idx_t i = 0; i < count; i++) {
 			auto src_idx = source_data.sel->get_index(i);
 			if (!source_data.validity.RowIsValid(src_idx)) {
-				FlatVector::Validity(result).SetInvalid(i);
+				FlatVector::ValidityMutable(result).SetInvalid(i);
 				list_entries[i] = {offset, 0};
 				continue;
 			}

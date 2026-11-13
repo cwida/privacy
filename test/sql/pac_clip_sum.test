@@ -488,3 +488,20 @@ SELECT count(*) FROM (
 ) t WHERE abs(s) < 500000
 ----
 4
+
+# Negative-only worlds must participate in the scalar NULL decision.
+statement ok
+SET priv_clip_support=0
+
+query I
+SELECT as_noised_clip_sum(1::UBIGINT,v)=-30
+FROM (VALUES(-5::BIGINT),(-10::BIGINT))t(v)
+----
+true
+
+statement error
+SELECT finalize(s)=-100 FROM (
+ SELECT as_noised_clip_sum(1::UBIGINT,-5::BIGINT) EXPORT_STATE s FROM range(10)
+)
+----
+does not have a state type callback

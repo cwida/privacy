@@ -37,14 +37,14 @@ static string Csv(const string &s) {
 		out += c == '"' ? "\"\"" : string(1, c);
 	return out + "\"";
 }
-static unique_ptr<MaterializedQueryResult> Query(Connection &con, const string &sql) {
+static unique_ptr<QueryResult> Query(Connection &con, const string &sql) {
 	auto r = con.Query(sql);
 	if (!r || r->HasError())
 		throw std::runtime_error(r ? r->GetError() : "No result");
 	return r;
 }
 static void Require(Connection &con, const string &sql, const string &why) {
-	if (!Query(con, sql)->GetValue(0, 0).GetValue<bool>())
+	if (!Query(con, sql)->Collection().GetValue(0, 0).GetValue<bool>())
 		throw std::runtime_error(why);
 }
 static string InputQuery(string sql, int world) {
@@ -66,10 +66,11 @@ static string QuerySQL(const string &sql) {
 }
 using Results = std::map<string, Value>;
 enum class Mode { FULL, REPEATED, ASA };
-static void Collect(MaterializedQueryResult &r, Results &out, int world, bool is_as, bool grouped) {
+static void Collect(QueryResult &r, Results &out, int world, bool is_as, bool grouped) {
+	auto rows = r.Collection().GetRows();
 	idx_t aggregate = r.ColumnCount();
 	for (idx_t col = 0; col < r.ColumnCount(); col++)
-		if (r.names[col] == "revenue" || r.names[col] == "profit")
+		if (r.GetNames()[col] == "revenue" || r.GetNames()[col] == "profit")
 			aggregate = col;
 	if (aggregate == r.ColumnCount())
 		throw std::runtime_error("Missing aggregate column");
@@ -78,13 +79,13 @@ static void Collect(MaterializedQueryResult &r, Results &out, int world, bool is
 		for (idx_t col = 0; col < r.ColumnCount() - (is_as ? 1 : 0); col++) {
 			if (col == aggregate)
 				continue;
-			auto v = r.GetValue(col, row);
+			auto v = rows.GetValue(col, row);
 			string s = v.IsNull() ? "NULL" : v.type().ToString() + ":" + v.ToString();
 			key += std::to_string(s.size()) + ":" + s;
 		}
-		Value value = r.GetValue(aggregate, row);
+		Value value = rows.GetValue(aggregate, row);
 		if (is_as) {
-			auto pv = r.GetValue(r.ColumnCount() - 1, row);
+			auto pv = rows.GetValue(r.ColumnCount() - 1, row);
 			bool present = false;
 			if (!pv.IsNull()) {
 				const auto &presence = ListValue::GetChildren(pv);
@@ -227,17 +228,20 @@ int main(int argc, char **argv) {
 		if (const char *memory_limit = std::getenv("SSB_MEMORY_LIMIT")) {
 			Query(con, "SET memory_limit=" + Quote(memory_limit));
 		}
-		string memory_limit = Query(con, "SELECT current_setting('memory_limit')")->GetValue(0, 0).ToString();
+		string memory_limit =
+		    Query(con, "SELECT current_setting('memory_limit')")->Collection().GetValue(0, 0).ToString();
 		std::cerr << "DuckDB memory limit: " << memory_limit << '\n';
 		Query(con, "SET priv_rewrite=false; SET pac_sample_diversity_check=false; SET pac_mi=0; SET privacy_seed=42; "
 		           "SET pac_hash_repair=true");
 		Query(con, Read(ssb + "/schema.sql"));
 		auto manifest = Query(con, "SELECT \"table\", rows::UBIGINT FROM read_csv(" + Quote(data + "/row_counts.csv") +
 		                               ", header=true)");
+		auto manifest_rows = manifest->Collection().GetRows();
 		std::map<string, uint64_t> row_counts;
 		for (idx_t row = 0; row < manifest->RowCount(); row++) {
 			if (!row_counts
-			         .emplace(manifest->GetValue(0, row).ToString(), manifest->GetValue(1, row).GetValue<uint64_t>())
+			         .emplace(manifest_rows.GetValue(0, row).ToString(),
+			                  manifest_rows.GetValue(1, row).GetValue<uint64_t>())
 			         .second)
 				throw std::runtime_error("Duplicate table in row-count manifest");
 		}
@@ -263,8 +267,8 @@ int main(int argc, char **argv) {
 		double import_ms = Ms(start);
 		Query(con, "CHECKPOINT");
 		// Explicit column protection permits grouping by customer city/nation while retaining key protection.
-		Query(con, "ALTER TABLE customer ADD PRIVACY_KEY(c_custkey); ALTER TABLE customer SET PU; "
-		           "ALTER TABLE customer ADD PROTECTED(c_custkey); "
+		Query(con, "ALTER TABLE customer ADD PRIVACY_KEY(c_custkey); "
+		           "ALTER TABLE customer ADD PROTECTED(c_custkey); ALTER TABLE customer SET PU; "
 		           "ALTER TABLE lineorder ADD PRIVACY_LINK(lo_custkey) REFERENCES customer(c_custkey)");
 		for (auto name : {"q11", "q12", "q13", "q21", "q22", "q23", "q31", "q32", "q33", "q34", "q41", "q42", "q43"}) {
 			string sql = Read(ssb + "/queries/" + name + ".sql");
@@ -281,9 +285,10 @@ int main(int argc, char **argv) {
 			for (const auto &variant : {std::make_pair("full", aggregate_sql), std::make_pair("asa", as_aggregate_sql),
 			                            std::make_pair("world0", InputQuery(aggregate_sql, 0))}) {
 				auto explain = Query(con, "EXPLAIN " + variant.second);
+				auto explain_rows = explain->Collection().GetRows();
 				plans << "\n--- " << name << " timed " << variant.first << " ---\n";
 				for (idx_t row = 0; row < explain->RowCount(); row++) {
-					plans << explain->GetValue(1, row).ToString() << '\n';
+					plans << explain_rows.GetValue(1, row).ToString() << '\n';
 				}
 			}
 			bool rewritten = false, executed = false;
@@ -291,9 +296,10 @@ int main(int argc, char **argv) {
 			Query(con, "SET priv_rewrite=true");
 			try {
 				auto explain = Query(con, "EXPLAIN " + sql);
+				auto explain_rows = explain->Collection().GetRows();
 				string plan;
 				for (idx_t row = 0; row < explain->RowCount(); row++)
-					plan += explain->GetValue(1, row).ToString();
+					plan += explain_rows.GetValue(1, row).ToString();
 				plans << "\n--- " << name << " ---\n" << plan << '\n';
 				rewritten = plan.find("as_noised_sum") != string::npos || plan.find("as_sum(") != string::npos;
 				if (!rewritten)

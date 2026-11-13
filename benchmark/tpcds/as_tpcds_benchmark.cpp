@@ -39,7 +39,7 @@ static string Csv(const string &value) {
 	return out + "\"";
 }
 
-static unique_ptr<MaterializedQueryResult> Query(Connection &con, const string &sql) {
+static unique_ptr<QueryResult> Query(Connection &con, const string &sql) {
 	auto result = con.Query(sql);
 	if (!result || result->HasError()) {
 		throw std::runtime_error(result ? result->GetError() : "No result");
@@ -71,7 +71,9 @@ int main(int argc, char **argv) {
 		EnsureOutputParentDirectory(db_path);
 		EnsureDirectory(queries);
 		EnsureDirectory(output);
-		DuckDB db(db_path.c_str());
+		DBConfig db_config;
+		ConfigureBenchmarkDatabase(db_config);
+		DuckDB db(db_path.c_str(), &db_config);
 		Connection con(db);
 		Query(con, "SET threads=" + std::to_string(threads));
 		Query(con, "SET memory_limit=" + Quote(JsonString(config, "memory_limit", "4GB")));
@@ -86,7 +88,7 @@ int main(int argc, char **argv) {
 			Query(con, "INSTALL tpcds; LOAD tpcds;");
 			auto tables = Query(con, "SELECT count(*) FROM duckdb_tables() WHERE schema_name='main' "
 			                         "AND table_name IN ('customer','store_sales','catalog_sales','web_sales')");
-			auto present = tables->GetValue(0, 0).GetValue<int64_t>();
+			auto present = tables->Collection().GetValue(0, 0).GetValue<int64_t>();
 			auto sf_value = JsonNumber(config, "sf", 1);
 			if (sf_value <= 0) {
 				throw std::runtime_error("Scale factor must be positive");
@@ -103,15 +105,15 @@ int main(int argc, char **argv) {
 				throw std::runtime_error("Expected all 99 TPC-DS queries");
 			}
 			for (idx_t row = 0; row < workload->RowCount(); row++) {
-				auto id = workload->GetValue(0, row).GetValue<int>();
+				auto id = workload->Collection().GetValue(0, row).GetValue<int>();
 				std::ofstream file(queries + "/" + Name(id) + ".sql");
 				if (!file) {
 					throw std::runtime_error("Cannot export original query");
 				}
-				file << workload->GetValue(1, row).ToString();
+				file << workload->Collection().GetValue(1, row).ToString();
 			}
 			std::ofstream metadata(output + "/environment.txt");
-			metadata << "DuckDB: " << Query(con, "SELECT version()")->GetValue(0, 0).ToString() << '\n'
+			metadata << "DuckDB: " << Query(con, "SELECT version()")->Collection().GetValue(0, 0).ToString() << '\n'
 			         << "Config:\n"
 			         << Read(argv[1]) << "\nOwnership:\n"
 			         << Read(schema);
@@ -157,7 +159,7 @@ int main(int argc, char **argv) {
 				auto explain = Query(con, "EXPLAIN " + sql);
 				string plan;
 				for (idx_t row = 0; row < explain->RowCount(); row++) {
-					plan += explain->GetValue(1, row).ToString() + "\n";
+					plan += explain->Collection().GetValue(1, row).ToString() + "\n";
 				}
 				std::ofstream plan_file(output + "/" + name + "_" + mode + ".plan.txt");
 				plan_file << plan;

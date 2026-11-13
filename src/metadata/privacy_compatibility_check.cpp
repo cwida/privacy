@@ -103,7 +103,7 @@ bool ContainsUnaggregatedEntityInput(const LogicalOperator &op, const PrivacyCom
 	}
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
 		auto table = op.Cast<LogicalGet>().GetTable();
-		if (table && (check.fk_paths.count(table->name) ||
+		if (table && (check.fk_paths.count(table->name.GetIdentifierName()) ||
 		              std::find(check.scanned_pu_tables.begin(), check.scanned_pu_tables.end(), table->name) !=
 		                  check.scanned_pu_tables.end())) {
 			return true;
@@ -135,6 +135,11 @@ static bool IsDPPrivacyMode(const string &privacy_mode) {
 }
 
 static bool ContainsUnsupportedDPShape(const LogicalOperator &op, string &shape) {
+	if (op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE &&
+	    StringUtil::StartsWith(op.Cast<LogicalMaterializedCTE>().ctename.GetIdentifierName(), "__duckdb_delim_")) {
+		shape = "lateral or correlated subqueries";
+		return true;
+	}
 	if (op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE || op.type == LogicalOperatorType::LOGICAL_CTE_REF ||
 	    op.type == LogicalOperatorType::LOGICAL_RECURSIVE_CTE) {
 		shape = "CTEs";
@@ -181,7 +186,7 @@ static bool ContainsAggregation(const LogicalOperator &op) {
 		for (auto &expr : aggr.expressions) {
 			if (expr && expr->IsAggregate()) {
 				auto &ag = expr->Cast<BoundAggregateExpression>();
-				if (IsAllowedAggregate(ag.function.name)) {
+				if (IsAllowedAggregate(ag.FunctionMutable().GetName().GetIdentifierName())) {
 					return true;
 				}
 			}
@@ -201,7 +206,7 @@ static void GetScannedTablesInScope(const LogicalOperator &op, std::unordered_se
 		auto &get = op.Cast<LogicalGet>();
 		auto table_entry = get.GetTable();
 		if (table_entry) {
-			tables.insert(table_entry->name);
+			tables.insert(table_entry->name.GetIdentifierName());
 		}
 	}
 
@@ -250,10 +255,10 @@ static bool CheckPacAggregatesHaveProperJoins(const LogicalOperator &op,
 		for (auto &expr : aggr.expressions) {
 			if (expr && expr->IsAggregate()) {
 				auto &ag = expr->Cast<BoundAggregateExpression>();
-				if (IsPacAggregate(ag.function.name)) {
+				if (IsPacAggregate(ag.FunctionMutable().GetName().GetIdentifierName())) {
 					has_pac_aggregate = true;
 					found_pac_aggregate = true;
-				} else if (IsAllowedAggregate(ag.function.name)) {
+				} else if (IsAllowedAggregate(ag.FunctionMutable().GetName().GetIdentifierName())) {
 					has_regular_aggregate = true;
 				}
 			}
@@ -359,7 +364,7 @@ static bool CheckPacAggregatesHaveProperJoins(const LogicalOperator &op,
 static void TraceBindingToSources(LogicalOperator &root, const ColumnBinding &binding,
                                   const std::function<void(const ColumnBinding &)> &visit_source_binding) {
 	// Find the operator that produces this binding's table_index
-	auto *source_op = FindOperatorByTableIndex(&root, binding.table_index);
+	auto *source_op = FindOperatorByTableIndex(&root, binding.table_index.index);
 	if (!source_op) {
 		return; // Can't find source, assume safe
 	}
@@ -370,35 +375,36 @@ static void TraceBindingToSources(LogicalOperator &root, const ColumnBinding &bi
 		auto &aggr = source_op->Cast<LogicalAggregate>();
 
 		// Check if this binding is from the aggregate's group output or aggregate output
-		if (binding.table_index == aggr.group_index) {
+		if (binding.table_index.index == aggr.group_index.index) {
 			// This is a grouped column - trace it further down
 			idx_t group_idx = binding.column_index;
 			if (group_idx < aggr.groups.size() && aggr.groups[group_idx]) {
 				// Find column refs in this group expression and trace them
 				ExpressionIterator::EnumerateExpression(
 				    const_cast<unique_ptr<Expression> &>(aggr.groups[group_idx]), [&](Expression &expr) {
-					    if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+					    if (expr.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 						    auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-						    TraceBindingToSources(root, col_ref.binding, visit_source_binding);
+						    TraceBindingToSources(root, col_ref.BindingMutable(), visit_source_binding);
 					    }
 				    });
 			}
 		}
-		// If binding.table_index == aggr.aggregate_index, it's an aggregate result - safe, don't trace further
+		// If binding.table_index.index == aggr.aggregate_index.index, it's an aggregate result - safe, don't trace
+		// further
 	} else if (source_op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
 		auto &proj = source_op->Cast<LogicalProjection>();
 		// Trace the expression that produces this column
 		if (binding.column_index < proj.expressions.size() && proj.expressions[binding.column_index]) {
 			ExpressionIterator::EnumerateExpression(proj.expressions[binding.column_index], [&](Expression &expr) {
-				if (expr.type == ExpressionType::BOUND_COLUMN_REF) {
+				if (expr.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 					auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-					TraceBindingToSources(root, col_ref.binding, visit_source_binding);
+					TraceBindingToSources(root, col_ref.BindingMutable(), visit_source_binding);
 				}
 			});
 		}
 	} else if (source_op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		auto &cte_ref = source_op->Cast<LogicalCTERef>();
-		auto *cte_def = FindMaterializedCTE(&root, cte_ref.cte_index);
+		auto *cte_def = FindMaterializedCTE(&root, cte_ref.cte_index.index);
 		if (cte_def && !cte_def->children.empty() && cte_def->children[0]) {
 			auto &cte_body = *cte_def->children[0];
 			auto body_bindings = cte_body.GetColumnBindings();
@@ -440,7 +446,7 @@ static std::pair<string, string>
 GetProtectedColumnInfo(LogicalOperator &root, const ColumnBinding &binding,
                        const std::unordered_map<string, std::unordered_set<string>> &protected_columns) {
 	// Find the LogicalGet that produces this binding
-	auto *source_op = FindOperatorByTableIndex(&root, binding.table_index);
+	auto *source_op = FindOperatorByTableIndex(&root, binding.table_index.index);
 	if (!source_op || source_op->type != LogicalOperatorType::LOGICAL_GET) {
 		return {"", ""};
 	}
@@ -457,18 +463,18 @@ GetProtectedColumnInfo(LogicalOperator &root, const ColumnBinding &binding,
 	string col_name;
 	const auto &column_ids = get.GetColumnIds();
 	if (binding.column_index < column_ids.size()) {
-		col_name = get.GetColumnName(column_ids[binding.column_index]);
+		col_name = get.GetColumnName(column_ids[binding.column_index]).GetIdentifierName();
 	}
 	if (col_name.empty()) {
 		return {"", ""};
 	}
 
 	// Check against the unified protected_columns set
-	string table_lower = StringUtil::Lower(table_entry->name);
+	string table_lower = StringUtil::Lower(table_entry->name.GetIdentifierName());
 	string col_lower = StringUtil::Lower(col_name);
 	auto it = protected_columns.find(table_lower);
 	if (it != protected_columns.end() && it->second.count(col_lower) > 0) {
-		return {table_entry->name, col_name};
+		return {table_entry->name.GetIdentifierName(), col_name};
 	}
 
 	return {"", ""};
@@ -508,9 +514,9 @@ static void CheckOutputColumnsNotFromPU(LogicalOperator &current_op, LogicalOper
 				continue;
 			}
 			ExpressionIterator::EnumerateExpression(expr, [&](Expression &e) {
-				if (e.type == ExpressionType::BOUND_COLUMN_REF) {
+				if (e.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 					auto &col_ref = e.Cast<BoundColumnRefExpression>();
-					TraceBindingToPUTable(plan_root, col_ref.binding, actual_pu_tables);
+					TraceBindingToPUTable(plan_root, col_ref.BindingMutable(), actual_pu_tables);
 				}
 			});
 		}
@@ -529,7 +535,7 @@ static void CheckOutputColumnsNotFromPU(LogicalOperator &current_op, LogicalOper
 		auto table_entry = get.GetTable();
 		if (table_entry) {
 			for (auto &pu_table : actual_pu_tables) {
-				if (table_entry->name == pu_table) {
+				if (table_entry->name.GetIdentifierName() == pu_table) {
 					throw InvalidInputException(
 					    "Privacy rewrite: columns from privacy unit tables can only be accessed inside aggregate "
 					    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)");
@@ -581,9 +587,9 @@ CheckOutputColumnsNotProtected(LogicalOperator &current_op, LogicalOperator &pla
 				continue;
 			}
 			ExpressionIterator::EnumerateExpression(expr, [&](Expression &e) {
-				if (e.type == ExpressionType::BOUND_COLUMN_REF) {
+				if (e.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 					auto &col_ref = e.Cast<BoundColumnRefExpression>();
-					TraceBindingForProtectedColumns(plan_root, col_ref.binding, protected_columns);
+					TraceBindingForProtectedColumns(plan_root, col_ref.BindingMutable(), protected_columns);
 				}
 			});
 		}
@@ -600,18 +606,18 @@ CheckOutputColumnsNotProtected(LogicalOperator &current_op, LogicalOperator &pla
 		auto &get = current_op.Cast<LogicalGet>();
 		auto table_entry = get.GetTable();
 		if (table_entry) {
-			string table_lower = StringUtil::Lower(table_entry->name);
+			string table_lower = StringUtil::Lower(table_entry->name.GetIdentifierName());
 			auto it = protected_columns.find(table_lower);
 			if (it != protected_columns.end()) {
 				const auto &column_ids = get.GetColumnIds();
 				for (const auto &col_idx : column_ids) {
-					const string &col_name = get.GetColumnName(col_idx);
+					const string &col_name = get.GetColumnName(col_idx).GetIdentifierName();
 					string col_lower = StringUtil::Lower(col_name);
 					if (it->second.count(col_lower) > 0) {
 						throw InvalidInputException(
 						    "Privacy rewrite: protected column '%s.%s' can only be accessed inside aggregate "
 						    "functions (e.g., SUM, COUNT, AVG, MIN, MAX)",
-						    table_entry->name.c_str(), col_name.c_str());
+						    table_entry->name.GetIdentifierName().c_str(), col_name.c_str());
 					}
 				}
 			}
@@ -656,9 +662,10 @@ CheckFiltersNotUsingProtectedColumns(LogicalOperator &op, LogicalOperator &plan_
 				continue;
 			}
 			ExpressionIterator::EnumerateExpression(expr, [&](Expression &e) {
-				if (e.type == ExpressionType::BOUND_COLUMN_REF) {
+				if (e.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 					auto &col_ref = e.Cast<BoundColumnRefExpression>();
-					auto protected_info = GetProtectedColumnInfo(plan_root, col_ref.binding, protected_columns);
+					auto protected_info =
+					    GetProtectedColumnInfo(plan_root, col_ref.BindingMutable(), protected_columns);
 					if (!protected_info.first.empty()) {
 						throw InvalidInputException(
 						    "Privacy rewrite: protected column '%s.%s' cannot be used in WHERE/HAVING filters. "
@@ -686,7 +693,7 @@ void CountScans(const LogicalOperator &op, std::unordered_map<string, idx_t> &co
 		auto &scan = op.Cast<LogicalGet>();
 		auto table_entry = scan.GetTable();
 		if (table_entry) {
-			counts[table_entry->name]++;
+			counts[table_entry->name.GetIdentifierName()]++;
 		}
 	}
 	// Handle CTEs: traverse into CTE definitions to find base table scans

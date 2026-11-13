@@ -1,4 +1,6 @@
+#include "duckdb/common/vector/list_vector.hpp"
 #include "aggregates/as_min_max.hpp"
+#include "aggregates/aggregate_state_export.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "duckdb/parser/parsed_data/create_aggregate_function_info.hpp"
 
@@ -17,31 +19,110 @@ template <typename T, bool IS_MAX>
 using MinMaxState = PacMinMaxStateWrapper<T, IS_MAX>;
 #endif
 
+template <typename T, bool IS_MAX>
+struct MinMaxStateCodec {
+	using State = MinMaxState<T, IS_MAX>;
+#ifdef PAC_NOBUFFERING
+	using Inner = State;
+#else
+	using Inner = typename State::State;
+#endif
+	static void WriteInner(AggregateStateWriter &out, const Inner &state) {
+		out.Write(uint8_t(state.initialized));
+		out.Write(state.update_count);
+		out.Write(state.key_hash);
+		out.Write(state.global_bound);
+		T values[64];
+		state.GetValues(values);
+		out.Write(values);
+	}
+	static void ReadInner(AggregateStateReader &in, Inner &state) {
+		state.initialized = in.ReadFlag();
+		in.Read(state.update_count);
+		in.Read(state.key_hash);
+		in.Read(state.global_bound);
+		T values[64];
+		in.Read(values);
+		state.SetValues(values);
+	}
+	static void Write(AggregateStateWriter &out, const State &state) {
+#ifdef PAC_NOBUFFERING
+		WriteInner(out, state);
+#else
+		auto buffered = state.n_buffered & State::BUF_MASK;
+		out.Write(uint8_t(buffered));
+		for (idx_t i = 0; i < buffered; i++) {
+			out.Write(state.val_buf[i]);
+			out.Write(state.hash_buf[i]);
+		}
+		auto *inner = state.GetState();
+		out.Write(uint8_t(inner != nullptr));
+		if (inner) {
+			WriteInner(out, *inner);
+		}
+#endif
+	}
+	static void Read(AggregateStateReader &in, State &state, ArenaAllocator &allocator) {
+		memset(&state, 0, sizeof(state));
+#ifdef PAC_NOBUFFERING
+		ReadInner(in, state);
+#else
+		uint8_t buffered;
+		in.Read(buffered);
+		if (buffered > State::BUF_SIZE) {
+			throw InvalidInputException("Invalid stochastic MIN/MAX buffer size");
+		}
+		for (idx_t i = 0; i < buffered; i++) {
+			in.Read(state.val_buf[i]);
+			in.Read(state.hash_buf[i]);
+		}
+		if (in.ReadFlag()) {
+			ReadInner(in, *state.EnsureState(allocator));
+		}
+		state.n_buffered |= buffered;
+		if (buffered) {
+			state.FlushBuffer(state, allocator);
+		}
+#endif
+	}
+};
+
 // ============================================================================
 // Update functions
 // ============================================================================
 
 // Non-grouped update
 template <typename T, bool IS_MAX>
-static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_p, idx_t count) {
-	auto &agg = *reinterpret_cast<MinMaxState<T, IS_MAX> *>(state_p);
-	int sample_lanes = GetPrivSampleLanes(aggr);
+static void PacMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count, const ClusteredAggr &clusters,
+                            idx_t count) {
+	ExecutePrivClusters(inputs, input_count, clusters, [&](Vector inputs[], data_ptr_t state_p, idx_t count) {
+		auto &agg = *reinterpret_cast<MinMaxState<T, IS_MAX> *>(state_p);
+		int sample_lanes = GetPrivSampleLanes(aggr);
 
-	UnifiedVectorFormat hash_data, value_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-	auto values = UnifiedVectorFormat::GetData<T>(value_data);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto h_idx = hash_data.sel->get_index(i);
-		auto v_idx = value_data.sel->get_index(i);
-		if (hash_data.validity.RowIsValid(h_idx) && value_data.validity.RowIsValid(v_idx)) {
-			// min/max do not use buffering for global aggregates (without GROUP BY) because it was  slower
-			PacMinMaxUpdateOne<T, IS_MAX>(agg, TransformPacUpdateHash(hashes[h_idx], sample_lanes), values[v_idx],
-			                              aggr.allocator);
+		UnifiedVectorFormat hash_data, value_data;
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(value_data);
+		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+		auto values = UnifiedVectorFormat::GetData<T>(value_data);
+		idx_t first = 0;
+		while (first < count && (!hash_data.validity.RowIsValid(hash_data.sel->get_index(first)) ||
+		                         !value_data.validity.RowIsValid(value_data.sel->get_index(first)))) {
+			first++;
 		}
-	}
+		if (first == count) {
+			return;
+		}
+		auto &direct = *static_cast<PacMinMaxState<T, IS_MAX> *>(agg.EnsureState(aggr.allocator));
+		for (idx_t i = first; i < count; i++) {
+			auto h_idx = hash_data.sel->get_index(i);
+			auto v_idx = value_data.sel->get_index(i);
+			if (hash_data.validity.RowIsValid(h_idx) && value_data.validity.RowIsValid(v_idx)) {
+				// min/max do not use buffering for global aggregates (without GROUP BY) because it was  slower
+				PacMinMaxUpdateOne<T, IS_MAX>(direct, TransformPacUpdateHash(hashes[h_idx], sample_lanes),
+				                              values[v_idx], aggr.allocator);
+			}
+		}
+	});
 }
 
 // Grouped (scatter) update
@@ -49,9 +130,9 @@ template <typename T, bool IS_MAX>
 static void PacMinMaxScatterUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states, idx_t count) {
 	int sample_lanes = GetPrivSampleLanes(aggr);
 	UnifiedVectorFormat hash_data, value_data, sdata;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, sdata);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(sdata);
 
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<T>(value_data);
@@ -95,15 +176,19 @@ static void PacMinMaxCombine(Vector &src, Vector &dst, AggregateInputData &aggr,
 }
 
 template <typename T, bool IS_MAX>
-static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset) {
+static void PacMinMaxFinalize(Vector &states, AggregateFinalizeInputData &input, Vector &result, idx_t count,
+                              idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<MinMaxState<T, IS_MAX> *>(states);
-	auto data = FlatVector::GetData<T>(result);
-	auto &result_mask = FlatVector::Validity(result);
+	auto data = FlatVector::GetDataMutable<T>(result);
+	auto &result_mask = FlatVector::ValidityMutable(result);
 
 	double mi = input.bind_data ? input.bind_data->Cast<PrivBindData>().mi : 0.0;
 	double correction = input.bind_data ? input.bind_data->Cast<PrivBindData>().correction : 1.0;
 	uint64_t query_hash = input.bind_data ? input.bind_data->Cast<PrivBindData>().query_hash : 0;
 	auto pstate = input.bind_data ? input.bind_data->Cast<PrivBindData>().pstate : nullptr;
+	auto gen = input.bind_data ? PacRandomStream(input.bind_data->Cast<PrivBindData>().seed,
+	                                             *input.bind_data->Cast<PrivBindData>().random_state)
+	                           : PacRandomEngine(0, 0);
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -113,8 +198,6 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		auto *s = state_ptrs[i]->GetState();
 		// Check if we should return NULL based on key_hash
 		uint64_t key_hash = s ? s->key_hash : 0;
-		std::mt19937_64 gen(input.bind_data->Cast<PrivBindData>().seed);
-		// mi controls noise mode, correction reduces NULL probability (but does NOT scale min/max values)
 		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_mask.SetInvalid(offset + i);
 			continue;
@@ -145,13 +228,16 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 // ============================================================================
 
 template <typename T, bool IS_MAX>
-static idx_t PacMinMaxStateSize(const AggregateFunction &) {
+static idx_t PacMinMaxStateSize(AggregateStateInput &) {
 	return sizeof(MinMaxState<T, IS_MAX>);
 }
 
 template <typename T, bool IS_MAX>
-static void PacMinMaxInitialize(const AggregateFunction &, data_ptr_t p) {
-	memset(p, 0, sizeof(MinMaxState<T, IS_MAX>));
+static void PacMinMaxInitialize(AggregateStateInput &, data_ptr_t *states, idx_t count) {
+	for (idx_t i = 0; i < count; i++) {
+		auto p = states[i];
+		memset(p, 0, sizeof(MinMaxState<T, IS_MAX>));
+	}
 }
 
 // ============================================================================
@@ -159,23 +245,26 @@ static void PacMinMaxInitialize(const AggregateFunction &, data_ptr_t p) {
 // ============================================================================
 
 template <bool IS_MAX>
-static unique_ptr<FunctionData> PacMinMaxBind(ClientContext &ctx, AggregateFunction &function,
-                                              vector<unique_ptr<Expression>> &args) {
-	auto &value_type = args[1]->return_type;
+static unique_ptr<FunctionData> PacMinMaxBind(BindAggregateFunctionInput &bind_input) {
+	auto &ctx = bind_input.GetClientContext();
+	auto &function = bind_input.GetBoundFunction();
+	auto &args = bind_input.GetArguments();
+	auto &value_type = args[1]->GetReturnType();
 	auto physical_type = value_type.InternalType();
 
-	function.return_type = value_type;
-	function.arguments[1] = value_type;
+	function.SetReturnType(value_type);
+	function.GetArguments()[1] = value_type;
 
 	// Select implementation based on physical type
 #define BIND_TYPE(PHYS_TYPE, CPP_TYPE)                                                                                 \
 	case PhysicalType::PHYS_TYPE:                                                                                      \
-		function.state_size = PacMinMaxStateSize<CPP_TYPE, IS_MAX>;                                                    \
-		function.initialize = PacMinMaxInitialize<CPP_TYPE, IS_MAX>;                                                   \
-		function.update = PacMinMaxScatterUpdate<CPP_TYPE, IS_MAX>;                                                    \
-		function.simple_update = PacMinMaxUpdate<CPP_TYPE, IS_MAX>;                                                    \
-		function.combine = PacMinMaxCombine<CPP_TYPE, IS_MAX>;                                                         \
-		function.finalize = PacMinMaxFinalize<CPP_TYPE, IS_MAX>;                                                       \
+		function.SetStateSizeCallback(PacMinMaxStateSize<CPP_TYPE, IS_MAX>);                                           \
+		function.SetStateInitCallback(PacMinMaxInitialize<CPP_TYPE, IS_MAX>);                                          \
+		function.SetStateUpdateCallback(PacMinMaxScatterUpdate<CPP_TYPE, IS_MAX>);                                     \
+		function.SetStateClusterUpdateCallback(PacMinMaxUpdate<CPP_TYPE, IS_MAX>);                                     \
+		function.SetStateCombineCallback(PacMinMaxCombine<CPP_TYPE, IS_MAX>);                                          \
+		function.SetStateFinalizeCallback(PacMinMaxFinalize<CPP_TYPE, IS_MAX>);                                        \
+		AggregateStateExport<MinMaxState<CPP_TYPE, IS_MAX>, MinMaxStateCodec<CPP_TYPE, IS_MAX>>::Register(function);   \
 		break
 
 	switch (physical_type) {
@@ -204,20 +293,20 @@ static unique_ptr<FunctionData> PacMinMaxBind(ClientContext &ctx, AggregateFunct
 // PAC_MIN/MAX_COUNTERS: Returns all 64 counters as LIST<DOUBLE> for categorical queries
 // ============================================================================
 template <typename T, bool IS_MAX>
-static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+static void PacMinMaxFinalizeCounters(Vector &states, AggregateFinalizeInputData &input, Vector &result, idx_t count,
                                       idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<MinMaxState<T, IS_MAX> *>(states);
 
 	// Result is LIST<DOUBLE>
-	auto list_entries = FlatVector::GetData<list_entry_t>(result);
-	auto &child_vec = ListVector::GetEntry(result);
+	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
+	auto &child_vec = ListVector::GetChildMutable(result);
 
 	// Reserve space for all lists (64 elements each)
 	idx_t total_elements = (offset + count) * 64;
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
 
-	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
+	auto child_data = FlatVector::GetDataMutable<PAC_FLOAT>(child_vec);
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -239,20 +328,14 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 
 		uint64_t key_hash = s->key_hash;
 		PAC_FLOAT *dst = &child_data[base];
-		// Undo SWAR interleaving: extremes[swar_pos] corresponds to bit j of key_hash
-		constexpr int SZ = sizeof(T) <= 8 ? static_cast<int>(sizeof(T)) : 8;
-		constexpr int ELEMS = 8 / SZ;
-		constexpr int SHIFTS = 64 / ELEMS;
+		// Access logical world order independently of the internal lane width.
 		for (idx_t j = 0; j < 64; j++) {
-			idx_t child_idx = i * 64 + j;
-			int swar_pos = (static_cast<int>(j) % SHIFTS) * ELEMS + static_cast<int>(j) / SHIFTS;
 			if ((key_hash >> j) & 1) {
 				// Counter was updated - return the value (no scaling for min/max)
-				dst[j] = ToDouble(s->extremes[swar_pos]);
+				dst[j] = ToDouble(s->GetValue(j));
 			} else {
 				// Counter was never updated - return 0
-				D_ASSERT(s->extremes[swar_pos] ==
-				         (IS_MAX ? std::numeric_limits<T>::lowest() : std::numeric_limits<T>::max()));
+				D_ASSERT(s->GetValue(j) == (IS_MAX ? std::numeric_limits<T>::lowest() : std::numeric_limits<T>::max()));
 				dst[j] = 0.0;
 			}
 		}
@@ -263,23 +346,26 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateInputData &input,
 
 // Bind function for as_min/max_counters - similar to PacMinMaxBind but returns LIST<DOUBLE>
 template <bool IS_MAX>
-static unique_ptr<FunctionData> PacMinMaxCountersBind(ClientContext &ctx, AggregateFunction &function,
-                                                      vector<unique_ptr<Expression>> &args) {
-	auto &value_type = args[1]->return_type;
+static unique_ptr<FunctionData> PacMinMaxCountersBind(BindAggregateFunctionInput &bind_input) {
+	auto &ctx = bind_input.GetClientContext();
+	auto &function = bind_input.GetBoundFunction();
+	auto &args = bind_input.GetArguments();
+	auto &value_type = args[1]->GetReturnType();
 	auto physical_type = value_type.InternalType();
 
-	function.return_type = LogicalType::LIST(PacFloatLogicalType());
-	function.arguments[1] = value_type;
+	function.SetReturnType(LogicalType::LIST(PacFloatLogicalType()));
+	function.GetArguments()[1] = value_type;
 
 	// Select implementation based on physical type
 #define BIND_COUNTERS_TYPE(PHYS_TYPE, CPP_TYPE)                                                                        \
 	case PhysicalType::PHYS_TYPE:                                                                                      \
-		function.state_size = PacMinMaxStateSize<CPP_TYPE, IS_MAX>;                                                    \
-		function.initialize = PacMinMaxInitialize<CPP_TYPE, IS_MAX>;                                                   \
-		function.update = PacMinMaxScatterUpdate<CPP_TYPE, IS_MAX>;                                                    \
-		function.simple_update = PacMinMaxUpdate<CPP_TYPE, IS_MAX>;                                                    \
-		function.combine = PacMinMaxCombine<CPP_TYPE, IS_MAX>;                                                         \
-		function.finalize = PacMinMaxFinalizeCounters<CPP_TYPE, IS_MAX>;                                               \
+		function.SetStateSizeCallback(PacMinMaxStateSize<CPP_TYPE, IS_MAX>);                                           \
+		function.SetStateInitCallback(PacMinMaxInitialize<CPP_TYPE, IS_MAX>);                                          \
+		function.SetStateUpdateCallback(PacMinMaxScatterUpdate<CPP_TYPE, IS_MAX>);                                     \
+		function.SetStateClusterUpdateCallback(PacMinMaxUpdate<CPP_TYPE, IS_MAX>);                                     \
+		function.SetStateCombineCallback(PacMinMaxCombine<CPP_TYPE, IS_MAX>);                                          \
+		function.SetStateFinalizeCallback(PacMinMaxFinalizeCounters<CPP_TYPE, IS_MAX>);                                \
+		AggregateStateExport<MinMaxState<CPP_TYPE, IS_MAX>, MinMaxStateCodec<CPP_TYPE, IS_MAX>>::Register(function);   \
 		break
 
 	switch (physical_type) {
@@ -308,18 +394,18 @@ static unique_ptr<FunctionData> PacMinMaxCountersBind(ClientContext &ctx, Aggreg
 // SASS MIN/MAX counters: Returns all 64 sample values as LIST<DOUBLE>
 // ============================================================================
 template <typename T, bool IS_MAX>
-static void DpSampleMinMaxFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
-                                           idx_t offset) {
+static void DpSampleMinMaxFinalizeCounters(Vector &states, AggregateFinalizeInputData &input, Vector &result,
+                                           idx_t count, idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<MinMaxState<T, IS_MAX> *>(states);
-	auto list_entries = FlatVector::GetData<list_entry_t>(result);
-	auto &child_vec = ListVector::GetEntry(result);
+	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
+	auto &child_vec = ListVector::GetChildMutable(result);
 
 	idx_t total_elements = (offset + count) * 64;
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
 
-	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
-	auto &child_validity = FlatVector::Validity(child_vec);
+	auto child_data = FlatVector::GetDataMutable<PAC_FLOAT>(child_vec);
+	auto &child_validity = FlatVector::ValidityMutable(child_vec);
 	child_validity.SetAllValid(total_elements);
 	PAC_FLOAT buf[64];
 	double scale_divisor = input.bind_data ? input.bind_data->Cast<PrivBindData>().scale_divisor : 1.0;
@@ -356,25 +442,27 @@ static void DpSampleMinMaxFinalizeCounters(Vector &states, AggregateInputData &i
 }
 
 template <bool IS_MAX>
-static unique_ptr<FunctionData> DpSampleMinMaxBind(ClientContext &ctx, AggregateFunction &function,
-                                                   vector<unique_ptr<Expression>> &args) {
-	auto &value_type = args[1]->return_type;
+static unique_ptr<FunctionData> DpSampleMinMaxBind(BindAggregateFunctionInput &bind_input) {
+	auto &ctx = bind_input.GetClientContext();
+	auto &function = bind_input.GetBoundFunction();
+	auto &args = bind_input.GetArguments();
+	auto &value_type = args[1]->GetReturnType();
 	auto physical_type = value_type.InternalType();
 	double scale_divisor = value_type.id() == LogicalTypeId::DECIMAL
 	                           ? std::pow(10.0, static_cast<double>(DecimalType::GetScale(value_type)))
 	                           : 1.0;
 
-	function.return_type = LogicalType::LIST(PacFloatLogicalType());
-	function.arguments[1] = value_type;
+	function.SetReturnType(LogicalType::LIST(PacFloatLogicalType()));
+	function.GetArguments()[1] = value_type;
 
 #define BIND_DP_SAMPLE_TYPE(PHYS_TYPE, CPP_TYPE)                                                                       \
 	case PhysicalType::PHYS_TYPE:                                                                                      \
-		function.state_size = PacMinMaxStateSize<CPP_TYPE, IS_MAX>;                                                    \
-		function.initialize = PacMinMaxInitialize<CPP_TYPE, IS_MAX>;                                                   \
-		function.update = PacMinMaxScatterUpdate<CPP_TYPE, IS_MAX>;                                                    \
-		function.simple_update = PacMinMaxUpdate<CPP_TYPE, IS_MAX>;                                                    \
-		function.combine = PacMinMaxCombine<CPP_TYPE, IS_MAX>;                                                         \
-		function.finalize = DpSampleMinMaxFinalizeCounters<CPP_TYPE, IS_MAX>;                                          \
+		function.SetStateSizeCallback(PacMinMaxStateSize<CPP_TYPE, IS_MAX>);                                           \
+		function.SetStateInitCallback(PacMinMaxInitialize<CPP_TYPE, IS_MAX>);                                          \
+		function.SetStateUpdateCallback(PacMinMaxScatterUpdate<CPP_TYPE, IS_MAX>);                                     \
+		function.SetStateClusterUpdateCallback(PacMinMaxUpdate<CPP_TYPE, IS_MAX>);                                     \
+		function.SetStateCombineCallback(PacMinMaxCombine<CPP_TYPE, IS_MAX>);                                          \
+		function.SetStateFinalizeCallback(DpSampleMinMaxFinalizeCounters<CPP_TYPE, IS_MAX>);                           \
 		break
 
 	switch (physical_type) {
@@ -411,13 +499,16 @@ struct DpSampleMMinMaxState {
 };
 
 template <typename T, bool IS_MAX>
-static idx_t DpSampleMMinMaxStateSize(const AggregateFunction &) {
+static idx_t DpSampleMMinMaxStateSize(AggregateStateInput &) {
 	return sizeof(DpSampleMMinMaxState<T, IS_MAX>);
 }
 
 template <typename T, bool IS_MAX>
-static void DpSampleMMinMaxInitialize(const AggregateFunction &, data_ptr_t state_ptr) {
-	memset(state_ptr, 0, sizeof(DpSampleMMinMaxState<T, IS_MAX>));
+static void DpSampleMMinMaxInitialize(AggregateStateInput &, data_ptr_t *states, idx_t count) {
+	for (idx_t i = 0; i < count; i++) {
+		auto state_ptr = states[i];
+		memset(state_ptr, 0, sizeof(DpSampleMMinMaxState<T, IS_MAX>));
+	}
 }
 
 template <typename T, bool IS_MAX>
@@ -442,21 +533,24 @@ static void DpSampleMMinMaxUpdateOne(DpSampleMMinMaxState<T, IS_MAX> &state, Are
 }
 
 template <typename T, bool IS_MAX>
-static void DpSampleMMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t, data_ptr_t state_ptr, idx_t count) {
-	auto &state = *reinterpret_cast<DpSampleMMinMaxState<T, IS_MAX> *>(state_ptr);
-	int sample_count = GetPrivSampleCount(aggr);
-	UnifiedVectorFormat hash_data, value_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
-	auto values = UnifiedVectorFormat::GetData<T>(value_data);
-	for (idx_t i = 0; i < count; i++) {
-		auto h_idx = hash_data.sel->get_index(i);
-		auto v_idx = value_data.sel->get_index(i);
-		if (hash_data.validity.RowIsValid(h_idx) && value_data.validity.RowIsValid(v_idx)) {
-			DpSampleMMinMaxUpdateOne(state, aggr.allocator, hashes[h_idx], values[v_idx], sample_count);
+static void DpSampleMMinMaxUpdate(Vector inputs[], AggregateInputData &aggr, idx_t input_count,
+                                  const ClusteredAggr &clusters, idx_t count) {
+	ExecutePrivClusters(inputs, input_count, clusters, [&](Vector inputs[], data_ptr_t state_ptr, idx_t count) {
+		auto &state = *reinterpret_cast<DpSampleMMinMaxState<T, IS_MAX> *>(state_ptr);
+		int sample_count = GetPrivSampleCount(aggr);
+		UnifiedVectorFormat hash_data, value_data;
+		inputs[0].ToUnifiedFormat(hash_data);
+		inputs[1].ToUnifiedFormat(value_data);
+		auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
+		auto values = UnifiedVectorFormat::GetData<T>(value_data);
+		for (idx_t i = 0; i < count; i++) {
+			auto h_idx = hash_data.sel->get_index(i);
+			auto v_idx = value_data.sel->get_index(i);
+			if (hash_data.validity.RowIsValid(h_idx) && value_data.validity.RowIsValid(v_idx)) {
+				DpSampleMMinMaxUpdateOne(state, aggr.allocator, hashes[h_idx], values[v_idx], sample_count);
+			}
 		}
-	}
+	});
 }
 
 template <typename T, bool IS_MAX>
@@ -464,9 +558,9 @@ static void DpSampleMMinMaxScatterUpdate(Vector inputs[], AggregateInputData &ag
                                          idx_t count) {
 	int sample_count = GetPrivSampleCount(aggr);
 	UnifiedVectorFormat hash_data, value_data, state_data;
-	inputs[0].ToUnifiedFormat(count, hash_data);
-	inputs[1].ToUnifiedFormat(count, value_data);
-	states.ToUnifiedFormat(count, state_data);
+	inputs[0].ToUnifiedFormat(hash_data);
+	inputs[1].ToUnifiedFormat(value_data);
+	states.ToUnifiedFormat(state_data);
 	auto hashes = UnifiedVectorFormat::GetData<uint64_t>(hash_data);
 	auto values = UnifiedVectorFormat::GetData<T>(value_data);
 	auto state_ptrs = UnifiedVectorFormat::GetData<DpSampleMMinMaxState<T, IS_MAX> *>(state_data);
@@ -502,19 +596,19 @@ static void DpSampleMMinMaxCombine(Vector &src, Vector &dst, AggregateInputData 
 }
 
 template <typename T, bool IS_MAX>
-static void DpSampleMMinMaxFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count,
+static void DpSampleMMinMaxFinalize(Vector &states, AggregateFinalizeInputData &input, Vector &result, idx_t count,
                                     idx_t offset) {
 	int sample_count = GetPrivSampleCount(input);
 	auto state_ptrs = FlatVector::GetData<DpSampleMMinMaxState<T, IS_MAX> *>(states);
-	auto list_entries = FlatVector::GetData<list_entry_t>(result);
-	auto &child_vec = ListVector::GetEntry(result);
+	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
+	auto &child_vec = ListVector::GetChildMutable(result);
 
 	idx_t total_elements = (offset + count) * static_cast<idx_t>(sample_count);
 	ListVector::Reserve(result, total_elements);
 	ListVector::SetListSize(result, total_elements);
 
-	auto child_data = FlatVector::GetData<PAC_FLOAT>(child_vec);
-	auto &child_validity = FlatVector::Validity(child_vec);
+	auto child_data = FlatVector::GetDataMutable<PAC_FLOAT>(child_vec);
+	auto &child_validity = FlatVector::ValidityMutable(child_vec);
 	child_validity.SetAllValid(total_elements);
 	double scale_divisor = input.bind_data ? input.bind_data->Cast<PrivBindData>().scale_divisor : 1.0;
 
@@ -535,30 +629,32 @@ static void DpSampleMMinMaxFinalize(Vector &states, AggregateInputData &input, V
 }
 
 template <bool IS_MAX>
-static unique_ptr<FunctionData> DpSampleMMinMaxBind(ClientContext &ctx, AggregateFunction &function,
-                                                    vector<unique_ptr<Expression>> &args) {
+static unique_ptr<FunctionData> DpSampleMMinMaxBind(BindAggregateFunctionInput &bind_input) {
+	auto &ctx = bind_input.GetClientContext();
+	auto &function = bind_input.GetBoundFunction();
+	auto &args = bind_input.GetArguments();
 	int sample_lanes = GetDpSampleLanes(ctx);
 	if (sample_lanes != 1) {
 		throw InvalidInputException("as_sample_m_%s: dp_sample_lanes must be 1 when dp_sass_m > 64",
 		                            IS_MAX ? "max" : "min");
 	}
-	auto &value_type = args[1]->return_type;
+	auto &value_type = args[1]->GetReturnType();
 	auto physical_type = value_type.InternalType();
 	double scale_divisor = value_type.id() == LogicalTypeId::DECIMAL
 	                           ? std::pow(10.0, static_cast<double>(DecimalType::GetScale(value_type)))
 	                           : 1.0;
 
-	function.return_type = LogicalType::LIST(PacFloatLogicalType());
-	function.arguments[1] = value_type;
+	function.SetReturnType(LogicalType::LIST(PacFloatLogicalType()));
+	function.GetArguments()[1] = value_type;
 
 #define BIND_DP_SAMPLE_M_TYPE(PHYS_TYPE, CPP_TYPE)                                                                     \
 	case PhysicalType::PHYS_TYPE:                                                                                      \
-		function.state_size = DpSampleMMinMaxStateSize<CPP_TYPE, IS_MAX>;                                              \
-		function.initialize = DpSampleMMinMaxInitialize<CPP_TYPE, IS_MAX>;                                             \
-		function.update = DpSampleMMinMaxScatterUpdate<CPP_TYPE, IS_MAX>;                                              \
-		function.simple_update = DpSampleMMinMaxUpdate<CPP_TYPE, IS_MAX>;                                              \
-		function.combine = DpSampleMMinMaxCombine<CPP_TYPE, IS_MAX>;                                                   \
-		function.finalize = DpSampleMMinMaxFinalize<CPP_TYPE, IS_MAX>;                                                 \
+		function.SetStateSizeCallback(DpSampleMMinMaxStateSize<CPP_TYPE, IS_MAX>);                                     \
+		function.SetStateInitCallback(DpSampleMMinMaxInitialize<CPP_TYPE, IS_MAX>);                                    \
+		function.SetStateUpdateCallback(DpSampleMMinMaxScatterUpdate<CPP_TYPE, IS_MAX>);                               \
+		function.SetStateClusterUpdateCallback(DpSampleMMinMaxUpdate<CPP_TYPE, IS_MAX>);                               \
+		function.SetStateCombineCallback(DpSampleMMinMaxCombine<CPP_TYPE, IS_MAX>);                                    \
+		function.SetStateFinalizeCallback(DpSampleMMinMaxFinalize<CPP_TYPE, IS_MAX>);                                  \
 		break
 
 	switch (physical_type) {
@@ -721,8 +817,8 @@ void RegisterDpSampleMMaxFunctions(ExtensionLoader &loader) {
 
 // Explicit template instantiations
 #define INST_ALL(T)                                                                                                    \
-	template void PacMinMaxUpdate<T, false>(Vector[], AggregateInputData &, idx_t, data_ptr_t, idx_t);                 \
-	template void PacMinMaxUpdate<T, true>(Vector[], AggregateInputData &, idx_t, data_ptr_t, idx_t);                  \
+	template void PacMinMaxUpdate<T, false>(Vector[], AggregateInputData &, idx_t, const ClusteredAggr &, idx_t);      \
+	template void PacMinMaxUpdate<T, true>(Vector[], AggregateInputData &, idx_t, const ClusteredAggr &, idx_t);       \
 	template void PacMinMaxScatterUpdate<T, false>(Vector[], AggregateInputData &, idx_t, Vector &, idx_t);            \
 	template void PacMinMaxScatterUpdate<T, true>(Vector[], AggregateInputData &, idx_t, Vector &, idx_t);             \
 	template void PacMinMaxCombine<T, false>(Vector &, Vector &, AggregateInputData &, idx_t);                         \

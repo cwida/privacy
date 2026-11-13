@@ -175,6 +175,53 @@ No new aggregate functions, no new noise mechanisms, no plan decomposition.
 
 ---
 
+## Stochastic aggregate state spilling (DuckDB 2.0)
+
+The membership-mask-plus-scalar SUM, COUNT, and MIN/MAX implementations expose
+DuckDB's native state-export/import callbacks, including DECIMAL specializations.
+List-input SUM, COUNT, and MIN/MAX also provide callbacks. Scalar AVG uses the
+SUM and COUNT implementations through the existing rewrite. DuckDB can export arena-backed hash-aggregate states to spillable columns
+and import them when combining partitions. Every aggregate in a hash table must
+expose a compatible state layout for DuckDB to select this path.
+
+The exported BLOB contains buffered values and masks, update counts, positive and
+negative integer cascade levels and overflow budgets, floating-point counters,
+COUNT SWAR bytes and overflow totals, MIN/MAX bounds, and list-aggregate values
+and counts. Folded correction arguments are retained when rebinding exported states.
+It contains no addresses. Import reconstructs owned arena allocations and retains
+the inline-level optimization. COUNT and MIN/MAX expand restored buffers using their existing
+kernels only on the import path, so a subsequent combine cannot overwrite a
+restored destination buffer. SUM retains restored buffers for its buffered combiner. Export does not finalize, resample, or add noise;
+the native update kernels and aggregate-state sizes remain unchanged. The binary
+representation is internal to this implementation, rather than a portable state
+interchange format.
+
+SUM retains one/two-value buffers during combine. Finalization materializes copies
+in temporary storage backed by `ArenaAllocator::GetUnderlyingAllocator()`, releasing
+these allocations after the callback. These two optimizations address the Q78
+allocation path: expanding many small groups during final combine/finalization can
+exhaust memory after sink-phase spilling decisions. Disk spilling handles stored
+states; it does not itself bound these late allocations. COUNT uses exact narrow
+overflow totals before widening. Buffered 64-bit integer MIN/MAX groups can also
+use exact narrow states, with original-width transport and merge destinations;
+see [stochastic aggregates](../simd-asa/aggregates.md).
+
+Regression coverage extends `test/sql/pac_sum.test`: round trips include signed,
+unsigned, floating-point and DECIMAL inputs, buffered/empty states, high cascade
+levels, combining imported states, and truncated-input rejection. The pressure
+test uses 800,000 rows in 100,000 contiguous groups, three SUMs and a 32 MB memory
+limit; its complete result checksum must equal the in-memory result.
+
+```sh
+build/release/test/unittest 'test/sql/pac_sum.test'
+```
+
+For the Q78 investigation, retain the complete query, sampling settings and thread
+count when comparing builds. Record peak buffer memory, temporary storage and
+result equivalence alongside latency. Passing the state-spill regression does not
+establish that Q78 SF30 fits the target machine: joins and active aggregate
+partitions still require working memory.
+
 ## TODO
 
 - Categorical expressions (`pac_categorical` rewriter)

@@ -524,12 +524,49 @@ SELECT count(*) FROM (
         )
 );
 ----
-2
+1
+
+# Independently evaluate all 64 sampled worlds with ordinary SQL. Only supplier
+# 1 passes in at least half of the worlds. DuckDB 2.0's nullable-COUNT wrapper
+# contains two COUNT states; both must remain world-specific through its CASE.
+statement ok
+SET priv_check = false;
+
+statement ok
+SET priv_rewrite = false;
+
+query I
+WITH sampled AS (
+    SELECT l_suppkey, j AS world
+    FROM lineitem JOIN orders ON l_orderkey = o_orderkey
+    CROSS JOIN range(64) t(j)
+    WHERE ((priv_hash(hash(o_custkey)) >> j) & 1::UBIGINT) <> 0
+), counts AS (
+    SELECT world, l_suppkey, COUNT(*) AS n FROM sampled GROUP BY ALL
+), means AS (
+    SELECT world, AVG(n) AS mean_count FROM counts GROUP BY world
+), decisions AS (
+    SELECT s_suppkey, SUM((COALESCE(n, 0) > mean_count)::INTEGER) AS true_worlds
+    FROM supplier CROSS JOIN range(64) t(j)
+    LEFT JOIN counts ON j = counts.world AND s_suppkey = l_suppkey
+    LEFT JOIN means ON j = means.world
+    GROUP BY s_suppkey
+)
+SELECT COUNT(*) FROM decisions WHERE true_worlds >= 32;
+----
+1
+
+statement ok
+SET priv_rewrite = true;
+
+statement ok
+SET priv_check = true;
 
 # ============================================================================
 # Test 11: Categorical with AVG aggregate
 # Find parts where avg quantity exceeds threshold
-# NOTE: Result is 2 with proper avg decomposition (as_noised_avg → sum/count)
+# All four parts pass in a majority of worlds; both correlated and global
+# averages must remain world-specific through the comparison.
 # ============================================================================
 
 query I
@@ -551,7 +588,42 @@ SELECT count(*) FROM (
         )
 );
 ----
-2
+4
+
+# Ordinary SQL oracle: report the number of passing worlds for each part.
+statement ok
+SET priv_check = false;
+
+statement ok
+SET priv_rewrite = false;
+
+query II
+WITH sampled AS (
+    SELECT l_partkey, l_quantity, j AS world
+    FROM lineitem JOIN orders ON l_orderkey = o_orderkey
+    CROSS JOIN range(64) t(j)
+    WHERE ((priv_hash(hash(o_custkey)) >> j) & 1::UBIGINT) <> 0
+), avgs AS (
+    SELECT world, l_partkey, AVG(l_quantity) AS a FROM sampled GROUP BY ALL
+), means AS (
+    SELECT world, AVG(l_quantity) AS m FROM sampled GROUP BY world
+)
+SELECT p_partkey, SUM((a > 0.8 * m)::INTEGER) AS true_worlds
+FROM part CROSS JOIN range(64) t(j)
+LEFT JOIN avgs ON j = avgs.world AND p_partkey = l_partkey
+LEFT JOIN means ON j = means.world
+GROUP BY p_partkey ORDER BY p_partkey;
+----
+1	41
+2	37
+3	50
+4	50
+
+statement ok
+SET priv_rewrite = true;
+
+statement ok
+SET priv_check = true;
 
 # ============================================================================
 # Test 12: Correlated categorical subquery with multiple tables
@@ -798,3 +870,388 @@ DROP TABLE scalar_case_reason;
 
 statement ok
 DROP TABLE scalar_case_pu;
+
+
+# Right-anti membership filters must preserve ownership joins, duplicates,
+# NULL-safe matches, and the output layout when the build/probe sides change.
+# as_count scales each world by two for 50% sampling; divide out that scale.
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET priv_rewrite=false;
+
+statement ok
+SET pac_sample_diversity_check=false;
+
+statement ok
+CREATE TABLE anti_owners AS SELECT i::BIGINT k FROM range(1000) r(i);
+
+statement ok
+CREATE TABLE anti_facts AS
+SELECT (i % 1000)::BIGINT k, (i % 7)::INTEGER v FROM range(10000) r(i);
+
+statement ok
+CREATE TABLE anti_outer(k BIGINT, v INTEGER);
+
+statement ok
+INSERT INTO anti_outer VALUES (10, 3), (10, 3), (11, 4), (2000, 1), (NULL, 1), (12, 0);
+
+query I
+SELECT list_extract(as_count(3::UBIGINT), 1) / 2
+FROM anti_outer a
+WHERE a.v > 0 AND NOT EXISTS (
+    SELECT 1 FROM anti_owners o JOIN anti_facts f ON o.k = f.k
+    WHERE f.k = a.k AND f.v <> a.v AND f.v > 1
+);
+----
+2
+
+# NULL=NULL must remain a match when neither join key is proven non-null.
+statement ok
+CREATE TABLE anti_nullable(k BIGINT, v INTEGER);
+
+statement ok
+INSERT INTO anti_nullable VALUES (NULL, 2), (10, 3), (11, 4);
+
+query I
+SELECT list_extract(as_count(3::UBIGINT), 1) / 2
+FROM anti_outer a
+WHERE a.v > 0 AND NOT EXISTS (
+    SELECT 1 FROM anti_nullable n
+    WHERE n.k IS NOT DISTINCT FROM a.k AND n.v <> a.v
+);
+----
+4
+
+# A LIMIT is a barrier: filtering below it can change which evidence row exists.
+query I
+SELECT list_extract(as_count(3::UBIGINT), 1) / 2
+FROM anti_outer a
+WHERE a.v > 0 AND NOT EXISTS (
+    SELECT 1 FROM (SELECT * FROM anti_nullable ORDER BY k NULLS FIRST LIMIT 1) n
+    WHERE n.k IS NOT DISTINCT FROM a.k AND n.v <> a.v
+);
+----
+4
+
+statement ok
+DROP TABLE anti_nullable;
+
+statement ok
+DROP TABLE anti_outer;
+
+statement ok
+DROP TABLE anti_facts;
+
+statement ok
+DROP TABLE anti_owners;
+
+# Reuse one filtered outer domain across EXISTS/NOT EXISTS ownership lookups.
+# Duplicate owners/facts retain their bag multiplicity; orphan facts remain
+# excluded by the original ownership joins. Compare every counter with the
+# ordinary optimizer, rather than relying on noisy scalar output.
+statement ok
+CREATE TABLE domain_owners AS
+SELECT i::BIGINT k, (i % 2 = 0) keep FROM range(2000) r(i);
+
+statement ok
+INSERT INTO domain_owners VALUES (10, true), (10, false), (NULL, true);
+
+statement ok
+CREATE TABLE domain_facts AS
+SELECT (i % 2000)::BIGINT k, (i // 2000)::INTEGER supplier, (i // 2000 = 0) late
+FROM range(10000) r(i);
+
+statement ok
+INSERT INTO domain_facts VALUES
+    (10, 0, true), (3000, 0, true), (3000, 1, false),
+    (NULL, 0, true), (NULL, 1, false), (12, NULL, false);
+
+statement ok
+CREATE VIEW domain_result AS
+SELECT f.supplier, as_count(hash(o.k)) counters
+FROM domain_facts f JOIN domain_owners o ON f.k = o.k
+WHERE o.keep AND f.late
+  AND EXISTS (
+      SELECT 1 FROM domain_facts w JOIN domain_owners ow ON w.k = ow.k
+      WHERE w.k = f.k AND w.supplier <> f.supplier)
+  AND NOT EXISTS (
+      SELECT 1 FROM domain_facts w JOIN domain_owners ow ON w.k = ow.k
+      WHERE w.k = f.k AND w.supplier <> f.supplier AND w.late)
+GROUP BY f.supplier;
+
+statement ok
+SET disabled_optimizers='extension';
+
+statement ok
+CREATE TEMP TABLE domain_expected AS SELECT * FROM domain_result;
+
+statement ok
+SET disabled_optimizers='';
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM domain_result EXCEPT ALL SELECT * FROM domain_expected)
+    UNION ALL
+    (SELECT * FROM domain_expected EXCEPT ALL SELECT * FROM domain_result)
+);
+----
+0
+
+statement ok
+SET threads=4;
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM domain_result EXCEPT ALL SELECT * FROM domain_expected)
+    UNION ALL
+    (SELECT * FROM domain_expected EXCEPT ALL SELECT * FROM domain_result)
+);
+----
+0
+
+# Null-safe membership predicates do not make NULL ownership keys joinable.
+statement ok
+CREATE VIEW domain_nullable_result AS
+SELECT f.supplier, as_count(hash(o.k)) counters
+FROM domain_facts f JOIN domain_owners o ON f.k = o.k
+WHERE o.keep AND f.late
+  AND EXISTS (
+      SELECT 1 FROM domain_facts w JOIN domain_owners ow ON w.k = ow.k
+      WHERE w.k IS NOT DISTINCT FROM f.k AND w.supplier IS DISTINCT FROM f.supplier)
+  AND NOT EXISTS (
+      SELECT 1 FROM domain_facts w JOIN domain_owners ow ON w.k = ow.k
+      WHERE w.k IS NOT DISTINCT FROM f.k AND w.supplier IS DISTINCT FROM f.supplier AND w.late)
+GROUP BY f.supplier;
+
+statement ok
+SET disabled_optimizers='extension';
+
+statement ok
+CREATE TEMP TABLE domain_nullable_expected AS SELECT * FROM domain_nullable_result;
+
+statement ok
+SET disabled_optimizers='';
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM domain_nullable_result EXCEPT ALL SELECT * FROM domain_nullable_expected)
+    UNION ALL
+    (SELECT * FROM domain_nullable_expected EXCEPT ALL SELECT * FROM domain_nullable_result)
+);
+----
+0
+
+statement ok
+DROP VIEW domain_nullable_result;
+
+# An input that reads an existing CTE must stay inside that CTE's scope.
+statement ok
+CREATE VIEW domain_cte_result AS
+WITH shared_facts AS MATERIALIZED (SELECT * FROM domain_facts)
+SELECT f.supplier, as_count(hash(o.k)) counters
+FROM shared_facts f JOIN domain_owners o ON f.k = o.k
+WHERE o.keep AND f.late
+  AND EXISTS (
+      SELECT 1 FROM domain_facts w JOIN domain_owners ow ON w.k = ow.k
+      WHERE w.k = f.k AND w.supplier <> f.supplier)
+  AND NOT EXISTS (
+      SELECT 1 FROM domain_facts w JOIN domain_owners ow ON w.k = ow.k
+      WHERE w.k = f.k AND w.supplier <> f.supplier AND w.late)
+GROUP BY f.supplier;
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM domain_cte_result EXCEPT ALL SELECT * FROM domain_expected)
+    UNION ALL
+    (SELECT * FROM domain_expected EXCEPT ALL SELECT * FROM domain_cte_result)
+);
+----
+0
+
+statement ok
+DROP VIEW domain_cte_result;
+
+statement ok
+DROP VIEW domain_result;
+
+statement ok
+DROP TABLE domain_nullable_expected;
+
+statement ok
+DROP TABLE domain_expected;
+
+statement ok
+DROP TABLE domain_facts;
+
+statement ok
+DROP TABLE domain_owners;
+
+# Stored sorted keys cross the core partitioning pass's fixed cardinality and
+# row-group thresholds. Compression would otherwise hide the grouping key.
+statement ok
+SET threads=1;
+
+statement ok
+CREATE TABLE partition_input AS
+SELECT i::BIGINT k, (i % 7)::INTEGER v FROM range(5000000) r(i);
+
+statement ok
+CREATE VIEW partition_result AS
+SELECT as_count(hash(k)) counters
+FROM (
+    SELECT k, SUM(v) total
+    FROM partition_input
+    GROUP BY k HAVING SUM(v) > 3
+) g;
+
+statement ok
+SET disabled_optimizers='extension';
+
+statement ok
+CREATE TEMP TABLE partition_expected AS SELECT * FROM partition_result;
+
+statement ok
+SET disabled_optimizers='';
+
+statement ok
+SET explain_output='optimized_only';
+
+query TT
+EXPLAIN SELECT * FROM partition_result;
+----
+logical_opt	<REGEX>:[\s\S]*(Union|UNION)[\s\S]*
+
+# Check every world against ordinary optimization, including the HAVING filter.
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM partition_result EXCEPT ALL SELECT * FROM partition_expected)
+    UNION ALL
+    (SELECT * FROM partition_expected EXCEPT ALL SELECT * FROM partition_result)
+);
+----
+0
+
+statement ok
+SET disabled_optimizers='partitioned_execution';
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM partition_result EXCEPT ALL SELECT * FROM partition_expected)
+    UNION ALL
+    (SELECT * FROM partition_expected EXCEPT ALL SELECT * FROM partition_result)
+);
+----
+0
+
+statement ok
+SET disabled_optimizers='';
+
+statement ok
+SET explain_output='physical_only';
+
+statement ok
+SET threads=4;
+
+statement ok
+DROP VIEW partition_result;
+
+statement ok
+DROP TABLE partition_expected;
+
+statement ok
+DROP TABLE partition_input;
+
+# Sampling queries must not materialize A x B before joining both keys to C.
+# Check duplicate multiplicities and NULL join keys against ordinary execution.
+statement ok
+SET priv_rewrite=false;
+
+statement ok
+CREATE TABLE sample_join_a AS SELECT i%4 id,CASE WHEN i%11=0 THEN NULL ELSE i%7 END k FROM range(100)t(i);
+
+statement ok
+CREATE TABLE sample_join_b AS SELECT i%3 id,CAST(CASE WHEN i%13=0 THEN NULL ELSE i%5 END AS INTEGER) k FROM range(80)t(i);
+
+statement ok
+CREATE TABLE sample_join_c AS SELECT i%7 ak,i%5 bk,i owner FROM range(32)t(i);
+
+statement ok
+CREATE VIEW sample_join_result AS
+SELECT a.id aid,b.id bid,c.owner
+FROM (sample_join_a a CROSS JOIN sample_join_b b)
+JOIN sample_join_c c ON a.k=c.ak AND b.k=c.bk
+WHERE (priv_hash(hash(c.owner))&1)<>0;
+
+statement ok
+SET disabled_optimizers='extension';
+
+statement ok
+CREATE TEMP TABLE sample_join_expected AS SELECT * FROM sample_join_result;
+
+statement ok
+SET disabled_optimizers='';
+
+query II
+SELECT (SELECT count(*)>0 FROM sample_join_expected),count(*) FROM (
+ (SELECT * FROM sample_join_result EXCEPT ALL SELECT * FROM sample_join_expected)
+ UNION ALL
+ (SELECT * FROM sample_join_expected EXCEPT ALL SELECT * FROM sample_join_result)
+);
+----
+true	0
+
+# Push a filtering relation through either side of an ordinary inner join.
+statement ok
+CREATE VIEW sample_join_inner AS
+SELECT 0 side,a.id aid,b.id bid,c.owner
+FROM sample_join_a a JOIN sample_join_b b ON a.id=b.id
+JOIN sample_join_c c ON a.k=c.ak WHERE (priv_hash(hash(c.owner))&1)<>0
+UNION ALL
+SELECT 1 side,a.id aid,b.id bid,c.owner
+FROM sample_join_a a JOIN sample_join_b b ON a.id=b.id
+JOIN sample_join_c c ON b.k=c.bk WHERE (priv_hash(hash(c.owner))&1)<>0
+UNION ALL
+SELECT 2 side,a.id aid,b.id bid,c.owner
+FROM sample_join_a a JOIN sample_join_b b ON a.id=b.id AND a.k<b.k
+JOIN sample_join_c c ON a.k=c.ak AND b.k=c.bk WHERE (priv_hash(hash(c.owner))&1)<>0
+UNION ALL
+SELECT 3 side,p.aid,p.bid,c.owner
+FROM (SELECT a.id aid,b.id bid,a.k ak,CAST(b.k AS BIGINT) bk
+      FROM sample_join_a a JOIN sample_join_b b ON a.id=b.id AND a.k<b.k) p
+JOIN sample_join_c c ON p.ak=c.ak AND p.bk=c.bk WHERE (priv_hash(hash(c.owner))&1)<>0
+UNION ALL
+SELECT 4 side,p.aid,p.bid,c.owner
+FROM (SELECT aid,bid,ak,CAST(bk AS BIGINT) bk
+      FROM (SELECT a.id aid,b.id bid,a.k ak,b.k bk
+            FROM sample_join_a a JOIN sample_join_b b ON a.id=b.id AND a.k<b.k) q) p
+JOIN (SELECT c.* FROM sample_join_c c JOIN (VALUES (0),(1),(2)) d(k) ON c.bk=d.k) c
+ON p.ak=c.ak AND p.bk=c.bk WHERE (priv_hash(hash(c.owner))&1)<>0;
+
+statement ok
+SET disabled_optimizers='extension';
+
+statement ok
+CREATE TEMP TABLE sample_join_inner_expected AS SELECT * FROM sample_join_inner;
+
+statement ok
+SET disabled_optimizers='';
+
+query II
+SELECT (SELECT count(DISTINCT side)=5 FROM sample_join_inner_expected),count(*) FROM (
+ (SELECT * FROM sample_join_inner EXCEPT ALL SELECT * FROM sample_join_inner_expected)
+ UNION ALL
+ (SELECT * FROM sample_join_inner_expected EXCEPT ALL SELECT * FROM sample_join_inner)
+);
+----
+true	0
+
+statement ok
+DROP VIEW sample_join_inner;
+
+statement ok
+DROP VIEW sample_join_result;
+
+statement ok
+SET priv_rewrite=true;

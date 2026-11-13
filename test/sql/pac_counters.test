@@ -245,3 +245,20 @@ DROP TABLE neg_worlds
 
 statement ok
 DROP TABLE test_data
+
+# Per-world AVG must retain independent NULL counts, including after state transport.
+query I
+SELECT as_avg(v)[1:4]
+FROM (VALUES ([2, NULL, 8, NULL]::FLOAT[]), ([4, 6, NULL, NULL]::FLOAT[])) t(v)
+----
+[3.0, 6.0, 8.0, NULL]
+
+query I
+WITH partial AS (
+    SELECT i, as_avg(v) EXPORT_STATE AS s
+    FROM (VALUES (1, [2, NULL, 8, NULL]::FLOAT[]), (2, [4, 6, NULL, NULL]::FLOAT[])) t(i,v)
+    GROUP BY i
+)
+SELECT finalize(combine(a.s, b.s))[1:4] FROM partial a, partial b WHERE a.i=1 AND b.i=2
+----
+[3.0, 6.0, 8.0, NULL]

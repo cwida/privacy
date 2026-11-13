@@ -48,7 +48,7 @@ static void CollectColumnBindingsRecursiveForTest(LogicalOperator *node, std::se
 	}
 	auto binds = node->GetColumnBindings();
 	for (auto &b : binds) {
-		out.insert({b.table_index, b.column_index});
+		out.insert({b.table_index.index, b.column_index});
 	}
 	for (auto &c : node->children) {
 		CollectColumnBindingsRecursiveForTest(c.get(), out);
@@ -63,11 +63,11 @@ static bool VerifyAllExprBindingsExist(LogicalOperator *node, const std::set<std
 	bool ok = true;
 	for (auto &expr : node->expressions) {
 		ExpressionIterator::VisitExpression<BoundColumnRefExpression>(*expr, [&](const BoundColumnRefExpression &bcr) {
-			auto key = std::make_pair(bcr.binding.table_index, bcr.binding.column_index);
+			auto key = std::make_pair(bcr.Binding().table_index.index, bcr.Binding().column_index);
 			if (bindings.find(key) == bindings.end()) {
 				std::cerr << "Verification failure: expression references missing binding (table="
-				          << bcr.binding.table_index << ", col=" << bcr.binding.column_index << ") in operator "
-				          << node->GetName() << "\n";
+				          << bcr.Binding().table_index.index << ", col=" << bcr.Binding().column_index
+				          << ") in operator " << node->GetName() << "\n";
 				ok = false;
 			}
 		});
@@ -98,7 +98,7 @@ static void CollectBindingProducers(LogicalOperator *node,
 	}
 	auto binds = node->GetColumnBindings();
 	for (auto &b : binds) {
-		out[{b.table_index, b.column_index}].push_back(node);
+		out[{b.table_index.index, b.column_index}].push_back(node);
 	}
 	for (auto &c : node->children) {
 		CollectBindingProducers(c.get(), out);
@@ -200,7 +200,7 @@ static bool VerifyExprTypesMatchProducers(LogicalOperator *root) {
 		for (auto &expr : node->expressions) {
 			ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
 			    *expr, [&](const BoundColumnRefExpression &bcr) {
-				    auto key = std::make_pair(bcr.binding.table_index, bcr.binding.column_index);
+				    auto key = std::make_pair(bcr.Binding().table_index.index, bcr.Binding().column_index);
 				    auto it = producers.find(key);
 				    if (it == producers.end() || it->second.empty()) {
 					    // missing producer already reported elsewhere; skip
@@ -208,17 +208,18 @@ static bool VerifyExprTypesMatchProducers(LogicalOperator *root) {
 				    }
 				    auto *producer = it->second[0];
 				    auto types = producer->types;
-				    if (bcr.binding.column_index >= (idx_t)types.size()) {
+				    if (bcr.Binding().column_index >= (idx_t)types.size()) {
 					    std::cerr << "Verification failure: expression references column index "
-					              << bcr.binding.column_index << " beyond producer types size " << types.size() << "\n";
+					              << bcr.Binding().column_index << " beyond producer types size " << types.size()
+					              << "\n";
 					    ok = false;
 					    return;
 				    }
-				    const auto &prod_type = types[bcr.binding.column_index];
-				    if (bcr.return_type.id() != prod_type.id()) {
+				    const auto &prod_type = types[bcr.Binding().column_index];
+				    if (bcr.GetReturnType().id() != prod_type.id()) {
 					    std::cerr << "Verification failure: expression type mismatch for binding (table="
-					              << bcr.binding.table_index << ", col=" << bcr.binding.column_index
-					              << "): expr_type=" << bcr.return_type.ToString()
+					              << bcr.Binding().table_index.index << ", col=" << bcr.Binding().column_index
+					              << "): expr_type=" << bcr.GetReturnType().ToString()
 					              << " producer_type=" << prod_type.ToString() << "\n";
 					    ok = false;
 				    }
@@ -261,7 +262,7 @@ static bool VerifyOperatorBindingsConsistentWithTypes(LogicalOperator *root) {
 		for (auto &expr : node->expressions) {
 			// Enumerate all expressions under this unique_ptr and check their return types
 			ExpressionIterator::EnumerateExpression(expr, [&](const Expression &e) {
-				if (e.return_type.id() == LogicalTypeId::INVALID) {
+				if (e.GetReturnType().id() == LogicalTypeId::INVALID) {
 					std::cerr << "Verification failure: expression in operator " << node->GetName()
 					          << " has INVALID return type\n";
 					ok = false;
@@ -342,18 +343,20 @@ static int RunRobustPlanVerification(const unique_ptr<LogicalOperator> &root) {
 // Test 1: basic ReplaceNode insertion and binding remap
 static int Test_BasicReplaceNode() {
 	// Build a simple plan: root projection (table_index = 0) with a child DummyScan (table_index = 0)
-	auto child = make_uniq<LogicalDummyScan>(0);
+	auto child = make_uniq<LogicalDummyScan>(TableIndex(0));
 
 	vector<unique_ptr<Expression>> proj_exprs;
 	// Projection expression referencing child's first column (binding {0,0})
-	proj_exprs.emplace_back(make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(0, 0)));
+	proj_exprs.emplace_back(
+	    make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(TableIndex(0), ProjectionIndex(0))));
 	// store root as unique_ptr<LogicalOperator> so it can be passed to ReplaceNode
-	unique_ptr<LogicalOperator> root = make_uniq<LogicalProjection>(0, std::move(proj_exprs));
+	unique_ptr<LogicalOperator> root = make_uniq<LogicalProjection>(TableIndex(0), std::move(proj_exprs));
 	root->children.emplace_back(std::move(child));
 
 	// Prepare a new parent projection that contains its own child (strict replace semantics)
-	unique_ptr<LogicalOperator> new_parent = make_uniq<LogicalProjection>(1, vector<unique_ptr<Expression>>());
-	new_parent->children.emplace_back(make_uniq<LogicalDummyScan>(5));
+	unique_ptr<LogicalOperator> new_parent =
+	    make_uniq<LogicalProjection>(TableIndex(1), vector<unique_ptr<Expression>>());
+	new_parent->children.emplace_back(make_uniq<LogicalDummyScan>(TableIndex(5)));
 	ReplaceNode(root, root->children[0], new_parent);
 
 	// After insertion, validate
@@ -383,16 +386,18 @@ static int Test_BasicReplaceNode() {
 // Test 2: multiple consecutive ReplaceNode calls produce consistent remapping
 static int Test_ConsecutiveReplaceNode() {
 	// Start with root projection (table_index = 0) and a DummyScan child (table_index = 0)
-	auto child = make_uniq<LogicalDummyScan>(0);
+	auto child = make_uniq<LogicalDummyScan>(TableIndex(0));
 
 	vector<unique_ptr<Expression>> proj_exprs;
-	proj_exprs.emplace_back(make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(0, 0)));
-	unique_ptr<LogicalOperator> root = make_uniq<LogicalProjection>(0, std::move(proj_exprs));
+	proj_exprs.emplace_back(
+	    make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(TableIndex(0), ProjectionIndex(0))));
+	unique_ptr<LogicalOperator> root = make_uniq<LogicalProjection>(TableIndex(0), std::move(proj_exprs));
 	root->children.emplace_back(std::move(child));
 
 	// First insertion
-	unique_ptr<LogicalOperator> new_parent1 = make_uniq<LogicalProjection>(1, vector<unique_ptr<Expression>>());
-	new_parent1->children.emplace_back(make_uniq<LogicalDummyScan>(7));
+	unique_ptr<LogicalOperator> new_parent1 =
+	    make_uniq<LogicalProjection>(TableIndex(1), vector<unique_ptr<Expression>>());
+	new_parent1->children.emplace_back(make_uniq<LogicalDummyScan>(TableIndex(7)));
 	ReplaceNode(root, root->children[0], new_parent1);
 
 	// Second insertion above the same original child
@@ -400,8 +405,9 @@ static int Test_ConsecutiveReplaceNode() {
 	if (!root->children[0]) {
 		return 7;
 	}
-	unique_ptr<LogicalOperator> new_parent2 = make_uniq<LogicalProjection>(2, vector<unique_ptr<Expression>>());
-	new_parent2->children.emplace_back(make_uniq<LogicalDummyScan>(8));
+	unique_ptr<LogicalOperator> new_parent2 =
+	    make_uniq<LogicalProjection>(TableIndex(2), vector<unique_ptr<Expression>>());
+	new_parent2->children.emplace_back(make_uniq<LogicalDummyScan>(TableIndex(8)));
 	ReplaceNode(root->children[0], root->children[0]->children[0], new_parent2);
 
 	// Validate structure: there should be two projections between root and the DummyScan
@@ -435,17 +441,19 @@ static int Test_ConsecutiveReplaceNode() {
 // Test 3: inserting parent when child has multiple columns and projection references later column
 static int Test_MultiColumnChildBinding() {
 	// DummyScan with two columns: logical behavior is simulated via projections using column bindings
-	auto child = make_uniq<LogicalDummyScan>(0);
+	auto child = make_uniq<LogicalDummyScan>(TableIndex(0));
 
 	vector<unique_ptr<Expression>> proj_exprs;
 	// Reference first column from child binding
-	proj_exprs.emplace_back(make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(0, 0)));
-	unique_ptr<LogicalOperator> root = make_uniq<LogicalProjection>(0, std::move(proj_exprs));
+	proj_exprs.emplace_back(
+	    make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(TableIndex(0), ProjectionIndex(0))));
+	unique_ptr<LogicalOperator> root = make_uniq<LogicalProjection>(TableIndex(0), std::move(proj_exprs));
 	root->children.emplace_back(std::move(child));
 
 	// Create new_parent with a child scan - this matches the pattern used in other tests
-	unique_ptr<LogicalOperator> new_parent = make_uniq<LogicalProjection>(1, vector<unique_ptr<Expression>>());
-	new_parent->children.emplace_back(make_uniq<LogicalDummyScan>(17));
+	unique_ptr<LogicalOperator> new_parent =
+	    make_uniq<LogicalProjection>(TableIndex(1), vector<unique_ptr<Expression>>());
+	new_parent->children.emplace_back(make_uniq<LogicalDummyScan>(TableIndex(17)));
 
 	ReplaceNode(root, root->children[0], new_parent);
 
@@ -471,15 +479,17 @@ static int Test_MultiColumnChildBinding() {
 // Test 4: insert a projection between an aggregate and root
 static int Test_InsertProjectionBetweenAggregateAndRoot() {
 	// Setup: root projection referencing an aggregate child
-	auto agg_child = make_uniq<LogicalAggregate>(0, 0, vector<unique_ptr<Expression>>());
-	unique_ptr<LogicalOperator> root = make_uniq<LogicalProjection>(0, vector<unique_ptr<Expression>>());
+	auto agg_child = make_uniq<LogicalAggregate>(TableIndex(0), TableIndex(0), vector<unique_ptr<Expression>>());
+	unique_ptr<LogicalOperator> root = make_uniq<LogicalProjection>(TableIndex(0), vector<unique_ptr<Expression>>());
 	// projection referencing the aggregate's (would-be) column 0
-	root->expressions.emplace_back(make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(0, 0)));
+	root->expressions.emplace_back(
+	    make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(TableIndex(0), ProjectionIndex(0))));
 	root->children.emplace_back(std::move(agg_child));
 
 	// Insert a LogicalProjection as new parent above the aggregate
-	unique_ptr<LogicalOperator> new_proj = make_uniq<LogicalProjection>(12, vector<unique_ptr<Expression>>());
-	new_proj->children.emplace_back(make_uniq<LogicalDummyScan>(13));
+	unique_ptr<LogicalOperator> new_proj =
+	    make_uniq<LogicalProjection>(TableIndex(12), vector<unique_ptr<Expression>>());
+	new_proj->children.emplace_back(make_uniq<LogicalDummyScan>(TableIndex(13)));
 
 	ReplaceNode(root, root->children[0], new_proj);
 
@@ -505,14 +515,15 @@ static int Test_InsertProjectionBetweenAggregateAndRoot() {
 
 // Test 6: insert a filter parent above a scan and ensure child moved
 static int Test_InsertFilterParent() {
-	auto child = make_uniq<LogicalDummyScan>(0);
+	auto child = make_uniq<LogicalDummyScan>(TableIndex(0));
 	vector<unique_ptr<Expression>> proj_exprs;
-	proj_exprs.emplace_back(make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(0, 0)));
-	unique_ptr<LogicalOperator> root = make_uniq<LogicalProjection>(0, std::move(proj_exprs));
+	proj_exprs.emplace_back(
+	    make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(TableIndex(0), ProjectionIndex(0))));
+	unique_ptr<LogicalOperator> root = make_uniq<LogicalProjection>(TableIndex(0), std::move(proj_exprs));
 	root->children.emplace_back(std::move(child));
 
 	unique_ptr<LogicalOperator> new_filter = make_uniq<LogicalFilter>();
-	new_filter->children.emplace_back(make_uniq<LogicalDummyScan>(16));
+	new_filter->children.emplace_back(make_uniq<LogicalDummyScan>(TableIndex(16)));
 	ReplaceNode(root, root->children[0], new_filter);
 
 	// Verify plan
@@ -567,15 +578,18 @@ static int Test_InsertFilterParent() {
 
 // Test 7: ensure ReplaceNode preserves column positions when no remapping is required
 static int Test_PreserveColumnsNoRemap() {
-	auto child = make_uniq<LogicalDummyScan>(0);
+	auto child = make_uniq<LogicalDummyScan>(TableIndex(0));
 	vector<unique_ptr<Expression>> proj_exprs;
-	proj_exprs.emplace_back(make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(0, 0)));
-	proj_exprs.emplace_back(make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(0, 1)));
-	unique_ptr<LogicalOperator> root = make_uniq<LogicalProjection>(0, std::move(proj_exprs));
+	proj_exprs.emplace_back(
+	    make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(TableIndex(0), ProjectionIndex(0))));
+	proj_exprs.emplace_back(
+	    make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(TableIndex(0), ProjectionIndex(1))));
+	unique_ptr<LogicalOperator> root = make_uniq<LogicalProjection>(TableIndex(0), std::move(proj_exprs));
 	root->children.emplace_back(std::move(child));
 
-	unique_ptr<LogicalOperator> new_parent = make_uniq<LogicalProjection>(1, vector<unique_ptr<Expression>>());
-	new_parent->children.emplace_back(make_uniq<LogicalDummyScan>(17));
+	unique_ptr<LogicalOperator> new_parent =
+	    make_uniq<LogicalProjection>(TableIndex(1), vector<unique_ptr<Expression>>());
+	new_parent->children.emplace_back(make_uniq<LogicalDummyScan>(TableIndex(17)));
 	ReplaceNode(root, root->children[0], new_parent);
 
 	// Validate structure
@@ -597,10 +611,10 @@ static int Test_PreserveColumnsNoRemap() {
 	// Verify column indices are preserved (0 and 1)
 	auto &bcr0 = root->expressions[0]->Cast<BoundColumnRefExpression>();
 	auto &bcr1 = root->expressions[1]->Cast<BoundColumnRefExpression>();
-	if (bcr0.binding.column_index != 0) {
+	if (bcr0.Binding().column_index != 0) {
 		return 31;
 	}
-	if (bcr1.binding.column_index != 1) {
+	if (bcr1.Binding().column_index != 1) {
 		return 32;
 	}
 
@@ -610,15 +624,16 @@ static int Test_PreserveColumnsNoRemap() {
 // New test: verifier should detect duplicate producers for the same ColumnBinding
 static int Test_VerifierDetectsDuplicateProducers() {
 	// Create a join whose left and right are both DummyScans with the same table_index (0)
-	auto left = make_uniq<LogicalDummyScan>(0);
-	auto right = make_uniq<LogicalDummyScan>(0);
+	auto left = make_uniq<LogicalDummyScan>(TableIndex(0));
+	auto right = make_uniq<LogicalDummyScan>(TableIndex(0));
 	auto base_join = make_uniq<LogicalJoin>(JoinType::INNER);
 	base_join->children.emplace_back(std::move(left));
 	base_join->children.emplace_back(std::move(right));
 
-	unique_ptr<LogicalOperator> root = make_uniq<LogicalProjection>(0, vector<unique_ptr<Expression>>());
+	unique_ptr<LogicalOperator> root = make_uniq<LogicalProjection>(TableIndex(0), vector<unique_ptr<Expression>>());
 	// Add a projection expression that references the duplicated binding (table=0,col=0)
-	root->expressions.emplace_back(make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(0, 0)));
+	root->expressions.emplace_back(
+	    make_uniq<BoundColumnRefExpression>(LogicalType::INTEGER, ColumnBinding(TableIndex(0), ProjectionIndex(0))));
 	root->children.emplace_back(std::move(base_join));
 
 	int res = RunRobustPlanVerification(root);
@@ -678,7 +693,7 @@ int RunCompilerFunctionTests() {
 
 		// Test 1: Simple scan - check that columns from t1 belong to t1
 		{
-			Parser parser;
+			Parser parser(*con.context);
 			parser.ParseQuery("SELECT a, b FROM t1;");
 
 			Planner planner(*con.context);
@@ -744,7 +759,7 @@ int RunCompilerFunctionTests() {
 		// Join key columns (t1.a, t2.x) belong to BOTH tables via equivalence.
 		// Non-join-key columns (t1.b, t2.y) belong ONLY to their own table.
 		{
-			Parser parser;
+			Parser parser(*con.context);
 			parser.ParseQuery("SELECT t1.a, t1.b, t2.x, t2.y FROM t1 INNER JOIN t2 ON t1.a = t2.x;");
 			Planner planner(*con.context);
 			planner.CreatePlan(std::move(parser.statements[0]));
@@ -841,7 +856,7 @@ int RunCompilerFunctionTests() {
 		// Join conditions: t1.a = t2.x AND t2.x = t3.m → transitive: t1.a = t2.x = t3.m
 		// Join key columns belong to all three tables; non-join-key columns stay isolated.
 		{
-			Parser parser;
+			Parser parser(*con.context);
 			parser.ParseQuery("SELECT * FROM t1 INNER JOIN t2 ON t1.a = t2.x INNER JOIN t3 ON t2.x = t3.m;");
 			Planner planner(*con.context);
 			planner.CreatePlan(std::move(parser.statements[0]));
@@ -943,7 +958,7 @@ int RunCompilerFunctionTests() {
 
 		// Test 4: Non-existent table
 		{
-			Parser parser;
+			Parser parser(*con.context);
 			parser.ParseQuery("SELECT a FROM t1;");
 			Planner planner(*con.context);
 			planner.CreatePlan(std::move(parser.statements[0]));
@@ -991,7 +1006,7 @@ int RunCompilerFunctionTests() {
 
 		// Test 5: Subquery with multiple tables
 		{
-			Parser parser;
+			Parser parser(*con.context);
 			parser.ParseQuery("SELECT * FROM (SELECT t1.a, t2.x FROM t1, t2) AS sub;");
 			Planner planner(*con.context);
 			planner.CreatePlan(std::move(parser.statements[0]));
@@ -1070,7 +1085,7 @@ int RunCompilerFunctionTests() {
 		    "SELECT t2.x, SUM(t3.n) FROM t1 INNER JOIN t2 ON t1.a = t2.x INNER JOIN t3 ON t2.x = t3.m GROUP BY t2.x;";
 
 		// Create plan using parser, planner and optimizer
-		Parser parser;
+		Parser parser(*con.context);
 		parser.ParseQuery(query);
 		Planner planner(*con.context);
 		planner.CreatePlan(std::move(parser.statements[0]));
@@ -1110,7 +1125,7 @@ int RunCompilerFunctionTests() {
 		}
 
 		auto &group_expr = agg_node->groups[0];
-		if (group_expr->type != ExpressionType::BOUND_COLUMN_REF) {
+		if (group_expr->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 6: group expression is not a column ref"
 			          << "\n";
 			return 1;
@@ -1148,8 +1163,8 @@ int RunCompilerFunctionTests() {
 
 		// The GROUP BY column could belong to either t1 or t2 since we're joining on the key
 		// (t1.a = t2.x), making them equivalent
-		bool belongs_to_t1 = ColumnBelongsToTable(*plan, "t1", col_ref.binding);
-		bool belongs_to_t2 = ColumnBelongsToTable(*plan, "t2", col_ref.binding);
+		bool belongs_to_t1 = ColumnBelongsToTable(*plan, "t1", col_ref.Binding());
+		bool belongs_to_t2 = ColumnBelongsToTable(*plan, "t2", col_ref.Binding());
 
 		// The column should belong to at least one of the tables (t1 or t2)
 		if (!belongs_to_t1 && !belongs_to_t2) {
@@ -1176,7 +1191,7 @@ int RunCompilerFunctionTests() {
 		const string query = "SELECT a, SUM(b) FROM t1 GROUP BY a ORDER BY a;";
 
 		// Create plan using parser, planner and optimizer
-		Parser parser;
+		Parser parser(*con.context);
 		parser.ParseQuery(query);
 		Planner planner(*con.context);
 		planner.CreatePlan(std::move(parser.statements[0]));
@@ -1239,7 +1254,7 @@ int RunCompilerFunctionTests() {
 		}
 
 		auto &group_expr = agg_node->groups[0];
-		if (group_expr->type != ExpressionType::BOUND_COLUMN_REF) {
+		if (group_expr->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 7: group expression is not a column ref"
 			          << "\n";
 			return 1;
@@ -1248,7 +1263,7 @@ int RunCompilerFunctionTests() {
 		auto &group_col_ref = group_expr->Cast<BoundColumnRefExpression>();
 
 		// Verify that the GROUP BY column 'a' belongs to t1
-		if (!ColumnBelongsToTable(*plan, "t1", group_col_ref.binding)) {
+		if (!ColumnBelongsToTable(*plan, "t1", group_col_ref.Binding())) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 7: GROUP BY column 'a' should belong to t1"
 			          << "\n";
 			return 1;
@@ -1267,7 +1282,7 @@ int RunCompilerFunctionTests() {
 			ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
 			    *agg_expr, [&](const BoundColumnRefExpression &col_ref) {
 				    // Verify that column 'b' belongs to t1
-				    if (!ColumnBelongsToTable(*plan, "t1", col_ref.binding)) {
+				    if (!ColumnBelongsToTable(*plan, "t1", col_ref.Binding())) {
 					    std::cerr << "FAIL: ColumnBelongsToTable test 7: SUM(b) column 'b' should belong to t1"
 					              << "\n";
 					    found_b_column = false;
@@ -1321,7 +1336,7 @@ int RunCompilerFunctionTests() {
 		                     "pu_table.a = non_pu_table.x GROUP BY non_pu_table.y;";
 
 		// Create plan using parser, planner and optimizer
-		Parser parser;
+		Parser parser(*con.context);
 		parser.ParseQuery(query);
 		Planner planner(*con.context);
 		planner.CreatePlan(std::move(parser.statements[0]));
@@ -1361,7 +1376,7 @@ int RunCompilerFunctionTests() {
 		}
 
 		auto &group_expr = agg_node->groups[0];
-		if (group_expr->type != ExpressionType::BOUND_COLUMN_REF) {
+		if (group_expr->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 8: group expression is not a column ref"
 			          << "\n";
 			return 1;
@@ -1370,14 +1385,14 @@ int RunCompilerFunctionTests() {
 		auto &col_ref = group_expr->Cast<BoundColumnRefExpression>();
 
 		// The GROUP BY column should belong to non_pu_table
-		if (!ColumnBelongsToTable(*plan, "non_pu_table", col_ref.binding)) {
+		if (!ColumnBelongsToTable(*plan, "non_pu_table", col_ref.Binding())) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 8: GROUP BY column should belong to non_pu_table"
 			          << "\n";
 			return 1;
 		}
 
 		// Should NOT belong to pu_table
-		if (ColumnBelongsToTable(*plan, "pu_table", col_ref.binding)) {
+		if (ColumnBelongsToTable(*plan, "pu_table", col_ref.Binding())) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 8: GROUP BY column should not belong to pu_table"
 			          << "\n";
 			return 1;
@@ -1407,7 +1422,7 @@ int RunCompilerFunctionTests() {
 		                     "pu_table.a = non_pu_table.x GROUP BY non_pu_table.x;";
 
 		// Create plan using parser, planner and optimizer
-		Parser parser;
+		Parser parser(*con.context);
 		parser.ParseQuery(query);
 		Planner planner(*con.context);
 		planner.CreatePlan(std::move(parser.statements[0]));
@@ -1447,7 +1462,7 @@ int RunCompilerFunctionTests() {
 		}
 
 		auto &group_expr = agg_node->groups[0];
-		if (group_expr->type != ExpressionType::BOUND_COLUMN_REF) {
+		if (group_expr->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 9: group expression is not a column ref"
 			          << "\n";
 			return 1;
@@ -1456,7 +1471,7 @@ int RunCompilerFunctionTests() {
 		auto &col_ref = group_expr->Cast<BoundColumnRefExpression>();
 
 		// The GROUP BY column physically comes from non_pu_table
-		if (!ColumnBelongsToTable(*plan, "non_pu_table", col_ref.binding)) {
+		if (!ColumnBelongsToTable(*plan, "non_pu_table", col_ref.Binding())) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 9: GROUP BY column should belong to non_pu_table"
 			          << "\n";
 			return 1;
@@ -1464,7 +1479,7 @@ int RunCompilerFunctionTests() {
 
 		// BUT because it's a join key (pu_table.a = non_pu_table.x), it should ALSO be detected
 		// as belonging to pu_table due to join key equivalence
-		if (!ColumnBelongsToTable(*plan, "pu_table", col_ref.binding)) {
+		if (!ColumnBelongsToTable(*plan, "pu_table", col_ref.Binding())) {
 			std::cerr << "FAIL: ColumnBelongsToTable test 9: JOIN KEY column should ALSO belong to pu_table "
 			             "(due to join key equivalence)"
 			          << "\n";

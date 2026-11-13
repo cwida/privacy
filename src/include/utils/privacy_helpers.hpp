@@ -8,6 +8,9 @@
 namespace duckdb {
 
 class Binder;
+class BoundWindowExpression;
+
+unique_ptr<BoundWindowExpression> BindRankingWindow(ClientContext &context, ExpressionType type);
 
 // Sanitize a string to be used as a PAC privacy unit or table name (alphanumeric + underscores only)
 string Sanitize(const string &in);

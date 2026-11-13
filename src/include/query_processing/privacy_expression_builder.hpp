@@ -38,7 +38,7 @@ unique_ptr<Expression> BuildXorHashFromPKs(OptimizerExtensionInput &input, Logic
 ColumnBinding InsertHashProjectionAboveGet(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                            LogicalGet &get, const vector<string> &key_columns, bool use_rowid);
 
-// Caching wrapper around InsertHashProjectionAboveGet. Keyed by get.table_index.
+// Caching wrapper around InsertHashProjectionAboveGet. Keyed by get.table_index.index.
 // Returns cached binding if hash projection was already inserted for this get.
 ColumnBinding GetOrInsertHashProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                                         LogicalGet &get, const vector<string> &key_columns, bool use_rowid,

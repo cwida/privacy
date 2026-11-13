@@ -166,7 +166,7 @@ void PrivacyMetadataManager::Clear() {
  */
 string PrivacyMetadataManager::GetMetadataFilePath(ClientContext &context) {
 	// Get the database path from the default catalog
-	auto &db_name = DatabaseManager::GetDefaultDatabase(context);
+	auto db_name = DatabaseManager::GetDefaultDatabase(context);
 	auto &catalog = Catalog::GetCatalog(context, db_name);
 	string db_path = catalog.GetDBPath();
 
@@ -181,7 +181,7 @@ string PrivacyMetadataManager::GetMetadataFilePath(ClientContext &context) {
 		CatalogSearchPath search_path(context);
 		const auto &entries = search_path.Get();
 		if (!entries.empty()) {
-			schema_name = entries[0].schema;
+			schema_name = entries[0].GetSchema().GetIdentifierName();
 		}
 	} catch (...) {
 		// If we can't get search path, use default schema

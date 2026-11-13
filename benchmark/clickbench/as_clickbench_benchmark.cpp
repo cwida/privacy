@@ -215,7 +215,7 @@ static string RewriteAsFunctionCall(const string &name, const vector<string> &ar
 }
 
 static bool ContainsVariableMUnsupportedAggregate(const string &sql) {
-	return sql.find("as_min") != string::npos || sql.find("as_max") != string::npos;
+	return sql.find("as_noised_min") != string::npos || sql.find("as_noised_max") != string::npos;
 }
 
 static string RewriteAsQueryForSampleAggregation(const string &sql, int sample_count) {
@@ -409,7 +409,9 @@ int RunASClickBenchBenchmark(const string &db_path, const string &queries_dir, c
 			throw std::runtime_error("No baseline ClickBench queries found");
 		}
 
-		DuckDB db(db_actual.c_str());
+		DBConfig db_config;
+		ConfigureBenchmarkDatabase(db_config);
+		DuckDB db(db_actual.c_str(), &db_config);
 		Connection con(db);
 		con.Query("LOAD privacy;");
 		con.Query("SET threads TO " + std::to_string(threads) + ";");

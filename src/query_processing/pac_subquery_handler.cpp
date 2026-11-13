@@ -26,15 +26,15 @@ namespace duckdb {
 // Traces a binding from the source operator up through the tree, modifying operators as needed.
 static ColumnBinding EnsureBindingFlowsThroughRecursive(LogicalOperator *op, idx_t source_table_index,
                                                         ColumnBinding source_binding, const LogicalType &source_type) {
-	ColumnBinding invalid(DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
+	ColumnBinding invalid {TableIndex(DConstants::INVALID_INDEX), ProjectionIndex(DConstants::INVALID_INDEX)};
 
 	// Base case: match any operator by table_index
 	if (op->type == LogicalOperatorType::LOGICAL_GET) {
-		if (op->Cast<LogicalGet>().table_index == source_table_index) {
+		if (op->Cast<LogicalGet>().table_index.index == source_table_index) {
 			return source_binding;
 		}
 	} else if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-		if (op->Cast<LogicalProjection>().table_index == source_table_index) {
+		if (op->Cast<LogicalProjection>().table_index.index == source_table_index) {
 			return source_binding;
 		}
 	}
@@ -43,12 +43,12 @@ static ColumnBinding EnsureBindingFlowsThroughRecursive(LogicalOperator *op, idx
 	ColumnBinding child_result = invalid;
 	for (auto &child : op->children) {
 		child_result = EnsureBindingFlowsThroughRecursive(child.get(), source_table_index, source_binding, source_type);
-		if (child_result.table_index != DConstants::INVALID_INDEX) {
+		if (child_result.table_index.index != DConstants::INVALID_INDEX) {
 			break;
 		}
 	}
 
-	if (child_result.table_index == DConstants::INVALID_INDEX) {
+	if (child_result.table_index.index == DConstants::INVALID_INDEX) {
 		return child_result;
 	}
 
@@ -59,10 +59,10 @@ static ColumnBinding EnsureBindingFlowsThroughRecursive(LogicalOperator *op, idx
 	case LogicalOperatorType::LOGICAL_PROJECTION: {
 		auto &proj = op->Cast<LogicalProjection>();
 		for (idx_t i = 0; i < proj.expressions.size(); i++) {
-			if (proj.expressions[i]->type == ExpressionType::BOUND_COLUMN_REF) {
+			if (proj.expressions[i]->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 				auto &col_ref = proj.expressions[i]->Cast<BoundColumnRefExpression>();
-				if (col_ref.binding == child_result) {
-					return ColumnBinding(proj.table_index, i);
+				if (col_ref.BindingMutable() == child_result) {
+					return ColumnBinding(TableIndex(proj.table_index.index), ProjectionIndex(i));
 				}
 			}
 		}
@@ -72,10 +72,10 @@ static ColumnBinding EnsureBindingFlowsThroughRecursive(LogicalOperator *op, idx
 		auto &agg = op->Cast<LogicalAggregate>();
 		// Check if binding is already in groups
 		for (idx_t i = 0; i < agg.groups.size(); i++) {
-			if (agg.groups[i]->type == ExpressionType::BOUND_COLUMN_REF) {
+			if (agg.groups[i]->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 				auto &col_ref = agg.groups[i]->Cast<BoundColumnRefExpression>();
-				if (col_ref.binding == child_result) {
-					return ColumnBinding(agg.group_index, i);
+				if (col_ref.BindingMutable() == child_result) {
+					return ColumnBinding(TableIndex(agg.group_index.index), ProjectionIndex(i));
 				}
 			}
 		}
@@ -84,7 +84,7 @@ static ColumnBinding EnsureBindingFlowsThroughRecursive(LogicalOperator *op, idx
 		idx_t new_group_idx = agg.groups.size();
 		agg.groups.push_back(std::move(group_col_ref));
 		agg.ResolveOperatorTypes();
-		return ColumnBinding(agg.group_index, new_group_idx);
+		return ColumnBinding(TableIndex(agg.group_index.index), ProjectionIndex(new_group_idx));
 	}
 	default:
 		return child_result;
@@ -105,11 +105,11 @@ static bool HasSourceTableInSubtree(LogicalOperator *op, idx_t source_table_inde
 		return false;
 	}
 	if (op->type == LogicalOperatorType::LOGICAL_GET) {
-		if (op->Cast<LogicalGet>().table_index == source_table_index) {
+		if (op->Cast<LogicalGet>().table_index.index == source_table_index) {
 			return true;
 		}
 	} else if (op->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-		if (op->Cast<LogicalProjection>().table_index == source_table_index) {
+		if (op->Cast<LogicalProjection>().table_index.index == source_table_index) {
 			return true;
 		}
 	}
@@ -183,13 +183,13 @@ static void UpdateDelimGetsInSubtree(LogicalOperator *op, const LogicalType &sou
 	if (op->type == LogicalOperatorType::LOGICAL_DELIM_GET) {
 		auto &dg = op->Cast<LogicalDelimGet>();
 #if PRIVACY_DEBUG
-		PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: Updating DELIM_GET #" + std::to_string(dg.table_index) +
+		PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: Updating DELIM_GET #" + std::to_string(dg.table_index.index) +
 		                    " chunk_types before=" + std::to_string(dg.chunk_types.size()));
 #endif
 		dg.chunk_types.push_back(source_type);
 		op->ResolveOperatorTypes();
 #if PRIVACY_DEBUG
-		PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: DELIM_GET #" + std::to_string(dg.table_index) +
+		PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: DELIM_GET #" + std::to_string(dg.table_index.index) +
 		                    " chunk_types after=" + std::to_string(dg.chunk_types.size()) +
 		                    " types after=" + std::to_string(dg.types.size()));
 #endif
@@ -204,7 +204,8 @@ DelimColumnResult AddBindingToDelimJoin(unique_ptr<LogicalOperator> &plan, idx_t
                                         ColumnBinding source_binding, const LogicalType &source_type,
                                         LogicalAggregate *target_agg) {
 	DelimColumnResult invalid_result;
-	invalid_result.binding = ColumnBinding(DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
+	invalid_result.binding =
+	    ColumnBinding(TableIndex(DConstants::INVALID_INDEX), ProjectionIndex(DConstants::INVALID_INDEX));
 	invalid_result.type = LogicalType::INVALID;
 
 	auto *delim_join = FindDelimJoinForSource(plan.get(), source_table_index, target_agg);
@@ -217,9 +218,10 @@ DelimColumnResult AddBindingToDelimJoin(unique_ptr<LogicalOperator> &plan, idx_t
 	}
 
 #if PRIVACY_DEBUG
-	PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: Found DELIM_JOIN, source_table_index=" +
-	                    std::to_string(source_table_index) + " binding=[" + std::to_string(source_binding.table_index) +
-	                    "." + std::to_string(source_binding.column_index) + "]");
+	PRIVACY_DEBUG_PRINT(
+	    "AddBindingToDelimJoin: Found DELIM_JOIN, source_table_index=" + std::to_string(source_table_index) +
+	    " binding=[" + std::to_string(source_binding.table_index.index) + "." +
+	    std::to_string(source_binding.column_index) + "]");
 	PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: Left child type=" +
 	                    std::to_string(static_cast<int>(delim_join->children[0]->type)));
 #endif
@@ -229,7 +231,7 @@ DelimColumnResult AddBindingToDelimJoin(unique_ptr<LogicalOperator> &plan, idx_t
 	ColumnBinding output_binding =
 	    EnsureBindingFlowsThrough(left_child, source_table_index, source_binding, source_type);
 
-	if (output_binding.table_index == DConstants::INVALID_INDEX) {
+	if (output_binding.table_index.index == DConstants::INVALID_INDEX) {
 #if PRIVACY_DEBUG
 		PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: EnsureBindingFlowsThrough failed");
 #endif
@@ -237,20 +239,21 @@ DelimColumnResult AddBindingToDelimJoin(unique_ptr<LogicalOperator> &plan, idx_t
 	}
 
 #if PRIVACY_DEBUG
-	PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: output_binding=[" + std::to_string(output_binding.table_index) + "." +
-	                    std::to_string(output_binding.column_index) + "]");
+	PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: output_binding=[" + std::to_string(output_binding.table_index.index) +
+	                    "." + std::to_string(output_binding.column_index) + "]");
 	PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: duplicate_eliminated_columns.size()=" +
 	                    std::to_string(delim_join->duplicate_eliminated_columns.size()));
 	for (idx_t i = 0; i < delim_join->duplicate_eliminated_columns.size(); i++) {
 		auto &dec = delim_join->duplicate_eliminated_columns[i];
 		PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: existing dup_elim[" + std::to_string(i) + "] = " + dec->ToString() +
-		                    " type=" + dec->return_type.ToString());
+		                    " type=" + dec->GetReturnType().ToString());
 	}
 	// Dump DELIM_JOIN conditions
 	auto &dj = delim_join->Cast<LogicalComparisonJoin>();
 	for (idx_t i = 0; i < dj.conditions.size(); i++) {
-		PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: condition[" + std::to_string(i) + "] left=" +
-		                    dj.conditions[i].left->ToString() + " right=" + dj.conditions[i].right->ToString());
+		PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: condition[" + std::to_string(i) +
+		                    "] left=" + dj.conditions[i].LeftReference()->ToString() +
+		                    " right=" + dj.conditions[i].RightReference()->ToString());
 	}
 #endif
 
@@ -271,55 +274,15 @@ DelimColumnResult AddBindingToDelimJoin(unique_ptr<LogicalOperator> &plan, idx_t
 	}
 
 #if PRIVACY_DEBUG
-	PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: DELIM_GET #" + std::to_string(delim_get->table_index) + " now has " +
-	                    std::to_string(delim_get->chunk_types.size()) + " chunk_types, " +
+	PRIVACY_DEBUG_PRINT("AddBindingToDelimJoin: DELIM_GET #" + std::to_string(delim_get->table_index.index) +
+	                    " now has " + std::to_string(delim_get->chunk_types.size()) + " chunk_types, " +
 	                    std::to_string(delim_get->types.size()) + " types");
 #endif
 
 	DelimColumnResult result;
-	result.binding = ColumnBinding(delim_get->table_index, new_col_idx);
+	result.binding = ColumnBinding(TableIndex(delim_get->table_index.index), ProjectionIndex(new_col_idx));
 	result.type = source_type;
 	return result;
-}
-
-// Thin wrapper: resolve column name to binding, then delegate to AddBindingToDelimJoin
-DelimColumnResult AddColumnToDelimJoin(unique_ptr<LogicalOperator> &plan, LogicalGet &source_get,
-                                       const string &column_name, LogicalAggregate *target_agg) {
-	DelimColumnResult invalid_result;
-	invalid_result.binding = ColumnBinding(DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
-	invalid_result.type = LogicalType::INVALID;
-
-	// Ensure the column is projected in source_get
-	idx_t col_proj_idx = EnsureProjectedColumn(source_get, column_name);
-	if (col_proj_idx == DConstants::INVALID_INDEX) {
-		return invalid_result;
-	}
-
-	// Get the column type
-	auto col_index = source_get.GetColumnIds()[col_proj_idx];
-	auto col_type = source_get.GetColumnType(col_index);
-
-	// Determine the output binding for the source_get
-	idx_t output_col_idx;
-	if (source_get.projection_ids.empty()) {
-		output_col_idx = col_proj_idx;
-	} else {
-		output_col_idx = DConstants::INVALID_INDEX;
-		for (idx_t i = 0; i < source_get.projection_ids.size(); i++) {
-			if (source_get.projection_ids[i] == col_proj_idx) {
-				output_col_idx = source_get.projection_ids[i];
-				break;
-			}
-		}
-		if (output_col_idx == DConstants::INVALID_INDEX) {
-			source_get.projection_ids.push_back(col_proj_idx);
-			output_col_idx = col_proj_idx;
-			source_get.ResolveOperatorTypes();
-		}
-	}
-
-	ColumnBinding source_binding(source_get.table_index, output_col_idx);
-	return AddBindingToDelimJoin(plan, source_get.table_index, source_binding, col_type, target_agg);
 }
 
 } // namespace duckdb

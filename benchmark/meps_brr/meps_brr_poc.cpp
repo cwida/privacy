@@ -38,14 +38,14 @@ static void Save(const string &path, const string &sql) {
 		throw std::runtime_error("Cannot write " + path);
 	f << sql;
 }
-static unique_ptr<MaterializedQueryResult> Query(Connection &con, const string &sql) {
+static unique_ptr<QueryResult> Query(Connection &con, const string &sql) {
 	auto r = con.Query(sql);
 	if (!r || r->HasError())
 		throw std::runtime_error(r ? r->GetError() : "No query result");
 	return r;
 }
 static void Require(Connection &con, const string &sql, const string &message) {
-	if (!Query(con, sql)->GetValue(0, 0).GetValue<bool>())
+	if (!Query(con, sql)->Collection().GetValue(0, 0).GetValue<bool>())
 		throw std::runtime_error(message);
 }
 static string ReplicateSQL(string sql, int rep) {
@@ -78,8 +78,8 @@ static Results Run(Connection &con, const string &sql, const string &mode, int w
 		if (r->RowCount() != 1)
 			throw std::runtime_error("Expected one row of named scalar/list estimates");
 		for (idx_t col = 0; col < r->ColumnCount(); col++) {
-			string metric = r->names[col];
-			auto value = r->GetValue(col, 0);
+			string metric = r->GetNames()[col].GetIdentifierName();
+			auto value = r->Collection().GetValue(col, 0);
 			if (mode == "duckdb" || mode == "naive_as") {
 				out[metric].push_back(Number(value));
 				continue;

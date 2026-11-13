@@ -3,10 +3,11 @@ cmake_minimum_required(VERSION 3.5)
 # Set extension name here
 set(TARGET_NAME privacy)
 
-# DuckDB's extension distribution supports vcpkg. As such, dependencies can be added in ./vcpkg.json and then
-# used in cmake with find_package. Feel free to remove or replace with other dependencies.
-# Note that it should also be removed from vcpkg.json to prevent needlessly installing it..
-#find_package(OpensSL REQUIRED)
+# DuckDB's extension distribution supports vcpkg. As such, dependencies can be
+# added in ./vcpkg.json and then used in cmake with find_package. Feel free to
+# remove or replace with other dependencies. Note that it should also be removed
+# from vcpkg.json to prevent needlessly installing it.. find_package(OpensSL
+# REQUIRED)
 
 set(EXTENSION_NAME ${TARGET_NAME}_extension)
 set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
@@ -15,15 +16,16 @@ project(${TARGET_NAME})
 include_directories(src/include)
 include_directories(benchmark/include)
 
-# Option to disable approximate sum algorithm (use exact cascading instead)
-# By default, pac_sum/pac_avg use the approx algorithm (16-bit cascading counters)
+# Option to disable approximate sum algorithm (use exact cascading instead) By
+# default, pac_sum/pac_avg use the approx algorithm (16-bit cascading counters)
 # Set PAC_NOAPPROX=ON to use exact cascading instead
-option(PAC_NOAPPROX "Disable approximate sum algorithm, use exact cascading" OFF)
+option(PAC_NOAPPROX "Disable approximate sum algorithm, use exact cascading"
+       OFF)
 if(PAC_NOAPPROX)
-    add_definitions(-DPAC_EXACTSUM)
-    message(STATUS "privacy: Using exact cascading sum algorithm (PAC_NOAPPROX)")
+  add_definitions(-DPAC_EXACTSUM)
+  message(STATUS "privacy: Using exact cascading sum algorithm (PAC_NOAPPROX)")
 else()
-    message(STATUS "privacy: Using approximate sum algorithm (default)")
+  message(STATUS "privacy: Using approximate sum algorithm (default)")
 endif()
 
 # Extension sources
@@ -37,6 +39,7 @@ set(EXTENSION_SOURCES
     src/aggregates/as_count.cpp
     src/aggregates/as_min_max.cpp
     src/aggregates/as_sum.cpp
+    src/aggregates/as_sum_state_export.cpp
     src/aggregates/as_finalize.cpp
     src/aggregates/as_clip_sum.cpp
     src/aggregates/as_clip_min_max.cpp
@@ -48,6 +51,7 @@ set(EXTENSION_SOURCES
     src/compiler/privacy_mechanisms.cpp
     src/compiler/privacy_compiler_helpers.cpp
     src/query_processing/pac_avg_rewriter.cpp
+    src/query_processing/as_correlation_optimizer.cpp
     src/query_processing/privacy_expression_builder.cpp
     src/query_processing/privacy_plan_traversal.cpp
     src/query_processing/pac_projection_propagation.cpp
@@ -69,8 +73,8 @@ build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
 if(WIN32)
-    target_link_libraries(${EXTENSION_NAME} bcrypt)
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} bcrypt)
+  target_link_libraries(${EXTENSION_NAME} bcrypt)
+  target_link_libraries(${LOADABLE_EXTENSION_NAME} bcrypt)
 endif()
 
 install(
@@ -79,76 +83,73 @@ install(
   LIBRARY DESTINATION "${INSTALL_LIB_DIR}"
   ARCHIVE DESTINATION "${INSTALL_LIB_DIR}")
 
-# Test runners and benchmarks - only build for native platforms, not WASM or Windows
-# (Windows lacks unistd.h and other POSIX features used by the benchmark code)
-set(PRIVACY_LINK_LIBS
-    duckdb_static
-    duckdb_generated_extension_loader
-    ${EXTENSION_NAME}
-    core_functions_extension
-    parquet_extension
-    duckdb_static)
-
-# jemalloc is only built on Linux 64-bit; link it when the extension was loaded
-# (can't use if(TARGET ...) here because the target isn't defined yet at this point)
-if(DUCKDB_EXTENSION_JEMALLOC_SHOULD_LINK)
-    list(APPEND PRIVACY_LINK_LIBS jemalloc_extension)
-endif()
+# Test runners and benchmarks - only build for native platforms, not WASM or
+# Windows (Windows lacks unistd.h and other POSIX features used by the benchmark
+# code)
 
 if(NOT EMSCRIPTEN AND NOT WIN32)
-    # Build a single unified test executable that invokes all tests via src/test/test_runner.cpp
-    add_executable(pac_test_runner
-        src/test/test_runner.cpp
-        src/test/test_plan_traversal.cpp
-        src/test/test_schema_metadata.cpp
-        src/test/test_compiler_functions.cpp
-        src/test/test_privacy_parser.cpp)
-    target_link_libraries(pac_test_runner ${PRIVACY_LINK_LIBS})
+  # Build a single unified test executable that invokes all tests via
+  # src/test/test_runner.cpp
+  add_executable(
+    pac_test_runner
+    src/test/test_runner.cpp src/test/test_plan_traversal.cpp
+    src/test/test_schema_metadata.cpp src/test/test_compiler_functions.cpp
+    src/test/test_privacy_parser.cpp)
 
-    # TPCH + AS benchmark runner
-    add_executable(as_tpch_benchmark benchmark/tpch/as_tpch_benchmark.cpp)
-    target_link_libraries(as_tpch_benchmark ${PRIVACY_LINK_LIBS})
+  # TPCH + AS benchmark runner
+  add_executable(as_tpch_benchmark benchmark/tpch/as_tpch_benchmark.cpp)
 
-    # WIP rebuttal experiment: four-way MEPS balanced repeated replication benchmark
-    add_executable(meps_brr_poc benchmark/meps_brr/meps_brr_poc.cpp)
-    target_link_libraries(meps_brr_poc ${PRIVACY_LINK_LIBS})
+  # WIP rebuttal experiment: four-way MEPS balanced repeated replication
+  # benchmark
+  add_executable(meps_brr_poc benchmark/meps_brr/meps_brr_poc.cpp)
 
-    # WIP rebuttal experiment: standard joined SSB queries and 64 sampled worlds
-    add_executable(as_ssb_benchmark benchmark/ssb/as_ssb_benchmark.cpp)
-    target_link_libraries(as_ssb_benchmark ${PRIVACY_LINK_LIBS})
+  # WIP rebuttal experiment: standard joined SSB queries and 64 sampled worlds
+  add_executable(as_ssb_benchmark benchmark/ssb/as_ssb_benchmark.cpp)
 
-    # ClickBench + AS benchmark runner
-    add_executable(as_clickbench_benchmark benchmark/clickbench/as_clickbench_benchmark.cpp)
-    target_link_libraries(as_clickbench_benchmark ${PRIVACY_LINK_LIBS})
+  # ClickBench + AS benchmark runner
+  add_executable(as_clickbench_benchmark
+                 benchmark/clickbench/as_clickbench_benchmark.cpp)
 
-    # TPC-DS automatic-rewriter coverage and end-to-end performance
-    add_executable(as_tpcds_benchmark benchmark/tpcds/as_tpcds_benchmark.cpp)
-    target_link_libraries(as_tpcds_benchmark ${PRIVACY_LINK_LIBS})
+  # TPC-DS automatic-rewriter coverage and end-to-end performance
+  add_executable(as_tpcds_benchmark benchmark/tpcds/as_tpcds_benchmark.cpp)
 
-    # Unified DP utility benchmark runner
-    set(TPCH_STOCK_DP_QUERY_NAMES q01 q05 q06 q14 q19)
-    set(TPCH_STOCK_DP_QUERY_FILES)
-    foreach(QUERY_NAME IN LISTS TPCH_STOCK_DP_QUERY_NAMES)
-        string(TOUPPER ${QUERY_NAME} QUERY_NAME_UPPER)
-        set(QUERY_FILE "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/dp/tpch_queries/${QUERY_NAME}.sql")
-        list(APPEND TPCH_STOCK_DP_QUERY_FILES "${QUERY_FILE}")
-        file(READ
-            "${QUERY_FILE}"
-            "TPCH_${QUERY_NAME_UPPER}_SQL")
-    endforeach()
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-        ${TPCH_STOCK_DP_QUERY_FILES})
-    set(TPCH_QUERY_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
-    file(MAKE_DIRECTORY "${TPCH_QUERY_GENERATED_DIR}")
-    configure_file(
-        benchmark/include/tpch_stock_queries.hpp.in
-        "${TPCH_QUERY_GENERATED_DIR}/tpch_stock_queries.hpp"
-        @ONLY)
-    add_executable(dp_benchmark_runner benchmark/dp/dp_benchmark_runner.cpp)
-    target_include_directories(dp_benchmark_runner PRIVATE "${TPCH_QUERY_GENERATED_DIR}")
-    target_link_libraries(dp_benchmark_runner ${PRIVACY_LINK_LIBS})
+  # Unified DP utility benchmark runner
+  set(TPCH_STOCK_DP_QUERY_NAMES q01 q05 q06 q14 q19)
+  set(TPCH_STOCK_DP_QUERY_FILES)
+  foreach(QUERY_NAME IN LISTS TPCH_STOCK_DP_QUERY_NAMES)
+    string(TOUPPER ${QUERY_NAME} QUERY_NAME_UPPER)
+    set(QUERY_FILE
+        "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/dp/tpch_queries/${QUERY_NAME}.sql"
+    )
+    list(APPEND TPCH_STOCK_DP_QUERY_FILES "${QUERY_FILE}")
+    file(READ "${QUERY_FILE}" "TPCH_${QUERY_NAME_UPPER}_SQL")
+  endforeach()
+  set_property(
+    DIRECTORY
+    APPEND
+    PROPERTY CMAKE_CONFIGURE_DEPENDS ${TPCH_STOCK_DP_QUERY_FILES})
+  set(TPCH_QUERY_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+  file(MAKE_DIRECTORY "${TPCH_QUERY_GENERATED_DIR}")
+  configure_file(benchmark/include/tpch_stock_queries.hpp.in
+                 "${TPCH_QUERY_GENERATED_DIR}/tpch_stock_queries.hpp" @ONLY)
+  add_executable(dp_benchmark_runner benchmark/dp/dp_benchmark_runner.cpp)
+  target_include_directories(dp_benchmark_runner
+                             PRIVATE "${TPCH_QUERY_GENERATED_DIR}")
 
-    # IMDb/JOB benchmark runner
-    add_executable(imdb_benchmark benchmark/imdb/imdb_benchmark.cpp)
-    target_link_libraries(imdb_benchmark ${PRIVACY_LINK_LIBS})
+  # IMDb/JOB benchmark runner
+  add_executable(imdb_benchmark benchmark/imdb/imdb_benchmark.cpp)
+
+  foreach(
+    PRIVACY_RUNNER IN
+    ITEMS pac_test_runner
+          as_tpch_benchmark
+          meps_brr_poc
+          as_ssb_benchmark
+          as_clickbench_benchmark
+          as_tpcds_benchmark
+          dp_benchmark_runner
+          imdb_benchmark)
+    target_link_libraries(${PRIVACY_RUNNER} PRIVATE duckdb_static)
+    link_extension_libraries(${PRIVACY_RUNNER} PRIVATE)
+  endforeach()
 endif()
