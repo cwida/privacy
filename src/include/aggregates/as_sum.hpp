@@ -348,11 +348,11 @@ struct PacSumIntState {
 	// Get probabilistic totals as PAC_FLOAT[64] for finalization: sum of all levels, each scaled by 2^(4*level)
 	void GetTotals(PAC_FLOAT *dst) const {
 		memset(dst, 0, 64 * sizeof(PAC_FLOAT));
-		for (int k = 0; k <= max_level_used; k++) {
+		PAC_FLOAT scale = 1;
+		for (int k = 0; k <= max_level_used; k++, scale *= (1U << PAC_APPROX_LEVEL_SHIFT)) {
 			if (!u.levels[k]) {
 				continue;
 			}
-			PAC_FLOAT scale = std::exp2(static_cast<PAC_FLOAT>(PAC_APPROX_LEVEL_SHIFT * k));
 			const CounterT *counters = reinterpret_cast<const CounterT *>(u.levels[k]);
 			for (int j = 0; j < 64; j++) {
 				int swar_idx = (j % 16) * 4 + (j / 16);
