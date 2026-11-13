@@ -172,3 +172,21 @@ Rscript --vanilla benchmark/microbench/plot_microbenchmark.R
 benchmark/microbench/approx_sum_stability.sql  # run with duckdb_default and duckdb_exactsum
 benchmark/microbench/binomial.sql              # generate hash-distribution validation data
 ```
+
+
+## SUM accuracy
+
+`benchmark/microbench/approx_sum_stability.sql` compares ten value distributions against 64 independent sampled
+sums. The approximate counters are divided by two before both errors and variances are computed, so all statistics
+use the same sample-total units. Run the same setup for each binary variant:
+
+```sh
+benchmark/microbench/binaries/duckdb_default -batch <<'SQL'
+SET threads=4;
+SET memory_limit='30GB';
+SET priv_rewrite=false;
+SET privacy_seed=42;
+SELECT setseed(0.42);
+.read benchmark/microbench/approx_sum_stability.sql
+SQL
+```

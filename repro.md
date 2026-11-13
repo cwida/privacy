@@ -348,3 +348,11 @@ Rscript --vanilla benchmark/dp/plot_q01_stability.R \
 The remaining files in `benchmark/configs/sanity/` are focused AS, beta, support-threshold, bounds, and SQLStorm
 checks. Validate one with the corresponding runner's `--dry-run` option before use. They are diagnostics, not part of
 the paper result matrix.
+
+### TPC-DS query inputs
+
+Use the same prepared `queries_dir` when comparing engine versions. `benchmark/tpcds/run.py`
+records each query's input hash, and `--prepare` preserves existing query files while generating
+missing ones. Keep that query snapshot with the result CSVs: newer TPC-DS generator releases
+can change predicates, duplicate handling, output expressions, and ORDER BY tie breakers.
+The handwritten queries must be validated against the selected original-query snapshot.
