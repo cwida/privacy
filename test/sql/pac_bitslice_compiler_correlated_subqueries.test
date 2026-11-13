@@ -461,3 +461,31 @@ ORDER BY
 ----
 Supplier#002	2
 Supplier#001	0
+
+# Mixed DISTINCT/ordinary aggregates copy native correlation CTEs. Each copied
+# reader must reference the copied definition, not the original branch's CTE.
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+CREATE PU TABLE cte_copy_owner(id INTEGER, PRIVACY_KEY(id));
+
+statement ok
+INSERT INTO cte_copy_owner VALUES (1);
+
+statement ok
+CREATE TABLE cte_copy_facts(k INTEGER, owner INTEGER, supplier INTEGER, v INTEGER);
+
+statement ok
+ALTER TABLE cte_copy_facts ADD PRIVACY_LINK(owner) REFERENCES cte_copy_owner(id);
+
+statement ok
+INSERT INTO cte_copy_facts VALUES (1,1,1,10),(1,1,2,20),(2,1,1,30);
+
+query II
+SELECT count(DISTINCT f.k), sum(f.v)
+FROM cte_copy_facts f
+WHERE EXISTS (SELECT 1 FROM cte_copy_facts w WHERE w.k=f.k AND w.supplier<>f.supplier)
+  AND NOT EXISTS (SELECT 1 FROM cte_copy_facts w WHERE w.k=f.k AND w.v<0);
+----
+0	0
