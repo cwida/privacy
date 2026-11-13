@@ -422,6 +422,11 @@ static bool PushFilteredJoin(OptimizerExtensionInput &input, unique_ptr<LogicalO
 		membership.left_projection_map.clear();
 		membership.right_projection_map.clear();
 		inner.filter_pushdown.reset();
+		if (include_inner) {
+			// These joins now have different inputs; their cached estimates describe the old tree.
+			inner.has_estimated_cardinality = false;
+			membership.has_estimated_cardinality = false;
+		}
 		PushFilteredJoin(input, op, include_inner);
 		if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_FILTER_PUSHDOWN)) {
 			JoinFilterPushdownOptimizer filters(input.optimizer);
