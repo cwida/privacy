@@ -75,8 +75,9 @@ struct AggregateStateExport {
 		states.ToUnifiedFormat(format);
 		auto addresses = UnifiedVectorFormat::GetData<STATE *>(format);
 		auto writer = FlatVector::Writer<string_t>(result, count, offset);
+		AggregateStateWriter out;
 		for (idx_t i = 0; i < count; i++) {
-			AggregateStateWriter out;
+			out.data.clear();
 			CODEC::Write(out, *addresses[format.sel->get_index(i)]);
 			writer.WriteValue(StringVector::AddStringOrBlob(result, out.data));
 		}
