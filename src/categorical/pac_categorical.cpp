@@ -1187,6 +1187,8 @@ static AggregateFunction CreatePacListAggregate(const Identifier &name) {
 void AddPacListAggregateOverload(AggregateFunctionSet &set, const string &aggr_type) {
 	if (aggr_type == "sum") {
 		set.AddFunction(CreatePacListAggregate<PacListAggType::SUM>(set.name));
+	} else if (aggr_type == "avg") {
+		set.AddFunction(CreatePacListAggregate<PacListAggType::AVG>(set.name));
 	} else if (aggr_type == "count") {
 		set.AddFunction(CreatePacListAggregate<PacListAggType::COUNT>(set.name));
 	} else if (aggr_type == "min") {

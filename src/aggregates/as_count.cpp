@@ -1365,6 +1365,7 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader) {
 	    "as_avg", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, list_float_type, PacCountStateSize,
 	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacAvgBind));
+	AddPacListAggregateOverload(counters_set, "avg");
 	CreateAggregateFunctionInfo avg_counters_info(counters_set);
 	FunctionDescription avg_counters_desc;
 	avg_counters_desc.description = "[INTERNAL] Returns 64 PAC subsample counters as LIST for categorical queries.";

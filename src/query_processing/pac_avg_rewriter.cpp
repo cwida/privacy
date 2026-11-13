@@ -63,6 +63,10 @@ static void RewritePacAvgAggregate(OptimizerExtensionInput &input, unique_ptr<Lo
 			continue;
 		}
 		auto &aggr = agg.expressions[i]->Cast<BoundAggregateExpression>();
+		// The unary list overload already computes per-world averages directly.
+		if (aggr.GetChildren().size() < 2) {
+			continue;
+		}
 		if (aggr.FunctionMutable().GetName().GetIdentifierName() == "as_noised_avg" ||
 		    aggr.FunctionMutable().GetName().GetIdentifierName() == "as_avg") {
 			avg_positions.push_back(i);
