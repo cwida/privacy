@@ -1220,7 +1220,14 @@ UNION ALL
 SELECT 3 side,p.aid,p.bid,c.owner
 FROM (SELECT a.id aid,b.id bid,a.k ak,CAST(b.k AS BIGINT) bk
       FROM sample_join_a a JOIN sample_join_b b ON a.id=b.id AND a.k<b.k) p
-JOIN sample_join_c c ON p.ak=c.ak AND p.bk=c.bk WHERE (priv_hash(hash(c.owner))&1)<>0;
+JOIN sample_join_c c ON p.ak=c.ak AND p.bk=c.bk WHERE (priv_hash(hash(c.owner))&1)<>0
+UNION ALL
+SELECT 4 side,p.aid,p.bid,c.owner
+FROM (SELECT aid,bid,ak,CAST(bk AS BIGINT) bk
+      FROM (SELECT a.id aid,b.id bid,a.k ak,b.k bk
+            FROM sample_join_a a JOIN sample_join_b b ON a.id=b.id AND a.k<b.k) q) p
+JOIN (SELECT c.* FROM sample_join_c c JOIN (VALUES (0),(1),(2)) d(k) ON c.bk=d.k) c
+ON p.ak=c.ak AND p.bk=c.bk WHERE (priv_hash(hash(c.owner))&1)<>0;
 
 statement ok
 SET disabled_optimizers='extension';
@@ -1232,7 +1239,7 @@ statement ok
 SET disabled_optimizers='';
 
 query II
-SELECT (SELECT count(DISTINCT side)=4 FROM sample_join_inner_expected),count(*) FROM (
+SELECT (SELECT count(DISTINCT side)=5 FROM sample_join_inner_expected),count(*) FROM (
  (SELECT * FROM sample_join_inner EXCEPT ALL SELECT * FROM sample_join_inner_expected)
  UNION ALL
  (SELECT * FROM sample_join_inner_expected EXCEPT ALL SELECT * FROM sample_join_inner)
