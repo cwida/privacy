@@ -1202,6 +1202,38 @@ SELECT (SELECT count(*)>0 FROM sample_join_expected),count(*) FROM (
 ----
 true	0
 
+# Push a filtering relation through either side of an ordinary inner join.
+statement ok
+CREATE VIEW sample_join_inner AS
+SELECT 0 side,a.id aid,b.id bid,c.owner
+FROM sample_join_a a JOIN sample_join_b b ON a.id=b.id
+JOIN sample_join_c c ON a.k=c.ak WHERE (priv_hash(hash(c.owner))&1)<>0
+UNION ALL
+SELECT 1 side,a.id aid,b.id bid,c.owner
+FROM sample_join_a a JOIN sample_join_b b ON a.id=b.id
+JOIN sample_join_c c ON b.k=c.bk WHERE (priv_hash(hash(c.owner))&1)<>0;
+
+statement ok
+SET disabled_optimizers='extension';
+
+statement ok
+CREATE TEMP TABLE sample_join_inner_expected AS SELECT * FROM sample_join_inner;
+
+statement ok
+SET disabled_optimizers='';
+
+query II
+SELECT (SELECT count(*)>0 FROM sample_join_inner_expected),count(*) FROM (
+ (SELECT * FROM sample_join_inner EXCEPT ALL SELECT * FROM sample_join_inner_expected)
+ UNION ALL
+ (SELECT * FROM sample_join_inner_expected EXCEPT ALL SELECT * FROM sample_join_inner)
+);
+----
+true	0
+
+statement ok
+DROP VIEW sample_join_inner;
+
 statement ok
 DROP VIEW sample_join_result;
 

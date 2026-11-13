@@ -349,7 +349,8 @@ static void RestoreOutputLayout(unique_ptr<LogicalOperator> &op, const vector<Co
 // (A SEMI/ANTI B) INNER F = (A INNER F) SEMI/ANTI B when F's
 // predicates use only A and F. Apply the filtered scan before testing existence,
 // so its reduced domain can also restrict the ownership joins in B.
-static bool PushFilteredJoin(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &op) {
+// Sampled ordinary plans also permit the INNER case when F uses only one child.
+static bool PushFilteredJoin(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &op, bool include_inner) {
 	if (op->type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
 		return false;
 	}
@@ -369,6 +370,30 @@ static bool PushFilteredJoin(OptimizerExtensionInput &input, unique_ptr<LogicalO
 			preserved = 0;
 		} else if (membership.join_type == JoinType::RIGHT_SEMI || membership.join_type == JoinType::RIGHT_ANTI) {
 			preserved = 1;
+		} else if (include_inner && membership.join_type == JoinType::INNER) {
+			preserved = 2;
+			for (idx_t candidate = 0; candidate < 2; candidate++) {
+				auto bindings = membership.children[candidate]->GetColumnBindings();
+				bool matches = true;
+				for (auto &condition : inner.conditions) {
+					if (!condition.IsComparison()) {
+						matches = false;
+						break;
+					}
+					auto &key = side == 0 ? condition.GetLHS() : condition.GetRHS();
+					ExpressionIterator::VisitExpression<BoundColumnRefExpression>(
+					    key, [&](const BoundColumnRefExpression &ref) {
+						    matches &= std::find(bindings.begin(), bindings.end(), ref.Binding()) != bindings.end();
+					    });
+				}
+				if (matches) {
+					preserved = candidate;
+					break;
+				}
+			}
+			if (preserved == 2) {
+				continue;
+			}
 		} else {
 			continue;
 		}
@@ -391,7 +416,7 @@ static bool PushFilteredJoin(OptimizerExtensionInput &input, unique_ptr<LogicalO
 		membership.left_projection_map.clear();
 		membership.right_projection_map.clear();
 		inner.filter_pushdown.reset();
-		PushFilteredJoin(input, op);
+		PushFilteredJoin(input, op, include_inner);
 		if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_FILTER_PUSHDOWN)) {
 			JoinFilterPushdownOptimizer filters(input.optimizer);
 			filters.VisitOperator(*op);
@@ -405,11 +430,12 @@ static bool PushFilteredJoin(OptimizerExtensionInput &input, unique_ptr<LogicalO
 	return false;
 }
 
-static void PushFilteredJoins(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &op) {
+static void PushFilteredJoins(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &op,
+                              bool include_inner = false) {
 	for (auto &child : op->children) {
-		PushFilteredJoins(input, child);
+		PushFilteredJoins(input, child, include_inner);
 	}
-	PushFilteredJoin(input, op);
+	PushFilteredJoin(input, op, include_inner);
 }
 
 static bool ContainsSamplingHash(LogicalOperator &op) {
@@ -850,6 +876,9 @@ static void OptimizeASCorrelations(OptimizerExtensionInput &input, unique_ptr<Lo
 		return;
 	}
 	if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_ORDER)) {
+		if (!has_aggregate) {
+			PushFilteredJoins(input, plan, true);
+		}
 		RemoveSamplingCrossProducts(input, plan);
 	}
 	if (!has_aggregate) {
