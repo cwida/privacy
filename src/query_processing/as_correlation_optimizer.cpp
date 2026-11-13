@@ -359,12 +359,18 @@ static bool PushFilteredJoin(OptimizerExtensionInput &input, unique_ptr<LogicalO
 		return false;
 	}
 	for (idx_t side = 0; side < 2; side++) {
+		auto *membership_slot = &inner.children[side];
+		while (include_inner && (*membership_slot)->type == LogicalOperatorType::LOGICAL_FILTER &&
+		       (*membership_slot)->Cast<LogicalFilter>().expressions.empty()) {
+			membership_slot = &(*membership_slot)->children[0];
+		}
 		if (!ScanCardinality(*inner.children[1 - side]) ||
-		    !JoinFilterPushdownOptimizer::IsFiltering(inner.children[1 - side]) ||
-		    inner.children[side]->type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		    (!JoinFilterPushdownOptimizer::IsFiltering(inner.children[1 - side]) &&
+		     (!include_inner || inner.conditions.size() < 2)) ||
+		    (*membership_slot)->type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
 			continue;
 		}
-		auto &membership = inner.children[side]->Cast<LogicalComparisonJoin>();
+		auto &membership = (*membership_slot)->Cast<LogicalComparisonJoin>();
 		idx_t preserved;
 		if (membership.join_type == JoinType::SEMI || membership.join_type == JoinType::ANTI) {
 			preserved = 0;
@@ -407,7 +413,7 @@ static bool PushFilteredJoin(OptimizerExtensionInput &input, unique_ptr<LogicalO
 			continue;
 		}
 		auto old_bindings = inner.GetColumnBindings();
-		auto result = std::move(inner.children[side]);
+		auto result = std::move(*membership_slot);
 		inner.children[side] = std::move(result->children[preserved]);
 		// The membership predicate still needs columns pruned from the old final
 		// INNER output. Retain them below it and restore the original layout above.
@@ -468,21 +474,38 @@ static bool ContainsSamplingHash(LogicalOperator &op) {
 	return found;
 }
 
-// (A CROSS B) JOIN C can avoid constructing A x B when C joins both inputs.
-// Keep the original A,B,C column order by forming A JOIN (B JOIN C).
-static void RemoveSamplingCrossProducts(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &op) {
+// Move a smaller C before A x B (or A JOIN B in ordinary sampled plans).
+// Keep every predicate and the A,B,C output order through A JOIN (B JOIN C).
+static void ReorderSamplingJoins(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &op,
+                                 bool include_inner = false) {
 	for (auto &child : op->children) {
-		RemoveSamplingCrossProducts(input, child);
+		ReorderSamplingJoins(input, child, include_inner);
 	}
 	if (op->type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
 		return;
 	}
 	auto &join = op->Cast<LogicalComparisonJoin>();
-	if (join.join_type != JoinType::INNER || join.children[0]->type != LogicalOperatorType::LOGICAL_CROSS_PRODUCT ||
-	    ContainsReorderingBarrier(join)) {
+	if (join.join_type != JoinType::INNER || ContainsReorderingBarrier(join)) {
 		return;
 	}
-	auto &cross = join.children[0]->Cast<LogicalCrossProduct>();
+	auto *left_slot = &join.children[0];
+	while (include_inner && (*left_slot)->type == LogicalOperatorType::LOGICAL_FILTER &&
+	       (*left_slot)->Cast<LogicalFilter>().expressions.empty()) {
+		left_slot = &(*left_slot)->children[0];
+	}
+	auto &cross = **left_slot;
+	if (cross.type != LogicalOperatorType::LOGICAL_CROSS_PRODUCT &&
+	    (!include_inner || cross.type != LogicalOperatorType::LOGICAL_COMPARISON_JOIN ||
+	     cross.Cast<LogicalComparisonJoin>().join_type != JoinType::INNER)) {
+		return;
+	}
+	if (cross.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		for (auto &condition : cross.Cast<LogicalComparisonJoin>().conditions) {
+			if (!condition.IsComparison() || condition.GetLHS().CanThrow() || condition.GetRHS().CanThrow()) {
+				return;
+			}
+		}
+	}
 	auto a_size = cross.children[0]->EstimateCardinality(input.context);
 	auto c_size = join.children[1]->EstimateCardinality(input.context);
 	if (!c_size || c_size >= a_size) {
@@ -515,6 +538,11 @@ static void RemoveSamplingCrossProducts(OptimizerExtensionInput &input, unique_p
 	for (idx_t i = 0; i < join.conditions.size(); i++) {
 		(to_inner[i] ? inner->conditions : outer_conditions).push_back(std::move(join.conditions[i]));
 	}
+	if (cross.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		for (auto &condition : cross.Cast<LogicalComparisonJoin>().conditions) {
+			outer_conditions.push_back(std::move(condition));
+		}
+	}
 	inner->children.push_back(std::move(cross.children[1]));
 	inner->children.push_back(std::move(join.children[1]));
 	auto left = std::move(cross.children[0]);
@@ -530,7 +558,10 @@ static void RemoveSamplingCrossProducts(OptimizerExtensionInput &input, unique_p
 		filters.VisitOperator(join);
 	}
 	RestoreOutputLayout(op, old_bindings);
-	PRIVACY_DEBUG_PRINT("[AS] Joined the smaller sampling input before a Cartesian product");
+	PRIVACY_DEBUG_PRINT("[AS] Reordered sampled joins to reduce intermediate rows");
+	if (include_inner) {
+		ReorderSamplingJoins(input, op, true);
+	}
 }
 
 // Resolve a witness key through projections to a key-only ownership lookup.
@@ -877,10 +908,10 @@ static void OptimizeASCorrelations(OptimizerExtensionInput &input, unique_ptr<Lo
 	}
 	if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_ORDER)) {
 		if (!has_aggregate) {
-			RemoveSamplingCrossProducts(input, plan);
+			ReorderSamplingJoins(input, plan);
 			PushFilteredJoins(input, plan, true);
 		}
-		RemoveSamplingCrossProducts(input, plan);
+		ReorderSamplingJoins(input, plan, !has_aggregate);
 	}
 	if (!has_aggregate) {
 		return;

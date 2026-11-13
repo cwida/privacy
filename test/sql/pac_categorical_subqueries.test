@@ -1211,7 +1211,11 @@ JOIN sample_join_c c ON a.k=c.ak WHERE (priv_hash(hash(c.owner))&1)<>0
 UNION ALL
 SELECT 1 side,a.id aid,b.id bid,c.owner
 FROM sample_join_a a JOIN sample_join_b b ON a.id=b.id
-JOIN sample_join_c c ON b.k=c.bk WHERE (priv_hash(hash(c.owner))&1)<>0;
+JOIN sample_join_c c ON b.k=c.bk WHERE (priv_hash(hash(c.owner))&1)<>0
+UNION ALL
+SELECT 2 side,a.id aid,b.id bid,c.owner
+FROM sample_join_a a JOIN sample_join_b b ON a.id=b.id AND a.k<b.k
+JOIN sample_join_c c ON a.k=c.ak AND b.k=c.bk WHERE (priv_hash(hash(c.owner))&1)<>0;
 
 statement ok
 SET disabled_optimizers='extension';
@@ -1223,7 +1227,7 @@ statement ok
 SET disabled_optimizers='';
 
 query II
-SELECT (SELECT count(*)>0 FROM sample_join_inner_expected),count(*) FROM (
+SELECT (SELECT count(DISTINCT side)=3 FROM sample_join_inner_expected),count(*) FROM (
  (SELECT * FROM sample_join_inner EXCEPT ALL SELECT * FROM sample_join_inner_expected)
  UNION ALL
  (SELECT * FROM sample_join_inner_expected EXCEPT ALL SELECT * FROM sample_join_inner)
