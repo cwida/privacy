@@ -12,6 +12,7 @@
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -90,7 +91,7 @@ static void RewritePacAvgAggregate(OptimizerExtensionInput &input, unique_ptr<Lo
 		auto value_child = old_aggr.GetChildrenMutable()[1]->Copy();
 
 		// Extract optional correction factor (3rd arg), default to constant 1.0
-		unique_ptr<Expression> corr_expr;
+		unique_ptr<Expression> corr_expr = make_uniq<BoundConstantExpression>(Value::DOUBLE(1.0));
 		if (old_aggr.GetChildrenMutable().size() >= 3) {
 			corr_expr = old_aggr.GetChildrenMutable()[2]->Copy();
 		}

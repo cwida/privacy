@@ -728,6 +728,59 @@ FROM (
 ----
 13	13
 
+# Negative-only groups still have participating worlds. The scalar finalizer
+# must include the negative state's mask before its empty-world check.
+query II
+SELECT as_noised_sum(1::UBIGINT,v)=-30,as_noised_avg(1::UBIGINT,v)=-7.5
+FROM (VALUES(-5::BIGINT),(-10::BIGINT))t(v)
+----
+true	true
+
+# A numeric constant is AVG's value, not COUNT's optional correction.
+query II
+SELECT as_noised_avg(1::UBIGINT,-5::DOUBLE)=-5,
+list_extract(as_avg(1::UBIGINT,-5::DOUBLE),1)=-5 FROM range(10)
+----
+true	true
+
+query II
+SELECT count(*),count(*) FILTER (WHERE s=-10*n AND a=-5)
+FROM (
+ SELECT i%1000 g,as_noised_sum(1::UBIGINT,-5::BIGINT) s,
+ as_noised_avg(1::UBIGINT,-5::BIGINT) a,count(*) n
+ FROM range(10000)t(i) GROUP BY g
+)
+----
+1000	1000
+
+query I
+SELECT finalize(s) FROM (
+ SELECT as_noised_sum(1::UBIGINT,-5::BIGINT) EXPORT_STATE s FROM range(10)
+)
+----
+-100
+
+statement ok
+SET pac_mi=0.125
+
+# Positive and negative masks together cover every world: no NULL coin may
+# treat the positive mask alone as the set of participating worlds.
+query III
+SELECT count(*),count(*) FILTER (WHERE s IS NULL),count(*) FILTER (WHERE c IS NULL)
+FROM (
+ SELECT i//20 g,
+ as_noised_sum(CASE WHEN i%20=0 THEN 1::UBIGINT ELSE 18446744073709551614::UBIGINT END,
+               CASE WHEN i%20=0 THEN 1::BIGINT ELSE -1::BIGINT END) s,
+ as_noised_clip_sum(CASE WHEN i%20=0 THEN 1::UBIGINT ELSE 18446744073709551614::UBIGINT END,
+                    CASE WHEN i%20=0 THEN 1::BIGINT ELSE -1::BIGINT END) c
+ FROM range(20000)t(i) GROUP BY g
+)
+----
+1000	0	0
+
+statement ok
+SET pac_mi=0
+
 statement ok
 SET pac_sample_diversity_check=true
 

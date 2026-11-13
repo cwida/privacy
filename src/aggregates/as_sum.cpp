@@ -524,6 +524,14 @@ void PacSumFinalize(Vector &states, AggregateFinalizeInputData &input, Vector &r
 			continue;
 		}
 		uint64_t key_hash = pos->key_hash;
+#ifndef PAC_SIGNEDSUM
+		if constexpr (SIGNED && !std::is_same<typename State::State, PacSumDoubleState>::value) {
+			// Negative-only worlds participate even when the positive state is empty.
+			if (auto *neg = state->GetNegState()) {
+				key_hash |= neg->key_hash;
+			}
+		}
+#endif
 		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_mask.SetInvalid(offset + i);
 			continue;

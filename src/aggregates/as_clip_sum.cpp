@@ -581,6 +581,10 @@ static void PacClipSumFinalize(Vector &states, AggregateFinalizeInputData &input
 			continue;
 		}
 		uint64_t key_hash = pos->key_hash;
+		auto *neg = state_ptrs[i]->GetNegState();
+		if (neg) {
+			key_hash |= neg->key_hash;
+		}
 		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_mask.SetInvalid(offset + i);
 			continue;
@@ -591,11 +595,9 @@ static void PacClipSumFinalize(Vector &states, AggregateFinalizeInputData &input
 		uint64_t update_count = pos->update_count;
 
 		// Subtract neg state
-		auto *neg = state_ptrs[i]->GetNegState();
 		if (neg) {
 			PAC_FLOAT neg_buf[64] = {0};
 			neg->GetTotals(neg_buf, clip_support, clip_scale);
-			key_hash |= neg->key_hash;
 			for (int j = 0; j < 64; j++) {
 				buf[j] -= neg_buf[j];
 			}

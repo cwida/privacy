@@ -23,6 +23,11 @@ static unique_ptr<FunctionData> PacCountBind(BindAggregateFunctionInput &bind_in
 	return MakePrivBindData(ctx, args, corr_idx, "as_noised_count");
 }
 
+// AVG reserves its third argument for correction; its second argument is always a value.
+static unique_ptr<FunctionData> PacAvgBind(BindAggregateFunctionInput &bind_input) {
+	return MakePrivBindData(bind_input.GetClientContext(), bind_input.GetArguments(), 2, "as_avg");
+}
+
 // State types: simple (non-scatter) always uses PacCountState directly
 // Scatter uses PacCountStateWrapper for buffering (unless NOBUFFERING or NOCASCADING)
 #if defined(PAC_NOBUFFERING) || defined(PAC_NOCASCADING)
@@ -1309,6 +1314,12 @@ void RegisterPacCountCountersFunctions(ExtensionLoader &loader) {
 	                      PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
 	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
 
+	// AVG decomposition carries an explicit correction through categorical lifting.
+	counters_set.AddFunction(AggregateFunction(
+	    "as_count", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, list_double_type, PacCountStateSize,
+	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
+
 	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts
 	AddPacListAggregateOverload(counters_set, "count");
 
@@ -1330,11 +1341,11 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader) {
 	noised_set.AddFunction(AggregateFunction(
 	    "as_noised_avg", {LogicalType::UBIGINT, LogicalType::ANY}, LogicalType::DOUBLE, PacCountStateSize,
 	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
-	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacAvgBind));
 	noised_set.AddFunction(AggregateFunction(
 	    "as_noised_avg", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, LogicalType::DOUBLE,
 	    PacCountStateSize, PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalize,
-	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacAvgBind));
 	CreateAggregateFunctionInfo avg_info(noised_set);
 	FunctionDescription avg_desc;
 	avg_desc.description = "Privacy-preserving AVG. Automatically injected by PAC for protected columns.";
@@ -1349,11 +1360,11 @@ void RegisterPacAvgFunctions(ExtensionLoader &loader) {
 	counters_set.AddFunction(
 	    AggregateFunction("as_avg", {LogicalType::UBIGINT, LogicalType::ANY}, list_float_type, PacCountStateSize,
 	                      PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
-	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
+	                      FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacAvgBind));
 	counters_set.AddFunction(AggregateFunction(
 	    "as_avg", {LogicalType::UBIGINT, LogicalType::ANY, LogicalType::DOUBLE}, list_float_type, PacCountStateSize,
 	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
-	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
+	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacAvgBind));
 	CreateAggregateFunctionInfo avg_counters_info(counters_set);
 	FunctionDescription avg_counters_desc;
 	avg_counters_desc.description = "[INTERNAL] Returns 64 PAC subsample counters as LIST for categorical queries.";
