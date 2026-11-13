@@ -461,7 +461,12 @@ int main(int argc, char **argv) {
 			}
 			for (idx_t row = 0; row < workload->RowCount(); row++) {
 				auto id = workload->Collection().GetValue(0, row).GetValue<int>();
-				std::ofstream file(queries + "/" + Name(id) + ".sql");
+				auto query_path = queries + "/" + Name(id) + ".sql";
+				// Preserve prepared SQL: generator releases can change query semantics.
+				if (std::ifstream(query_path).good()) {
+					continue;
+				}
+				std::ofstream file(query_path);
 				if (!file) {
 					throw std::runtime_error("Cannot export original query");
 				}
