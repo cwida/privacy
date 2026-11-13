@@ -348,7 +348,10 @@ static void RestoreOutputLayout(unique_ptr<LogicalOperator> &op, const vector<Co
 
 // Range joins can produce large intermediates before a later multi-key join
 // restricts them, as when inventory is matched to sales before matching dates.
-static bool ContainsRangeJoin(LogicalOperator &op) {
+static bool ContainsJoinReorderingTarget(LogicalOperator &op, bool include_cross = false) {
+	if (include_cross && op.type == LogicalOperatorType::LOGICAL_CROSS_PRODUCT) {
+		return true;
+	}
 	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
 		for (auto &condition : op.Cast<LogicalComparisonJoin>().conditions) {
 			if (condition.IsComparison()) {
@@ -362,7 +365,7 @@ static bool ContainsRangeJoin(LogicalOperator &op) {
 		}
 	}
 	for (auto &child : op.children) {
-		if (ContainsRangeJoin(*child)) {
+		if (ContainsJoinReorderingTarget(*child, include_cross)) {
 			return true;
 		}
 	}
@@ -392,7 +395,8 @@ static bool PushFilteredJoin(OptimizerExtensionInput &input, unique_ptr<LogicalO
 		}
 		auto &membership = (*membership_slot)->Cast<LogicalComparisonJoin>();
 		auto filter_cardinality = ScanCardinality(*inner.children[1 - side]);
-		if (!filter_cardinality && include_inner && inner.conditions.size() >= 2 && ContainsRangeJoin(membership)) {
+		if (!filter_cardinality && include_inner && inner.conditions.size() >= 2 &&
+		    ContainsJoinReorderingTarget(membership)) {
 			auto size = inner.children[1 - side]->EstimateCardinality(input.context);
 			if (size < membership.EstimateCardinality(input.context)) {
 				filter_cardinality = size;
@@ -524,7 +528,8 @@ static void LiftSamplingJoinProjections(unique_ptr<LogicalOperator> &op, Binding
 	}
 	if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
 		auto &join = op->Cast<LogicalComparisonJoin>();
-		if (join.join_type == JoinType::INNER && join.conditions.size() >= 2 && ContainsRangeJoin(*join.children[0])) {
+		if (join.join_type == JoinType::INNER && join.conditions.size() >= 2 &&
+		    ContainsJoinReorderingTarget(*join.children[0])) {
 			ColumnBindingRewrite::RewriteChild(op, 0,
 			                                   [](unique_ptr<LogicalOperator> &child, BindingReplacementGraph &) {
 				                                   while (child->type == LogicalOperatorType::LOGICAL_FILTER &&
@@ -535,8 +540,8 @@ static void LiftSamplingJoinProjections(unique_ptr<LogicalOperator> &op, Binding
 			                                   });
 		}
 		if (join.join_type == JoinType::INNER && join.conditions.size() >= 2 &&
-		    join.children[0]->type == LogicalOperatorType::LOGICAL_PROJECTION && ContainsRangeJoin(*join.children[0]) &&
-		    !ContainsReorderingBarrier(join)) {
+		    join.children[0]->type == LogicalOperatorType::LOGICAL_PROJECTION &&
+		    ContainsJoinReorderingTarget(*join.children[0]) && !ContainsReorderingBarrier(join)) {
 			auto &projection = join.children[0]->Cast<LogicalProjection>();
 			bool safe = true;
 			for (auto &expression : projection.expressions) {
@@ -617,7 +622,7 @@ static void ReorderSamplingJoins(OptimizerExtensionInput &input, unique_ptr<Logi
 		return;
 	}
 	if (cross.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
-		if (!ContainsRangeJoin(cross)) {
+		if (!ContainsJoinReorderingTarget(cross)) {
 			return;
 		}
 		for (auto &condition : cross.Cast<LogicalComparisonJoin>().conditions) {
@@ -1036,7 +1041,9 @@ static void AddAntiJoinFilters(OptimizerExtensionInput &input, LogicalOperator &
 
 static void OptimizeASCorrelations(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	auto has_aggregate = ContainsASAggregate(*plan);
-	if (!has_aggregate && !ContainsSamplingHash(*plan)) {
+	// Leave ordinary equality-only plans to DuckDB; these extra rotations
+	// address Cartesian or range-join intermediates.
+	if (!has_aggregate && (!ContainsSamplingHash(*plan) || !ContainsJoinReorderingTarget(*plan, true))) {
 		return;
 	}
 	if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_ORDER)) {
