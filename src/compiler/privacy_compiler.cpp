@@ -469,7 +469,15 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 				// Find FK columns referencing the next table in the path toward the PU
 				string next_table = fk_path.size() > 1 ? fk_path[1] : pu_table_name;
 				for (auto &fk : fk_meta_it->second.fks) {
-					if (fk.first == next_table && !fk.second.empty() && CTERefExposesColumns(ref, fk.second)) {
+					if (fk.first != next_table || fk.second.empty()) {
+						continue;
+					}
+					// A row-level CTE may omit its owner's key from the SQL projection.
+					// Carry a direct ownership key through it just as for a PU scan.
+					if (!CTERefExposesColumns(ref, fk.second) && next_table == pu_table_name && plan_root) {
+						ExpandCTEWithColumns(plan_root, ref, fk_table, fk.second);
+					}
+					if (CTERefExposesColumns(ref, fk.second)) {
 						return CTEHashMatch(&ref, fk.second);
 					}
 				}

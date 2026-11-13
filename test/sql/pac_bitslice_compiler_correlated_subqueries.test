@@ -489,3 +489,31 @@ WHERE EXISTS (SELECT 1 FROM cte_copy_facts w WHERE w.k=f.k AND w.supplier<>f.sup
   AND NOT EXISTS (SELECT 1 FROM cte_copy_facts w WHERE w.k=f.k AND w.v<0);
 ----
 0	0
+
+# CTEs may omit the direct ownership key; their consumers must still be sampled.
+statement ok
+DELETE FROM cte_copy_facts;
+
+statement ok
+INSERT INTO cte_copy_owner SELECT i FROM range(2,33) t(i);
+
+statement ok
+INSERT INTO cte_copy_facts SELECT i,i,1,i+10 FROM range(1,33) t(i);
+
+statement ok
+CREATE TEMP TABLE cte_hidden_key_actual AS
+WITH raw AS MATERIALIZED (SELECT v FROM cte_copy_facts)
+SELECT sum(v) AS total FROM raw UNION ALL SELECT sum(v) FROM raw;
+
+statement ok
+SET priv_rewrite=false;
+
+query I
+SELECT count(*) FROM cte_hidden_key_actual a,
+(SELECT as_noised_sum(priv_hash(hash(owner)),v) AS total FROM cte_copy_facts) e
+WHERE a.total=e.total;
+----
+2
+
+statement ok
+SET priv_rewrite=true;
