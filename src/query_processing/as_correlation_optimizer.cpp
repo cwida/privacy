@@ -474,6 +474,29 @@ static bool ContainsSamplingHash(LogicalOperator &op) {
 	return found;
 }
 
+// Range joins can produce large intermediates before a later multi-key join
+// restricts them, as when inventory is matched to sales before matching dates.
+static bool ContainsRangeJoin(LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		for (auto &condition : op.Cast<LogicalComparisonJoin>().conditions) {
+			if (condition.IsComparison()) {
+				auto type = condition.GetComparisonType();
+				if (type == ExpressionType::COMPARE_LESSTHAN || type == ExpressionType::COMPARE_LESSTHANOREQUALTO ||
+				    type == ExpressionType::COMPARE_GREATERTHAN ||
+				    type == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
+					return true;
+				}
+			}
+		}
+	}
+	for (auto &child : op.children) {
+		if (ContainsRangeJoin(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 // Move a smaller C before A x B (or A JOIN B in ordinary sampled plans).
 // Keep every predicate and the A,B,C output order through A JOIN (B JOIN C).
 static void ReorderSamplingJoins(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &op,
@@ -500,6 +523,9 @@ static void ReorderSamplingJoins(OptimizerExtensionInput &input, unique_ptr<Logi
 		return;
 	}
 	if (cross.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		if (!ContainsRangeJoin(cross)) {
+			return;
+		}
 		for (auto &condition : cross.Cast<LogicalComparisonJoin>().conditions) {
 			if (!condition.IsComparison() || condition.GetLHS().CanThrow() || condition.GetRHS().CanThrow()) {
 				return;
