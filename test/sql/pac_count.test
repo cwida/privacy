@@ -284,6 +284,9 @@ CREATE TABLE compact_count_expected AS
 SELECT g,as_count(h)c,as_count(h,v)cv FROM compact_count_input GROUP BY g;
 
 statement ok
+SET temp_directory='{TEST_DIR}/compact_count_spill';
+
+statement ok
 SET debug_force_external=true;
 
 statement ok
