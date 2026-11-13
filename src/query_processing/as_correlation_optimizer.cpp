@@ -877,6 +877,7 @@ static void OptimizeASCorrelations(OptimizerExtensionInput &input, unique_ptr<Lo
 	}
 	if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_ORDER)) {
 		if (!has_aggregate) {
+			RemoveSamplingCrossProducts(input, plan);
 			PushFilteredJoins(input, plan, true);
 		}
 		RemoveSamplingCrossProducts(input, plan);
