@@ -502,6 +502,72 @@ static bool ContainsRangeJoin(LogicalOperator &op) {
 	return false;
 }
 
+// Lift deterministic projections above a join so a range join below them can
+// receive a later multi-key restriction. Keep the public columns in order and
+// let DuckDB rewrite each parent boundary, including its projection maps.
+static void LiftSamplingJoinProjections(unique_ptr<LogicalOperator> &op, BindingReplacementGraph &replacements) {
+	auto old_output = op->GetColumnBindings();
+	for (idx_t i = 0; i < op->children.size(); i++) {
+		ColumnBindingRewrite::RewriteChild(op, i, LiftSamplingJoinProjections);
+	}
+	if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &join = op->Cast<LogicalComparisonJoin>();
+		if (join.join_type == JoinType::INNER && join.conditions.size() >= 2 &&
+		    join.children[0]->type == LogicalOperatorType::LOGICAL_PROJECTION && ContainsRangeJoin(*join.children[0]) &&
+		    !ContainsReorderingBarrier(join)) {
+			auto &projection = join.children[0]->Cast<LogicalProjection>();
+			bool safe = true;
+			for (auto &expression : projection.expressions) {
+				safe &= !expression->CanThrow();
+			}
+			for (auto &condition : join.conditions) {
+				safe &= condition.IsComparison();
+			}
+			if (safe) {
+				auto join_output = join.GetColumnBindings();
+				auto right_bindings = join.children[1]->GetColumnBindings();
+				join.children[1]->ResolveOperatorTypes();
+				BindingReplacementGraph lifted_bindings;
+				for (auto &condition : join.conditions) {
+					for (auto expression : {&condition.LeftReference(), &condition.RightReference()}) {
+						ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
+						    *expression, [&](BoundColumnRefExpression &ref, unique_ptr<Expression> &node) {
+							    if (ref.Binding().table_index == projection.table_index) {
+								    node = projection.GetExpression(ref.Binding()).Copy();
+							    }
+						    });
+					}
+				}
+				for (idx_t i = 0; i < right_bindings.size(); i++) {
+					lifted_bindings.Add(
+					    right_bindings[i],
+					    ColumnBinding(projection.table_index, ProjectionIndex(projection.expressions.size())));
+					projection.expressions.push_back(
+					    make_uniq<BoundColumnRefExpression>(join.children[1]->types[i], right_bindings[i]));
+				}
+				join.left_projection_map.clear();
+				join.right_projection_map.clear();
+				join.filter_pushdown.reset();
+				auto lifted = std::move(join.children[0]);
+				join.children[0] = std::move(lifted->children[0]);
+				lifted->children[0] = std::move(op);
+				lifted->has_estimated_cardinality = false;
+				op = std::move(lifted);
+				ColumnBindingRewrite::RewriteChild(op, 0, LiftSamplingJoinProjections);
+				for (auto &binding : join_output) {
+					binding = lifted_bindings.Resolve(binding);
+				}
+				RestoreOutputLayout(op, join_output);
+			}
+		}
+	}
+	auto new_output = op->GetColumnBindings();
+	D_ASSERT(old_output.size() == new_output.size());
+	for (idx_t i = 0; i < old_output.size(); i++) {
+		replacements.Add(old_output[i], new_output[i]);
+	}
+}
+
 // Move a smaller C before A x B (or A JOIN B in ordinary sampled plans).
 // Keep every predicate and the A,B,C output order through A JOIN (B JOIN C).
 static void ReorderSamplingJoins(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &op,
@@ -547,12 +613,25 @@ static void ReorderSamplingJoins(OptimizerExtensionInput &input, unique_ptr<Logi
 	vector<bool> to_inner;
 	idx_t inner_count = 0;
 	for (auto &condition : join.conditions) {
-		if (!condition.IsComparison() || condition.GetComparisonType() != ExpressionType::COMPARE_EQUAL ||
-		    condition.GetLHS().GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
-		    condition.GetRHS().GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+		if (!condition.IsComparison() || condition.GetComparisonType() != ExpressionType::COMPARE_EQUAL) {
 			return;
 		}
-		auto key = condition.GetLHS().Cast<BoundColumnRefExpression>().Binding();
+		ColumnBinding key;
+		if (include_inner) {
+			JoinFilterPushdownColumn left_column, right_column;
+			if (condition.GetLHS().CanThrow() || condition.GetRHS().CanThrow() ||
+			    !JoinFilterPushdownUtil::PushdownJoinFilterExpression(condition.GetLHS(), left_column) ||
+			    !JoinFilterPushdownUtil::PushdownJoinFilterExpression(condition.GetRHS(), right_column)) {
+				return;
+			}
+			key = left_column.probe_column_index;
+		} else {
+			if (condition.GetLHS().GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF ||
+			    condition.GetRHS().GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+				return;
+			}
+			key = condition.GetLHS().Cast<BoundColumnRefExpression>().Binding();
+		}
 		bool is_b = std::find(b.begin(), b.end(), key) != b.end();
 		if (!is_b && std::find(a.begin(), a.end(), key) == a.end()) {
 			return;
@@ -939,6 +1018,10 @@ static void OptimizeASCorrelations(OptimizerExtensionInput &input, unique_ptr<Lo
 	}
 	if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::JOIN_ORDER)) {
 		if (!has_aggregate) {
+			if (!DBConfig::GetConfig(input.context).IsOptimizerDisabled(OptimizerType::PROJECTION_PULLUP)) {
+				BindingReplacementGraph bindings;
+				LiftSamplingJoinProjections(plan, bindings);
+			}
 			ReorderSamplingJoins(input, plan);
 			PushFilteredJoins(input, plan, true);
 		}

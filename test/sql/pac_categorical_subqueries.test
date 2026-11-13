@@ -1172,7 +1172,7 @@ statement ok
 CREATE TABLE sample_join_a AS SELECT i%4 id,CASE WHEN i%11=0 THEN NULL ELSE i%7 END k FROM range(100)t(i);
 
 statement ok
-CREATE TABLE sample_join_b AS SELECT i%3 id,CASE WHEN i%13=0 THEN NULL ELSE i%5 END k FROM range(80)t(i);
+CREATE TABLE sample_join_b AS SELECT i%3 id,CAST(CASE WHEN i%13=0 THEN NULL ELSE i%5 END AS INTEGER) k FROM range(80)t(i);
 
 statement ok
 CREATE TABLE sample_join_c AS SELECT i%7 ak,i%5 bk,i owner FROM range(32)t(i);
@@ -1215,7 +1215,12 @@ JOIN sample_join_c c ON b.k=c.bk WHERE (priv_hash(hash(c.owner))&1)<>0
 UNION ALL
 SELECT 2 side,a.id aid,b.id bid,c.owner
 FROM sample_join_a a JOIN sample_join_b b ON a.id=b.id AND a.k<b.k
-JOIN sample_join_c c ON a.k=c.ak AND b.k=c.bk WHERE (priv_hash(hash(c.owner))&1)<>0;
+JOIN sample_join_c c ON a.k=c.ak AND b.k=c.bk WHERE (priv_hash(hash(c.owner))&1)<>0
+UNION ALL
+SELECT 3 side,p.aid,p.bid,c.owner
+FROM (SELECT a.id aid,b.id bid,a.k ak,CAST(b.k AS BIGINT) bk
+      FROM sample_join_a a JOIN sample_join_b b ON a.id=b.id AND a.k<b.k) p
+JOIN sample_join_c c ON p.ak=c.ak AND p.bk=c.bk WHERE (priv_hash(hash(c.owner))&1)<>0;
 
 statement ok
 SET disabled_optimizers='extension';
@@ -1227,7 +1232,7 @@ statement ok
 SET disabled_optimizers='';
 
 query II
-SELECT (SELECT count(DISTINCT side)=3 FROM sample_join_inner_expected),count(*) FROM (
+SELECT (SELECT count(DISTINCT side)=4 FROM sample_join_inner_expected),count(*) FROM (
  (SELECT * FROM sample_join_inner EXCEPT ALL SELECT * FROM sample_join_inner_expected)
  UNION ALL
  (SELECT * FROM sample_join_inner_expected EXCEPT ALL SELECT * FROM sample_join_inner)
