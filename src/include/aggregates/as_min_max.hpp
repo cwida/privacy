@@ -461,7 +461,8 @@ void PacMinMaxStateHeader<T, IS_MAX>::GetTotals(PAC_FLOAT *dst) const {
 	auto *small = static_cast<const PacMinMaxNarrowState<T, IS_MAX> *>(this);
 	const auto neutral = static_cast<PAC_FLOAT>(ToDouble(PacMinMaxState<T, IS_MAX>::InitValue()));
 	for (idx_t bit = 0; bit < 64; bit++) {
-		auto value = static_cast<PAC_FLOAT>(small->extremes[(bit % 8) * 8 + bit / 8]);
+		auto swar_pos = (bit % 8) * 8 + bit / 8;
+		auto value = static_cast<PAC_FLOAT>(small->extremes[swar_pos]);
 		dst[bit] = ((key_hash >> bit) & 1) ? value : neutral;
 	}
 }
