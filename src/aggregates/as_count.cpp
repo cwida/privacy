@@ -222,19 +222,18 @@ void PacCountFinalize(Vector &states, AggregateInputData &input, Vector &result,
 	auto data = FlatVector::GetData<int64_t>(result);
 	auto &result_mask = FlatVector::Validity(result);
 	auto &bind = input.bind_data->Cast<PrivBindData>();
-	std::mt19937_64 gen(bind.seed);
 	double mi = bind.mi;
 	double correction = bind.correction;
 	uint64_t query_hash = bind.query_hash;
 	auto pstate = bind.pstate;
 	PAC_FLOAT buf[64];
+	auto gen = PacRandomStream(bind.seed, *bind.random_state);
 	for (idx_t i = 0; i < count; i++) {
 #if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
 		aggs[i]->FlushBuffer(*aggs[i], input.allocator); // flush values into yourself
 #endif
 		PacCountState *s = aggs[i]->GetState();
 		uint64_t key_hash = s ? s->key_hash : 0;
-		// Check if we should return NULL based on key_hash (uses mi and correction)
 		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_mask.SetInvalid(offset + i);
 			continue;

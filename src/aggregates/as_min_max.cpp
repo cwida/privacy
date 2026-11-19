@@ -104,6 +104,9 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 	double correction = input.bind_data ? input.bind_data->Cast<PrivBindData>().correction : 1.0;
 	uint64_t query_hash = input.bind_data ? input.bind_data->Cast<PrivBindData>().query_hash : 0;
 	auto pstate = input.bind_data ? input.bind_data->Cast<PrivBindData>().pstate : nullptr;
+	auto gen = input.bind_data ? PacRandomStream(input.bind_data->Cast<PrivBindData>().seed,
+	                                             *input.bind_data->Cast<PrivBindData>().random_state)
+	                           : PacRandomEngine(0, 0);
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -113,8 +116,6 @@ static void PacMinMaxFinalize(Vector &states, AggregateInputData &input, Vector 
 		auto *s = state_ptrs[i]->GetState();
 		// Check if we should return NULL based on key_hash
 		uint64_t key_hash = s ? s->key_hash : 0;
-		std::mt19937_64 gen(input.bind_data->Cast<PrivBindData>().seed);
-		// mi controls noise mode, correction reduces NULL probability (but does NOT scale min/max values)
 		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_mask.SetInvalid(offset + i);
 			continue;

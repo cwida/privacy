@@ -5,6 +5,7 @@
 #include "duckdb/common/random_engine.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
+#include "pcg_random.hpp"
 #include <type_traits>
 #include <mutex>
 #include <memory>
@@ -184,6 +185,27 @@ static inline int pac_ctzll(uint64_t x) {
 
 namespace duckdb {
 
+// DuckDB's PCG32 core, exposed as a 64-bit URBG for the standard distributions.
+class PacRandomEngine {
+public:
+	using result_type = uint64_t;
+	explicit PacRandomEngine(uint64_t seed, uint64_t stream) : engine(seed, stream) {
+	}
+	static constexpr result_type min() {
+		return 0;
+	}
+	static constexpr result_type max() {
+		return ~result_type(0);
+	}
+	result_type operator()() {
+		const auto high = engine();
+		return (result_type(high) << 32) | engine();
+	}
+
+private:
+	pcg32 engine;
+};
+
 // Returns the DuckDB LogicalType corresponding to PAC_FLOAT (FLOAT or DOUBLE).
 static inline LogicalType PacFloatLogicalType() {
 	return std::is_same<PAC_FLOAT, float>::value ? LogicalType::FLOAT : LogicalType::DOUBLE;
@@ -237,7 +259,7 @@ void RegisterPacFinalizeFunction(ExtensionLoader &loader);
 // correction: factor to multiply values by after compacting NULLs but before adding noise
 // pstate: optional shared p-tracking state for persistent secret composition (may be nullptr)
 // out_noise_variance: if non-null, receives the noise variance used (for utility NULLing)
-PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, double correction, std::mt19937_64 &gen,
+PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, double correction, PacRandomEngine &gen,
                                        uint64_t is_null = 0, uint64_t counter_selector = 0,
                                        const std::shared_ptr<PacPState> &pstate = nullptr,
                                        double *out_noise_variance = nullptr);
@@ -253,7 +275,7 @@ static inline bool PacNoisedSelect(uint64_t key_hash, uint64_t rnd) {
 // correction: reduces NULL probability by this factor (considers correction times more non-nulls)
 // Probabilistic: P(NULL) = popcount(~key_hash) / (64 * correction)
 // Deterministic: NULL when popcount(key_hash) * correction < 1
-bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt19937_64 &gen);
+bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, PacRandomEngine &gen);
 
 // PacUtilityNull: post-processing NULLing of low-SNR cells.
 // Returns true (NULL the cell) probabilistically based on z-score = |noised_value| / noise_std_dev.
@@ -261,7 +283,14 @@ bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt1993
 // Safe by data processing inequality: this is a function of the already-noised output + independent coins.
 // threshold: z-score center (e.g., 4.0 means ~20% expected relative error cutoff). NaN = disabled.
 // noise_variance: the PAC noise variance used for this cell (delta = sigma^2 / (2*mi))
-bool PacUtilityNull(double noised_value, double noise_variance, double threshold, std::mt19937_64 &gen);
+bool PacUtilityNull(double noised_value, double noise_variance, double threshold, PacRandomEngine &gen);
+
+// Streams advance across cells and reset for each query execution. Fixed seeds
+// reproduce draws for the same execution order, not after row/worker reordering.
+struct PacRandomState;
+shared_ptr<PacRandomState> GetPacRandomState(ClientContext &context);
+uint64_t GetPacSeed(ClientContext &context, double mi);
+PacRandomEngine PacRandomStream(uint64_t seed, PacRandomState &state);
 
 // Minimum total rows across all groups before the diversity check applies
 // With hash32_32 (hash_repair), single-PU groups always have exactly 32 zero bits
@@ -291,13 +320,13 @@ inline double GetPacMiFromSetting(ClientContext &ctx) {
 }
 
 // Bind data used by privacy aggregates to carry `mi`, `correction`, and sampling parameters.
-// Reads seed from privacy_seed setting (or uses query-id if not set) and computes query_hash.
+// Reads an explicit privacy_seed, otherwise mixes in query-id when noise is enabled.
 // query_hash is XOR'd with per-row key_hash inside priv_hash() (centralized) and used as
 // the counter selector for PacNoisySampleFrom64Counters in finalize functions.
 struct PrivBindData : public FunctionData {
 	double mi;                   // mutual information parameter from pac_mi setting (controls noise/NULL probability)
 	double correction;           // correction factor: multiplies sum/avg/count results, reduces NULL prob for min/max
-	uint64_t seed;               // RNG seed: privacy_seed setting value, or query-id if not set
+	uint64_t seed;               // RNG seed: explicit privacy_seed, otherwise default seed mixed with query-id
 	uint64_t query_hash;         // derived from seed: used inside priv_hash() for XOR and as counter selector
 	double scale_divisor;        // for DECIMAL as_avg: divide result by 10^scale (default 1.0)
 	bool hash_repair;            // if true, priv_hash() repairs hash to exactly 32 bits set
@@ -306,6 +335,7 @@ struct PrivBindData : public FunctionData {
 	int sample_count;            // SASS mode: total number of sample lanes (m); 64 uses the SIMD bitmask path
 	bool sample_rescale;         // SASS mode: rescale SUM/COUNT samples to full-dataset-estimator scale
 	double utility_threshold;    // z-score threshold for utility NULLing (NaN = disabled, any value = enabled)
+	shared_ptr<PacRandomState> random_state; // query-local stream allocation, shared across aggregate bindings
 
 	// Persistent secret p-tracking: shared across all aggregates in the same query (same query_hash).
 	// When active (mi > 0 and pac_ptracking enabled), noise calibration uses p-weighted variance
@@ -317,7 +347,7 @@ struct PrivBindData : public FunctionData {
 	mutable uint64_t suspicious_count;    // groups with [29..35] zero bits AND all-same-value
 	mutable uint64_t nonsuspicious_count; // groups that are not suspicious
 
-	// Primary constructor - reads seed from privacy_seed setting, or uses query-id if not set.
+	// Primary constructor - an explicit privacy_seed is stable across queries.
 	// All aggregates in the same query get the same seed and query_hash.
 	explicit PrivBindData(ClientContext &ctx, double mi_val, double correction_val = 1.0, double scale_div = 1.0,
 	                      bool hash_repair_val = false, int sample_lanes_val = 0,
@@ -325,7 +355,7 @@ struct PrivBindData : public FunctionData {
 	    : mi(mi_val), correction(correction_val), scale_divisor(scale_div), hash_repair(hash_repair_val),
 	      sample_diversity_check(true), sample_lanes(sample_lanes_val), sample_count(sample_count_val),
 	      sample_rescale(sample_rescale_val), utility_threshold(std::numeric_limits<double>::quiet_NaN()),
-	      total_update_count(0), suspicious_count(0), nonsuspicious_count(0) {
+	      random_state(GetPacRandomState(ctx)), total_update_count(0), suspicious_count(0), nonsuspicious_count(0) {
 		Value sd_val;
 		if (ctx.TryGetCurrentSetting("pac_sample_diversity_check", sd_val) && !sd_val.IsNull()) {
 			sample_diversity_check = sd_val.GetValue<bool>();
@@ -335,15 +365,7 @@ struct PrivBindData : public FunctionData {
 		if (ctx.TryGetCurrentSetting("privacy_min_group_count", ut_val) && !ut_val.IsNull()) {
 			utility_threshold = ut_val.GetValue<double>();
 		}
-		Value pac_seed_val;
-		if (ctx.TryGetCurrentSetting("privacy_seed", pac_seed_val) && !pac_seed_val.IsNull()) {
-			seed = uint64_t(pac_seed_val.GetValue<int64_t>());
-		} else {
-			seed = 42;
-		}
-		if (mi != 0.0) { // randomize seed per query (not in deterministic mode aka mi==0)
-			seed ^= PAC_MAGIC_HASH * static_cast<uint64_t>(ctx.ActiveTransaction().GetActiveQuery());
-		}
+		seed = GetPacSeed(ctx, mi);
 		query_hash = (seed * PAC_MAGIC_HASH) ^ PAC_MAGIC_HASH;
 
 		// Initialize p-tracking if mi > 0 and pac_ptracking is enabled

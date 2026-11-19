@@ -1,0 +1,199 @@
+# name: test/sql/pac_noise_independence.test
+# description: Independent noise draws across groups and finalization batches
+# group: [sql]
+
+require privacy
+
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+SET privacy_seed = 42
+
+statement ok
+SET threads = 1
+
+statement ok
+SET pac_mi = 0.0078125
+
+statement ok
+SET pac_ptracking = false
+
+statement ok
+SET pac_sample_diversity_check = false
+
+# 1000 groups of one entity: each is NULL with probability popcount(~key_hash)/64 = 1/2
+statement ok
+CREATE TABLE solo AS SELECT i AS g, i AS e, 1 + i % 5 AS v FROM range(1000) t(i)
+
+# 1000 groups of 20 entities (no world empty: never NULL)
+statement ok
+CREATE TABLE cells AS SELECT i // 20 AS g, i AS e, 1 + i % 7 AS v FROM range(20000) t(i)
+
+# ============================================================================
+# NULL decisions are independent across groups (not all-or-nothing)
+# ============================================================================
+
+query I
+SELECT count(*) FILTER (WHERE s IS NULL) BETWEEN 400 AND 600
+FROM (SELECT g, as_noised_sum(priv_hash(hash(e)), v) AS s FROM solo GROUP BY g)
+----
+true
+
+query I
+SELECT count(*) FILTER (WHERE c IS NULL) BETWEEN 400 AND 600
+FROM (SELECT g, as_noised_count(priv_hash(hash(e))) AS c FROM solo GROUP BY g)
+----
+true
+
+query II
+SELECT count(*) FILTER (WHERE mx IS NULL) BETWEEN 400 AND 600, count(*) FILTER (WHERE mn IS NULL) BETWEEN 400 AND 600
+FROM (SELECT g, as_noised_max(priv_hash(hash(e)), v) AS mx, as_noised_min(priv_hash(hash(e)), v) AS mn
+      FROM solo GROUP BY g)
+----
+true	true
+
+query II
+SELECT count(*) FILTER (WHERE s IS NULL) BETWEEN 400 AND 600, count(*) FILTER (WHERE mx IS NULL) BETWEEN 400 AND 600
+FROM (SELECT g, as_noised_clip_sum(priv_hash(hash(e)), v) AS s, as_noised_clip_max(priv_hash(hash(e)), v) AS mx
+      FROM solo GROUP BY g)
+----
+true	true
+
+# ============================================================================
+# Noise is independent across groups: released values fall on either side of the exact ones about equally
+# often (500 +- 16 of 1000; with one draw shared by all groups, nearly all fall on the same side)
+# ============================================================================
+
+query II
+SELECT count(*) FILTER (WHERE s > x) BETWEEN 400 AND 600, count(*) FILTER (WHERE s < x) BETWEEN 400 AND 600
+FROM (SELECT g, as_noised_sum(priv_hash(hash(e)), v) AS s, sum(v) AS x FROM cells GROUP BY g)
+----
+true	true
+
+query II
+SELECT count(*) FILTER (WHERE c > x) BETWEEN 400 AND 600, count(*) FILTER (WHERE c < x) BETWEEN 400 AND 600
+FROM (SELECT g, as_noised_count(priv_hash(hash(e))) AS c, count(*) AS x FROM cells GROUP BY g)
+----
+true	true
+
+query II
+SELECT count(*) FILTER (WHERE s > x) BETWEEN 400 AND 600, count(*) FILTER (WHERE s < x) BETWEEN 400 AND 600
+FROM (SELECT g, as_noised_clip_sum(priv_hash(hash(e)), v) AS s, sum(v) AS x FROM cells GROUP BY g)
+----
+true	true
+
+query II
+SELECT count(*) FILTER (WHERE s > x) BETWEEN 400 AND 600, count(*) FILTER (WHERE s < x) BETWEEN 400 AND 600
+FROM (SELECT g, as_noised(as_sum(priv_hash(hash(e)), v)) AS s, sum(v) AS x FROM cells GROUP BY g)
+----
+true	true
+
+# ============================================================================
+# Equal counter values in different groups still receive independent draws.
+# Reinitializing the generator from counters would make all 1000 NULL decisions identical.
+# ============================================================================
+
+query I
+SELECT count(*) FILTER (WHERE c IS NULL) BETWEEN 400 AND 600
+FROM (SELECT i, as_noised_count(4294967295::UBIGINT) AS c FROM range(1000) t(i) GROUP BY i)
+----
+true
+
+# Constant counter arrays across several vectors must not be constant-folded,
+# or restart the same RNG stream in each vector. Check all scalar release forms.
+query III
+SELECT count(DISTINCT l) > 3000, count(DISTINCT f) > 3000, count(DISTINCT d) > 3000
+FROM (SELECT as_noised(range(64)::FLOAT[]) AS l,
+             priv_finalize(range(64)::FLOAT[]) AS f,
+             as_noised_div(range(64)::FLOAT[], list_transform(range(64), x -> 1::FLOAT)) AS d
+      FROM range(4096)) t
+----
+true	true	true
+
+# A fixed seed repeats for the same execution setup, even after unrelated draws.
+statement ok
+CREATE TABLE seeded_first AS
+SELECT g, as_noised_sum(priv_hash(hash(e)), v) AS s,
+          as_noised_count(priv_hash(hash(e))) AS c,
+          as_noised_min(priv_hash(hash(e)), v) AS mn,
+          as_noised_max(priv_hash(hash(e)), v) AS mx,
+          as_noised_clip_sum(priv_hash(hash(e)), v) AS cs,
+          as_noised_clip_max(priv_hash(hash(e)), v) AS cm
+FROM solo GROUP BY g
+
+statement ok
+CREATE TABLE unrelated_draws AS SELECT as_noised(range(64)::FLOAT[]) AS v FROM range(8192)
+
+statement ok
+CREATE TABLE seeded_second AS
+SELECT g, as_noised_sum(priv_hash(hash(e)), v) AS s,
+          as_noised_count(priv_hash(hash(e))) AS c,
+          as_noised_min(priv_hash(hash(e)), v) AS mn,
+          as_noised_max(priv_hash(hash(e)), v) AS mx,
+          as_noised_clip_sum(priv_hash(hash(e)), v) AS cs,
+          as_noised_clip_max(priv_hash(hash(e)), v) AS cm
+FROM solo GROUP BY g
+
+query I
+SELECT count(*) FROM seeded_first a JOIN seeded_second b USING (g)
+WHERE a.s IS DISTINCT FROM b.s OR a.c IS DISTINCT FROM b.c
+   OR a.mn IS DISTINCT FROM b.mn OR a.mx IS DISTINCT FROM b.mx
+   OR a.cs IS DISTINCT FROM b.cs OR a.cm IS DISTINCT FROM b.cm
+----
+0
+
+# Prepared scalar releases must reset streams on every execution and advance
+# between vectors; bind data can survive many executions of the statement.
+statement ok
+CREATE TABLE seeded_prepared(i BIGINT, l FLOAT, f FLOAT, d DOUBLE)
+
+statement ok
+PREPARE seeded_release AS INSERT INTO seeded_prepared
+SELECT i, as_noised(range(64)::FLOAT[]), priv_finalize(range(64)::FLOAT[]),
+       as_noised_div(range(64)::FLOAT[], list_transform(range(64), x -> 1::FLOAT))
+FROM range(4096) t(i)
+
+statement ok
+EXECUTE seeded_release
+
+statement ok
+EXECUTE seeded_release
+
+query I
+SELECT count(*) FROM seeded_prepared a JOIN seeded_prepared b USING (i)
+WHERE a.rowid < 4096 AND b.rowid >= 4096
+AND (a.l IS DISTINCT FROM b.l OR a.f IS DISTINCT FROM b.f OR a.d IS DISTINCT FROM b.d)
+----
+0
+
+query III
+SELECT count(DISTINCT l) > 3000, count(DISTINCT f) > 3000, count(DISTINCT d) > 3000
+FROM seeded_prepared WHERE rowid < 4096
+----
+true	true	true
+
+statement ok
+DEALLOCATE seeded_release
+
+statement ok
+CREATE TABLE seeded_counts(g BIGINT, c BIGINT)
+
+statement ok
+PREPARE seeded_count AS INSERT INTO seeded_counts
+SELECT g, as_noised_count(priv_hash(hash(e))) FROM solo GROUP BY g
+
+statement ok
+EXECUTE seeded_count
+
+statement ok
+EXECUTE seeded_count
+
+query I
+SELECT count(*) FROM seeded_counts a JOIN seeded_counts b USING (g)
+WHERE a.rowid < 1000 AND b.rowid >= 1000 AND a.c IS DISTINCT FROM b.c
+----
+0
+
+statement ok
+DEALLOCATE seeded_count

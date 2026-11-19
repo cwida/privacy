@@ -354,6 +354,7 @@ static void PacClipMinMaxFinalize(Vector &states, AggregateInputData &input, Vec
 	int clip_support = bind.clip_support_threshold;
 	bool clip_scale = bind.clip_scale;
 
+	auto gen = PacRandomStream(bind.seed, *bind.random_state);
 	for (idx_t i = 0; i < count; i++) {
 		PacClipMinMaxFlushBuffer<IS_MAX, true>(*state_ptrs[i], *state_ptrs[i], input.allocator);
 
@@ -365,7 +366,6 @@ static void PacClipMinMaxFinalize(Vector &states, AggregateInputData &input, Vec
 			continue;
 		}
 		uint64_t key_hash = (pos ? pos->key_hash : 0) | (neg ? neg->key_hash : 0);
-		std::mt19937_64 gen(bind.seed);
 		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
 			result_mask.SetInvalid(offset + i);
 			continue;

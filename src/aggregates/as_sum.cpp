@@ -434,6 +434,9 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 	double correction = input.bind_data ? input.bind_data->Cast<PrivBindData>().correction : 1.0;
 	uint64_t query_hash = input.bind_data ? input.bind_data->Cast<PrivBindData>().query_hash : 0;
 	auto pstate = input.bind_data ? input.bind_data->Cast<PrivBindData>().pstate : nullptr;
+	auto gen = input.bind_data ? PacRandomStream(input.bind_data->Cast<PrivBindData>().seed,
+	                                             *input.bind_data->Cast<PrivBindData>().random_state)
+	                           : PacRandomEngine(0, 0);
 
 	for (idx_t i = 0; i < count; i++) {
 #ifndef PAC_NOBUFFERING
@@ -445,12 +448,9 @@ void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, i
 			result_mask.SetInvalid(offset + i); // return NULL (no values seen)
 			continue;
 		}
-		// Use per-group deterministic RNG seeded by both privacy_seed and key_hash
-		// This ensures each group gets the same noise regardless of processing order
 		uint64_t key_hash = pos->key_hash;
-		std::mt19937_64 gen(input.bind_data->Cast<PrivBindData>().seed);
 		if (PacNoiseInNull(key_hash, mi, correction, gen)) {
-			result_mask.SetInvalid(offset + i); // return NULL (probabilistic decision)
+			result_mask.SetInvalid(offset + i);
 			continue;
 		}
 #ifndef PAC_SIGNEDSUM
