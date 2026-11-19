@@ -21,6 +21,14 @@
 #if defined(PAC_EXACTSUM) || defined(PAC_NOBUFFERING)
 #define PAC_SIGNEDSUM 1
 #endif
+// Default of the priv_sum_state_export setting. Every non-cascading state holds 64 128-bit totals (1 KB) in the
+// aggregate arena. If DuckDB cannot export these, a hash table with many groups stays over its memory limit and
+// DuckDB 2.0 spills a new, nearly empty block set for every input chunk until the temp directory is full.
+#ifdef PAC_NOCASCADING
+#define PRIV_SUM_STATE_EXPORT_DEFAULT true
+#else
+#define PRIV_SUM_STATE_EXPORT_DEFAULT false
+#endif
 
 // PAC_GODBOLT mode: cpp -DPAC_GODBOLT -P -E -w src/include/pac_sum_avg.hpp
 // Isolates the SIMD kernel for Godbolt analysis (-P removes line markers)

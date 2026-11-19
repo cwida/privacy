@@ -339,7 +339,7 @@ SELECT count(*) FROM (
 # SUM state export (EXPORT_STATE and DuckDB's aggregate-state spilling) is opt-in.
 # The tests above ran with the default; the export and spill tests below enable it.
 statement ok
-SET pac_sum_state_export=true;
+SET priv_sum_state_export=true;
 
 # Exported partial states are forced past the two-value buffer so this tests
 # packed-state combine, not replay of buffered inputs.
@@ -798,14 +798,15 @@ SET memory_limit='80%'
 statement ok
 SET priv_rewrite=true
 
-# pac_sum_state_export defaults to false: SUM then exposes no state layout, so
-# DuckDB creates no aggregate-state spill plan for hash tables that contain a
-# SUM and rejects EXPORT_STATE. Results must not depend on the setting.
+# With priv_sum_state_export off (the default, except in the non-cascading
+# ablation builds) SUM exposes no state layout, so DuckDB creates no
+# aggregate-state spill plan for hash tables that contain a SUM and rejects
+# EXPORT_STATE. Results must not depend on the setting.
 statement ok
-RESET pac_sum_state_export
+SET priv_sum_state_export=false
 
 query I
-SELECT current_setting('pac_sum_state_export')
+SELECT current_setting('priv_sum_state_export')
 ----
 false
 
@@ -838,7 +839,7 @@ SELECT count(*) n,sum(hash(g,a,b,c)) checksum FROM (
 )
 
 statement ok
-SET pac_sum_state_export=true
+SET priv_sum_state_export=true
 
 query II
 SELECT e.n,e.checksum=r.checksum FROM sum_export_off e,(
@@ -853,7 +854,7 @@ SELECT e.n,e.checksum=r.checksum FROM sum_export_off e,(
 100000	true
 
 statement ok
-RESET pac_sum_state_export
+RESET priv_sum_state_export
 
 statement ok
 SET debug_force_external=false

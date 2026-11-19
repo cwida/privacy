@@ -704,13 +704,14 @@ static unique_ptr<FunctionData> PacBindWithScaleDivisor(ClientContext &ctx, vect
 // DuckDB 2.0 creates an aggregate-state spill plan only when every aggregate in a hash table exposes these
 // callbacks. With a plan, arena-backed SUM states can spill, but aggregation also turns external as soon as the
 // arena outgrows half of the per-thread memory reservation, which slows grouped SUMs that fit in memory. So the
-// callbacks registered by SpillableSum() stay on the bound function only when pac_sum_state_export is set.
+// callbacks registered by SpillableSum() stay on the bound function only when priv_sum_state_export is set
+// (default: PRIV_SUM_STATE_EXPORT_DEFAULT, on only for the non-cascading ablation builds).
 static void ApplySumStateExportSetting(ClientContext &ctx, BoundAggregateFunction &function) {
-	if (GetBooleanSetting(ctx, "pac_sum_state_export", false)) {
-		PRIVACY_DEBUG_PRINT("SUM bind: state export enabled (pac_sum_state_export=true)");
+	if (GetBooleanSetting(ctx, "priv_sum_state_export", PRIV_SUM_STATE_EXPORT_DEFAULT)) {
+		PRIVACY_DEBUG_PRINT("SUM bind: state export enabled (priv_sum_state_export=true)");
 		return;
 	}
-	PRIVACY_DEBUG_PRINT("SUM bind: state export disabled (pac_sum_state_export=false)");
+	PRIVACY_DEBUG_PRINT("SUM bind: state export disabled (priv_sum_state_export=false)");
 	function.GetCallbacks().get_state_type = nullptr;
 	function.SetExportAggregateStateCallback(nullptr);
 	function.SetImportAggregateStateCallback(nullptr);
@@ -758,7 +759,7 @@ void PacSumDoubleInitialize(AggregateStateInput &, data_ptr_t *states, idx_t cou
 }
 
 // State export is cold-path metadata; the update kernels and native state sizes are unchanged.
-// Binding keeps these callbacks only when pac_sum_state_export is set (see ApplySumStateExportSetting).
+// Binding keeps these callbacks only when priv_sum_state_export is set (see ApplySumStateExportSetting).
 static AggregateFunction SpillableSum(AggregateFunction function) {
 	RegisterSumStateExport(function);
 	return function;

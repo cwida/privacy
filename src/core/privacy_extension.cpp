@@ -555,10 +555,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	// Expose as_sum/as_noised_sum states to DuckDB's state export: EXPORT_STATE and spilling of arena-backed
 	// aggregate states. Off by default: with exportable states, DuckDB 2.0 aggregates externally under state
-	// pressure, which slows grouped SUMs that would fit in memory.
-	db.config.AddExtensionOption("pac_sum_state_export",
+	// pressure, which slows grouped SUMs that would fit in memory. The non-cascading ablation builds default to on.
+	db.config.AddExtensionOption("priv_sum_state_export",
 	                             "Let DuckDB export and spill as_sum/as_noised_sum aggregate states",
-	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(PRIV_SUM_STATE_EXPORT_DEFAULT));
 	// Propagate PAC metadata through CREATE TABLE AS SELECT
 	db.config.AddExtensionOption("pac_ctas", "[INTERNAL] Propagate PAC metadata through CTAS", LogicalType::BOOLEAN,
 	                             Value::BOOLEAN(true));
