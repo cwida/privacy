@@ -336,6 +336,11 @@ SELECT count(*) FROM (
 ----
 64
 
+# SUM state export (EXPORT_STATE and DuckDB's aggregate-state spilling) is opt-in.
+# The tests above ran with the default; the export and spill tests below enable it.
+statement ok
+SET pac_sum_state_export=true;
+
 # Exported partial states are forced past the two-value buffer so this tests
 # packed-state combine, not replay of buffered inputs.
 query I
@@ -792,3 +797,69 @@ SET memory_limit='80%'
 
 statement ok
 SET priv_rewrite=true
+
+# pac_sum_state_export defaults to false: SUM then exposes no state layout, so
+# DuckDB creates no aggregate-state spill plan for hash tables that contain a
+# SUM and rejects EXPORT_STATE. Results must not depend on the setting.
+statement ok
+RESET pac_sum_state_export
+
+query I
+SELECT current_setting('pac_sum_state_export')
+----
+false
+
+statement error
+SELECT as_sum(18446744073709551615::UBIGINT,1::BIGINT) EXPORT_STATE s
+----
+does not have a state type callback
+
+statement error
+SELECT as_noised_sum(18446744073709551615::UBIGINT,1::DECIMAL(18,2)) EXPORT_STATE s
+----
+does not have a state type callback
+
+# Without state export these states cannot spill, so this needs more memory than
+# the 32 MB that the exporting pressure tests above run in.
+statement ok
+SET debug_force_external=true
+
+statement ok
+SET memory_limit='256MB'
+
+statement ok
+CREATE TABLE sum_export_off AS
+SELECT count(*) n,sum(hash(g,a,b,c)) checksum FROM (
+ SELECT i//8 g,
+ as_sum(18446744073709551615::UBIGINT,1::BIGINT) a,
+ as_sum(18446744073709551615::UBIGINT,2::DOUBLE) b,
+ as_noised_sum(18446744073709551615::UBIGINT,3::DECIMAL(18,2)) c
+ FROM range(800000)t(i) GROUP BY g
+)
+
+statement ok
+SET pac_sum_state_export=true
+
+query II
+SELECT e.n,e.checksum=r.checksum FROM sum_export_off e,(
+ SELECT count(*) n,sum(hash(g,a,b,c)) checksum FROM (
+ SELECT i//8 g,
+ as_sum(18446744073709551615::UBIGINT,1::BIGINT) a,
+ as_sum(18446744073709551615::UBIGINT,2::DOUBLE) b,
+ as_noised_sum(18446744073709551615::UBIGINT,3::DECIMAL(18,2)) c
+ FROM range(800000)t(i) GROUP BY g
+ ))r
+----
+100000	true
+
+statement ok
+RESET pac_sum_state_export
+
+statement ok
+SET debug_force_external=false
+
+statement ok
+SET memory_limit='80%'
+
+statement ok
+DROP TABLE sum_export_off

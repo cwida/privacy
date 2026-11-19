@@ -184,6 +184,16 @@ SUM and COUNT implementations through the existing rewrite. DuckDB can export ar
 and import them when combining partitions. Every aggregate in a hash table must
 expose a compatible state layout for DuckDB to select this path.
 
+This is opt-in: `SET pac_sum_state_export = true` (default `false`). The callbacks are
+registered on every SUM implementation and removed from the bound function at bind time
+unless the setting is on. With an export-capable SUM in the hash table, DuckDB 2.0 treats
+arena bytes above half of the current per-thread memory reservation as memory pressure,
+switches to external aggregation and resets the local hash table, even when the query
+would fit in memory; grouped SUMs with many allocated counter states then run several
+times slower. Leave the setting off unless the aggregate states themselves must spill
+(the Q78 case below) or `EXPORT_STATE` is needed; with it off, `EXPORT_STATE` on
+`as_sum`/`as_noised_sum` is rejected and COUNT/MIN/MAX keep their own export.
+
 The exported BLOB contains buffered values and masks, update counts, positive and
 negative integer cascade levels and overflow budgets, floating-point counters,
 COUNT SWAR bytes and overflow totals, MIN/MAX bounds, and list-aggregate values

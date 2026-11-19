@@ -553,6 +553,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Control whether priv_hash() repairs hashes to exactly 32 bits set
 	db.config.AddExtensionOption("pac_hash_repair", "[INTERNAL] priv_hash() repairs hash to exactly 32 bits set",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	// Expose as_sum/as_noised_sum states to DuckDB's state export: EXPORT_STATE and spilling of arena-backed
+	// aggregate states. Off by default: with exportable states, DuckDB 2.0 aggregates externally under state
+	// pressure, which slows grouped SUMs that would fit in memory.
+	db.config.AddExtensionOption("pac_sum_state_export",
+	                             "Let DuckDB export and spill as_sum/as_noised_sum aggregate states",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	// Propagate PAC metadata through CREATE TABLE AS SELECT
 	db.config.AddExtensionOption("pac_ctas", "[INTERNAL] Propagate PAC metadata through CTAS", LogicalType::BOOLEAN,
 	                             Value::BOOLEAN(true));
