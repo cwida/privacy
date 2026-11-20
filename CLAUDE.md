@@ -176,13 +176,3 @@ Other style rules (from `.clang-format`, based on LLVM):
 - **Long arguments**: align after open bracket
 
 Run `make format-fix` to auto-format. Formatting runs automatically via hook after edits.
-
-## Attack evaluation
-
-Attack scripts live in `attacks/`. Results are documented in `attacks/clip_attack_results.md`.
-
-```bash
-bash attacks/clip_attack_test.sh 2>/dev/null     # main attack suite
-bash attacks/clip_multirow_test.sh 2>/dev/null   # 20K small items test
-bash attacks/clip_hardzero_stress.sh 2>/dev/null  # stress tests
-```

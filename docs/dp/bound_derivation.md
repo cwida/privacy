@@ -84,13 +84,8 @@ the exploratory harnesses that produced them were removed during repository clea
 
 ## Maintained attack audit
 
-The single maintained Python harness is:
-
-```bash
-python3 attacks/filterless_attacks.py
-```
-
-It contains two experiments:
+The audit harness, `attacks/filterless_attacks.py`, was removed from the tree during repository cleanup; it is
+available in the Git history (last present in commit `2b0efb1`). It contains two experiments:
 
 1. A same-database, different-predicate scale diagnostic. This is not a neighboring-database DP
    test; it checks whether the filter changes the bound channel.

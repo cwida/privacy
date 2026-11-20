@@ -172,7 +172,8 @@ Thus `p=6` reduces the unfiltered relational work by 2.3x-4.2x on the main TPC-H
 1.65x-1.70x slower than filtered pre-aggregation. When nearly every PU qualifies, sampling cannot
 prune much: the synthetic billionaire inputs are about 1.0x full-filterless time.
 
-`attacks/filterless_attacks.py` isolates the fixed-sample knife edge. Its filter-change experiment
+`attacks/filterless_attacks.py` (removed from the tree; last present in commit `2b0efb1`) isolates the fixed-sample
+knife edge. Its filter-change experiment
 uses one fixed database and two predicates, so it is a channel diagnostic rather than a DP
 neighboring-database test. The sampled-PU update experiment uses add/remove adjacency. It compares
 the removed raw-histogram prototype, where the selected bound jumps from 128 to 134,217,728 and the

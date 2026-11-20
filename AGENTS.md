@@ -144,13 +144,3 @@ Follow DuckDB's clang-tidy and clang-format configuration:
 - No short functions on one line
 
 Run `make format-fix` to auto-format.
-
-## Attack Evaluation
-
-Attack scripts live in `attacks/`. Results are documented in `attacks/clip_attack_results.md`.
-
-```bash
-bash attacks/clip_attack_test.sh 2>/dev/null
-bash attacks/clip_multirow_test.sh 2>/dev/null
-bash attacks/clip_hardzero_stress.sh 2>/dev/null
-```
