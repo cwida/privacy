@@ -67,9 +67,7 @@ Rscript --vanilla benchmark/tpch/plot_tpch_results.R \
   benchmark/results/utility/as_tpch_sf30.csv benchmark/results/figures
 
 Rscript --vanilla benchmark/tpch/plot_tpch_as_m_sweep.R \
-  benchmark/results/utility/as_tpch_sf30.csv \
-  benchmark/results/utility/as_tpch_sf30_m_sweep.csv \
-  benchmark/results/figures
+  benchmark/results/utility/as_tpch_sf30_m_sweep.csv benchmark/results/figures
 ```
 
 See [Utility evaluation](utility.md) for bound and metric definitions. See [repro.md](../../repro.md) for every paper

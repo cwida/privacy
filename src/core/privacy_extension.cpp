@@ -2,6 +2,7 @@
 
 #include "privacy_extension.hpp"
 #include "duckdb.hpp"
+#include "duckdb/main/database_manager.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
@@ -18,6 +19,7 @@
 #include "core/privacy_optimizer.hpp"
 #include "aggregates/as_aggregate.hpp"
 #include "aggregates/as_count.hpp"
+#include "aggregates/aggregate_state_export.hpp"
 #include "aggregates/as_sum.hpp"
 #include "aggregates/as_clip_sum.hpp"
 #include "aggregates/as_min_max.hpp"
@@ -31,6 +33,7 @@
 #include "table_functions/dp_sass_stability_query.hpp"
 #include "query_processing/pac_topk_rewriter.hpp"
 #include "query_processing/pac_avg_rewriter.hpp"
+#include "query_processing/as_correlation_optimizer.hpp"
 #include "privacy_debug.hpp"
 
 namespace duckdb {
@@ -92,7 +95,7 @@ static string QuoteIdentifier(const string &identifier) {
 static void SetExtensionSetting(ClientContext &context, const string &name, const Value &value) {
 	auto &config = DBConfig::GetConfig(context);
 	ExtensionOption extension_option;
-	if (!config.TryGetExtensionOption(name, extension_option)) {
+	if (!config.TryGetExtensionOption(Identifier(name), extension_option)) {
 		throw InternalException("refresh_dp_stats: extension setting '" + name + "' was not registered");
 	}
 	auto target_value = value.CastAs(context, extension_option.type);
@@ -285,6 +288,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 		          << "\n";
 #endif
 	}
+
+	RegisterASCorrelationOptimizer(db);
 
 	// Register PAC optimizer rule
 	auto priv_rewrite_rule = PACRewriteRule();
@@ -548,6 +553,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));
 	// Control whether priv_hash() repairs hashes to exactly 32 bits set
 	db.config.AddExtensionOption("pac_hash_repair", "[INTERNAL] priv_hash() repairs hash to exactly 32 bits set",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	// Expose SUM, COUNT/AVG and MIN/MAX states to DuckDB's state export: EXPORT_STATE and spilling of arena-backed
+	// aggregate states. Off by default: with exportable states, DuckDB 2.0 aggregates externally under state
+	// pressure, which slows grouped aggregates that would fit in memory.
+	db.config.AddExtensionOption("priv_state_export",
+	                             "Let DuckDB export and spill stochastic SUM, COUNT, AVG, MIN and MAX states",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	// Propagate PAC metadata through CREATE TABLE AS SELECT
 	db.config.AddExtensionOption("pac_ctas", "[INTERNAL] Propagate PAC metadata through CTAS", LogicalType::BOOLEAN,

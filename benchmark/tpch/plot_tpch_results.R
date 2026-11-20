@@ -184,14 +184,14 @@ if (!has_naive_as) {
       geom_col(data = duckdb_bars, aes(x = x_pos, y = time, fill = component), width = 0.35) +
       geom_col(data = as_total, aes(x = x_pos, y = total, fill = "sampling key join"), width = 0.35) +
       geom_col(data = as_core, aes(x = x_pos, y = time, fill = component), width = 0.35) +
-      scale_fill_manual(values = comp_colors, name = NULL,
+      scale_fill_manual(values = comp_colors, name = NULL, labels = PaperMethodLabels,
                         breaks = c("DuckDB", "SIMD-AS", "sampling key join")) +
       scale_x_continuous(breaks = seq_along(query_order), labels = query_labels, expand = expansion(add = 0.4)) +
       labs(x = NULL, y = NULL)
   } else {
     p <- ggplot(plot_data, aes(x = x_pos, y = time, fill = component, width = 0.35)) +
       geom_col() +
-      scale_fill_manual(values = comp_colors, name = NULL) +
+      scale_fill_manual(values = comp_colors, name = NULL, labels = PaperMethodLabels) +
       scale_x_continuous(breaks = seq_along(query_order), labels = query_labels, expand = expansion(add = 0.4)) +
       labs(x = NULL, y = NULL)
   }
@@ -228,9 +228,12 @@ if (!has_naive_as) {
       panel.grid.minor = element_blank(),
       legend.position = "top",
       legend.title = element_blank(),
-      legend.text = element_text(size = 28),
+      # Keep each colour box next to its own label, with a clear gap before the next entry.
+      legend.text = element_text(size = 28, margin = margin(l = 6)),
+      legend.key.width = grid::unit(16, "pt"),
+      legend.key.spacing.x = grid::unit(26, "pt"),
       legend.margin = margin(0, 0, -5, 0),
-      legend.box.margin = margin(0, 0, -20, 0),
+      legend.box.margin = margin(0, 80, -20, 0),
       axis.text.x = element_text(angle = 45, hjust = 1, size = 24),
       axis.text.y = element_text(size = 24),
       axis.title = element_text(size = 32),
@@ -321,14 +324,14 @@ if (!has_naive_as) {
       geom_col(data = paper_other_bars, aes(x = x_pos, y = time, fill = component), width = 0.25) +
       geom_col(data = paper_as_total, aes(x = x_pos, y = total, fill = "sampling key join"), width = 0.25) +
       geom_col(data = paper_as_core, aes(x = x_pos, y = time, fill = component), width = 0.25) +
-      scale_fill_manual(values = paper_comp_colors, name = NULL,
+      scale_fill_manual(values = paper_comp_colors, name = NULL, labels = PaperMethodLabels,
                         breaks = c("DuckDB", "Naive-AS", "SIMD-AS", "sampling key join")) +
       scale_x_continuous(breaks = seq_along(query_order), labels = query_labels, expand = expansion(add = 0.4)) +
       labs(x = NULL, y = NULL)
   } else {
     p_paper <- ggplot(paper_plot_data, aes(x = x_pos, y = time, fill = component, width = 0.25)) +
       geom_col() +
-      scale_fill_manual(values = paper_comp_colors, name = NULL) +
+      scale_fill_manual(values = paper_comp_colors, name = NULL, labels = PaperMethodLabels) +
       scale_x_continuous(breaks = seq_along(query_order), labels = query_labels, expand = expansion(add = 0.4)) +
       labs(x = NULL, y = NULL)
   }
@@ -356,9 +359,12 @@ if (!has_naive_as) {
       panel.grid.minor = element_blank(),
       legend.position = "top",
       legend.title = element_blank(),
-      legend.text = element_text(size = 28),
+      # Keep each colour box next to its own label, with a clear gap before the next entry.
+      legend.text = element_text(size = 28, margin = margin(l = 6)),
       legend.margin = margin(0, 0, -5, 0),
-      legend.box.margin = margin(0, 0, -20, 0),
+      legend.key.width = grid::unit(16, "pt"),
+      legend.key.spacing.x = grid::unit(26, "pt"),
+      legend.box.margin = margin(0, 80, -20, 0),
       axis.text.x = element_text(angle = 45, hjust = 1, size = 24),
       axis.text.y = element_text(size = 24),
       axis.title = element_text(size = 32),

@@ -22,7 +22,7 @@
 #include "duckdb/optimizer/optimizer.hpp"
 // Include DuckDB headers for DROP operation handling
 #include "duckdb/parser/parsed_data/drop_info.hpp"
-#include "duckdb/planner/operator/logical_simple.hpp"
+#include "duckdb/planner/operator/logical_drop.hpp"
 // Include DuckDB headers for CTAS metadata propagation
 #include "duckdb/planner/operator/logical_create_table.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -47,7 +47,7 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 		return;
 	}
 	// Cast to LogicalSimple to access the parse info (DROP operations use LogicalSimple)
-	auto &simple = plan->Cast<LogicalSimple>();
+	auto &simple = plan->Cast<LogicalDrop>();
 	if (simple.info->info_type != ParseInfoType::DROP_INFO) {
 		return;
 	}
@@ -56,7 +56,7 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 	if (drop_info.type != CatalogType::TABLE_ENTRY) {
 		return; // Only handle DROP TABLE operations
 	}
-	string table_name = drop_info.name;
+	string table_name = drop_info.GetQualifiedName().Name().GetIdentifierName();
 
 	// Check if this table has PAC metadata
 	auto &metadata_mgr = PrivacyMetadataManager::Get();
@@ -140,7 +140,7 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, unique_ptr<LogicalOperator> &select_plan,
                                   OptimizerExtensionInput &input) {
 	auto &create_table = outer_plan->Cast<LogicalCreateTable>();
-	string new_table = create_table.info->Base().table;
+	string new_table = create_table.info->Base().GetQualifiedName().Name().GetIdentifierName();
 	auto &mgr = PrivacyMetadataManager::Get();
 	if (mgr.HasMetadata(new_table)) {
 		return;
@@ -167,7 +167,7 @@ static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, uniqu
 			if (!entry) {
 				continue;
 			}
-			auto *meta = mgr.GetTableMetadata(entry->name);
+			auto *meta = mgr.GetTableMetadata(entry->name.GetIdentifierName());
 			if (meta && (meta->is_privacy_unit || meta->derived_pu)) {
 				source_meta = meta;
 				source_get = &get;
@@ -187,7 +187,7 @@ static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, uniqu
 	std::unordered_map<idx_t, string> oid_to_name;
 	if (entry) {
 		for (auto &col : entry->GetColumns().Logical()) {
-			oid_to_name[col.Oid()] = col.Name();
+			oid_to_name[col.Oid()] = col.Name().GetIdentifierName();
 		}
 	}
 
@@ -215,7 +215,7 @@ static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, uniqu
 	for (auto &new_col : new_columns.Logical()) {
 		auto name_it = get_col_idx_to_name.find(dest_idx);
 		if (name_it != get_col_idx_to_name.end()) {
-			src_to_dest_name[name_it->second] = new_col.Name();
+			src_to_dest_name[name_it->second] = new_col.Name().GetIdentifierName();
 		}
 		dest_idx++;
 	}
@@ -247,7 +247,7 @@ static void PropagateCTASMetadata(unique_ptr<LogicalOperator> &outer_plan, uniqu
 		// fall back to a simple name check against the output column names.
 		std::unordered_set<string> new_col_names;
 		for (auto &new_col : new_columns.Logical()) {
-			new_col_names.insert(new_col.Name());
+			new_col_names.insert(new_col.Name().GetIdentifierName());
 		}
 		for (auto &prot : source_meta->protected_columns) {
 			if (new_col_names.count(prot) > 0) {
@@ -495,7 +495,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	bool do_diff = false;
 	{
 		Value val;
-		if (input.context.TryGetCurrentSetting("privacy_diffcols", val) && !val.IsNull()) {
+		if (input.context.TryGetCurrentSetting(Identifier("privacy_diffcols"), val) && !val.IsNull()) {
 			string val_str = val.ToString();
 			if (!val_str.empty()) {
 				if (std::isdigit(val_str[0])) {
@@ -541,10 +541,10 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 				string target_table;
 				if (outer_plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE) {
 					auto &create = outer_plan->Cast<LogicalCreateTable>();
-					target_table = create.info->Base().table;
+					target_table = create.info->Base().GetQualifiedName().Name().GetIdentifierName();
 				} else if (outer_plan->type == LogicalOperatorType::LOGICAL_INSERT) {
 					auto &insert = outer_plan->Cast<LogicalInsert>();
-					target_table = insert.table.name;
+					target_table = insert.table.name.GetIdentifierName();
 				}
 				if (!target_table.empty()) {
 					auto &mgr = PrivacyMetadataManager::Get();
@@ -570,7 +570,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 									col.SetType(plan_types[i]);
 								}
 								if (plan_types[i] == counter_list_type && mut_meta) {
-									mut_meta->counter_columns.push_back(col.Name());
+									mut_meta->counter_columns.push_back(col.Name().GetIdentifierName());
 								}
 							}
 						}

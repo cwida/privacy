@@ -179,7 +179,7 @@ CreateGetsAndChainJoins(const PrivacyCompatibilityResult &check, OptimizerExtens
 			throw InvalidInputException("Privacy compiler: missing table metadata for table: " + table);
 		}
 		auto required_cols = GetRequiredColumnsForTable(check, table, fk_path, privacy_units);
-		idx_t local_idx = binder.GenerateTableIndex();
+		idx_t local_idx = binder.GenerateTableIndex().index;
 		auto get = CreateLogicalGet(input.context, plan, table, local_idx, required_cols);
 		local_get_map[table] = std::move(get);
 	}
@@ -209,15 +209,15 @@ static bool FindAccessibleAlternativeAndJoin(const PrivacyCompatibilityResult &c
 
 		for (auto *table_node : table_nodes) {
 			auto &table_get = table_node->get()->Cast<LogicalGet>();
-			if (table_get.table_index == skip_table_index) {
+			if (table_get.table_index.index == skip_table_index) {
 				continue;
 			}
-			if (!AreTableColumnsAccessible(plan.get(), table_get.table_index)) {
+			if (!AreTableColumnsAccessible(plan.get(), table_get.table_index.index)) {
 				continue;
 			}
 #if PRIVACY_DEBUG
 			PRIVACY_DEBUG_PRINT("FindAccessibleAlternativeAndJoin: Found accessible table " + candidate + " #" +
-			                    std::to_string(table_get.table_index) + " - joining " +
+			                    std::to_string(table_get.table_index.index) + " - joining " +
 			                    std::to_string(tables_to_join.size()) + " tables");
 #endif
 			unique_ptr<LogicalOperator> current_node = (*table_node)->Copy(input.context);
@@ -272,7 +272,7 @@ void AddMissingFKJoins(const PrivacyCompatibilityResult &check, OptimizerExtensi
 				throw InvalidInputException("Privacy compiler: missing table metadata for missing GET: " + table);
 			}
 			auto required_cols = GetRequiredColumnsForTable(check, table, fk_path, privacy_units);
-			idx_t idx = binder.GenerateTableIndex();
+			idx_t idx = binder.GenerateTableIndex().index;
 			auto get = CreateLogicalGet(input.context, plan, table, idx, required_cols);
 			get_map[table] = std::move(get);
 			ordered_table_names.push_back(table);
@@ -351,7 +351,7 @@ void AddMissingFKJoins(const PrivacyCompatibilityResult &check, OptimizerExtensi
 	// Iterate over each instance of the connecting table and add joins
 	for (auto *target_ref : all_connecting_nodes) {
 		auto &target_op = (*target_ref)->Cast<LogicalGet>();
-		idx_t connecting_table_idx = target_op.table_index;
+		idx_t connecting_table_idx = target_op.table_index.index;
 		bool is_in_subquery = IsInDelimJoinSubqueryBranch(&plan, target_ref->get());
 		vector<string> tables_to_join_for_instance = ordered_table_names;
 
@@ -428,7 +428,7 @@ void AddMissingFKJoins(const PrivacyCompatibilityResult &check, OptimizerExtensi
 				}
 				for (auto *fk_node : fk_table_nodes) {
 					auto &fk_table_get = fk_node->get()->Cast<LogicalGet>();
-					idx_t fk_table_idx = fk_table_get.table_index;
+					idx_t fk_table_idx = fk_table_get.table_index.index;
 
 					if (fk_table_idx == connecting_table_idx) {
 						if (AreTableColumnsAccessible(plan.get(), fk_table_idx)) {
@@ -468,7 +468,7 @@ void AddMissingFKJoins(const PrivacyCompatibilityResult &check, OptimizerExtensi
 		string connecting_table_name;
 		auto table_ptr = target_op.GetTable();
 		if (table_ptr) {
-			connecting_table_name = table_ptr->name;
+			connecting_table_name = table_ptr->name.GetIdentifierName();
 		}
 
 		// Case 1: connecting table IS the FK table but blocked (SEMI/ANTI join)
@@ -579,10 +579,10 @@ void AddMissingFKJoins(const PrivacyCompatibilityResult &check, OptimizerExtensi
 
 				for (auto *table_node : table_nodes) {
 					auto &table_get = table_node->get()->Cast<LogicalGet>();
-					if (table_get.table_index == connecting_table_idx) {
+					if (table_get.table_index.index == connecting_table_idx) {
 						continue;
 					}
-					if (!AreTableColumnsAccessible(plan.get(), table_get.table_index)) {
+					if (!AreTableColumnsAccessible(plan.get(), table_get.table_index.index)) {
 						continue;
 					}
 
@@ -609,7 +609,7 @@ void AddMissingFKJoins(const PrivacyCompatibilityResult &check, OptimizerExtensi
 					}
 #if PRIVACY_DEBUG
 					PRIVACY_DEBUG_PRINT("AddMissingFKJoins: Found accessible table " + candidate + " #" +
-					                    std::to_string(table_get.table_index) + " - adding full join chain:");
+					                    std::to_string(table_get.table_index.index) + " - adding full join chain:");
 					for (auto &t : full_tables_to_add) {
 						PRIVACY_DEBUG_PRINT("  - " + t);
 					}

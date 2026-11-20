@@ -43,7 +43,6 @@ the PAC privacy layer (`pac/`); and the differential-privacy layer (`dp/`).
 |------------------------------------------------------|-------------|
 | [benchmark/README.md](benchmark/README.md)           | Benchmark overview |
 | [benchmark/tpch.md](benchmark/tpch.md)               | TPC-H benchmark instructions |
-| [benchmark/imdb.md](benchmark/imdb.md)               | IMDB / JOB benchmark instructions |
 | [benchmark/microbenchmarks.md](benchmark/microbenchmarks.md) | Microbenchmark suite |
 | [benchmark/clickbench.md](benchmark/clickbench.md)   | ClickBench benchmark |
 | [benchmark/sqlstorm.md](benchmark/sqlstorm.md)       | SQLStorm benchmark |

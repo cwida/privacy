@@ -12,6 +12,7 @@
 // IMPORTANT: <regex> must be included BEFORE duckdb headers on Windows MSVC
 // because DuckDB defines its own std namespace that conflicts with <regex>
 #include <regex>
+#include <iostream>
 
 #include "parser/privacy_parser.hpp"
 #include "parser/privacy_parser_helpers.hpp"

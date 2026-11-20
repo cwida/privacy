@@ -315,7 +315,7 @@ NULL
 
 # Test correlated subquery where outer query scans FK table (orders) directly
 # and inner subquery aggregates on a deeper FK table (lineitem)
-# This tests the AddColumnToDelimJoin fix where:
+# This tests DELIM_JOIN binding propagation where:
 # - Outer query scans orders (has FK to customer via o_custkey)
 # - Inner subquery scans lineitem (has FK to orders via l_orderkey)
 # - The o_custkey column needs to be added to DELIM_JOIN correlation
@@ -461,3 +461,81 @@ ORDER BY
 ----
 Supplier#002	2
 Supplier#001	0
+
+# Mixed DISTINCT/ordinary aggregates copy native correlation CTEs. Each copied
+# reader must reference the copied definition, not the original branch's CTE.
+statement ok
+PRAGMA clear_privacy_metadata;
+
+statement ok
+CREATE PU TABLE cte_copy_owner(id INTEGER, PRIVACY_KEY(id));
+
+statement ok
+INSERT INTO cte_copy_owner VALUES (1);
+
+statement ok
+CREATE TABLE cte_copy_facts(k INTEGER, owner INTEGER, supplier INTEGER, v INTEGER);
+
+statement ok
+ALTER TABLE cte_copy_facts ADD PRIVACY_LINK(owner) REFERENCES cte_copy_owner(id);
+
+statement ok
+INSERT INTO cte_copy_facts VALUES (1,1,1,10),(1,1,2,20),(2,1,1,30);
+
+query II
+SELECT count(DISTINCT f.k), sum(f.v)
+FROM cte_copy_facts f
+WHERE EXISTS (SELECT 1 FROM cte_copy_facts w WHERE w.k=f.k AND w.supplier<>f.supplier)
+  AND NOT EXISTS (SELECT 1 FROM cte_copy_facts w WHERE w.k=f.k AND w.v<0);
+----
+0	0
+
+# CTEs may omit the direct ownership key; their consumers must still be sampled.
+statement ok
+DELETE FROM cte_copy_facts;
+
+statement ok
+INSERT INTO cte_copy_owner SELECT i FROM range(2,33) t(i);
+
+statement ok
+INSERT INTO cte_copy_facts SELECT i,i,1,i+10 FROM range(1,33) t(i);
+
+statement ok
+CREATE TEMP TABLE cte_hidden_key_actual AS
+WITH raw AS MATERIALIZED (SELECT v FROM cte_copy_facts)
+SELECT sum(v) AS total FROM raw UNION ALL SELECT sum(v) FROM raw;
+
+statement ok
+SET priv_rewrite=false;
+
+query I
+SELECT count(*) FROM cte_hidden_key_actual a,
+(SELECT as_noised_sum(priv_hash(hash(owner)),v) AS total FROM cte_copy_facts) e
+WHERE a.total=e.total;
+----
+2
+
+statement ok
+SET priv_rewrite=true;
+
+# An aliased ownership key already used by GROUP BY keeps its existing binding.
+# Adding a duplicate scan column would fail to cross that grouping boundary.
+statement ok
+CREATE TEMP TABLE cte_aliased_key_actual AS
+WITH per_owner AS MATERIALIZED (
+ SELECT owner AS pid,sum(v) AS total FROM cte_copy_facts GROUP BY owner
+)
+SELECT avg(total) AS av FROM per_owner;
+
+statement ok
+SET priv_rewrite=false;
+
+query I
+SELECT a.av=e.av FROM cte_aliased_key_actual a,
+(SELECT as_noised_avg(priv_hash(hash(pid)),total) AS av FROM
+ (SELECT owner AS pid,sum(v) AS total FROM cte_copy_facts GROUP BY owner) p) e;
+----
+true
+
+statement ok
+SET priv_rewrite=true;

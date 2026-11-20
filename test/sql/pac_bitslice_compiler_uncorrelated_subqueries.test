@@ -358,7 +358,9 @@ ORDER BY
 
 # Test 4: TPC-H Q9-style query with complex arithmetic in subquery
 # Tests: Subquery with multiple joins, complex arithmetic expression (subtraction of products), GROUP BY multiple columns
-# This query computes profit by nation and year
+# This query computes profit by nation and year. DuckDB 2.0 widens the arithmetic
+# to DECIMAL(21,4), selecting the INT128/double SUM state rather than the
+# approximate INT64 state used for DuckDB 1.5's DECIMAL(18,4).
 query III
 SELECT
     nation,
@@ -389,10 +391,10 @@ ORDER BY
     nation,
     o_year DESC;
 ----
-FRANCE	1996	-619.3152
+FRANCE	1996	-620.0000
 FRANCE	1995	0.0000
 GERMANY	1996	0.0000
-GERMANY	1995	NULL
+GERMANY	1995	-420.0000
 
 # Clean up
 statement ok

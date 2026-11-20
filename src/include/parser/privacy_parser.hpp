@@ -74,11 +74,12 @@ struct PACParseData : public ParserExtensionParseData {
 class PrivacyParserExtension : public ParserExtension {
 public:
 	PrivacyParserExtension() {
-		parse_function = PACParseFunction;
+		parse_function = PACParseTokens;
 		plan_function = PACPlanFunction;
 	}
 
 	static ParserExtensionParseResult PACParseFunction(ParserExtensionInfo *info, const string &query);
+	static ParserExtensionParseResult PACParseTokens(ParserExtensionInfo *info, const vector<SimpleToken> &tokens);
 	static ParserExtensionPlanResult PACPlanFunction(ParserExtensionInfo *info, ClientContext &context,
 	                                                 unique_ptr<ParserExtensionParseData> parse_data);
 

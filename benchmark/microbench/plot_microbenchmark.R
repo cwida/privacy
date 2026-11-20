@@ -43,7 +43,7 @@ base_font <- tryCatch({
 # ============================================================================
 
 PLATFORM_NAMES <- c(
-  'epyc' = 'AMD\n(EPYC 9645)',
+  'epyc' = 'AMD\n(EPYC 9R45)',
   'granite-rapids' = 'Intel Xeon\n(Granite Rapids)',
   'graviton' = 'ARM\n(AWS Graviton4)',
   'macbook' = 'ARM\n(Apple M2 Max)'
@@ -218,6 +218,11 @@ plot_count_optimizations <- function(platform, platform_name, results_dir, outpu
   if (length(valid_times) == 0) return(NULL)
   max_time <- max(valid_times)
   y_max <- max_time / 0.92
+  ordered_times <- sort(valid_times, decreasing = TRUE)
+  if (length(ordered_times) > 1 && ordered_times[1] > 3 * ordered_times[2]) {
+    # Use the existing broken-bar marks when one ablation dwarfs the other bars.
+    y_max <- ordered_times[2] / 0.8
+  }
 
   # Prepare display times
   df <- df %>% mutate(
@@ -295,13 +300,17 @@ plot_count_optimizations <- function(platform, platform_name, results_dir, outpu
     # Regular time labels on top of bars
     geom_text(aes(label = time_label),
               position = position_dodge(width = 0.9),
-              vjust = -0.3, size = base_size * 0.28, fontface = 'bold',
+              vjust = -0.3, size = base_size * 0.23, fontface = 'bold',
               color = 'black', family = base_family) +
     # FAILED labels inside bars - ensure variant_name is factored correctly
-    geom_text(data = df %>% filter(is_timeout) %>% mutate(label_y = y_max, variant_name = factor(variant_name, levels = COUNT_VARIANT_ORDER)),
-              aes(x = group_label, y = label_y, label = 'FAILED', fill = variant_name),
-              position = position_dodge(width = 0.45),
-              vjust = 2.85, hjust = 1,
+    geom_text(data = df %>% filter(is_timeout) %>% mutate(
+                variant_name = factor(variant_name, levels = COUNT_VARIANT_ORDER),
+                bar_x = as.numeric(group_label) +
+                  (as.numeric(variant_name) - (length(COUNT_VARIANT_ORDER) + 1) / 2) *
+                  (0.9 / length(COUNT_VARIANT_ORDER)),
+                label_y = y_max * 0.67),
+              aes(x = bar_x, y = label_y, label = 'FAILED'), inherit.aes = FALSE,
+              vjust = 0.5, hjust = 0.5,
               size = base_size * 0.3, fontface = 'bold',
               color = 'white', angle = 90, show.legend = FALSE) +
     scale_fill_manual(values = COUNT_VARIANT_COLORS, name = NULL) +
@@ -318,7 +327,7 @@ plot_count_optimizations <- function(platform, platform_name, results_dir, outpu
       legend.direction = 'horizontal',
       legend.margin = margin(0, 0, -5, 0),
       legend.box.margin = margin(0, 0, -15, 0),
-      legend.text = element_text(size = base_size + 6),
+      legend.text = element_text(size = base_size),
       legend.key.size = unit(1.2, 'lines'),
       axis.text.x = element_text(angle = 0, hjust = 0.5, size = base_size + 2),
       axis.text.y = element_text(size = base_size + 2),
@@ -342,6 +351,13 @@ plot_count_optimizations <- function(platform, platform_name, results_dir, outpu
 plot_sum_optimizations <- function(platform, platform_name, results_dir, output_dir) {
   sum_files <- list.files(file.path(results_dir, platform),
                          pattern = "^sum_avg_.*\\.csv$", full.names = TRUE)
+  # A sum_figure_*.csv, when present, is the input of this figure (see results/README.md);
+  # the SIMD comparison keeps reading the plain sum_avg_*.csv run.
+  figure_files <- list.files(file.path(results_dir, platform),
+                            pattern = "^sum_figure_.*\\.csv$", full.names = TRUE)
+  if (length(figure_files) > 0) {
+    sum_files <- figure_files
+  }
   if (length(sum_files) == 0) {
     message("No sum_avg data for ", platform)
     return(NULL)
@@ -354,6 +370,10 @@ plot_sum_optimizations <- function(platform, platform_name, results_dir, output_
 
   # Filter to sum, 1000M rows
   df <- df %>% filter(aggregate == 'sum', rows_m == 1000)
+  if (nrow(df) == 0) {
+    message("No 1000M-row sum data for ", platform)
+    return(NULL)
+  }
 
   # Get grouped_scat data — average across all dtypes
   grouped_df <- df %>% filter(!!sym(test_col) == 'grouped_scat') %>%
@@ -808,9 +828,9 @@ plot_simd_improvements <- function(results_dir, output_dir) {
                                      levels = PLATFORM_NAMES[PLATFORM_ORDER])
   data_long$aggregate <- factor(data_long$aggregate, levels = AGG_ORDER)
 
-  # Paper plot settings
-  width <- 4000
-  height <- 1450
+  # Match the dimensions of the figure included in the manuscript.
+  width <- 3991
+  height <- 1308
   res <- 200
   base_size <- 40
   base_family <- base_font
@@ -843,10 +863,10 @@ plot_simd_improvements <- function(results_dir, output_dir) {
       axis.title.x = element_blank(),
       plot.margin = margin(2, 5, 5, 5)
     ) +
-    ylim(0, 50)
+    ylim(0, ceiling(max(data_long$factor) * 1.15 / 5) * 5)
 
   output_file <- file.path(output_dir, 'simd_improvements_paper.png')
-  png(filename = output_file, width = width, height = height, res = res)
+  png(filename = output_file, width = width, height = height, res = res, type = "cairo")
   print(p)
   dev.off()
   message("Saved: ", output_file)

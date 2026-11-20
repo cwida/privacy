@@ -28,7 +28,7 @@ int RunPlanTraversalTests() {
 
 		// Test 1: FindPrivacyUnitGetNode - find specific table
 		std::cerr << "\n--- Test FindPrivacyUnitGetNode ---\n";
-		Parser parser;
+		Parser parser(*con.context);
 		parser.ParseQuery("SELECT SUM(val) FROM t_test;");
 		Planner planner(*con.context);
 		planner.CreatePlan(std::move(parser.statements[0]));
@@ -75,7 +75,7 @@ int RunPlanTraversalTests() {
 
 		// Test 4: FindTopAggregate - no aggregate should throw
 		std::cerr << "\n--- Test FindTopAggregate (no aggregate) ---\n";
-		Parser parser2;
+		Parser parser2(*con.context);
 		parser2.ParseQuery("SELECT val FROM t_test;");
 		Planner planner2(*con.context);
 		planner2.CreatePlan(std::move(parser2.statements[0]));

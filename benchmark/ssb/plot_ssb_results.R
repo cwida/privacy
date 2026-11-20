@@ -1,6 +1,7 @@
 #!/usr/bin/env Rscript
 # WIP: prepare SSB inputs for the paper's existing TPC-H runtime plotter.
 script_file <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)[1])
+source(file.path(dirname(dirname(normalizePath(script_file))), "plot_common.R"))
 plotter <- file.path(dirname(dirname(normalizePath(script_file))), "tpch", "plot_tpch_results.R")
 
 args <- commandArgs(trailingOnly = TRUE)
@@ -109,9 +110,12 @@ p$layers <- p$layers[1]
 p$mapping$width <- NULL
 p$layers[[1]]$aes_params$width <- 0.20
 p <- suppressMessages(p + ggplot2::scale_fill_manual(
-  values = setNames(c("#95a5a6", "#a8d4ff", "#4dff4d", "#52b788"), series), name = NULL
+  values = setNames(c("#95a5a6", "#a8d4ff", "#4dff4d", "#52b788"), series), name = NULL,
+  labels = PaperMethodLabels
 ))
-p <- p + ggplot2::theme(legend.text = ggplot2::element_text(size = 23))
+p <- p + ggplot2::theme(legend.text = ggplot2::element_text(size = 24, margin = ggplot2::margin(l = 6)),
+                        legend.key.width = grid::unit(16, "pt"),
+                        legend.key.spacing.x = grid::unit(20, "pt"))
 p <- suppressMessages(p + ggplot2::scale_x_continuous(
   breaks = seq_along(queries), labels = sub("^q([0-9])([0-9])$", "Q\\1.\\2", queries),
   expand = ggplot2::expansion(add = 0.4)))
@@ -138,6 +142,6 @@ p <- p + ggplot2::geom_segment(data = do.call(rbind, stripes),
   ggplot2::aes(x = x, xend = xend, y = y, yend = yend),
   inherit.aes = FALSE, color = "#245d2c", linewidth = 0.3, alpha = 0.55)
 combined <- file.path(output_dir, sprintf("ssb_sf%d_t%d_combined_paper", sf, threads))
-ggplot2::ggsave(paste0(combined, ".png"), p, width = 4000 / 350, height = 1500 / 350, dpi = 350)
-ggplot2::ggsave(paste0(combined, ".pdf"), p, width = 4000 / 350, height = 1500 / 350, device = cairo_pdf)
+ggplot2::ggsave(paste0(combined, ".png"), p, width = 4000 / 350, height = 1300 / 350, dpi = 350)
+ggplot2::ggsave(paste0(combined, ".pdf"), p, width = 4000 / 350, height = 1300 / 350, device = cairo_pdf)
 message("Combined figure: ", combined, ".{png,pdf}; labels are runtime / full-data DuckDB runtime")

@@ -21,3 +21,8 @@ PaperFont <- function() {
 SuccessFlag <- function(x) {
   tolower(as.character(x)) %in% c("true", "t", "1")
 }
+
+PaperMethodLabels <- function(x) {
+  x <- gsub("\\bNaive-AS\\b", "Naive-SA", x)
+  gsub("\\bSIMD-AS\\b", "SIMD-ASA", x)
+}

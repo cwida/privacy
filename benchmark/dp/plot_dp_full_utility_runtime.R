@@ -247,10 +247,10 @@ runtime_compact <- normalized %>%
 			mechanism == "DP-SAA m=512" ~ 0.28,
 			TRUE ~ 0.0
 		),
-    label_y = avg_time_ms * 1.15,
+    label_y = median_time_ms * 1.15,
     slowdown_label = ifelse(mechanism == "DuckDB", "",
-                            ifelse(avg_slowdown >= 10, sprintf("%.0fx", avg_slowdown),
-                                   sprintf("%.1fx", avg_slowdown)))
+                            ifelse(median_slowdown >= 10, sprintf("%.0fx", median_slowdown),
+                                   sprintf("%.1fx", median_slowdown)))
   )
 
 utility_csv <- file.path(output_dir, "tpch_sf30_all5_utility_summary.csv")
@@ -358,7 +358,7 @@ message("Grouped utility plot saved to: ", utility_grouped_plot)
 
 runtime_compact_plot_obj <- ggplot(
   runtime_compact,
-  aes(x = x_pos, y = avg_time_ms, fill = mechanism)
+  aes(x = x_pos, y = median_time_ms, fill = mechanism)
 ) +
   geom_col(width = 0.14, color = "black", linewidth = 0.25, na.rm = TRUE) +
 	geom_text(
@@ -378,7 +378,7 @@ runtime_compact_plot_obj <- ggplot(
     expand = expansion(add = 0.08)
   ) +
   scale_y_log10(labels = function(x) ifelse(x >= 1000, paste0(x / 1000, "s"), paste0(x, "ms"))) +
-  coord_cartesian(ylim = c(NA, max(runtime_compact$avg_time_ms, na.rm = TRUE) * 1.5), clip = "off") +
+  coord_cartesian(ylim = c(NA, max(runtime_compact$median_time_ms, na.rm = TRUE) * 1.5), clip = "off") +
   guides(fill = guide_legend(nrow = 1, byrow = TRUE)) +
   labs(x = NULL, y = NULL) +
   theme_bw(base_size = 40, base_family = base_font) +

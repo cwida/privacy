@@ -1,3 +1,4 @@
+#include "duckdb/common/vector/list_vector.hpp"
 #include "aggregates/as_aggregate.hpp"
 
 #include "duckdb.hpp"
@@ -7,8 +8,10 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/main/client_context_state.hpp"
 
 #include <random>
+#include <atomic>
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -114,7 +117,7 @@ static double ComputeSecondMomentVariance(const vector<PAC_FLOAT> &values);
 // PacNoiseInNull: probabilistically returns true based on bit count in key_hash
 // mi: controls probabilistic (mi>0) vs deterministic (mi<=0) mode
 // correction: reduces NULL probability by this factor (considers correction times more non-nulls)
-bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt19937_64 &gen) {
+bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, PacRandomEngine &gen) {
 	int popcount = pac_popcount64(key_hash);
 	// Effective popcount considering correction factor (correction times more non-nulls)
 	double effective_popcount = popcount * correction;
@@ -133,10 +136,34 @@ bool PacNoiseInNull(uint64_t key_hash, double mi, double correction, std::mt1993
 	return pac_popcount64(~key_hash) > threshold;
 }
 
+struct PacRandomState : public ClientContextState {
+	std::atomic<uint64_t> next_stream {0};
+
+	void QueryBegin(ClientContext &) override {
+		next_stream.store(0, std::memory_order_relaxed);
+	}
+};
+
+shared_ptr<PacRandomState> GetPacRandomState(ClientContext &context) {
+	return context.registered_state->GetOrCreate<PacRandomState>("privacy_random_streams");
+}
+
+uint64_t GetPacSeed(ClientContext &context, double mi) {
+	Value value;
+	if (context.TryGetCurrentSetting(Identifier("privacy_seed"), value) && !value.IsNull()) {
+		return uint64_t(value.GetValue<int64_t>());
+	}
+	return mi == 0.0 ? 42 : 42 ^ (PAC_MAGIC_HASH * uint64_t(context.ActiveTransaction().GetActiveQuery()));
+}
+
+PacRandomEngine PacRandomStream(uint64_t seed, PacRandomState &state) {
+	return PacRandomEngine(seed, state.next_stream.fetch_add(1, std::memory_order_relaxed));
+}
+
 // ============================================================================
 // Utility NULLing: probabilistically NULL low-SNR cells (post-processing)
 // ============================================================================
-bool PacUtilityNull(double noised_value, double noise_variance, double threshold, std::mt19937_64 &gen) {
+bool PacUtilityNull(double noised_value, double noise_variance, double threshold, PacRandomEngine &gen) {
 	if (std::isnan(threshold)) {
 		return false; // disabled (setting is NULL)
 	}
@@ -169,7 +196,7 @@ bool PacUtilityNull(double noised_value, double noise_variance, double threshold
 // correction: factor to multiply values by after compacting but before noising
 // pstate: optional p-tracking state for persistent secret composition (Bayesian posterior over worlds)
 // Returns: correction*yJ + noise where yJ is a randomly selected counter
-PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, double correction, std::mt19937_64 &gen,
+PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, double correction, PacRandomEngine &gen,
                                        uint64_t is_null, uint64_t counter_selector,
                                        const std::shared_ptr<PacPState> &pstate, double *out_noise_variance) {
 	D_ASSERT(~is_null != 0); // at least one bit must be valid
@@ -350,19 +377,19 @@ uint64_t PacRepairHash32(uint64_t num) {
 //   k     : minimum per-subsample support; cells below it are released as NULL
 // ============================================================================
 struct PacAggregateLocalState : public FunctionLocalState {
-	explicit PacAggregateLocalState(uint64_t seed) : gen(seed) {
+	explicit PacAggregateLocalState(PacRandomEngine gen_p) : gen(gen_p) {
 	}
-	std::mt19937_64 gen;
+	PacRandomEngine gen;
 };
 
-static unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &, const BoundFunctionExpression &,
+static unique_ptr<FunctionLocalState> PacAggregateInit(ExpressionState &state, const BoundFunctionExpression &,
                                                        FunctionData *bind_data) {
 	// Single source-of-truth: prefer seed supplied via bind_data (PrivBindData).
 	uint64_t seed = std::random_device {}();
 	if (bind_data) {
 		seed = bind_data->Cast<PrivBindData>().seed;
 	}
-	return make_uniq<PacAggregateLocalState>(seed);
+	return make_uniq<PacAggregateLocalState>(PacRandomStream(seed, *GetPacRandomState(state.GetContext())));
 }
 
 // Templated over values element type T and counts element type C so we can accept
@@ -376,8 +403,8 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 
 	idx_t count = args.size();
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto res = FlatVector::GetData<double>(result);
-	FlatVector::Validity(result).SetAllValid(count);
+	auto res = FlatVector::GetDataMutable<double>(result);
+	FlatVector::ValidityMutable(result).SetAllValid(count);
 
 	auto &local = ExecuteFunctionState::GetFunctionState(state)->Cast<PacAggregateLocalState>();
 	auto &gen = local.gen;
@@ -386,18 +413,18 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 	uint64_t query_hash = 0;
 	std::shared_ptr<PacPState> pstate;
 	auto &bound_expr = state.expr.Cast<BoundFunctionExpression>();
-	if (bound_expr.bind_info) {
-		auto &bd = bound_expr.bind_info->Cast<PrivBindData>();
+	if (bound_expr.BindInfo()) {
+		auto &bd = bound_expr.BindInfo()->Cast<PrivBindData>();
 		query_hash = bd.query_hash;
 		pstate = bd.pstate;
 	}
 
 	UnifiedVectorFormat vvals, vcnts;
-	vals.ToUnifiedFormat(count, vvals);
-	cnts.ToUnifiedFormat(count, vcnts);
+	vals.ToUnifiedFormat(vvals);
+	cnts.ToUnifiedFormat(vcnts);
 
 	UnifiedVectorFormat kvals;
-	k_vec.ToUnifiedFormat(count, kvals);
+	k_vec.ToUnifiedFormat(kvals);
 	auto *kdata = UnifiedVectorFormat::GetData<int32_t>(kvals);
 
 	for (idx_t row = 0; row < count; row++) {
@@ -426,10 +453,10 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 		idx_t vals_len = ve.length;
 		idx_t cnts_len = ce.length;
 
-		auto &vals_child = ListVector::GetEntry(vals);
-		auto &cnts_child = ListVector::GetEntry(cnts);
-		vals_child.Flatten(ve.offset + ve.length);
-		cnts_child.Flatten(ce.offset + ce.length);
+		auto &vals_child = ListVector::GetChild(vals);
+		auto &cnts_child = ListVector::GetChild(cnts);
+		vals_child.Flatten();
+		cnts_child.Flatten();
 		auto *vdata = FlatVector::GetData<T>(vals_child);
 		auto *cdata = FlatVector::GetData<C>(cnts_child);
 
@@ -521,8 +548,8 @@ static void PacAggregateScalar(DataChunk &args, ExpressionState &state, Vector &
 	}
 }
 
-static unique_ptr<FunctionData> PacAggregateBind(ClientContext &ctx, ScalarFunction &,
-                                                 vector<unique_ptr<Expression>> &) {
+static unique_ptr<FunctionData> PacAggregateBind(BindScalarFunctionInput &bind_input) {
+	auto &ctx = bind_input.GetClientContext();
 	// mi is supplied per-row; the bind-time value is unused for noise but seeds the RNG.
 	return make_uniq<PrivBindData>(ctx, 128.0);
 }
@@ -533,8 +560,9 @@ void RegisterPacAggregateFunctions(ExtensionLoader &loader) {
 		auto fun = ScalarFunction(
 		    "pac_aggregate",
 		    {LogicalType::LIST(vals_elem), LogicalType::LIST(cnts_elem), LogicalType::DOUBLE, LogicalType::INTEGER},
-		    LogicalType::DOUBLE, fn, PacAggregateBind, nullptr, nullptr, PacAggregateInit);
-		fun.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		    LogicalType::DOUBLE, fn, PacAggregateBind, nullptr, PacAggregateInit);
+		fun.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+		fun.SetFallible();
 		loader.RegisterFunction(fun);
 	};
 
@@ -569,11 +597,12 @@ void RegisterPacAggregateFunctions(ExtensionLoader &loader) {
 #undef REG_COUNTS_FOR
 }
 
-static unique_ptr<FunctionData> PacHashBind(ClientContext &ctx, ScalarFunction &, vector<unique_ptr<Expression>> &) {
+static unique_ptr<FunctionData> PacHashBind(BindScalarFunctionInput &bind_input) {
+	auto &ctx = bind_input.GetClientContext();
 	double mi = GetPacMiFromSetting(ctx);
 	bool hash_repair = true;
 	Value hr_val;
-	if (ctx.TryGetCurrentSetting("pac_hash_repair", hr_val) && !hr_val.IsNull()) {
+	if (ctx.TryGetCurrentSetting(Identifier("pac_hash_repair"), hr_val) && !hr_val.IsNull()) {
 		hash_repair = hr_val.GetValue<bool>();
 	}
 	return make_uniq<PrivBindData>(ctx, mi, 1.0, 1.0, hash_repair);
@@ -585,8 +614,8 @@ static void PacHashFunction(DataChunk &args, ExpressionState &state, Vector &res
 	auto &function = state.expr.Cast<BoundFunctionExpression>();
 	uint64_t query_hash = 0;
 	bool hash_repair = true;
-	if (function.bind_info) {
-		auto &bind_data = function.bind_info->Cast<PrivBindData>();
+	if (function.BindInfo()) {
+		auto &bind_data = function.BindInfo()->Cast<PrivBindData>();
 		query_hash = bind_data.query_hash;
 		hash_repair = bind_data.hash_repair;
 	}

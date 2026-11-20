@@ -8,6 +8,7 @@
 #include "as_query_rewriter.hpp"
 #include "benchmark_json.hpp"
 #include "benchmark_paths.hpp"
+#include "benchmark_settings.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/connection.hpp"
@@ -464,7 +465,9 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 		} else {
 			Log(string("Will create/populate DuckDB database: ") + db_actual);
 		}
-		DuckDB db(db_actual.c_str());
+		DBConfig db_config;
+		ConfigureBenchmarkDatabase(db_config);
+		DuckDB db(db_actual.c_str(), &db_config);
 		Connection con(db);
 
 		// Set thread count
@@ -472,6 +475,11 @@ int RunASTPCHBenchmark(const string &db_path, const string &queries_dir, double 
 		con.Query("SET threads TO " + std::to_string(threads) + ";");
 		con.Query("SET pac_sample_diversity_check=false;");
 		con.Query("SET priv_rewrite=false;");
+		auto r_export = con.Query(ANALYTICAL_STATE_EXPORT_SQL);
+		if (!r_export || r_export->HasError()) {
+			throw std::runtime_error(string(ANALYTICAL_STATE_EXPORT_SQL) + " failed" +
+			                         (r_export ? ": " + r_export->GetError() : string()));
+		}
 
 		// Enable spilling to disk when memory is insufficient
 		auto r_temp = con.Query("SET temp_directory='/tmp/duckdb_temp';");

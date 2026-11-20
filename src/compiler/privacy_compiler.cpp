@@ -91,7 +91,7 @@ static bool IsDirectlyReachable(LogicalOperator *from, idx_t table_index, bool i
 	}
 	if (from->type == LogicalOperatorType::LOGICAL_GET) {
 		auto &get = from->Cast<LogicalGet>();
-		if (get.table_index == table_index) {
+		if (get.table_index.index == table_index) {
 			return true;
 		}
 	}
@@ -115,9 +115,9 @@ static unique_ptr<Expression> HandlePassthroughDeepHash(OptimizerExtensionInput 
                                                         std::unordered_map<idx_t, ColumnBinding> &hash_cache) {
 	auto inner_hash_binding = GetOrInsertHashProjection(input, plan, inner_get, key_cols, false, hash_cache);
 
-	auto propagated_to_inner = PropagateSingleBinding(*plan, inner_hash_binding.table_index, inner_hash_binding,
+	auto propagated_to_inner = PropagateSingleBinding(*plan, inner_hash_binding.table_index.index, inner_hash_binding,
 	                                                  LogicalType::UBIGINT, inner_agg);
-	if (propagated_to_inner.table_index == DConstants::INVALID_INDEX) {
+	if (propagated_to_inner.table_index.index == DConstants::INVALID_INDEX) {
 		return nullptr;
 	}
 	// Add hash as GROUP BY column in the inner aggregate
@@ -125,16 +125,17 @@ static unique_ptr<Expression> HandlePassthroughDeepHash(OptimizerExtensionInput 
 	inner_agg->groups.push_back(make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated_to_inner));
 	// Also add to grouping_sets so the physical HASH_GROUP_BY includes this column
 	for (auto &gs : inner_agg->grouping_sets) {
-		gs.insert(new_group_idx);
+		gs.insert(ProjectionIndex(new_group_idx));
 	}
 	inner_agg->ResolveOperatorTypes();
 
-	ColumnBinding inner_hash_output(inner_agg->group_index, inner_agg->groups.size() - 1);
+	ColumnBinding inner_hash_output {TableIndex(inner_agg->group_index.index),
+	                                 ProjectionIndex(inner_agg->groups.size() - 1)};
 
 	// Propagate from inner aggregate output to outer aggregate
-	auto propagated_to_outer = PropagateSingleBinding(*plan, inner_hash_output.table_index, inner_hash_output,
+	auto propagated_to_outer = PropagateSingleBinding(*plan, inner_hash_output.table_index.index, inner_hash_output,
 	                                                  LogicalType::UBIGINT, target_agg);
-	if (propagated_to_outer.table_index == DConstants::INVALID_INDEX) {
+	if (propagated_to_outer.table_index.index == DConstants::INVALID_INDEX) {
 		return nullptr;
 	}
 	return make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated_to_outer);
@@ -230,7 +231,7 @@ static void CollectCTERefs(LogicalOperator *op, idx_t target_cte_index, vector<L
 	}
 	if (op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		auto &ref = op->Cast<LogicalCTERef>();
-		if (ref.cte_index == target_cte_index) {
+		if (ref.cte_index.index == target_cte_index) {
 			refs.push_back(&ref);
 		}
 	}
@@ -278,9 +279,19 @@ static ColumnBinding PropagateColumnThroughSubtree(LogicalOperator *root, Logica
 			auto &proj = op->Cast<LogicalProjection>();
 			idx_t new_idx = proj.expressions.size();
 			proj.expressions.push_back(make_uniq<BoundColumnRefExpression>(col_type, current));
-			current = ColumnBinding(proj.table_index, new_idx);
+			current = ColumnBinding(TableIndex(proj.table_index.index), ProjectionIndex(new_idx));
 			proj.ResolveOperatorTypes();
 		} else if (op != &get) {
+			if (op->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
+				auto &agg = op->Cast<LogicalAggregate>();
+				for (idx_t j = 0; j < agg.groups.size(); j++) {
+					if (agg.groups[j]->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+					    agg.groups[j]->Cast<BoundColumnRefExpression>().Binding() == current) {
+						current = ColumnBinding(agg.group_index, ProjectionIndex(j));
+						break;
+					}
+				}
+			}
 			// For non-projection operators, check that the binding passes through
 			auto bindings = op->GetColumnBindings();
 			bool found = false;
@@ -292,7 +303,7 @@ static ColumnBinding PropagateColumnThroughSubtree(LogicalOperator *root, Logica
 			}
 			if (!found) {
 				// Binding is not in this operator's output — propagation is impossible
-				return ColumnBinding(DConstants::INVALID_INDEX, 0);
+				return ColumnBinding(TableIndex(DConstants::INVALID_INDEX), ProjectionIndex(0));
 			}
 		}
 	}
@@ -305,7 +316,7 @@ static ColumnBinding PropagateColumnThroughSubtree(LogicalOperator *root, Logica
 static bool ExpandCTEWithColumns(LogicalOperator *plan_root, const LogicalCTERef &ref, const string &table_name,
                                  const vector<string> &columns) {
 	// Find the MATERIALIZED_CTE that defines this CTE
-	auto *mat_cte = FindMaterializedCTE(plan_root, ref.cte_index);
+	auto *mat_cte = FindMaterializedCTE(plan_root, ref.cte_index.index);
 	if (!mat_cte || mat_cte->children.empty()) {
 		return false;
 	}
@@ -347,7 +358,7 @@ static bool ExpandCTEWithColumns(LogicalOperator *plan_root, const LogicalCTERef
 		LogicalType col_type = LogicalType::INVALID;
 		auto &catalog_columns = entry->GetColumns();
 		for (auto &col : catalog_columns.Logical()) {
-			if (col.Name() == col_name) {
+			if (col.Name().GetIdentifierName() == col_name) {
 				col_oid = col.Oid();
 				col_type = col.Type();
 				break;
@@ -359,28 +370,18 @@ static bool ExpandCTEWithColumns(LogicalOperator *plan_root, const LogicalCTERef
 			return false;
 		}
 
-		// Add column to GET's column_ids
-		idx_t new_col_idx = get->GetColumnIds().size();
-		get->AddColumnId(col_oid);
-
-		// Add to projection_ids if the GET uses them
-		if (!get->projection_ids.empty()) {
-			get->projection_ids.push_back(new_col_idx);
+		// Reuse an existing key binding, including keys projected under an alias.
+		// A duplicate GET column would not match the aggregate's grouping binding.
+		auto get_output_idx = EnsureProjectedColumn(*get, col_name);
+		if (get_output_idx == DConstants::INVALID_INDEX) {
+			return false;
 		}
-
-		get->ResolveOperatorTypes();
-
-		// The GET now outputs this column at binding (get->table_index, new_output_idx)
-		// If projection_ids is non-empty, the output index is projection_ids.size()-1
-		// Otherwise it's column_ids.size()-1
-		idx_t get_output_idx =
-		    get->projection_ids.empty() ? (get->GetColumnIds().size() - 1) : (get->projection_ids.size() - 1);
-		ColumnBinding get_binding(get->table_index, get_output_idx);
+		ColumnBinding get_binding {TableIndex(get->table_index.index), ProjectionIndex(get_output_idx)};
 
 		// Propagate through intermediate operators (projections, filters) in the CTE definition.
 		// If propagation fails (binding blocked by aggregate, semi-join, etc.), bail out.
 		auto top_binding = PropagateColumnThroughSubtree(mat_cte->children[0].get(), *get, get_binding, col_type);
-		if (top_binding.table_index == DConstants::INVALID_INDEX) {
+		if (top_binding.table_index.index == DConstants::INVALID_INDEX) {
 			return false;
 		}
 
@@ -389,15 +390,15 @@ static bool ExpandCTEWithColumns(LogicalOperator *plan_root, const LogicalCTERef
 
 		// Update ALL CTE_REF nodes that reference this CTE
 		vector<LogicalCTERef *> all_refs;
-		CollectCTERefs(plan_root, ref.cte_index, all_refs);
+		CollectCTERefs(plan_root, ref.cte_index.index, all_refs);
 		for (auto *cte_ref : all_refs) {
-			cte_ref->bound_columns.push_back(col_name);
+			cte_ref->bound_columns.emplace_back(col_name);
 			cte_ref->chunk_types.push_back(col_type);
 			cte_ref->ResolveOperatorTypes();
 		}
 
 		PRIVACY_DEBUG_PRINT("ExpandCTEWithColumns: added column '" + col_name + "' (oid=" + std::to_string(col_oid) +
-		                    ") to CTE index " + std::to_string(ref.cte_index));
+		                    ") to CTE index " + std::to_string(ref.cte_index.index));
 	}
 
 	return true;
@@ -418,7 +419,7 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 
 	if (!inside_delim_join && op->type == LogicalOperatorType::LOGICAL_CTE_REF) {
 		auto &ref = op->Cast<LogicalCTERef>();
-		auto cte_it = cte_map.find(ref.cte_index);
+		auto cte_it = cte_map.find(ref.cte_index.index);
 		if (cte_it != cte_map.end()) {
 			auto &cte_tables = cte_it->second;
 
@@ -468,7 +469,15 @@ static CTEHashMatch FindCTEHashSource(LogicalOperator *op, const string &pu_tabl
 				// Find FK columns referencing the next table in the path toward the PU
 				string next_table = fk_path.size() > 1 ? fk_path[1] : pu_table_name;
 				for (auto &fk : fk_meta_it->second.fks) {
-					if (fk.first == next_table && !fk.second.empty() && CTERefExposesColumns(ref, fk.second)) {
+					if (fk.first != next_table || fk.second.empty()) {
+						continue;
+					}
+					// A row-level CTE may omit its owner's key from the SQL projection.
+					// Carry a direct ownership key through it just as for a PU scan.
+					if (!CTERefExposesColumns(ref, fk.second) && next_table == pu_table_name && plan_root) {
+						ExpandCTEWithColumns(plan_root, ref, fk_table, fk.second);
+					}
+					if (CTERefExposesColumns(ref, fk.second)) {
 						return CTEHashMatch(&ref, fk.second);
 					}
 				}
@@ -509,17 +518,18 @@ public:
 				AppendMembership(cte.children[0], mask_column);
 				cte.column_count = value_columns + 1;
 				vector<LogicalCTERef *> refs;
-				CollectCTERefs(plan.get(), cte.table_index, refs);
+				CollectCTERefs(plan.get(), cte.table_index.index, refs);
 				for (auto *ref : refs) {
 					if (ref->chunk_types.size() != value_columns) {
 						throw InvalidInputException("Private UNION CTE has unresolved ownership output columns");
 					}
 					ref->chunk_types.push_back(LogicalType::UBIGINT);
-					ref->bound_columns.push_back("private_union_membership");
+					ref->bound_columns.emplace_back("private_union_membership");
 					ref->ResolveOperatorTypes();
-					memberships.emplace(ref, ColumnBinding(ref->table_index, mask_column));
+					memberships.emplace(ref, ColumnBinding(ref->table_index, ProjectionIndex(mask_column)));
 				}
-				PRIVACY_DEBUG_PRINT("[PRIVATE UNION] Exported membership through CTE " + cte.ctename);
+				PRIVACY_DEBUG_PRINT("[PRIVATE UNION] Exported membership through CTE " +
+				                    cte.ctename.GetIdentifierName());
 			}
 			Rewrite(cte.children[1]);
 			cte.ResolveOperatorTypes();
@@ -563,15 +573,15 @@ public:
 		vector<pair<LogicalOperator *, ColumnBinding>> found;
 		CollectMemberships(*agg.children[0], found);
 		if (found.empty()) {
-			return ColumnBinding(DConstants::INVALID_INDEX, DConstants::INVALID_INDEX);
+			return ColumnBinding();
 		}
 		if (found.size() != 1 || ContainsOutsideEntity(*agg.children[0])) {
 			throw InvalidInputException("Private UNION cannot combine independent ownership streams above a UNION");
 		}
 		CheckBranch(*agg.children[0]);
-		auto mask =
-		    PropagateSingleBinding(*plan, found[0].second.table_index, found[0].second, LogicalType::UBIGINT, &agg);
-		if (mask.table_index == DConstants::INVALID_INDEX) {
+		auto mask = PropagateSingleBinding(*plan, found[0].second.table_index.index, found[0].second,
+		                                   LogicalType::UBIGINT, &agg);
+		if (mask.table_index.index == DConstants::INVALID_INDEX) {
 			throw InvalidInputException("Private UNION could not propagate membership to the consuming aggregate");
 		}
 		return mask;
@@ -584,7 +594,7 @@ private:
 	const vector<string> &pus;
 	std::unordered_map<LogicalOperator *, ColumnBinding> memberships;
 
-	void ProjectMembership(unique_ptr<LogicalOperator> &op, idx_t count, idx_t output_index, bool distinct) {
+	void ProjectMembership(unique_ptr<LogicalOperator> &op, idx_t count, TableIndex output_index, bool distinct) {
 		auto types = op->types;
 		auto bindings = op->GetColumnBindings();
 		vector<unique_ptr<Expression>> outputs;
@@ -600,10 +610,11 @@ private:
 			                                input.optimizer.binder.GenerateTableIndex(), std::move(aggregates));
 			for (idx_t i = 0; i < count; i++) {
 				dedup->groups.push_back(make_uniq<BoundColumnRefExpression>(types[i], bindings[i]));
-				outputs.push_back(make_uniq<BoundColumnRefExpression>(types[i], ColumnBinding(dedup->group_index, i)));
+				outputs.push_back(make_uniq<BoundColumnRefExpression>(
+				    types[i], ColumnBinding(dedup->group_index, ProjectionIndex(i))));
 			}
-			outputs.push_back(
-			    make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, ColumnBinding(dedup->aggregate_index, 0)));
+			outputs.push_back(make_uniq<BoundColumnRefExpression>(
+			    LogicalType::UBIGINT, ColumnBinding(dedup->aggregate_index, ProjectionIndex(0))));
 			dedup->children.push_back(std::move(op));
 			op = std::move(dedup);
 		} else {
@@ -616,7 +627,7 @@ private:
 		projection->children.push_back(std::move(op));
 		op = std::move(projection);
 		op->ResolveOperatorTypes();
-		memberships.emplace(op.get(), ColumnBinding(output_index, count));
+		memberships.emplace(op.get(), ColumnBinding(output_index, ProjectionIndex(count)));
 	}
 
 	void RewriteDistinct(unique_ptr<LogicalOperator> &op) {
@@ -636,8 +647,8 @@ private:
 		auto old_bindings = op->children[0]->GetColumnBindings();
 		for (idx_t i = 0; i < count; i++) {
 			auto &expr = distinct.distinct_targets[i];
-			if (i >= old_bindings.size() || expr->type != ExpressionType::BOUND_COLUMN_REF ||
-			    expr->Cast<BoundColumnRefExpression>().binding != old_bindings[i]) {
+			if (i >= old_bindings.size() || expr->GetExpressionType() != ExpressionType::BOUND_COLUMN_REF ||
+			    expr->Cast<BoundColumnRefExpression>().Binding() != old_bindings[i]) {
 				throw InvalidInputException("Private UNION DISTINCT requires the visible output columns");
 			}
 		}
@@ -646,7 +657,7 @@ private:
 		// DuckDB's own DISTINCT modifier above UNION DISTINCT is already satisfied.
 		if (annotation != memberships.end() && child->type == LogicalOperatorType::LOGICAL_PROJECTION &&
 		    child->children[0]->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY &&
-		    annotation->second.column_index == count) {
+		    annotation->second.column_index == ProjectionIndex(count)) {
 			op = std::move(op->children[0]);
 			return;
 		}
@@ -656,7 +667,8 @@ private:
 		ProjectMembership(op, count, output_index, true);
 		ColumnBindingReplacer replacer;
 		for (idx_t i = 0; i < count; i++) {
-			replacer.replacement_bindings.emplace_back(old_bindings[i], ColumnBinding(output_index, i));
+			replacer.replacement_bindings.emplace_back(old_bindings[i],
+			                                           ColumnBinding(output_index, ProjectionIndex(i)));
 		}
 		replacer.stop_operator = op.get();
 		replacer.VisitOperator(*plan);
@@ -794,18 +806,18 @@ private:
 				if (!table) {
 					continue;
 				}
-				if (!AreTableColumnsAccessible(&target, get->table_index)) {
+				if (!AreTableColumnsAccessible(&target, get->table_index.index)) {
 					if (ContainsUnaggregatedEntityInput(*get, check)) {
 						throw InvalidInputException("Private UNION branch has inaccessible privacy-unit ownership");
 					}
 					continue;
 				}
-				auto meta = check.table_metadata.find(table->name);
+				auto meta = check.table_metadata.find(table->name.GetIdentifierName());
 				if (meta == check.table_metadata.end()) {
 					continue;
 				}
 				vector<string> candidate;
-				if (table->name == pus[0]) {
+				if (table->name.GetIdentifierName() == pus[0]) {
 					candidate = meta->second.pks;
 				} else {
 					for (auto &fk : meta->second.fks) {
@@ -838,8 +850,8 @@ private:
 			return;
 		}
 		auto propagated =
-		    PropagateSingleBindingToOperator(*plan, source.table_index, source, LogicalType::UBIGINT, &target);
-		if (propagated.table_index == DConstants::INVALID_INDEX) {
+		    PropagateSingleBindingToOperator(*plan, source.table_index.index, source, LogicalType::UBIGINT, &target);
+		if (propagated.table_index.index == DConstants::INVALID_INDEX) {
 			throw InvalidInputException("Private UNION could not propagate branch membership");
 		}
 		target.expressions.push_back(make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated));
@@ -909,7 +921,7 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 	// Cache for hash projections: get.table_index → hash column binding
 	std::unordered_map<idx_t, ColumnBinding> hash_cache;
 
-	// Cache for CTE hash projections: cte_ref.table_index → hash column binding
+	// Cache for CTE hash projections: cte_ref.table_index.index → hash column binding
 	// Prevents inserting duplicate projections above the same CTE_SCAN when
 	// multiple aggregates try the CTE path for the same CTE_SCAN node.
 	std::unordered_map<idx_t, ColumnBinding> cte_hash_cache;
@@ -918,7 +930,7 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 	vector<PrivAggregateHashInfo> result;
 	for (auto *target_agg : target_aggregates) {
 		auto union_mask = unions.FindForAggregate(*target_agg);
-		if (union_mask.table_index != DConstants::INVALID_INDEX) {
+		if (union_mask.table_index.index != DConstants::INVALID_INDEX) {
 			result.push_back(
 			    {target_agg, make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, union_mask), union_mask, 1.0});
 			continue;
@@ -937,7 +949,7 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 			if (pu_in_subtree) {
 				get_ptr = FindTableScanInSubtree(target_agg, pu_table_name);
 				if (get_ptr) {
-					pu_columns_accessible = AreTableColumnsAccessible(target_agg, get_ptr->table_index);
+					pu_columns_accessible = AreTableColumnsAccessible(target_agg, get_ptr->table_index.index);
 				}
 			}
 
@@ -961,7 +973,7 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 				// Check if the PU table is directly reachable (not behind a nested aggregate).
 				// PU-key passthrough: the table is behind an inner aggregate that groups
 				// by PU key — insert hash deep and propagate through the inner's GROUP BY.
-				if (!IsDirectlyReachable(target_agg, get.table_index)) {
+				if (!IsDirectlyReachable(target_agg, get.table_index.index)) {
 					ColumnBinding pk_binding;
 					auto *inner_agg = FindInnerAggregateWithPUKeyGroup(target_agg, check, pu_table_names, pk_binding);
 					if (inner_agg) {
@@ -979,17 +991,17 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 
 				// Direct path: insert hash projection above get and propagate
 				auto hash_binding = GetOrInsertHashProjection(input, plan, get, pks, false, hash_cache);
-				auto propagated = PropagateSingleBinding(*plan, hash_binding.table_index, hash_binding,
+				auto propagated = PropagateSingleBinding(*plan, hash_binding.table_index.index, hash_binding,
 				                                         LogicalType::UBIGINT, target_agg);
-				if (propagated.table_index == DConstants::INVALID_INDEX) {
+				if (propagated.table_index.index == DConstants::INVALID_INDEX) {
 					// Try DELIM_JOIN fallback before giving up
-					auto delim_result = AddBindingToDelimJoin(plan, hash_binding.table_index, hash_binding,
+					auto delim_result = AddBindingToDelimJoin(plan, hash_binding.table_index.index, hash_binding,
 					                                          LogicalType::UBIGINT, target_agg);
 					if (delim_result.IsValid()) {
 						propagated = delim_result.binding;
 					}
 				}
-				if (propagated.table_index == DConstants::INVALID_INDEX) {
+				if (propagated.table_index.index == DConstants::INVALID_INDEX) {
 					continue;
 				}
 				auto hash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
@@ -1042,7 +1054,7 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 						}
 						// PU-key passthrough: if the FK table is behind an inner aggregate,
 						// insert hash deep and propagate through the inner's GROUP BY.
-						if (!IsDirectlyReachable(target_agg, fk_get_ptr->table_index)) {
+						if (!IsDirectlyReachable(target_agg, fk_get_ptr->table_index.index)) {
 							ColumnBinding pk_binding;
 							auto *inner_agg =
 							    FindInnerAggregateWithPUKeyGroup(target_agg, check, pu_table_names, pk_binding);
@@ -1063,18 +1075,19 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 						// Direct path: insert hash projection and propagate
 						auto fk_hash_binding =
 						    GetOrInsertHashProjection(input, plan, *fk_get_ptr, fk_cols, false, hash_cache);
-						auto fk_propagated = PropagateSingleBinding(*plan, fk_hash_binding.table_index, fk_hash_binding,
-						                                            LogicalType::UBIGINT, target_agg);
+						auto fk_propagated = PropagateSingleBinding(*plan, fk_hash_binding.table_index.index,
+						                                            fk_hash_binding, LogicalType::UBIGINT, target_agg);
 
 						// If propagation failed, try DELIM_JOIN fallback
-						if (fk_propagated.table_index == DConstants::INVALID_INDEX) {
-							auto delim_result = AddBindingToDelimJoin(
-							    plan, fk_hash_binding.table_index, fk_hash_binding, LogicalType::UBIGINT, target_agg);
+						if (fk_propagated.table_index.index == DConstants::INVALID_INDEX) {
+							auto delim_result =
+							    AddBindingToDelimJoin(plan, fk_hash_binding.table_index.index, fk_hash_binding,
+							                          LogicalType::UBIGINT, target_agg);
 							if (delim_result.IsValid()) {
 								fk_propagated = delim_result.binding;
 							}
 						}
-						if (fk_propagated.table_index == DConstants::INVALID_INDEX) {
+						if (fk_propagated.table_index.index == DConstants::INVALID_INDEX) {
 							continue;
 						}
 						auto fk_hash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, fk_propagated);
@@ -1108,29 +1121,29 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 					continue;
 				}
 				ColumnBinding hash_binding;
-				auto cte_cache_it = cte_hash_cache.find(match.cte_ref->table_index);
+				auto cte_cache_it = cte_hash_cache.find(match.cte_ref->table_index.index);
 				if (cte_cache_it != cte_hash_cache.end()) {
 					hash_binding = cte_cache_it->second;
 				} else {
 					hash_binding = InsertHashProjectionAboveCTERef(input, plan, *match.cte_ref, match.hash_columns);
-					if (hash_binding.table_index == DConstants::INVALID_INDEX) {
+					if (hash_binding.table_index.index == DConstants::INVALID_INDEX) {
 						continue;
 					}
-					cte_hash_cache[match.cte_ref->table_index] = hash_binding;
+					cte_hash_cache[match.cte_ref->table_index.index] = hash_binding;
 				}
 
-				auto propagated = PropagateSingleBinding(*plan, hash_binding.table_index, hash_binding,
+				auto propagated = PropagateSingleBinding(*plan, hash_binding.table_index.index, hash_binding,
 				                                         LogicalType::UBIGINT, target_agg);
 
 				// If propagation failed (e.g., blocked by DELIM_JOIN), try AddBindingToDelimJoin
-				if (propagated.table_index == DConstants::INVALID_INDEX) {
-					auto delim_result = AddBindingToDelimJoin(plan, hash_binding.table_index, hash_binding,
+				if (propagated.table_index.index == DConstants::INVALID_INDEX) {
+					auto delim_result = AddBindingToDelimJoin(plan, hash_binding.table_index.index, hash_binding,
 					                                          LogicalType::UBIGINT, target_agg);
 					if (delim_result.IsValid()) {
 						propagated = delim_result.binding;
 					}
 				}
-				if (propagated.table_index == DConstants::INVALID_INDEX) {
+				if (propagated.table_index.index == DConstants::INVALID_INDEX) {
 					continue;
 				}
 				auto hash_ref = make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated);
@@ -1151,8 +1164,8 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 
 		// Record hash binding for categorical rewriter before modifying
 		ColumnBinding hash_binding;
-		if (combined_hash_expr->type == ExpressionType::BOUND_COLUMN_REF) {
-			hash_binding = combined_hash_expr->Cast<BoundColumnRefExpression>().binding;
+		if (combined_hash_expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
+			hash_binding = combined_hash_expr->Cast<BoundColumnRefExpression>().BindingMutable();
 		}
 
 		result.push_back({target_agg, std::move(combined_hash_expr), hash_binding, correction});
@@ -1169,12 +1182,12 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		ModifyAggregatesWithPacFunctions(input, hash_info.aggregate, hash_info.hash_expr, plan, hash_info.correction);
 
 		// Record metadata for the categorical rewriter
-		if (hash_info.hash_binding.table_index != DConstants::INVALID_INDEX) {
+		if (hash_info.hash_binding.table_index.index != DConstants::INVALID_INDEX) {
 			PacAggregateInfo info;
-			info.aggregate_index = hash_info.aggregate->aggregate_index;
-			info.group_index = hash_info.aggregate->group_index;
+			info.aggregate_index = hash_info.aggregate->aggregate_index.index;
+			info.group_index = hash_info.aggregate->group_index.index;
 			info.hash_binding = hash_info.hash_binding;
-			pac_agg_info[hash_info.aggregate->aggregate_index] = info;
+			pac_agg_info[hash_info.aggregate->aggregate_index.index] = info;
 		}
 	}
 }
@@ -1309,7 +1322,7 @@ static void CompilePacMechanism(const PrivacyCompatibilityResult &check, Optimiz
 	// clipping variants with per-PU pre-aggregation below.
 	{
 		Value clip_val;
-		if (input.context.TryGetCurrentSetting("priv_clip_support", clip_val) && !clip_val.IsNull()) {
+		if (input.context.TryGetCurrentSetting(Identifier("priv_clip_support"), clip_val) && !clip_val.IsNull()) {
 			RewriteClipAggregates(input, plan, check, pu_setup.pu_names);
 		}
 	}

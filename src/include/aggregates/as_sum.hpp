@@ -164,7 +164,7 @@ AUTOVECTORIZE static inline
 		uint64_t bits = (key_hash >> i) & MASK;
 		// Expand each 0x01 byte to 0xFF: (bits << BITS) - bits turns 0x01 into 0xFF per byte
 		uint64_t expanded = (bits << BITS) - bits;
-#ifdef PAC_EXACTSUM
+#if defined(PAC_EXACTSUM) || defined(PAC_SIGNEDSUM)
 		// Signed lanes may contain negative subtotals. Isolate the high bits so
 		// carries cannot escape a lane when adding two's-complement values.
 		constexpr uint64_t high_bits = MASK << (BITS - 1);
@@ -294,10 +294,13 @@ struct PacSumIntState {
 	static constexpr int32_t UNDERFLOW_THRESHOLD = SIGNED ? -32768 : 0;
 
 	// Add amount to exact_total[level], allocating level if needed, cascading if overflow.
-	// exact_total[level] is an upper bound on every world counter at that level (each world sums a subset of
-	// the amounts), so checking it against the 16-bit range guarantees that no packed SWAR lane can overflow.
+	// For signed states, the sum of input magnitudes bounds every world's absolute subtotal despite cancellation.
+	// Checking this budget against the lane range prevents packed counters from overflowing.
 	inline void AddToExactTotal(int level, int32_t amount, ArenaAllocator &allocator) {
 		EnsureLevelAllocated(allocator, level);
+		if constexpr (SIGNED) {
+			amount = amount < 0 ? -amount : amount;
+		}
 		int32_t new_total = exact_total[level] + amount;
 		if (DUCKDB_UNLIKELY(new_total > OVERFLOW_THRESHOLD || new_total < UNDERFLOW_THRESHOLD)) {
 			Cascade(level, allocator);
@@ -319,7 +322,9 @@ struct PacSumIntState {
 		if (k >= PAC_APPROX_NUM_LEVELS - 1 || !u.levels[k]) {
 			return;
 		}
-		int32_t cascade_amount = exact_total[k] >> PAC_APPROX_LEVEL_SHIFT;
+		// Negative subtotals use arithmetic shift, so their carry magnitude
+		// can be ceil(budget / 16) rather than floor(budget / 16).
+		int32_t cascade_amount = (exact_total[k] + (SIGNED ? PAC_APPROX_LEVEL_MASK : 0)) >> PAC_APPROX_LEVEL_SHIFT;
 		AddToExactTotal(k + 1, cascade_amount, allocator);
 
 		CounterT *src = reinterpret_cast<CounterT * PAC_RESTRICT>(u.levels[k]);
@@ -343,11 +348,11 @@ struct PacSumIntState {
 	// Get probabilistic totals as PAC_FLOAT[64] for finalization: sum of all levels, each scaled by 2^(4*level)
 	void GetTotals(PAC_FLOAT *dst) const {
 		memset(dst, 0, 64 * sizeof(PAC_FLOAT));
-		for (int k = 0; k <= max_level_used; k++) {
+		PAC_FLOAT scale = 1;
+		for (int k = 0; k <= max_level_used; k++, scale *= (1U << PAC_APPROX_LEVEL_SHIFT)) {
 			if (!u.levels[k]) {
 				continue;
 			}
-			PAC_FLOAT scale = std::exp2(static_cast<PAC_FLOAT>(PAC_APPROX_LEVEL_SHIFT * k));
 			const CounterT *counters = reinterpret_cast<const CounterT *>(u.levels[k]);
 			for (int j = 0; j < 64; j++) {
 				int swar_idx = (j % 16) * 4 + (j / 16);
@@ -399,7 +404,14 @@ struct PacSumIntState {
 			uint64_t *src_level = src->u.levels[k];
 			uint64_t *dst_level = u.levels[k];
 			for (int j = 0; j < PAC_APPROX_SWAR_ELEMENTS; j++) {
-				dst_level[j] += src_level[j];
+				if constexpr (SIGNED) {
+					constexpr uint64_t high_bits = PAC_APPROX_SWAR_MASK << 15;
+					auto left = dst_level[j];
+					auto right = src_level[j];
+					dst_level[j] = ((left & ~high_bits) + (right & ~high_bits)) ^ ((left ^ right) & high_bits);
+				} else {
+					dst_level[j] += src_level[j];
+				}
 			}
 		}
 	}
@@ -733,7 +745,7 @@ using PacSumDoubleStateWrapper = PacSumStateWrapper<PacSumDoubleState, double>;
 
 // Forward declarations for as_sum functions
 
-// State type selection (defined in as_sum.cpp, needed by as_avg.cpp)
+// State type selection shared by SUM updates and state transport.
 #ifdef PAC_NOBUFFERING
 template <bool SIGNED>
 using ScatterIntState = PacSumIntState<SIGNED>;
@@ -804,15 +816,15 @@ SubtractNegStateTotals(State *, PAC_FLOAT *, uint64_t &, ArenaAllocator &) {
 
 // Generic finalize template (used by as_sum)
 template <class State, class ACC_TYPE, bool SIGNED>
-void PacSumFinalize(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset);
+void PacSumFinalize(Vector &states, AggregateFinalizeInputData &input, Vector &result, idx_t count, idx_t offset);
 
 // Bind for DECIMAL as_sum
-unique_ptr<FunctionData> BindDecimalPacSum(ClientContext &ctx, AggregateFunction &function,
-                                           vector<unique_ptr<Expression>> &args);
+unique_ptr<FunctionData> BindDecimalPacSum(BindAggregateFunctionInput &input);
 
 // FinalizeCounters for as_sum
 template <class State, bool SIGNED>
-void PacSumAvgFinalizeCounters(Vector &states, AggregateInputData &input, Vector &result, idx_t count, idx_t offset);
+void PacSumAvgFinalizeCounters(Vector &states, AggregateFinalizeInputData &input, Vector &result, idx_t count,
+                               idx_t offset);
 
 } // namespace duckdb
 #endif // PAC_GODBOLT

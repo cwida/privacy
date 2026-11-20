@@ -9,15 +9,15 @@ Run all commands from the repository root.
 
 ## Environment
 
-The reported experiments use DuckDB v1.5.4 and Clang 22.1.0. Build the repository with its submodules, but do not
-modify the `duckdb/` submodule.
+The reported experiments use DuckDB v2.0.0 (the `duckdb/` submodule, commit `d54cbbe`) and Clang 22.1.2. Build the
+repository with its submodules, but do not modify the `duckdb/` submodule.
 
 ```bash
 git clone --recurse-submodules git@github.com:cwida/privacy.git
 cd privacy
 export CC=clang-22
 export CXX=clang++-22
-$CC --version  # must report Clang 22.1.0 for the paper build
+$CC --version  # must report Clang 22.1.2 for the paper build
 GEN=ninja make
 ```
 
@@ -25,8 +25,8 @@ To rebuild only the paper benchmark executables:
 
 ```bash
 cmake --build build/release --target \
-  as_tpch_benchmark as_clickbench_benchmark \
-  dp_benchmark_runner
+  as_tpch_benchmark as_clickbench_benchmark as_ssb_benchmark \
+  as_tpcds_benchmark meps_brr_poc dp_benchmark_runner
 ```
 
 The paper uses the following machines:
@@ -56,6 +56,53 @@ Rscript --vanilla plot_microbenchmark.R
 
 The seven variants are `default`, `nobuffering`, `noboundopt`, `signedsum`, `exactsum`, `nocascading`, and `nosimd`.
 Results and the R plotting program remain self-contained in that directory.
+The runner disables DuckDB shell agent mode so large result sets are fully consumed when invoked by a coding agent.
+
+The paper runs used these settings for every query, with one warmup and three measured runs per cell
+(`WARMUP_RUNS=1 BENCH_RUNS=3`); the reported time is the median:
+
+```bash
+export QUERY_SETUP="SET pac_mi=0.0; SET threads=4; SET max_memory='30G'; \
+  SET max_temp_directory_size='90GB'; SET temp_directory='<local SSD path>';"
+export WARMUP_RUNS=1 BENCH_RUNS=3
+bash benchmark/microbench/bench_count.sh
+bash benchmark/microbench/bench_sum_avg.sh
+bash benchmark/microbench/bench_min_max.sh
+```
+
+Each variant is a full build of the DuckDB shell with the variant's flags passed as `CMAKE_CXX_FLAGS` (see
+[`docs/benchmark/microbenchmarks.md`](docs/benchmark/microbenchmarks.md)). The microbenchmarks keep the default
+`priv_state_export=false` (see [Aggregate state export](#aggregate-state-export)).
+
+The microbenchmark figures use these machines and suites:
+
+| Figure | Machine | Suite and cells |
+|---|---|---|
+| COUNT optimizations | Granite Rapids (`c8i.4xlarge`) | `bench_count.sh`, 1G rows, ungrouped and scattered groups |
+| SUM optimizations | MacBook Pro (M2 Max) | `bench_sum_avg.sh`, 1G rows, ungrouped and scattered groups |
+| MAX optimizations | Graviton4 | `bench_min_max.sh`, 1G rows, ungrouped value-distribution test |
+| SIMD improvement factors | all four | 100M rows, ungrouped: naive kernel time divided by default kernel time |
+
+In the MacBook SUM figure, the DuckDB and naive bars come from the DuckDB 2.0 run; the three optimized variants
+(Approx.+Buffering, Approx., Exact+Cascading) are the measurements of the original submission on DuckDB 1.5.4. The
+MacBook was not re-measured with `priv_state_export=false`.
+
+Some ablation cells exhaust the 90 GB temporary-storage limit and are reported as failed (`-1` in the CSV): unbuffered
+SUM and MAX and non-cascading COUNT at 10M scattered groups, and non-cascading SUM at 10M sequential groups.
+
+## Aggregate State Export
+
+DuckDB 2.0 can spill aggregate states of extension aggregates when they expose state export callbacks. The setting
+`priv_state_export` (default `false`) controls whether the stochastic SUM, COUNT/AVG and MIN/MAX aggregates expose
+them. With export on, DuckDB switches grouped aggregation to external mode as soon as the aggregate states exceed a
+fraction of the per-thread memory budget, which slows grouped aggregates that would fit in memory; with export off,
+states cannot spill.
+
+- The aggregation microbenchmarks run with the default, `priv_state_export=false`.
+- The analytical benchmark runners (TPC-H, TPC-DS, ClickBench, SSB, MEPS and the DP runner) execute
+  `SET priv_state_export=true` at session start (`benchmark/include/benchmark_settings.hpp`).
+
+See [`docs/pac/internal_operators.md`](docs/pac/internal_operators.md) for the mechanism.
 
 ## Standalone Benchmarks
 
@@ -76,6 +123,10 @@ build/release/extension/privacy/dp_benchmark_runner \
 The runners create the configured output parent directories. Existing result files are replaced only after input
 discovery and database initialization succeed.
 
+For development builds using locally compiled TPCH/TPC-DS generator extensions, explicitly set
+`PRIVACY_BENCHMARK_ALLOW_UNSIGNED_EXTENSIONS=1` when invoking the benchmark runners. This permits those unsigned
+generators only in the benchmark process; signature verification remains the default when the variable is unset.
+
 ### TPC-H AS performance
 
 The main SF30 benchmark measures DuckDB, SIMD-AS with `m=64`, the naive sampling implementation, and a simple-hash
@@ -89,6 +140,18 @@ build/release/extension/privacy/as_tpch_benchmark \
 
 Each AS query/mode is executed once without timing before its five measured executions. The CSV reports their median.
 
+The naive runtime is the runtime of one sampled world multiplied by 64: every world runs the same plan over a sample
+of the same size, so the benchmark times world 0 and extrapolates. `benchmark/tpch/measure_naive_worlds.py` checks
+this by timing all 64 worlds. At SF30 (AMD EPYC, 16 threads, three repetitions per world) the extrapolation differs
+from the measured sum of the 64 worlds by -1.8% to +1.6% per query and by less than 0.1% over all 19 queries; the
+slowest world of a query is at most 7% slower than its fastest. The measurements are in
+`benchmark/results/paper/tpch/naive_worlds_sf30.csv`.
+
+```bash
+python3 benchmark/tpch/measure_naive_worlds.py build/release/duckdb tpch_sf30_graviton.db \
+  benchmark/tpch/tpch_naive_as_queries 16 3 benchmark/results/utility/naive_worlds_sf30.csv
+```
+
 The variable-`m` configuration measures the separate aggregate path for `m=128,256,512`. It reuses the same database
 and skips the naive implementation.
 
@@ -101,6 +164,13 @@ Outputs:
 
 - `benchmark/results/utility/as_tpch_sf30.csv`
 - `benchmark/results/utility/as_tpch_sf30_m_sweep.csv`
+
+### SSB, MEPS and TPC-DS
+
+The SSB and MEPS experiments, including data preparation, repetitions and the Graviton4 launch script, are described
+in [`benchmark/EC2_REPRODUCIBILITY.md`](benchmark/EC2_REPRODUCIBILITY.md), [`benchmark/ssb/README.md`](benchmark/ssb/README.md)
+and [`benchmark/meps_brr/README.md`](benchmark/meps_brr/README.md). TPC-DS is described in
+[`docs/benchmark/tpcds.md`](docs/benchmark/tpcds.md).
 
 ### ClickBench AS performance
 
@@ -227,9 +297,7 @@ Rscript --vanilla benchmark/tpch/plot_tpch_results.R \
   benchmark/results/utility/as_tpch_sf30.csv benchmark/results/figures
 
 Rscript --vanilla benchmark/tpch/plot_tpch_as_m_sweep.R \
-  benchmark/results/utility/as_tpch_sf30.csv \
-  benchmark/results/utility/as_tpch_sf30_m_sweep.csv \
-  benchmark/results/figures
+  benchmark/results/utility/as_tpch_sf30_m_sweep.csv benchmark/results/figures
 
 Rscript --vanilla benchmark/clickbench/plot_clickbench_as_slowdown.R \
   benchmark/results/utility/as_clickbench_graviton.csv benchmark/results/figures 64
@@ -239,7 +307,7 @@ Rscript --vanilla benchmark/dp/plot_unskewed_sass_utility_views.R \
 
 Rscript --vanilla benchmark/dp/plot_sass_sampled_m_1x.R \
   benchmark/results/utility/dp_tpch_sf30_utility.csv \
-  benchmark/results/figures/tpch_sass_sampled_m_1x_paper.png tpch 1e-6 median mean
+  benchmark/results/figures/tpch_sass_sampled_m_1x_paper.png tpch 1e-6 median
 
 Rscript --vanilla benchmark/dp/plot_dp_full_utility_runtime.R \
   benchmark/results/utility/dp_tpch_sf30_utility.csv benchmark/results/figures
@@ -252,43 +320,11 @@ Rscript --vanilla benchmark/dp/plot_q01_avg_compact_grid.R \
 
 Plot scripts fail with a direct dependency or schema error; they do not install packages or modify benchmark inputs.
 
-The exact CSV inputs retained for the paper figures are versioned in `benchmark/results/paper/`. Fresh benchmark runs
-write to `benchmark/results/utility/`; they do not overwrite the archived submission data.
-
-To regenerate the submitted figures directly from the archived inputs:
-
-```bash
-mkdir -p benchmark/results/figures
-
-Rscript --vanilla benchmark/tpch/plot_tpch_results.R \
-  benchmark/results/paper/as_tpch_m64.csv benchmark/results/figures
-
-DROP_M=64 Rscript --vanilla benchmark/tpch/plot_tpch_as_m_sweep.R \
-  benchmark/results/paper/as_tpch_m_sweep.csv benchmark/results/figures
-
-Rscript --vanilla benchmark/clickbench/plot_clickbench_as_slowdown.R \
-  benchmark/results/paper/as_clickbench_m64_m512.csv benchmark/results/figures 64
-
-Rscript --vanilla benchmark/dp/plot_unskewed_sass_utility_views.R \
-  benchmark/results/paper/dp_tpch_utility_raw.csv benchmark/results/figures 1e-6 64 true
-
-Rscript --vanilla benchmark/dp/plot_sass_sampled_m_1x.R \
-  benchmark/results/paper/dp_tpch_utility_raw.csv \
-  benchmark/results/figures/tpch_sass_sampled_m_1x_paper.png tpch 1e-6 median mean
-
-Rscript --vanilla benchmark/dp/plot_dp_full_utility_runtime.R \
-  benchmark/results/paper/dp_tpch_runtime_raw.csv benchmark/results/figures
-
-Rscript --vanilla benchmark/dp/plot_q01_avg_compact_grid.R \
-  benchmark/results/paper/q01_avg_columns_raw.csv \
-  benchmark/results/paper/q01_avg_groups_raw.csv \
-  benchmark/results/figures/q01_avg_compact_grid_paper.png
-
-Rscript --vanilla benchmark/dp/plot_q01_stability.R \
-  benchmark/results/paper/q01_stability_avg_summary_raw.csv \
-  benchmark/results/paper/q01_stability_sum_count_summary_raw.csv \
-  benchmark/results/figures/q01_stability_m64_m512_rescaled_sumcount_paper.png
-```
+The inputs of the paper's figures and the figures themselves are versioned in
+[`benchmark/results/paper/`](benchmark/results/paper/README.md), which maps every figure to its input files and gives
+the commands that regenerate it; the microbenchmark inputs are in
+[`benchmark/microbench/results/`](benchmark/microbench/results/README.md). Fresh benchmark runs write to
+`benchmark/results/utility/` and do not overwrite that data.
 
 ## Optional Sanity Checks
 

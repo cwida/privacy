@@ -5,6 +5,7 @@ duckdb_extension_load(privacy
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
     LOAD_TESTS
 )
+duckdb_extension_statically_link(privacy)
 
 # Any extra extensions that should be built
 # e.g.: duckdb_extension_load(json)

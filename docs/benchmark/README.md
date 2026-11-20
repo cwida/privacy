@@ -28,7 +28,6 @@ databases and results are ignored by Git and written below `benchmark/results/` 
 ## Additional Benchmarks
 
 - [Aggregation microbenchmarks](microbenchmarks.md) compare aggregate kernel implementations.
-- [IMDb/JOB](imdb.md) exercises person-level privacy over a multi-table workload.
 - [SQLStorm](sqlstorm.md) provides optional query-coverage smoke tests.
 - [Utility evaluation](utility.md) documents DP bounds, metrics, and diagnostic tools.
 
@@ -36,7 +35,6 @@ databases and results are ignored by Git and written below `benchmark/results/` 
 
 - [TPC-H](tpch.md)
 - [ClickBench](clickbench.md)
-- [IMDb/JOB](imdb.md)
 - [SQLStorm](sqlstorm.md)
 - [Microbenchmarks](microbenchmarks.md)
 - [Utility evaluation](utility.md)

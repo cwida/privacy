@@ -60,14 +60,13 @@ static bool IsNumericType(const LogicalType &type) {
 }
 
 // Create a ROW_NUMBER() OVER () window expression for positional matching.
-static unique_ptr<LogicalOperator> AddRowNumber(unique_ptr<LogicalOperator> child, idx_t table_index,
-                                                ColumnBinding &rn_binding_out) {
-	auto window = make_uniq<LogicalWindow>(table_index);
+static unique_ptr<LogicalOperator> AddRowNumber(ClientContext &context, unique_ptr<LogicalOperator> child,
+                                                idx_t table_index, ColumnBinding &rn_binding_out) {
+	auto window = make_uniq<LogicalWindow>(TableIndex(table_index));
 
-	auto row_number =
-	    make_uniq<BoundWindowExpression>(ExpressionType::WINDOW_ROW_NUMBER, LogicalType::BIGINT, nullptr, nullptr);
+	auto row_number = BindRankingWindow(context, ExpressionType::WINDOW_ROW_NUMBER);
 
-	rn_binding_out = ColumnBinding(table_index, 0);
+	rn_binding_out = ColumnBinding(TableIndex(table_index), ProjectionIndex(0));
 
 	window->expressions.push_back(std::move(row_number));
 	window->children.push_back(std::move(child));
@@ -77,7 +76,7 @@ static unique_ptr<LogicalOperator> AddRowNumber(unique_ptr<LogicalOperator> chil
 // Create an IS NULL check expression.
 static unique_ptr<Expression> MakeIsNull(unique_ptr<Expression> child) {
 	auto op = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NULL, LogicalType::BOOLEAN);
-	op->children.push_back(std::move(child));
+	op->GetChildrenMutable().push_back(std::move(child));
 	return std::move(op);
 }
 
@@ -95,7 +94,8 @@ static vector<string> ExtractColumnNames(LogicalOperator *node) {
 	if (node && node->type == LogicalOperatorType::LOGICAL_PROJECTION) {
 		auto &proj = node->Cast<LogicalProjection>();
 		for (auto &expr : proj.expressions) {
-			names.push_back(expr->alias.empty() ? expr->GetName() : expr->alias);
+			names.push_back(expr->GetAlias().empty() ? expr->GetName().GetIdentifierName()
+			                                         : expr->GetAlias().GetIdentifierName());
 		}
 	}
 	return names;
@@ -153,13 +153,14 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 			auto &order_op = node->Cast<LogicalOrder>();
 			auto child_bindings = node->children[0]->GetColumnBindings();
 			for (auto &o : order_op.orders) {
-				if (o.expression->type == ExpressionType::BOUND_COLUMN_REF) {
+				if (o.expression->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 					auto &ref = o.expression->Cast<BoundColumnRefExpression>();
 					for (idx_t i = 0; i < child_bindings.size(); i++) {
-						if (child_bindings[i] == ref.binding) {
+						if (child_bindings[i] == ref.BindingMutable()) {
 							saved_orders.emplace_back(
 							    o.type, o.null_order,
-							    make_uniq<BoundColumnRefExpression>(ref.return_type, ColumnBinding(0, i)));
+							    make_uniq<BoundColumnRefExpression>(ref.GetReturnType(),
+							                                        ColumnBinding(TableIndex(0), ProjectionIndex(i))));
 							break;
 						}
 					}
@@ -217,7 +218,7 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 		for (idx_t i = 0; i < col_types.size(); i++) {
 			exprs.push_back(make_uniq<BoundColumnRefExpression>(col_types[i], bindings[i]));
 		}
-		auto proj = make_uniq<LogicalProjection>(binder.GenerateTableIndex(), std::move(exprs));
+		auto proj = make_uniq<LogicalProjection>(TableIndex(binder.GenerateTableIndex().index), std::move(exprs));
 		proj->children.push_back(std::move(child));
 		return std::move(proj);
 	};
@@ -231,25 +232,25 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 	ref_bindings = ref_side->GetColumnBindings();
 
 	if (num_key_cols == 0) {
-		pac_side = AddRowNumber(std::move(pac_side), binder.GenerateTableIndex(), pac_rn_binding);
-		ref_side = AddRowNumber(std::move(ref_side), binder.GenerateTableIndex(), ref_rn_binding);
+		pac_side = AddRowNumber(input.context, std::move(pac_side), binder.GenerateTableIndex().index, pac_rn_binding);
+		ref_side = AddRowNumber(input.context, std::move(ref_side), binder.GenerateTableIndex().index, ref_rn_binding);
 	}
 
 	// ---- Step 2: Create the FULL OUTER JOIN ----
 	auto join = make_uniq<LogicalComparisonJoin>(JoinType::OUTER);
 
 	if (num_key_cols == 0) {
-		JoinCondition cond;
-		cond.comparison = ExpressionType::COMPARE_EQUAL;
-		cond.left = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, pac_rn_binding);
-		cond.right = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ref_rn_binding);
+		JoinCondition cond(nullptr, nullptr, ExpressionType::COMPARE_EQUAL);
+
+		cond.LeftReference() = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, pac_rn_binding);
+		cond.RightReference() = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, ref_rn_binding);
 		join->conditions.push_back(std::move(cond));
 	} else {
 		for (idx_t i = 0; i < num_key_cols; i++) {
-			JoinCondition cond;
-			cond.comparison = ExpressionType::COMPARE_EQUAL;
-			cond.left = make_uniq<BoundColumnRefExpression>(col_types[i], pac_bindings[i]);
-			cond.right = make_uniq<BoundColumnRefExpression>(col_types[i], ref_bindings[i]);
+			JoinCondition cond(nullptr, nullptr, ExpressionType::COMPARE_EQUAL);
+
+			cond.LeftReference() = make_uniq<BoundColumnRefExpression>(col_types[i], pac_bindings[i]);
+			cond.RightReference() = make_uniq<BoundColumnRefExpression>(col_types[i], ref_bindings[i]);
 			join->conditions.push_back(std::move(cond));
 		}
 	}
@@ -283,16 +284,16 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				BoundCaseCheck check;
 				check.when_expr = MakeIsNull(make_uniq<BoundColumnRefExpression>(probe_type, pac_probe_binding));
 				check.then_expr = make_uniq<BoundConstantExpression>(Value(col_types[i]));
-				case_expr->case_checks.push_back(std::move(check));
+				case_expr->CaseChecksMutable().push_back(std::move(check));
 			}
 			{
 				BoundCaseCheck check;
 				check.when_expr = MakeIsNull(make_uniq<BoundColumnRefExpression>(probe_type, ref_probe_binding));
 				check.then_expr = make_uniq<BoundColumnRefExpression>(col_types[i], pac_bindings[i]);
-				case_expr->case_checks.push_back(std::move(check));
+				case_expr->CaseChecksMutable().push_back(std::move(check));
 			}
-			case_expr->else_expr = make_uniq<BoundColumnRefExpression>(col_types[i], ref_bindings[i]);
-			case_expr->alias = col_names[i];
+			case_expr->ElseMutable() = make_uniq<BoundColumnRefExpression>(col_types[i], ref_bindings[i]);
+			case_expr->SetAlias(Identifier(col_names[i]));
 			new_expressions.push_back(std::move(case_expr));
 		} else if (is_numeric) {
 			// Numeric measure columns:
@@ -318,7 +319,7 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				BoundCaseCheck check;
 				check.when_expr = MakeIsNull(make_uniq<BoundColumnRefExpression>(probe_type, ref_probe_binding));
 				check.then_expr = make_uniq<BoundConstantExpression>(Value(col_types[i]));
-				case_expr->case_checks.push_back(std::move(check));
+				case_expr->CaseChecksMutable().push_back(std::move(check));
 			}
 
 			// "-" row → 0 (missing from PAC result = zero utility)
@@ -327,7 +328,7 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				check.when_expr = MakeIsNull(make_uniq<BoundColumnRefExpression>(probe_type, pac_probe_binding));
 				check.then_expr = BoundCastExpression::AddDefaultCastToType(
 				    make_uniq<BoundConstantExpression>(Value::DOUBLE(0.0)), col_types[i]);
-				case_expr->case_checks.push_back(std::move(check));
+				case_expr->CaseChecksMutable().push_back(std::move(check));
 			}
 
 			// Both NULL → 0 (perfect match)
@@ -339,7 +340,7 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				                                                        std::move(pac_null), std::move(ref_null));
 				check.then_expr = BoundCastExpression::AddDefaultCastToType(
 				    make_uniq<BoundConstantExpression>(Value::DOUBLE(0.0)), col_types[i]);
-				case_expr->case_checks.push_back(std::move(check));
+				case_expr->CaseChecksMutable().push_back(std::move(check));
 			}
 
 			// One NULL → 50
@@ -351,7 +352,7 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				                                                        std::move(pac_null), std::move(ref_null));
 				check.then_expr = BoundCastExpression::AddDefaultCastToType(
 				    make_uniq<BoundConstantExpression>(Value::DOUBLE(50.0)), col_types[i]);
-				case_expr->case_checks.push_back(std::move(check));
+				case_expr->CaseChecksMutable().push_back(std::move(check));
 			}
 
 			// ELSE: CAST(100 * |ref - pac| / max(0.00001, |ref|) AS original_type)
@@ -360,12 +361,12 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				auto abs_diff = make_uniq<BoundCaseExpression>(LogicalType::DOUBLE);
 				{
 					BoundCaseCheck check;
-					check.when_expr = make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_GREATERTHANOREQUALTO,
-					                                                       make_ref_dbl(), make_pac_dbl());
+					check.when_expr = BoundComparisonExpression::Create(ExpressionType::COMPARE_GREATERTHANOREQUALTO,
+					                                                    make_ref_dbl(), make_pac_dbl());
 					check.then_expr = optimizer.BindScalarFunction("-", make_ref_dbl(), make_pac_dbl());
-					abs_diff->case_checks.push_back(std::move(check));
+					abs_diff->CaseChecksMutable().push_back(std::move(check));
 				}
-				abs_diff->else_expr = optimizer.BindScalarFunction("-", make_pac_dbl(), make_ref_dbl());
+				abs_diff->ElseMutable() = optimizer.BindScalarFunction("-", make_pac_dbl(), make_ref_dbl());
 
 				// max(0.00001, |ref|):
 				// CASE WHEN ref >= 0.00001 THEN ref
@@ -374,32 +375,32 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				auto denom = make_uniq<BoundCaseExpression>(LogicalType::DOUBLE);
 				{
 					BoundCaseCheck check;
-					check.when_expr = make_uniq<BoundComparisonExpression>(
-					    ExpressionType::COMPARE_GREATERTHANOREQUALTO, make_ref_dbl(),
-					    make_uniq<BoundConstantExpression>(Value::DOUBLE(0.00001)));
+					check.when_expr =
+					    BoundComparisonExpression::Create(ExpressionType::COMPARE_GREATERTHANOREQUALTO, make_ref_dbl(),
+					                                      make_uniq<BoundConstantExpression>(Value::DOUBLE(0.00001)));
 					check.then_expr = make_ref_dbl();
-					denom->case_checks.push_back(std::move(check));
+					denom->CaseChecksMutable().push_back(std::move(check));
 				}
 				{
 					BoundCaseCheck check;
-					check.when_expr = make_uniq<BoundComparisonExpression>(
-					    ExpressionType::COMPARE_LESSTHANOREQUALTO, make_ref_dbl(),
-					    make_uniq<BoundConstantExpression>(Value::DOUBLE(-0.00001)));
+					check.when_expr =
+					    BoundComparisonExpression::Create(ExpressionType::COMPARE_LESSTHANOREQUALTO, make_ref_dbl(),
+					                                      make_uniq<BoundConstantExpression>(Value::DOUBLE(-0.00001)));
 					check.then_expr = optimizer.BindScalarFunction(
 					    "-", make_uniq<BoundConstantExpression>(Value::DOUBLE(0.0)), make_ref_dbl());
-					denom->case_checks.push_back(std::move(check));
+					denom->CaseChecksMutable().push_back(std::move(check));
 				}
-				denom->else_expr = make_uniq<BoundConstantExpression>(Value::DOUBLE(0.00001));
+				denom->ElseMutable() = make_uniq<BoundConstantExpression>(Value::DOUBLE(0.00001));
 
 				// 100 * abs_diff / denom
 				auto hundred = make_uniq<BoundConstantExpression>(Value::DOUBLE(100.0));
 				auto numerator = optimizer.BindScalarFunction("*", std::move(hundred), std::move(abs_diff));
 				auto result = optimizer.BindScalarFunction("/", std::move(numerator), std::move(denom));
 
-				case_expr->else_expr = BoundCastExpression::AddDefaultCastToType(std::move(result), col_types[i]);
+				case_expr->ElseMutable() = BoundCastExpression::AddDefaultCastToType(std::move(result), col_types[i]);
 			}
 
-			case_expr->alias = col_names[i];
+			case_expr->SetAlias(Identifier(col_names[i]));
 			new_expressions.push_back(std::move(case_expr));
 		} else {
 			// Non-numeric, non-key columns:
@@ -411,35 +412,37 @@ void ApplyUtilityDiff(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 				BoundCaseCheck check;
 				check.when_expr = MakeIsNull(make_uniq<BoundColumnRefExpression>(probe_type, ref_probe_binding));
 				check.then_expr = make_uniq<BoundConstantExpression>(Value(col_types[i]));
-				case_expr->case_checks.push_back(std::move(check));
+				case_expr->CaseChecksMutable().push_back(std::move(check));
 			}
 			{
 				BoundCaseCheck check;
 				check.when_expr = MakeIsNull(make_uniq<BoundColumnRefExpression>(probe_type, pac_probe_binding));
 				check.then_expr = make_uniq<BoundConstantExpression>(Value(col_types[i]));
-				case_expr->case_checks.push_back(std::move(check));
+				case_expr->CaseChecksMutable().push_back(std::move(check));
 			}
 			auto coalesce = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_COALESCE, col_types[i]);
-			coalesce->children.push_back(make_uniq<BoundColumnRefExpression>(col_types[i], pac_bindings[i]));
-			coalesce->children.push_back(make_uniq<BoundColumnRefExpression>(col_types[i], ref_bindings[i]));
-			case_expr->else_expr = std::move(coalesce);
-			case_expr->alias = col_names[i];
+			coalesce->GetChildrenMutable().push_back(
+			    make_uniq<BoundColumnRefExpression>(col_types[i], pac_bindings[i]));
+			coalesce->GetChildrenMutable().push_back(
+			    make_uniq<BoundColumnRefExpression>(col_types[i], ref_bindings[i]));
+			case_expr->ElseMutable() = std::move(coalesce);
+			case_expr->SetAlias(Identifier(col_names[i]));
 			new_expressions.push_back(std::move(case_expr));
 		}
 	}
 
 	// ---- Step 4: Create a new top-level diff projection ----
-	idx_t diff_proj_idx = binder.GenerateTableIndex();
-	plan = make_uniq<LogicalProjection>(diff_proj_idx, std::move(new_expressions));
+	idx_t diff_proj_idx = binder.GenerateTableIndex().index;
+	plan = make_uniq<LogicalProjection>(TableIndex(diff_proj_idx), std::move(new_expressions));
 	plan->children.push_back(std::move(join));
 
 	// ---- Step 4b: Re-apply ORDER BY if the original query had one ----
 	if (!saved_orders.empty()) {
 		for (auto &o : saved_orders) {
 			auto &ref = o.expression->Cast<BoundColumnRefExpression>();
-			idx_t col_idx = ref.binding.column_index;
-			ref.binding = ColumnBinding(diff_proj_idx, col_idx);
-			ref.return_type = col_types[col_idx];
+			idx_t col_idx = ref.BindingMutable().column_index;
+			ref.BindingMutable() = ColumnBinding(TableIndex(diff_proj_idx), ProjectionIndex(col_idx));
+			ref.SetReturnType(col_types[col_idx]);
 		}
 		auto order = make_uniq<LogicalOrder>(std::move(saved_orders));
 		order->children.push_back(std::move(plan));

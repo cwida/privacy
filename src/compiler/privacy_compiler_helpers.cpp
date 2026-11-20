@@ -2,6 +2,7 @@
 // Created by ila on 12/23/25.
 //
 
+#include "duckdb/main/database_manager.hpp"
 #include "compiler/privacy_compiler_helpers.hpp"
 #include "privacy_debug.hpp"
 #include "core/privacy_optimizer.hpp"
@@ -44,14 +45,16 @@ void BuildJoinConditions(LogicalGet *left_get, LogicalGet *right_get, const vect
 		if (lproj == DConstants::INVALID_INDEX || rproj == DConstants::INVALID_INDEX) {
 			throw InternalException("Privacy compiler: failed to project FK/PK columns for join");
 		}
-		JoinCondition cond;
-		cond.comparison = ExpressionType::COMPARE_EQUAL;
+		JoinCondition cond(nullptr, nullptr, ExpressionType::COMPARE_EQUAL);
+
 		auto left_col_index = left_get->GetColumnIds()[lproj];
 		auto right_col_index = right_get->GetColumnIds()[rproj];
 		auto &left_type = left_get->GetColumnType(left_col_index);
 		auto &right_type = right_get->GetColumnType(right_col_index);
-		cond.left = make_uniq<BoundColumnRefExpression>(left_type, ColumnBinding(left_get->table_index, lproj));
-		cond.right = make_uniq<BoundColumnRefExpression>(right_type, ColumnBinding(right_get->table_index, rproj));
+		cond.LeftReference() = make_uniq<BoundColumnRefExpression>(
+		    left_type, ColumnBinding(TableIndex(left_get->table_index.index), ProjectionIndex(lproj)));
+		cond.RightReference() = make_uniq<BoundColumnRefExpression>(
+		    right_type, ColumnBinding(TableIndex(right_get->table_index.index), ProjectionIndex(rproj)));
 		conditions.push_back(std::move(cond));
 	}
 }
@@ -83,8 +86,8 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PrivacyCompatibilityResult &
 		throw InternalException(
 		    "Privacy compiler: expected both LogicalGet nodes to be bound to tables for join creation");
 	}
-	string left_table_name = left_table_ptr->name;
-	string right_table_name = right_table_ptr->name;
+	string left_table_name = left_table_ptr->name.GetIdentifierName();
+	string right_table_name = right_table_ptr->name.GetIdentifierName();
 
 	// Require metadata to be present; compatibility check is responsible for populating it.
 	auto lit = check.table_metadata.find(left_table_name);
@@ -160,9 +163,8 @@ unique_ptr<LogicalOperator> CreateLogicalJoin(const PrivacyCompatibilityResult &
 		                            right_table_name);
 	}
 
-	vector<unique_ptr<Expression>> extra;
 	return LogicalComparisonJoin::CreateJoin(JoinType::INNER, JoinRefType::REGULAR, std::move(left_operator),
-	                                         std::move(right), std::move(conditions), std::move(extra));
+	                                         std::move(right), std::move(conditions));
 }
 
 // Create a LogicalGet operator for a table by name, projecting only the specified columns
@@ -173,8 +175,8 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 	CatalogSearchPath path(context);
 
 	for (auto &schema : path.Get()) {
-		auto entry =
-		    catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema.schema, table, OnEntryNotFound::RETURN_NULL);
+		auto entry = catalog.GetEntry(context, CatalogType::TABLE_ENTRY, schema.GetSchema(), Identifier(table),
+		                              OnEntryNotFound::RETURN_NULL);
 		if (!entry) {
 			continue;
 		}
@@ -184,9 +186,9 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 		unique_ptr<FunctionData> bind_data;
 		auto scan_function = table_entry.GetScanFunction(context, bind_data);
 		vector<LogicalType> return_types = {};
-		vector<string> return_names = {};
+		vector<Identifier> return_names = {};
 		vector<ColumnIndex> column_ids = {};
-		vector<idx_t> projection_ids = {};
+		vector<ProjectionIndex> projection_ids = {};
 
 		// Build a set of required column names for fast lookup (case-insensitive)
 		std::unordered_set<string> required_set;
@@ -198,15 +200,15 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 		std::unordered_set<string> found_columns;
 
 		for (auto &col : table_entry.GetColumns().Logical()) {
-			string col_name_lower = StringUtil::Lower(col.Name());
+			string col_name_lower = StringUtil::Lower(col.Name().GetIdentifierName());
 
 			// If required_columns is empty, include all columns (backward compatible)
 			// Otherwise, only include columns that are in the required set
 			if (required_columns.empty() || required_set.count(col_name_lower) > 0) {
 				return_types.push_back(col.Type());
-				return_names.push_back(col.Name());
+				return_names.emplace_back(col.Name().GetIdentifierName());
 				column_ids.push_back(ColumnIndex(col.Oid()));
-				projection_ids.push_back(column_ids.size() - 1);
+				projection_ids.push_back(ProjectionIndex(column_ids.size() - 1));
 
 				if (!required_columns.empty()) {
 					found_columns.insert(col_name_lower);
@@ -238,20 +240,21 @@ unique_ptr<LogicalGet> CreateLogicalGet(ClientContext &context, unique_ptr<Logic
 			projection_ids.clear();
 			for (auto &col : table_entry.GetColumns().Logical()) {
 				return_types.push_back(col.Type());
-				return_names.push_back(col.Name());
+				return_names.emplace_back(col.Name().GetIdentifierName());
 				column_ids.push_back(ColumnIndex(col.Oid()));
-				projection_ids.push_back(column_ids.size() - 1);
+				projection_ids.push_back(ProjectionIndex(column_ids.size() - 1));
 			}
 		}
 
-		unique_ptr<LogicalGet> get = make_uniq<LogicalGet>(idx, scan_function, std::move(bind_data),
-		                                                   std::move(return_types), std::move(return_names));
+		unique_ptr<LogicalGet> get =
+		    make_uniq<LogicalGet>(TableIndex(idx), BoundTableFunction(scan_function), std::move(bind_data),
+		                          std::move(return_types), std::move(return_names));
 		get->SetColumnIds(std::move(column_ids));
 		get->projection_ids = projection_ids;
 		get->ResolveOperatorTypes();
 		get->Verify(context);
 
-		return get;
+		return std::move(get);
 	}
 
 	throw ParserException("PAC: missing internal sample table " + table);
@@ -354,7 +357,7 @@ LogicalGet *FindAccessibleGetInSubtree(unique_ptr<LogicalOperator> &plan, Logica
 	FindAllNodesByTable(&plan, table_name, nodes);
 	for (auto *node : nodes) {
 		auto &node_get = node->get()->Cast<LogicalGet>();
-		if (HasTableIndexInSubtree(subtree_root, node_get.table_index)) {
+		if (HasTableIndexInSubtree(subtree_root, node_get.table_index.index)) {
 			return &node_get;
 		}
 	}

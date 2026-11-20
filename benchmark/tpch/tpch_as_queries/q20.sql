@@ -6,6 +6,6 @@ SELECT s_name, s_address
                         AND priv_filter_gt(ps_availqty * 2, (SELECT as_sum(priv_hash(hash(o_custkey)), l_quantity)
                                                               FROM lineitem JOIN orders ON l_orderkey = o_orderkey
                                                              WHERE l_partkey = ps_partkey AND l_suppkey = ps_suppkey
-                                                               AND l_shipdate >= DATE '1994-01-01' AND l_shipdate < DATE '1995-01-01'))
-   AND n_name = 'CANADA')
+                                                               AND l_shipdate >= DATE '1994-01-01' AND l_shipdate < DATE '1995-01-01')))
+   AND n_name = 'CANADA'
  ORDER BY s_name;

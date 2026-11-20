@@ -38,7 +38,7 @@ FKToPUResult GetFKColumnsToPU(const string &table_name, const vector<string> &pr
 // This is used when the primary FK table is blocked by SEMI/ANTI joins
 struct AccessibleFKTableResult {
 	LogicalGet *get_node;
-	idx_t table_index;
+	TableIndex table_index;
 	string table_name;
 	vector<string> fk_columns;
 	bool found;

@@ -117,6 +117,23 @@ BENCH_RUNS=3     # Benchmark iterations (default: 3)
 FORCE_REBUILD=1  # Force rebuild binaries
 ```
 
+## Query settings and state export
+
+The paper runs pass the same session settings to every query through `QUERY_SETUP`, with one warmup and three
+measured runs per cell:
+
+```bash
+export QUERY_SETUP="SET pac_mi=0.0; SET threads=4; SET max_memory='30G'; \
+  SET max_temp_directory_size='90GB'; SET temp_directory='<local SSD path>';"
+export WARMUP_RUNS=1 BENCH_RUNS=3
+```
+
+The microbenchmarks keep `priv_state_export=false`, the default in every build variant. With export off DuckDB cannot
+spill the aggregate states, and some ablation cells fail once the temporary-storage limit is reached (`-1` in the
+CSV): unbuffered SUM and MAX and non-cascading COUNT at 10M scattered groups, and non-cascading SUM at 10M sequential
+groups. See the "Aggregate State Export" section of
+[`repro.md`](../../repro.md).
+
 ## Reproducibility
 
 ### EC2 Instances

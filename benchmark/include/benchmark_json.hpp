@@ -1,13 +1,24 @@
 #pragma once
 
 #include "duckdb.hpp"
+#include "duckdb/main/config.hpp"
 
 #include <cctype>
+#include <cstdlib>
 #include <map>
 #include <stdexcept>
 #include <utility>
 
 namespace duckdb {
+
+// Development DuckDB builds may use locally compiled, unsigned generator extensions.
+// Opt in for benchmark processes only; normal extension loading keeps its defaults.
+inline void ConfigureBenchmarkDatabase(DBConfig &config) {
+	auto allow_unsigned = std::getenv("PRIVACY_BENCHMARK_ALLOW_UNSIGNED_EXTENSIONS");
+	if (allow_unsigned && string(allow_unsigned) == "1") {
+		config.SetOptionByName("allow_unsigned_extensions", Value::BOOLEAN(true));
+	}
+}
 
 enum class JsonType : uint8_t { NIL, BOOL, NUMBER, STRING, ARRAY, OBJECT };
 
