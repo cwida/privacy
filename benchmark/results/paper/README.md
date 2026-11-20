@@ -23,6 +23,9 @@ directory.
 | 17 | `q01_stability_m64_m512_rescaled_sumcount_paper.png` | `dp/dp_tpch_sf30_q01_stability_{avg,sum_count}_summary.csv` | `benchmark/dp/plot_q01_stability.R` |
 | Table 1 | — | `accuracy/accuracy_{default,signedsum,exactsum}.csv` | — |
 
+`tpch/naive_worlds_sf30.csv` holds the check of the naive-baseline extrapolation (all 64 worlds timed individually)
+described in `repro.md`.
+
 The microbenchmark inputs (Figures 4–7) live with the microbenchmark suite; see
 [`benchmark/microbench/results/README.md`](../../microbench/results/README.md). The TPC-DS figure (Figure 12) and its
 inputs are added together with the TPC-DS benchmark.

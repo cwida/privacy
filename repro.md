@@ -140,6 +140,18 @@ build/release/extension/privacy/as_tpch_benchmark \
 
 Each AS query/mode is executed once without timing before its five measured executions. The CSV reports their median.
 
+The naive runtime is the runtime of one sampled world multiplied by 64: every world runs the same plan over a sample
+of the same size, so the benchmark times world 0 and extrapolates. `benchmark/tpch/measure_naive_worlds.py` checks
+this by timing all 64 worlds. At SF30 (AMD EPYC, 16 threads, three repetitions per world) the extrapolation differs
+from the measured sum of the 64 worlds by -1.8% to +1.6% per query and by less than 0.1% over all 19 queries; the
+slowest world of a query is at most 7% slower than its fastest. The measurements are in
+`benchmark/results/paper/tpch/naive_worlds_sf30.csv`.
+
+```bash
+python3 benchmark/tpch/measure_naive_worlds.py build/release/duckdb tpch_sf30_graviton.db \
+  benchmark/tpch/tpch_naive_as_queries 16 3 benchmark/results/utility/naive_worlds_sf30.csv
+```
+
 The variable-`m` configuration measures the separate aggregate path for `m=128,256,512`. It reuses the same database
 and skips the naive implementation.
 
