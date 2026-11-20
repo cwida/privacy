@@ -281,7 +281,7 @@ static unique_ptr<FunctionData> PacMinMaxBind(BindAggregateFunctionInput &bind_i
 		BIND_TYPE(INT128, hugeint_t);
 		BIND_TYPE(UINT128, uhugeint_t);
 	default:
-		throw NotImplementedException("pac_%s not implemented for type %s", IS_MAX ? "max" : "min",
+		throw NotImplementedException("as_%s is not implemented for type %s", IS_MAX ? "max" : "min",
 		                              value_type.ToString());
 	}
 #undef BIND_TYPE
@@ -383,7 +383,7 @@ static unique_ptr<FunctionData> PacMinMaxCountersBind(BindAggregateFunctionInput
 		BIND_COUNTERS_TYPE(INT128, hugeint_t);
 		BIND_COUNTERS_TYPE(UINT128, uhugeint_t);
 	default:
-		throw NotImplementedException("pac_%s_counters not implemented for type %s", IS_MAX ? "max" : "min",
+		throw NotImplementedException("as_%s (counter list) is not implemented for type %s", IS_MAX ? "max" : "min",
 		                              value_type.ToString());
 	}
 #undef BIND_COUNTERS_TYPE
