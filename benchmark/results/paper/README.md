@@ -16,6 +16,7 @@ directory.
 | 9 | `tpch_as_m_sweep_paper.png` | `tpch/as_tpch_sf30_m_sweep.csv` | `benchmark/tpch/plot_tpch_as_m_sweep.R` |
 | 10 | `ssb_sf30_graviton_paper.png` | `ssb/{approximate,exact}/threads_16_timings.csv` | `benchmark/ssb/plot_ssb_results.R` |
 | 11 | `meps_brr_graviton_paper.png` | `meps/{approximate,exact}/{damico2006,ahrq2016}/threads_16_timings.csv` | `benchmark/meps_brr/plot_meps_results.R` |
+| 12 | `tpcds_sf30_graviton_paper.png` | `tpcds/sf30.json`, `tpcds/sf30/summary.csv` | `benchmark/tpcds/plot_tpcds_results.R` |
 | 13 | `unskewed_sass_two_error_views_delta1e-06_m64_rescaletrue_paper.png` | `dp/dp_tpch_sf30_utility.csv` | `benchmark/dp/plot_unskewed_sass_utility_views.R` |
 | 14 | `tpch_sass_sampled_m_1x_paper.png` | `dp/dp_tpch_sf30_utility.csv` | `benchmark/dp/plot_sass_sampled_m_1x.R` |
 | 15 | `tpch_jcch_sf30_all5_runtime_compact_paper.png` | `dp/dp_tpch_sf30_utility.csv` | `benchmark/dp/plot_dp_full_utility_runtime.R` |
@@ -27,10 +28,11 @@ directory.
 described in `repro.md`.
 
 The microbenchmark inputs (Figures 4–7) live with the microbenchmark suite; see
-[`benchmark/microbench/results/README.md`](../../microbench/results/README.md). The TPC-DS figure (Figure 12) and its
-inputs are added together with the TPC-DS benchmark.
+[`benchmark/microbench/results/README.md`](../../microbench/results/README.md). `tpcds/queries/` is the snapshot of
+the 99 original TPC-DS queries that the SF30 run of Figure 12 executed; see
+[`docs/benchmark/tpcds.md`](../../../docs/benchmark/tpcds.md).
 
-The analytical runs (TPC-H, ClickBench, SSB, MEPS, DP) were measured on the Graviton machine with 16 threads and
+The analytical runs (TPC-H, ClickBench, SSB, MEPS, TPC-DS, DP) were measured on the Graviton machine with 16 threads and
 `priv_state_export=true`; see [`repro.md`](../../../repro.md) for the configurations, machines and commands.
 
 ## Regenerating the figures
@@ -60,6 +62,8 @@ Rscript --vanilla benchmark/dp/plot_q01_avg_compact_grid.R \
 Rscript --vanilla benchmark/dp/plot_q01_stability.R \
   $P/dp/dp_tpch_sf30_q01_stability_avg_summary.csv $P/dp/dp_tpch_sf30_q01_stability_sum_count_summary.csv \
   $O/q01_stability_m64_m512_rescaled_sumcount_paper.png
+
+Rscript --vanilla benchmark/tpcds/plot_tpcds_results.R $P/tpcds $O
 
 # Figures 4-7, written to benchmark/microbench/plots/.
 Rscript --vanilla benchmark/microbench/plot_microbenchmark.R

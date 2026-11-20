@@ -57,3 +57,16 @@ Validation summaries record exact and floating-point mismatches and maximum abso
 handwritten queries, unsupported constructs, compilation/runtime errors, timeouts, and absent stochastic operators
 are reported explicitly. `q17_fixture.sql` supplies a small nonempty correctness fixture for Q17; it is not a
 performance dataset. Small-scale or empty results remain preliminary diagnostics rather than paper-scale evidence.
+
+## Figure
+
+`plot_tpcds_results.R` plots the SF30 slowdown of the handwritten queries over ordinary DuckDB from a run directory
+that contains `sf30.json` and `sf30/summary.csv`:
+
+```bash
+Rscript --vanilla benchmark/tpcds/plot_tpcds_results.R benchmark/results/tpcds_sf30 benchmark/results/figures
+```
+
+The paper's figure, its `summary.csv` and the 99 original queries of that run are in
+`benchmark/results/paper/tpcds/` (Graviton, SF30, 16 threads, 30 GB memory limit, 64 worlds, five repetitions). To
+compare against it, copy that query snapshot into the configured `queries_dir` before running.
