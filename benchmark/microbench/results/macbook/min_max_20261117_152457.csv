@@ -1,0 +1,16 @@
+test,aggregate,variant,rows_m,groups,dtype,wall_sec,agg_sec,wall_times,agg_times
+dist_test,max,standard,100,1,random,0.260,0.017,0.526 0.254 0.260,0.018 0.017 0.017
+dist_test,max,default,100,1,random,0.530,0.211,0.535 0.530 0.530,0.211 0.212 0.211
+dist_test,max,noboundopt,100,1,random,1.980,1.657,1.980 1.976 2.022,1.657 1.655 1.692
+dist_test,max,nobuffering,100,1,random,0.555,0.217,0.660 0.545 0.555,0.217 0.217 0.216
+dist_test,max,nosimd,100,1,random,0.620,0.219,0.620 0.608 0.635,0.219 0.214 0.220
+dist_test,max,standard,100,1,monotonic_inc,0.213,0.017,0.210 0.256 0.213,0.018 0.017 0.017
+dist_test,max,default,100,1,monotonic_inc,2.011,1.748,2.019 2.011 2.010,1.750 1.748 1.747
+dist_test,max,noboundopt,100,1,monotonic_inc,1.934,1.666,1.934 1.933 1.936,1.666 1.666 1.666
+dist_test,max,nobuffering,100,1,monotonic_inc,2.032,1.768,2.024 2.032 2.057,1.768 1.765 1.780
+dist_test,max,nosimd,100,1,monotonic_inc,17.882,17.510,17.907 17.758 17.882,17.574 17.433 17.510
+dist_test,max,standard,100,1,monotonic_dec,0.336,0.017,0.336 0.333 0.336,0.017 0.017 0.017
+dist_test,max,default,100,1,monotonic_dec,0.607,0.213,0.607 0.609 0.602,0.212 0.214 0.213
+dist_test,max,noboundopt,100,1,monotonic_dec,2.074,1.672,2.074 2.066 2.079,1.671 1.672 1.675
+dist_test,max,nobuffering,100,1,monotonic_dec,0.612,0.215,0.607 0.617 0.612,0.213 0.215 0.215
+dist_test,max,nosimd,100,1,monotonic_dec,0.660,0.212,0.667 0.652 0.660,0.212 0.212 0.213

@@ -115,25 +115,29 @@ p$layers[[1]]$geom <- ggproto(NULL, GeomCol,
   })
 p <- suppressMessages(p + scale_fill_manual(
   values = setNames(c("#95a5a6", "#a8d4ff", "#f0b35a", "#4dff4d", "#52b788"), series_labels),
-  name = NULL))
+  name = NULL, labels = PaperMethodLabels))
 p <- suppressMessages(p + scale_x_continuous(
-  breaks = query_positions, labels = query_labels, expand = expansion(add = 0.1),
+  breaks = query_positions, labels = query_labels, expand = expansion(add = 0.18),
   sec.axis = dup_axis(breaks = c(mean(query_positions[1:2]), mean(query_positions[3:7])),
                       labels = c("MEPS 2006 (64 replicates)", "MEPS 2016 (128 replicates)"), name = NULL)))
 p <- suppressMessages(p + scale_y_log10(
   labels = function(x) ifelse(x >= 1e6, paste0(x / 1e6, "s"), paste0(x / 1000, "ms"))))
-p <- p + coord_cartesian(ylim = c(100, max(labels$y_pos) * 1.3), clip = "on") +
+p <- p + coord_cartesian(ylim = c(100, max(labels$y_pos) * 2.8), clip = "on") +
   theme(text = element_text(family = base_font),
         axis.text = element_text(family = base_font),
-        axis.text.x.top = element_text(size = 16, angle = 0, hjust = 0.5, color = "black",
+        axis.text.x.bottom = element_text(size = 22, angle = 0, hjust = 0.5, vjust = 1,
+                                          margin = margin(t = 4)),
+        axis.text.x.top = element_text(size = 17, angle = 0, hjust = 0.5, color = "black",
                                        margin = margin(b = 4)),
         axis.ticks.x.top = element_blank(),
-        legend.text = element_text(size = 18.5, family = base_font, margin = margin(l = 8, r = 8)),
+        legend.text = element_text(size = 22, family = base_font, margin = margin(l = 3, r = 8)),
         legend.key.width = grid::unit(0.4, "cm"), legend.key.height = grid::unit(0.4, "cm"),
         legend.spacing.x = grid::unit(0.12, "cm"),
+        # Set explicitly: the TPC-H plotter this figure builds on uses a wider legend.
+        legend.key.spacing.x = grid::unit(4, "pt"),
         legend.justification = "left", legend.box.just = "left", legend.location = "plot",
         legend.box.spacing = grid::unit(9, "pt"),
-        legend.margin = margin(0, 0, 0, 0), legend.box.margin = margin(0, 0, 0, 12),
+        legend.margin = margin(0, 0, 0, 0), legend.box.margin = margin(0, 0, 0, 0),
         plot.margin = margin(12, 10, 12, 10)) +
   geom_text(data = labels, aes(x = x_pos, y = y_pos, label = label), inherit.aes = FALSE,
             size = 5, vjust = 0, fontface = "bold", family = base_font) +
@@ -158,7 +162,7 @@ p <- p + geom_segment(data = do.call(rbind, stripes),
                       aes(x = x, xend = xend, y = y, yend = yend), inherit.aes = FALSE,
                       color = "#245d2c", linewidth = 0.3, alpha = 0.55)
 prefix <- file.path(root, paste0("meps_t", threads, "_five_runs_median"))
-ggsave(paste0(prefix, ".png"), p, width = 4000 / 350, height = 1750 / 350, dpi = 350,
+ggsave(paste0(prefix, ".png"), p, width = 4000 / 350, height = 1200 / 350, dpi = 350,
        type = if (capabilities("aqua")) "quartz" else "cairo")
-ggsave(paste0(prefix, ".pdf"), p, width = 4000 / 350, height = 1750 / 350, device = "pdf")
+ggsave(paste0(prefix, ".pdf"), p, width = 4000 / 350, height = 1200 / 350, device = "pdf")
 message("Saved ", prefix, ".{png,pdf}; medians of five warm executions; labels = runtime / DuckDB.")

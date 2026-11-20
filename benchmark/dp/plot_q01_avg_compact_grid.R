@@ -83,7 +83,7 @@ cols_data <- normalize(cols) %>%
 	) %>%
 	group_by(panel, item, mechanism) %>%
 	summarise(
-		full_error = mean(full_error, na.rm = TRUE),
+		full_error = median(full_error, na.rm = TRUE),
 		.groups = "drop"
 	)
 
@@ -97,7 +97,7 @@ groups_data <- normalize(groups) %>%
 	) %>%
 	group_by(panel, item, mechanism) %>%
 	summarise(
-		full_error = mean(full_error, na.rm = TRUE),
+		full_error = median(full_error, na.rm = TRUE),
 		.groups = "drop"
 	)
 

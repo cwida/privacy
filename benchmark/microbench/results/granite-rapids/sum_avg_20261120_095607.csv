@@ -1,0 +1,65 @@
+test,aggregate,variant,rows_m,groups,dtype,wall_sec,agg_sec,wall_times,agg_times
+ungrouped_domain,sum,standard,100,1,tiny,0.660,0.083,0.660 0.659 0.663,0.083 0.083 0.083
+ungrouped_domain,sum,default,100,1,tiny,1.301,0.603,1.292 1.301 1.304,0.601 0.607 0.603
+ungrouped_domain,sum,nobuffering,100,1,tiny,1.437,0.769,1.437 1.435 1.469,0.765 0.769 0.797
+ungrouped_domain,sum,exactsum,100,1,tiny,2.168,1.498,2.176 2.162 2.168,1.498 1.496 1.501
+ungrouped_domain,sum,nocascading,100,1,tiny,8.426,7.733,8.426 8.431 8.418,7.733 7.735 7.732
+ungrouped_domain,sum,nosimd,100,1,tiny,27.213,26.450,27.213,26.450
+ungrouped_domain,sum,standard,100,1,small,0.667,0.083,0.670 0.664 0.667,0.083 0.084 0.083
+ungrouped_domain,sum,default,100,1,small,1.336,0.637,1.341 1.335 1.336,0.637 0.638 0.634
+ungrouped_domain,sum,nobuffering,100,1,small,1.501,0.832,1.501 1.499 1.506,0.833 0.832 0.831
+ungrouped_domain,sum,exactsum,100,1,small,2.047,1.323,2.047 2.050 2.039,1.324 1.323 1.321
+ungrouped_domain,sum,nocascading,100,1,small,8.431,7.741,8.436 8.431 8.425,7.741 7.741 7.736
+ungrouped_domain,sum,nosimd,100,1,small,27.249,26.487,27.249,26.487
+ungrouped_domain,sum,standard,100,1,medium,0.663,0.083,0.662 0.670 0.663,0.083 0.084 0.083
+ungrouped_domain,sum,default,100,1,medium,1.361,0.667,1.369 1.359 1.361,0.667 0.666 0.667
+ungrouped_domain,sum,nobuffering,100,1,medium,1.552,0.884,1.552 1.552 1.556,0.884 0.884 0.882
+ungrouped_domain,sum,exactsum,100,1,medium,1.752,1.025,1.752 1.751 1.767,1.025 1.024 1.032
+ungrouped_domain,sum,nocascading,100,1,medium,8.433,7.741,8.432 8.433 8.434,7.743 7.739 7.741
+ungrouped_domain,sum,nosimd,100,1,medium,27.277,26.505,27.277,26.505
+ungrouped_domain,sum,standard,100,1,large,0.664,0.083,0.664 0.663 0.671,0.083 0.083 0.084
+ungrouped_domain,sum,default,100,1,large,1.329,0.631,1.324 1.337 1.329,0.631 0.640 0.630
+ungrouped_domain,sum,nobuffering,100,1,large,1.501,0.834,1.501 1.508 1.499,0.834 0.839 0.834
+ungrouped_domain,sum,exactsum,100,1,large,1.918,1.186,1.917 1.918 1.924,1.186 1.186 1.188
+ungrouped_domain,sum,nocascading,100,1,large,8.437,7.743,8.437 8.437 8.426,7.746 7.743 7.736
+ungrouped_domain,sum,nosimd,100,1,large,27.190,26.430,27.190,26.430
+grouped_seq,sum,standard,100,10,tiny,1.437,0.516,1.437 1.436 1.437,0.520 0.515 0.516
+grouped_seq,sum,default,100,10,tiny,2.116,1.062,2.108 2.116 2.117,1.057 1.065 1.062
+grouped_seq,sum,nobuffering,100,10,tiny,2.164,1.163,2.167 2.163 2.164,1.162 1.163 1.163
+grouped_seq,sum,exactsum,100,10,tiny,2.878,1.872,2.879 2.878 2.876,1.873 1.872 1.869
+grouped_seq,sum,nocascading,100,10,tiny,9.121,8.094,9.128 9.120 9.121,8.094 8.093 8.094
+grouped_seq,sum,standard,100,1000,tiny,1.437,0.518,1.434 1.443 1.437,0.518 0.518 0.521
+grouped_seq,sum,default,100,1000,tiny,2.119,1.066,2.119 2.122 2.116,1.066 1.069 1.066
+grouped_seq,sum,nobuffering,100,1000,tiny,2.178,1.178,2.197 2.177 2.178,1.180 1.177 1.178
+grouped_seq,sum,exactsum,100,1000,tiny,2.887,1.881,2.887 2.890 2.881,1.882 1.881 1.874
+grouped_seq,sum,nocascading,100,1000,tiny,9.131,8.099,9.121 9.132 9.131,8.089 8.101 8.099
+grouped_seq,sum,standard,100,100000,tiny,1.488,0.570,1.490 1.488 1.487,0.567 0.570 0.570
+grouped_seq,sum,default,100,100000,tiny,2.246,1.206,2.246 2.238 2.248,1.206 1.201 1.212
+grouped_seq,sum,nobuffering,100,100000,tiny,2.270,1.281,2.268 2.270 2.275,1.279 1.284 1.281
+grouped_seq,sum,exactsum,100,100000,tiny,2.977,2.000,2.971 2.984 2.977,1.997 2.010 2.000
+grouped_seq,sum,nocascading,100,100000,tiny,9.260,8.302,9.260 9.260 9.274,8.302 8.291 8.305
+grouped_seq,sum,standard,100,10000000,tiny,2.014,1.298,2.011 2.020 2.014,1.294 1.306 1.298
+grouped_seq,sum,default,100,10000000,tiny,5.255,7.962,5.051 5.255 5.389,7.125 7.962 8.402
+grouped_seq,sum,nobuffering,100,10000000,tiny,5.446,7.671,5.446 5.358 5.477,7.671 7.319 7.835
+grouped_seq,sum,exactsum,100,10000000,tiny,5.748,9.213,5.748 5.759 5.705,9.213 9.234 9.057
+grouped_seq,sum,nocascading,100,10000000,tiny,-1,-1,-1,-1
+grouped_scat,sum,standard,100,10,tiny,1.302,0.378,1.298 1.302 1.303,0.375 0.378 0.381
+grouped_scat,sum,default,100,10,tiny,2.145,1.136,2.145 2.163 2.142,1.136 1.144 1.136
+grouped_scat,sum,nobuffering,100,10,tiny,2.158,1.151,2.158 2.151 2.163,1.155 1.149 1.151
+grouped_scat,sum,exactsum,100,10,tiny,2.937,1.932,2.937 2.931 2.945,1.932 1.925 1.937
+grouped_scat,sum,nocascading,100,10,tiny,9.132,8.096,9.134 9.123 9.132,8.108 8.093 8.096
+grouped_scat,sum,standard,100,1000,tiny,1.378,0.462,1.382 1.378 1.376,0.462 0.463 0.459
+grouped_scat,sum,default,100,1000,tiny,2.287,1.205,2.303 2.287 2.282,1.211 1.205 1.203
+grouped_scat,sum,nobuffering,100,1000,tiny,2.357,1.356,2.371 2.357 2.351,1.358 1.356 1.341
+grouped_scat,sum,exactsum,100,1000,tiny,2.974,1.962,2.979 2.968 2.974,1.962 1.959 1.964
+grouped_scat,sum,nocascading,100,1000,tiny,9.285,8.221,9.285 9.291 9.280,8.217 8.221 8.224
+grouped_scat,sum,standard,100,100000,tiny,2.000,1.053,2.000 2.000 2.039,1.053 1.051 1.088
+grouped_scat,sum,default,100,100000,tiny,3.036,1.954,3.030 3.047 3.036,1.951 1.972 1.954
+grouped_scat,sum,nobuffering,100,100000,tiny,3.737,2.703,3.762 3.737 3.725,2.708 2.703 2.667
+grouped_scat,sum,exactsum,100,100000,tiny,3.745,2.728,3.791 3.739 3.745,2.769 2.719 2.728
+grouped_scat,sum,nocascading,100,100000,tiny,10.768,9.685,10.697 10.768 10.822,9.617 9.685 9.725
+grouped_scat,sum,standard,100,10000000,tiny,4.102,3.604,4.102 4.112 4.092,3.604 3.631 3.593
+grouped_scat,sum,default,100,10000000,tiny,8.271,11.867,8.227 8.326 8.271,11.895 11.859 11.867
+grouped_scat,sum,nobuffering,100,10000000,tiny,24.179,39.885,24.160 24.754 24.179,39.003 40.336 39.885
+grouped_scat,sum,exactsum,100,10000000,tiny,8.587,13.322,8.572 8.749 8.587,13.314 13.994 13.322
+grouped_scat,sum,nocascading,100,10000000,tiny,11.676,24.272,11.658 11.676 11.689,24.082 24.272 24.340
