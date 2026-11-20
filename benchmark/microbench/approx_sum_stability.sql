@@ -34,18 +34,18 @@ WITH bit_positions AS (SELECT unnest(range(64)) as bit_pos),
                    FROM accuracy_test, bit_positions GROUP BY dist, bit_pos),
     exact_lists AS (SELECT dist, list(exact_sum ORDER BY bit_pos) as exact_counters
                     FROM exact_sums GROUP BY dist),
-    approx_sums AS (SELECT dist, as_sum(priv_hash(hash(rowid)), val) as approx_counters
+    approx_sums AS (SELECT dist, list_transform(as_sum(priv_hash(hash(rowid)), val), lambda x: x / 2.0) as approx_counters
                     FROM accuracy_test GROUP BY dist),
     per_counter_stats AS (
         SELECT e.dist, e.exact_counters, a.approx_counters,
-               [POWER(e.exact_counters[x+1] - a.approx_counters[x+1] / 2, 2) FOR x IN range(64)] as sq_diffs,
+               [POWER(e.exact_counters[x+1] - a.approx_counters[x+1], 2) FOR x IN range(64)] as sq_diffs,
                [CASE WHEN e.exact_counters[x+1] = 0 THEN NULL
-                     ELSE 100.0 * (a.approx_counters[x+1] / 2 - e.exact_counters[x+1]) / e.exact_counters[x+1]
+                     ELSE 100.0 * (a.approx_counters[x+1] - e.exact_counters[x+1]) / e.exact_counters[x+1]
                 END FOR x IN range(64)] as pct_diffs
         FROM exact_lists e JOIN approx_sums a ON e.dist = a.dist)
     SELECT
         dist, cast(sqrt(list_avg(sq_diffs)) as bigint) as rmse,
-        ROUND(list_avg(list_transform(pct_diffs, x -> abs(x))), 4) as pct_err,
+        ROUND(list_avg(list_transform(pct_diffs, lambda x: abs(x))), 4) as pct_err,
         ROUND(POWER(rmse, 2) / NULLIF(list_var_samp(approx_counters), 0), 4) as z_squared,
         cast(list_var_samp(exact_counters) as float) as var_exact,
         cast(list_var_samp(approx_counters) as float) as var_approx,

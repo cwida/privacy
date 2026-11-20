@@ -1,0 +1,13 @@
+{
+  "sf": 30,
+  "db": "/mnt/asa/tpcds_rerun_20261119/sf30/data.db",
+  "queries_dir": "/home/ubuntu/tpcds_rerun_20261119/queries",
+  "out_dir": "/home/ubuntu/tpcds_rerun_20261119/sf30",
+  "schema": "/home/ubuntu/tpcds_rerun_20261119/benchmark/schema.sql",
+  "threads": 16,
+  "memory_limit": "30GB",
+  "repetitions": 5,
+  "timeout_seconds": 3600,
+  "as_queries_dir": "/home/ubuntu/tpcds_rerun_20261119/benchmark/as_queries",
+  "reference_queries_dir": "/home/ubuntu/tpcds_rerun_20261119/benchmark/reference_queries"
+}
