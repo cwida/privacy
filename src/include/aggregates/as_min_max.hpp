@@ -571,7 +571,9 @@ struct PacMinMaxStateWrapper {
 				}
 			}
 		} else if (!s) {
-			s = reinterpret_cast<State *>(a.Allocate(sizeof(State)));
+			// The low bits of this pointer hold the buffered-value count, so the state must start 8-byte
+			// aligned; other aggregates can leave the shared arena at an odd offset.
+			s = reinterpret_cast<State *>(a.AllocateAligned(sizeof(State)));
 			memset(s, 0, sizeof(State));
 			state = s;
 		}

@@ -863,3 +863,58 @@ SET memory_limit='80%'
 
 statement ok
 DROP TABLE sum_export_off
+
+# Buffered states keep a counter in the low bits of their state pointer, so the state must be allocated
+# 8-byte aligned. bit_or over a 105-bit BIT allocates 15 bytes per group in the same arena and used to
+# leave it at an odd offset, which corrupted the neighbouring stochastic state (crash or wrong result).
+statement ok
+SET pac_mi=0
+
+statement ok
+SET privacy_seed=42
+
+statement ok
+SET pac_sample_diversity_check=false
+
+statement ok
+SET priv_rewrite=false
+
+statement ok
+CREATE TABLE align_t AS SELECT i AS k, i % 1000 AS g, (i % 50)::BIGINT AS v, repeat('1', 105)::BIT AS b FROM range(200000) r(i)
+
+statement ok
+CREATE TABLE align_with AS SELECT g, bit_or(b) AS bo, as_noised_sum(priv_hash(hash(k)), v) AS s, as_noised_count(priv_hash(hash(k))) AS c FROM align_t GROUP BY g
+
+statement ok
+CREATE TABLE align_alone AS SELECT g, as_noised_sum(priv_hash(hash(k)), v) AS s, as_noised_count(priv_hash(hash(k))) AS c FROM align_t GROUP BY g
+
+query I
+SELECT count(*) FROM align_with w JOIN align_alone a USING (g) WHERE w.s = a.s AND w.c = a.c
+----
+1000
+
+statement ok
+CREATE TABLE align_mm_with AS SELECT g, bit_or(b) AS bo, as_noised_min(priv_hash(hash(k)), v::INTEGER) AS mn, as_noised_max(priv_hash(hash(k)), v::INTEGER) AS mx FROM align_t GROUP BY g
+
+statement ok
+CREATE TABLE align_mm_alone AS SELECT g, as_noised_min(priv_hash(hash(k)), v::INTEGER) AS mn, as_noised_max(priv_hash(hash(k)), v::INTEGER) AS mx FROM align_t GROUP BY g
+
+query I
+SELECT count(*) FROM align_mm_with w JOIN align_mm_alone a USING (g) WHERE w.mn = a.mn AND w.mx = a.mx
+----
+1000
+
+statement ok
+DROP TABLE align_t
+
+statement ok
+DROP TABLE align_with
+
+statement ok
+DROP TABLE align_alone
+
+statement ok
+DROP TABLE align_mm_with
+
+statement ok
+DROP TABLE align_mm_alone

@@ -287,7 +287,9 @@ struct PacCountStateWrapper {
 	PacCountState *EnsureState(ArenaAllocator &a) {
 		PacCountState *s = GetState();
 		if (!s) {
-			s = reinterpret_cast<PacCountState *>(a.Allocate(sizeof(PacCountState)));
+			// The low bits of this pointer hold the buffered-value count, so the state must start 8-byte
+			// aligned; other aggregates can leave the shared arena at an odd offset.
+			s = reinterpret_cast<PacCountState *>(a.AllocateAligned(sizeof(PacCountState)));
 			memset(s, 0, sizeof(PacCountState));
 			state = s;
 		}
