@@ -1,7 +1,3 @@
-//
-// Created by ila on 1/16/26.
-//
-
 #include "query_processing/pac_projection_propagation.hpp"
 #include "privacy_debug.hpp"
 #include "utils/privacy_helpers.hpp"

@@ -9,9 +9,6 @@
 // - FK Path: The chain of foreign keys from queried tables to the PU (e.g., lineitem -> orders -> customer)
 // - Hash Expression: A hash computed from FK columns that reference the PU (e.g., hash(o_custkey))
 // - Correlated Subqueries: Inner queries that reference outer query tables (require special handling)
-//
-// Created by ila on 12/21/25.
-//
 
 #include "compiler/privacy_compiler.hpp"
 #include "compiler/privacy_mechanisms.hpp"

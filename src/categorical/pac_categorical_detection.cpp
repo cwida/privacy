@@ -2,9 +2,6 @@
 // PAC Categorical Pattern Detection - Implementation
 //
 // See pac_categorical_detection.hpp for design documentation.
-//
-// Created by ila on 1/23/26.
-//
 #include "privacy_debug.hpp"
 #include "categorical/pac_categorical_detection.hpp"
 #include "duckdb/planner/operator/logical_cteref.hpp"

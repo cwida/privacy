@@ -4,9 +4,6 @@
 // This file contains functions for handling correlated subqueries and DELIM_JOIN operations
 // in PAC query compilation. These functions help manage column accessibility and propagation
 // across subquery boundaries.
-//
-// Created by ila on 1/22/26.
-//
 
 #include "query_processing/pac_subquery_handler.hpp"
 #include "privacy_debug.hpp"

@@ -1,4 +1,3 @@
-// filepath: /home/ila/Code/pac/src/privacy_helpers.hpp
 #pragma once
 
 #include "duckdb.hpp"

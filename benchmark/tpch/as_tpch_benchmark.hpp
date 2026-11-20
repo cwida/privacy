@@ -1,7 +1,3 @@
-//
-// Created by ila on 12/24/25.
-//
-
 #ifndef AS_TPCH_BENCHMARK_HPP
 #define AS_TPCH_BENCHMARK_HPP
 

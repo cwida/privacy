@@ -55,7 +55,6 @@ set(EXTENSION_SOURCES
     src/query_processing/privacy_expression_builder.cpp
     src/query_processing/privacy_plan_traversal.cpp
     src/query_processing/pac_projection_propagation.cpp
-    src/query_processing/privacy_fk_resolver.cpp
     src/compiler/privacy_bitslice_add_fkjoins.cpp
     src/query_processing/pac_subquery_handler.cpp
     src/parser/privacy_parser.cpp

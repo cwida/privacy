@@ -7,9 +7,6 @@
 //
 // This is the detection phase only — no plan mutation happens here.
 // See pac_categorical_rewriter.hpp/.cpp for the rewriting phase.
-//
-// Created by ila on 1/23/26.
-//
 
 #ifndef PAC_CATEGORICAL_DETECTION_HPP
 #define PAC_CATEGORICAL_DETECTION_HPP

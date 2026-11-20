@@ -4,9 +4,6 @@
 // Expression builder layer for categorical query rewriting.
 // Builds list_transform / list_zip lambda expressions over PAC counter bindings,
 // and algebraic simplification to priv_filter_<cmp> / priv_select_<cmp>.
-//
-// Created by ila on 3/13/26.
-//
 
 #ifndef PAC_CATEGORICAL_LAMBDAS_HPP
 #define PAC_CATEGORICAL_LAMBDAS_HPP

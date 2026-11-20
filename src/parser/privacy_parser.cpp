@@ -10,7 +10,6 @@
 // - privacy_metadata_serialization.cpp: JSON serialization/deserialization
 // - privacy_parser_helpers.cpp: SQL parsing and clause extraction
 //
-// Created by ila on 12/21/25.
 // Refactored on 1/22/26.
 //
 

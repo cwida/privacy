@@ -2,9 +2,6 @@
 // PAC Categorical Query Rewriter - Implementation
 //
 // See pac_categorical_rewriter.hpp for design documentation.
-//
-// Created by ila on 1/23/26.
-//
 #include "privacy_debug.hpp"
 #include "categorical/pac_categorical_lambdas.hpp"
 #include "aggregates/as_aggregate.hpp"

@@ -2,9 +2,6 @@
 // PAC Categorical Lambda Construction - Implementation
 //
 // See pac_categorical_lambdas.hpp for design documentation.
-//
-// Created by ila on 3/13/26.
-//
 #include "categorical/pac_categorical_lambdas.hpp"
 #include "privacy_debug.hpp"
 #include "aggregates/as_aggregate.hpp"

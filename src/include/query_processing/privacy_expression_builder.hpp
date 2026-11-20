@@ -1,7 +1,3 @@
-//
-// Created by ila on 1/6/26.
-//
-
 #ifndef PRIVACY_EXPRESSION_BUILDER_HPP
 #define PRIVACY_EXPRESSION_BUILDER_HPP
 

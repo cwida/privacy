@@ -1,7 +1,3 @@
-//
-// Created by ila on 1/6/26.
-//
-
 #ifndef PRIVACY_PLAN_TRAVERSAL_HPP
 #define PRIVACY_PLAN_TRAVERSAL_HPP
 

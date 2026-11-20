@@ -1,7 +1,3 @@
-//
-// Created by ila on 12/19/25.
-//
-
 #ifndef PAC_COUNT_HPP
 #define PAC_COUNT_HPP
 

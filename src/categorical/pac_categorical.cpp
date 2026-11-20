@@ -3,9 +3,6 @@
 // PAC Categorical Query Support - Implementation
 //
 // See pac_categorical.hpp for design documentation.
-//
-// Created by ila on 1/22/26.
-//
 
 #include "duckdb/common/vector/list_vector.hpp"
 #include "categorical/pac_categorical.hpp"

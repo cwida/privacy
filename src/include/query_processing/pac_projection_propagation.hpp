@@ -1,7 +1,3 @@
-//
-// Created by ila on 1/16/26.
-//
-
 #pragma once
 
 #include "duckdb/common/common.hpp"

@@ -1,7 +1,3 @@
-//
-// Created by ila on 12/24/25.
-//
-
 // Implement the TPCH benchmark runner.
 
 #include "as_tpch_benchmark.hpp"

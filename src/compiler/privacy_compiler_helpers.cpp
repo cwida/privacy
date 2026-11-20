@@ -1,7 +1,3 @@
-//
-// Created by ila on 12/23/25.
-//
-
 #include "duckdb/main/database_manager.hpp"
 #include "compiler/privacy_compiler_helpers.hpp"
 #include "privacy_debug.hpp"

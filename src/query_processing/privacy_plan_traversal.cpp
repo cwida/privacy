@@ -1,7 +1,3 @@
-//
-// Created by ila on 1/6/26.
-//
-
 #include "query_processing/privacy_plan_traversal.hpp"
 
 #include "duckdb/planner/logical_operator.hpp"

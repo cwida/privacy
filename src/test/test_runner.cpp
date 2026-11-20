@@ -1,7 +1,3 @@
-//
-// Created by ila on 12/24/25.
-//
-
 #include <iostream>
 #include "include/test_compiler_functions.hpp"
 #include "include/test_schema_metadata.hpp"

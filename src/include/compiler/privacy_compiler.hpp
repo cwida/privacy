@@ -1,7 +1,3 @@
-//
-// Created by ila on 12/21/25.
-//
-
 #ifndef PRIVACY_COMPILER_HPP
 #define PRIVACY_COMPILER_HPP
 

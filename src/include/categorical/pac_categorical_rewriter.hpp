@@ -12,9 +12,6 @@
 // Example transformation for TPC-H Q20:
 //   BEFORE: ps_availqty > (SELECT 0.5 * as_sum(hash, l_quantity) FROM ...)
 //   AFTER:  priv_filter(pac_gt(ps_availqty, (SELECT 0.5 * as_sum(hash, l_quantity) FROM ...)))
-//
-// Created by ila on 1/23/26.
-//
 
 #ifndef PAC_CATEGORICAL_REWRITER_HPP
 #define PAC_CATEGORICAL_REWRITER_HPP

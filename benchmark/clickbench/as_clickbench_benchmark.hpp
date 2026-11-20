@@ -1,7 +1,3 @@
-//
-// Created by ila on 07/07/26.
-//
-
 #ifndef AS_CLICKBENCH_BENCHMARK_HPP
 #define AS_CLICKBENCH_BENCHMARK_HPP
 

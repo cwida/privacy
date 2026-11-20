@@ -1,7 +1,3 @@
-//
-// Created by ila on 12/12/25.
-//
-
 #include "core/privacy_optimizer.hpp"
 #include "aggregates/as_aggregate.hpp"
 #include "privacy_debug.hpp"

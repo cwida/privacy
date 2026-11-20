@@ -1,7 +1,3 @@
-//
-// Created by ila on 12/19/25.
-//
-
 #ifndef PAC_SUM_HPP
 #define PAC_SUM_HPP
 

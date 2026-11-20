@@ -1,7 +1,3 @@
-//
-// Created by ila on 07/07/26.
-//
-
 #include "as_clickbench_benchmark.hpp"
 #include "as_query_rewriter.hpp"
 #include "benchmark_json.hpp"

@@ -22,9 +22,6 @@
 // - priv_filter(mask) -> BOOLEAN : Probabilistically filter based on popcount(mask)/64
 // - priv_filter(list<bool>) -> BOOLEAN : Convert to mask, then filter
 // - NOT: ~mask (negate condition)
-//
-// Created by ila on 1/22/26.
-//
 
 #ifndef PAC_CATEGORICAL_HPP
 #define PAC_CATEGORICAL_HPP
