@@ -511,9 +511,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                             Value::BOOLEAN(true));
 	// Number of per-sample subsets (m): a power of two from 64 to 512 (default 64)
 	db.config.AddExtensionOption("pac_m", "[INTERNAL] Number of per-sample subsets", LogicalType::INTEGER);
-	// Path where compiled privacy artifacts (CTEs) are written
-	db.config.AddExtensionOption("priv_compiled_path", "[INTERNAL] Path to write compiled privacy artifacts",
-	                             LogicalType::VARCHAR);
 	// Enable/disable join elimination (stop FK chain before reaching PU)
 	db.config.AddExtensionOption("priv_join_elimination", "[INTERNAL] Eliminate final join to PU table",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(true));

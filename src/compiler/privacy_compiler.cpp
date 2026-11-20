@@ -45,12 +45,10 @@
 namespace duckdb {
 
 static void CompilePacMechanism(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
-                                unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                                const string &query, const string &query_hash);
+                                unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units);
 
 void CompilePrivQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
-                      unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units, const string &query,
-                      const string &query_hash) {
+                      unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units) {
 	string privacy_mode = GetPrivacyMode(input.context);
 	PRIVACY_DEBUG_PRINT("[PRIV_COMPILER] CompilePrivQuery mode=" + privacy_mode);
 
@@ -59,15 +57,15 @@ void CompilePrivQuery(const PrivacyCompatibilityResult &check, OptimizerExtensio
 	plan->ResolveOperatorTypes();
 
 	if (privacy_mode == "pac") {
-		CompilePacMechanism(check, input, plan, privacy_units, query, query_hash);
+		CompilePacMechanism(check, input, plan, privacy_units);
 	} else if (privacy_mode == "dp_standard") {
-		CompileDPStandardQuery(check, input, plan, privacy_units, query_hash);
+		CompileDPStandardQuery(check, input, plan, privacy_units);
 	} else if (privacy_mode == "dp_filterless") {
-		CompileDPFilterlessQuery(check, input, plan, privacy_units, query_hash);
+		CompileDPFilterlessQuery(check, input, plan, privacy_units);
 	} else if (privacy_mode == "dp_elastic") {
-		CompileDPElasticQuery(check, input, plan, privacy_units, query_hash);
+		CompileDPElasticQuery(check, input, plan, privacy_units);
 	} else if (privacy_mode == "dp_sass") {
-		CompileDPSampleMedianQuery(check, input, plan, privacy_units, query_hash);
+		CompileDPSampleMedianQuery(check, input, plan, privacy_units);
 	} else {
 		throw InvalidInputException("unknown privacy_mode '" + privacy_mode +
 		                            "' (expected 'pac', 'dp_standard', 'dp_filterless', 'dp_elastic', or 'dp_sass')");
@@ -906,7 +904,7 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 	// (e.g., GROUP BY c_custkey where customer is the PU). In this case, we noise the outer
 	// aggregate instead of the inner one.
 	vector<LogicalAggregate *> target_aggregates =
-	    FilterTargetAggregatesWithPUKeyCheck(all_aggregates, relevant_tables, check, pu_table_names, cte_map);
+	    FilterTargetAggregatesWithPUKeyCheck(all_aggregates, relevant_tables, check, cte_map);
 
 	if (target_aggregates.empty()) {
 		throw InvalidInputException("PAC Compiler: no aggregate nodes with relevant tables found in plan");
@@ -972,7 +970,7 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 				// by PU key — insert hash deep and propagate through the inner's GROUP BY.
 				if (!IsDirectlyReachable(target_agg, get.table_index.index)) {
 					ColumnBinding pk_binding;
-					auto *inner_agg = FindInnerAggregateWithPUKeyGroup(target_agg, check, pu_table_names, pk_binding);
+					auto *inner_agg = FindInnerAggregateWithPUKeyGroup(target_agg, check, pk_binding);
 					if (inner_agg) {
 						auto *inner_get = FindTableScanInSubtree(inner_agg, pu_table_name);
 						if (inner_get) {
@@ -1053,8 +1051,7 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 						// insert hash deep and propagate through the inner's GROUP BY.
 						if (!IsDirectlyReachable(target_agg, fk_get_ptr->table_index.index)) {
 							ColumnBinding pk_binding;
-							auto *inner_agg =
-							    FindInnerAggregateWithPUKeyGroup(target_agg, check, pu_table_names, pk_binding);
+							auto *inner_agg = FindInnerAggregateWithPUKeyGroup(target_agg, check, pk_binding);
 							if (inner_agg) {
 								auto *inner_get = FindTableScanInSubtree(inner_agg, candidate);
 								if (inner_get) {
@@ -1246,12 +1243,9 @@ PrivPUHashingSetup PreparePlanForPUHashing(const PrivacyCompatibilityResult &che
 }
 
 static void CompilePacMechanism(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
-                                unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                                const string &query, const string &query_hash) {
+                                unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units) {
 #if PRIVACY_DEBUG
 	PRIVACY_DEBUG_PRINT("=== PRIVACY BITSLICE COMPILATION ===");
-	PRIVACY_DEBUG_PRINT("Query hash: " + query_hash);
-	PRIVACY_DEBUG_PRINT("Query: " + query.substr(0, 100) + (query.length() > 100 ? "..." : ""));
 	PRIVACY_DEBUG_PRINT("Privacy units: " + std::to_string(privacy_units.size()));
 	for (auto &pu : privacy_units) {
 		PRIVACY_DEBUG_PRINT("  " + pu);
@@ -1259,20 +1253,6 @@ static void CompilePacMechanism(const PrivacyCompatibilityResult &check, Optimiz
 	PRIVACY_DEBUG_PRINT("Scanned PU tables: " + std::to_string(check.scanned_pu_tables.size()));
 	PRIVACY_DEBUG_PRINT("Scanned non-PU tables: " + std::to_string(check.scanned_non_pu_tables.size()));
 #endif
-
-	// Generate filename with all PU names concatenated
-	string path = GetPacCompiledPath(input.context, ".");
-	if (!path.empty() && path.back() != '/') {
-		path.push_back('/');
-	}
-	string pu_names_joined;
-	for (size_t i = 0; i < privacy_units.size(); ++i) {
-		if (i > 0) {
-			pu_names_joined += "_";
-		}
-		pu_names_joined += privacy_units[i];
-	}
-	string filename = path + pu_names_joined + "_" + query_hash + "_bitslice.sql";
 
 	// The bitslice compiler works in the following way:
 	// a) the query scans PU table(s):

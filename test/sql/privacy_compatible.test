@@ -40,9 +40,6 @@ SET pac_compiled_path = '/tmp/privacy.sql'
 ----
 pac_compiled_path
 
-statement ok
-SET priv_compiled_path = '/tmp/privacy.sql'
-
 # Create a test table
 statement ok
 CREATE TABLE t1(a INTEGER, b INTEGER);

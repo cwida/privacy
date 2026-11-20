@@ -714,8 +714,7 @@ static std::pair<string, string> GetColumnInfoFromBinding(LogicalOperator *subtr
 
 // Check if an aggregate's GROUP BY keys contain a protected column (PU PK, LINK FK, or metadata PROTECTED).
 // This is used to detect the edge case where inner aggregate groups by PU key.
-bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PrivacyCompatibilityResult &check,
-                            const vector<string> &privacy_units) {
+bool AggregateGroupsByPUKey(LogicalAggregate *agg, const PrivacyCompatibilityResult &check) {
 	if (!agg || agg->groups.empty()) {
 		return false;
 	}
@@ -817,7 +816,6 @@ static LogicalAggregate *FindFirstChildAggregateWithPath(LogicalOperator *op, ve
 vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<LogicalAggregate *> &all_aggregates,
                                                                 const vector<string> &target_table_names,
                                                                 const PrivacyCompatibilityResult &check,
-                                                                const vector<string> &privacy_units,
                                                                 const CTETableMap &cte_map) {
 	vector<LogicalAggregate *> target_aggregates;
 
@@ -840,7 +838,7 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 
 			if (inner_agg) {
 				// Check if the inner aggregate groups by PU key
-				if (AggregateGroupsByPUKey(inner_agg, check, privacy_units)) {
+				if (AggregateGroupsByPUKey(inner_agg, check)) {
 					// Skip the inner aggregate, include the outer aggregate instead
 					skip_aggregates.insert(inner_agg);
 					include_outer_aggregates.insert(agg);
@@ -874,7 +872,7 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 						}
 					}
 					if (other_has_direct) {
-						if (AggregateGroupsByPUKey(other_agg, check, privacy_units)) {
+						if (AggregateGroupsByPUKey(other_agg, check)) {
 							// CTE definition groups by PU key → can't noise it.
 							// Include outer aggregate instead (PU-key passthrough across CTE boundary).
 							skip_aggregates.insert(other_agg);
@@ -976,7 +974,7 @@ vector<LogicalAggregate *> FilterTargetAggregatesWithPUKeyCheck(const vector<Log
 // Returns the inner aggregate and the column binding of the PU key group column in its output.
 LogicalAggregate *FindInnerAggregateWithPUKeyGroup(LogicalAggregate *target_agg,
                                                    const PrivacyCompatibilityResult &check,
-                                                   const vector<string> &privacy_units, ColumnBinding &out_pk_binding) {
+                                                   ColumnBinding &out_pk_binding) {
 	if (!target_agg) {
 		return nullptr;
 	}
@@ -993,7 +991,7 @@ LogicalAggregate *FindInnerAggregateWithPUKeyGroup(LogicalAggregate *target_agg,
 		}
 
 		// Check if this inner aggregate groups by PU key
-		if (!AggregateGroupsByPUKey(inner_agg, check, privacy_units)) {
+		if (!AggregateGroupsByPUKey(inner_agg, check)) {
 			continue;
 		}
 

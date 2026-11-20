@@ -1184,7 +1184,7 @@ void RewriteClipAggregates(OptimizerExtensionInput &input, unique_ptr<LogicalOpe
 		bool child_groups_by_pu = false;
 		for (auto &child : agg->children) {
 			auto *inner_agg = FindFirstChildAggregate(child.get());
-			if (inner_agg && AggregateGroupsByPUKey(inner_agg, check, privacy_units)) {
+			if (inner_agg && AggregateGroupsByPUKey(inner_agg, check)) {
 				child_groups_by_pu = true;
 				break;
 			}

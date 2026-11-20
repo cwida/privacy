@@ -14,13 +14,6 @@ unique_ptr<BoundWindowExpression> BindRankingWindow(ClientContext &context, Expr
 // Sanitize a string to be used as a PAC privacy unit or table name (alphanumeric + underscores only)
 string Sanitize(const string &in);
 
-// Normalize a query string by collapsing whitespace and lower-casing. Returns the normalized string.
-// (Hashing is provided by HashStringToHex below.)
-string NormalizeQueryForHash(const string &query);
-
-// Compute a hex string of the std::hash of the given input string
-string HashStringToHex(const string &input);
-
 // Determine the next available table index by scanning existing logical operators in the plan
 idx_t GetNextTableIndex(unique_ptr<LogicalOperator> &plan);
 
@@ -77,7 +70,6 @@ private:
 
 // Configuration helpers that read PAC-related settings from the client's context and
 // return a canonicalized value or a default when not configured.
-string GetPacCompiledPath(ClientContext &context, const string &default_path = ".");
 bool IsPacNoiseEnabled(ClientContext &context, bool default_value = true);
 
 // Return the selected privacy mechanism: "pac" (default), "dp_standard", "dp_filterless", "dp_elastic", or

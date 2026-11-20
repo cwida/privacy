@@ -193,7 +193,7 @@ static vector<AvgInfo> RewriteAvgAggregates(OptimizerExtensionInput &input, Logi
 // ----------------------------------------------------------------------------
 
 static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const vector<LogicalGet *> &gets,
-                                const vector<string> &privacy_units, bool include_fk_cols, bool allow_self_joins) {
+                                const vector<string> &privacy_units, bool allow_self_joins) {
 	(void)privacy_units;
 
 	// Self-join check: no table name may appear more than once in the plan
@@ -306,9 +306,6 @@ static DPFKChain ExtractFKChain(const PrivacyCompatibilityResult &check, const v
 	// Build fk_cols: for each consecutive pair in the chain, find the FK column
 	DPFKChain chain;
 	chain.tables = *longest_path;
-	if (!include_fk_cols) {
-		return chain;
-	}
 	chain.fk_cols.reserve(chain.tables.size() - 1);
 
 	for (idx_t i = 0; i + 1 < chain.tables.size(); i++) {
@@ -401,7 +398,7 @@ static DPFKChain ExtractDPFKChain(unique_ptr<LogicalOperator> &plan, const vecto
                                   const PrivacyCompatibilityResult &check, bool allow_self_joins = false) {
 	vector<LogicalGet *> gets;
 	FindAllGetNodes(plan.get(), gets);
-	return ExtractFKChain(check, gets, privacy_units, true, allow_self_joins);
+	return ExtractFKChain(check, gets, privacy_units, allow_self_joins);
 }
 
 static bool IsRightSideHiddenJoin(JoinType join_type) {
@@ -1842,8 +1839,8 @@ static bool TryCompileDPSassFastCountStar(OptimizerExtensionInput &input, unique
 static std::pair<idx_t, LogicalProjection *>
 WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                        const NoiseProjection &noise_proj, const vector<AvgInfo> &avg_infos, idx_t n_groups,
-                       idx_t n_original_aggs, LogicalOperator *insert_above, bool null_on_nonpositive_count,
-                       bool clamp_output = false, double clamp_lo = 0.0, double clamp_hi = 0.0) {
+                       idx_t n_original_aggs, LogicalOperator *insert_above, bool clamp_output = false,
+                       double clamp_lo = 0.0, double clamp_hi = 0.0) {
 	D_ASSERT(!avg_infos.empty());
 
 	// dp_sass 'ratio' clamps the released mean back into its public output domain [clamp_lo, clamp_hi]
@@ -1915,23 +1912,10 @@ WrapAvgRatioProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperato
 
 			// DuckDB registers "/" as "divide" for scalar functions
 			auto denominator = make_cnt_dbl();
-			if (!null_on_nonpositive_count) {
-				auto one = make_uniq<BoundConstantExpression>(Value::DOUBLE(1.0));
-				denominator = input.optimizer.BindScalarFunction("greatest", std::move(denominator), std::move(one));
-				auto ratio = input.optimizer.BindScalarFunction("/", make_sum_dbl(), std::move(denominator));
-				proj_exprs.push_back(maybe_clamp(add_midpoint(std::move(ratio)), info));
-			} else {
-				auto ratio = input.optimizer.BindScalarFunction("/", make_sum_dbl(), std::move(denominator));
-				auto case_expr = make_uniq<BoundCaseExpression>(LogicalType::DOUBLE);
-				BoundCaseCheck check;
-				check.when_expr =
-				    BoundComparisonExpression::Create(ExpressionType::COMPARE_LESSTHANOREQUALTO, make_cnt_dbl(),
-				                                      make_uniq<BoundConstantExpression>(Value::DOUBLE(0.0)));
-				check.then_expr = make_uniq<BoundConstantExpression>(Value(LogicalType::DOUBLE));
-				case_expr->CaseChecksMutable().push_back(std::move(check));
-				case_expr->ElseMutable() = maybe_clamp(add_midpoint(std::move(ratio)), info);
-				proj_exprs.push_back(std::move(case_expr));
-			}
+			auto one = make_uniq<BoundConstantExpression>(Value::DOUBLE(1.0));
+			denominator = input.optimizer.BindScalarFunction("greatest", std::move(denominator), std::move(one));
+			auto ratio = input.optimizer.BindScalarFunction("/", make_sum_dbl(), std::move(denominator));
+			proj_exprs.push_back(maybe_clamp(add_midpoint(std::move(ratio)), info));
 		}
 	}
 
@@ -2144,7 +2128,7 @@ static bool IsSinglePuKeyDistinctCount(unique_ptr<LogicalOperator> &plan, Logica
 	if (!key_get) {
 		vector<LogicalGet *> gets;
 		FindAllGetNodes(plan.get(), gets);
-		auto chain = ExtractFKChain(check, gets, privacy_units, /*include_fk_cols=*/true, allow_self_joins);
+		auto chain = ExtractFKChain(check, gets, privacy_units, allow_self_joins);
 		if (chain.tables.size() >= 2 && !chain.fk_cols.empty()) {
 			const string &linked_table = chain.tables[chain.tables.size() - 2];
 			key_get = FindAccessibleGetInSubtree(plan, agg, linked_table);
@@ -2787,7 +2771,7 @@ BuildStableDpSassPuHashExpression(OptimizerExtensionInput &input, unique_ptr<Log
 	if (!key_get) {
 		vector<LogicalGet *> gets;
 		FindAllGetNodes(plan.get(), gets);
-		auto chain = ExtractFKChain(check, gets, privacy_units, /*include_fk_cols=*/true, allow_self_joins);
+		auto chain = ExtractFKChain(check, gets, privacy_units, allow_self_joins);
 		if (chain.tables.size() >= 2 && !chain.fk_cols.empty()) {
 			const string &linked_table = chain.tables[chain.tables.size() - 2];
 			key_get = FindAccessibleGetInSubtree(plan, agg, linked_table);
@@ -2865,8 +2849,7 @@ static vector<double> ClipAndComputeSensitivities(OptimizerExtensionInput &input
 static void FinalizeDPLaplace(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan, LogicalAggregate *agg,
                               const DPFKChain &chain, const string &mech, const vector<AvgInfo> &avg_infos,
                               const vector<double> &agg_sens, const vector<LogicalType> &output_types,
-                              idx_t n_original_aggs, idx_t n_groups, double epsilon, bool noise_enabled, bool per_pu,
-                              bool allow_group_suppression) {
+                              idx_t n_original_aggs, idx_t n_groups, double epsilon, bool noise_enabled, bool per_pu) {
 	// Partition selection. The released set of group keys is data-dependent, so a grouped query must
 	// privatize it (Google DP / Wilson et al.): noise the per-group COUNT(DISTINCT pu) — the
 	// AddSupportAggregate output — and keep groups whose noisy η' clears τ. Partitions are private by
@@ -2883,7 +2866,7 @@ static void FinalizeDPLaplace(OptimizerExtensionInput &input, unique_ptr<Logical
 	double support_gate = 0.0; // positive → AddSupportAggregate appends the η aggregate
 	double budget_units = k;   // ε split across the k user aggregates; +1 reserves ε_η for η
 	if (mech == "dp_standard") {
-		apply_support_filter = allow_group_suppression && n_groups > 0;
+		apply_support_filter = n_groups > 0;
 		if (apply_support_filter) {
 			double delta = 0.0;
 			if (!TryGetDpDelta(input.context, delta) || !std::isfinite(delta) || delta <= 0.0 || delta >= 0.5) {
@@ -2915,7 +2898,7 @@ static void FinalizeDPLaplace(OptimizerExtensionInput &input, unique_ptr<Logical
 		// a noised τ with C_u = 1 (the row-level branch). Deferred — dp_elastic is the FLEX baseline.
 		double support_threshold = 0.0;
 		bool want_support = TryGetPrivacyMinGroupCount(input.context, support_threshold);
-		apply_support_filter = want_support && allow_group_suppression;
+		apply_support_filter = want_support;
 		tau = support_threshold;
 		support_gate = support_threshold; // raw threshold, no noise
 	}
@@ -2952,8 +2935,7 @@ static void FinalizeDPLaplace(OptimizerExtensionInput &input, unique_ptr<Logical
 	// Wrap AVG above the noise projection so upstream operators — including HAVING
 	// that references AVG — get remapped from the raw SUM to the ratio output.
 	if (!avg_infos.empty()) {
-		WrapAvgRatioProjection(input, plan, noise_proj, avg_infos, n_groups, n_original_aggs, noise_proj.proj_ptr,
-		                       false);
+		WrapAvgRatioProjection(input, plan, noise_proj, avg_infos, n_groups, n_original_aggs, noise_proj.proj_ptr);
 	}
 
 #if PRIVACY_DEBUG
@@ -2968,8 +2950,7 @@ static void FinalizeDPLaplace(OptimizerExtensionInput &input, unique_ptr<Logical
 // ClipAndComputeSensitivities).
 static void CompileDPLaplaceQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
                                   unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                                  const string &query_hash, const string &mech, DPSensitivityKind kind) {
-	(void)query_hash;
+                                  const string &mech, DPSensitivityKind kind) {
 	PRIVACY_DEBUG_PRINT("[" + mech + "] CompileDPLaplaceQuery: start");
 
 	double epsilon = GetValidatedDpEpsilon(input.context, mech);
@@ -3029,20 +3010,17 @@ static void CompileDPLaplaceQuery(const PrivacyCompatibilityResult &check, Optim
 	                                            per_pu, self_join_factor, auto_bounds, auto_bounds_epsilon);
 
 	FinalizeDPLaplace(input, plan, agg, fk_chain, mech, avg_infos, agg_sens, output_types, n_original_aggs, n_groups,
-	                  epsilon, noise_enabled, per_pu, true);
+	                  epsilon, noise_enabled, per_pu);
 }
 
 void CompileDPElasticQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
-                           unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                           const string &query_hash) {
-	CompileDPLaplaceQuery(check, input, plan, privacy_units, query_hash, "dp_elastic",
-	                      DPSensitivityKind::ELASTIC_SMOOTH);
+                           unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units) {
+	CompileDPLaplaceQuery(check, input, plan, privacy_units, "dp_elastic", DPSensitivityKind::ELASTIC_SMOOTH);
 }
 
 void CompileDPStandardQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
-                            unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                            const string &query_hash) {
-	CompileDPLaplaceQuery(check, input, plan, privacy_units, query_hash, "dp_standard", DPSensitivityKind::GLOBAL);
+                            unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units) {
+	CompileDPLaplaceQuery(check, input, plan, privacy_units, "dp_standard", DPSensitivityKind::GLOBAL);
 }
 
 static void FindFilterlessInputFilters(LogicalOperator *op, vector<LogicalFilter *> &filters) {
@@ -3377,7 +3355,7 @@ static unique_ptr<Expression> BuildFilterlessLowerPair(OptimizerExtensionInput &
 }
 
 void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
-                              unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units, const string &) {
+                              unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units) {
 	PRIVACY_DEBUG_PRINT("[dp_filterless] CompileDPFilterlessQuery: start");
 	auto filterless_settings = GetFilterlessSettings(input.context);
 	double epsilon = GetValidatedDpEpsilon(input.context, "dp_filterless");
@@ -3513,9 +3491,7 @@ void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, Optimizer
 }
 
 void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
-                                unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units,
-                                const string &query_hash) {
-	(void)query_hash;
+                                unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units) {
 	PRIVACY_DEBUG_PRINT("[DP_SAMPLE_MEDIAN] CompileDPSampleMedianQuery: start");
 
 	double epsilon = GetValidatedDpEpsilon(input.context, "dp_sample_median");
@@ -3803,8 +3779,7 @@ void CompileDPSampleMedianQuery(const PrivacyCompatibilityResult &check, Optimiz
 	bool stability_query_mode = GetBooleanSetting(input.context, "dp_sass_stability_query_mode", false);
 	if (!avg_infos.empty() && !stability_query_mode) {
 		WrapAvgRatioProjection(input, plan, noise_proj, avg_infos, n_groups, n_original_aggs, noise_proj.proj_ptr,
-		                       /*null_on_nonpositive_count=*/false, /*clamp_output=*/true, ratio_avg_lower,
-		                       ratio_avg_upper);
+		                       /*clamp_output=*/true, ratio_avg_lower, ratio_avg_upper);
 	}
 	(void)noise_proj;
 

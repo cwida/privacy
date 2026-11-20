@@ -72,42 +72,6 @@ string Sanitize(const string &in) {
 	return out;
 }
 
-string NormalizeQueryForHash(const string &query) {
-	string s = query;
-	std::replace(s.begin(), s.end(), '\n', ' ');
-	std::replace(s.begin(), s.end(), '\r', ' ');
-	std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
-	string out;
-	out.reserve(s.size());
-	bool in_space = false;
-	for (char c : s) {
-		if (std::isspace(static_cast<unsigned char>(c))) {
-			if (!in_space) {
-				out.push_back(' ');
-				in_space = true;
-			}
-		} else {
-			out.push_back(c);
-			in_space = false;
-		}
-	}
-	// trim
-	if (!out.empty() && out.front() == ' ') {
-		out.erase(out.begin());
-	}
-	if (!out.empty() && out.back() == ' ') {
-		out.pop_back();
-	}
-	return out;
-}
-
-string HashStringToHex(const string &input) {
-	size_t h = std::hash<string> {}(input);
-	std::ostringstream ss;
-	ss << std::hex << h;
-	return ss.str();
-}
-
 idx_t GetNextTableIndex(unique_ptr<LogicalOperator> &plan) {
 	idx_t max_index = DConstants::INVALID_INDEX;
 	vector<unique_ptr<LogicalOperator> *> stack;
@@ -569,17 +533,6 @@ ReplanGuard::~ReplanGuard() {
 	if (info) {
 		info->replan_in_progress.store(prev, std::memory_order_release);
 	}
-}
-
-// Configuration helpers
-string GetPacCompiledPath(ClientContext &context, const string &default_path) {
-	Value v;
-	context.TryGetCurrentSetting(Identifier("priv_compiled_path"), v);
-	string path = v.IsNull() ? default_path : v.ToString();
-	if (!path.empty() && path.back() != '/') {
-		path.push_back('/');
-	}
-	return path;
 }
 
 bool IsPacNoiseEnabled(ClientContext &context, bool default_value) {

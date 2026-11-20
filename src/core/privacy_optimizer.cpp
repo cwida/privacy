@@ -457,21 +457,6 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 		return;
 	}
 
-	// Compute normalized query hash once for file naming.
-	// When another optimizer extension replans a query
-	// inside its own hook, the new Optimizer runs on a Connection context whose
-	// active_query is NULL. DuckDB's GetCurrentQuery() dereferences that unique_ptr
-	// and throws InternalException. The query string is only used for the compiled-
-	// file hash, so we fall back to a fixed string to let privacy compilation proceed
-	// (needed so delta queries get as_noised_sum / priv_hash rewrites).
-	string current_query;
-	try {
-		current_query = input.context.GetCurrentQuery();
-	} catch (InternalException &) {
-		current_query = "replan";
-	}
-	string normalized = NormalizeQueryForHash(current_query);
-	string query_hash = HashStringToHex(normalized);
 	vector<string> privacy_units = std::move(discovered_pus);
 #if PRIVACY_DEBUG
 	for (auto &pu : privacy_units) {
@@ -527,7 +512,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 #endif
 			// set replan flag for duration of compilation
 			ReplanGuard scoped2(pac_info);
-			CompilePrivQuery(check, input, target_plan, privacy_units, normalized, query_hash);
+			CompilePrivQuery(check, input, target_plan, privacy_units);
 
 			// For DML targeting derived_pu tables: convert as_noised_* → as_* counter variants
 			// so the table stores raw 64-element counter lists instead of noised scalars.

@@ -62,8 +62,7 @@ void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator
 
 // Unified privacy compiler entrypoint. Dispatches by `privacy_mode`.
 void CompilePrivQuery(const PrivacyCompatibilityResult &check, OptimizerExtensionInput &input,
-                      unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units, const string &query,
-                      const string &query_hash);
+                      unique_ptr<LogicalOperator> &plan, const vector<string> &privacy_units);
 
 } // namespace duckdb
 
