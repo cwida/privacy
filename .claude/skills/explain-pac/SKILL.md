@@ -6,7 +6,7 @@ description: Reference material for PAC privacy internals. Auto-loaded when disc
 ## PAC Privacy Overview
 
 PAC (Probably Approximately Correct) privacy is a framework for privatizing
-algorithms with provable guarantees, described in [SIMD-PAC-DB](https://arxiv.org/abs/2603.15023).
+algorithms with provable guarantees.
 
 ### Formal definition
 
@@ -25,7 +25,7 @@ random subsamples** of the data. Stable algorithms (low variance) need less nois
    where β is the MI budget
 4. **Release**: Pick a random subset Xⱼ, return Q(Xⱼ) + N(0, Δ)
 
-This is the theoretical foundation. SIMD-PAC-DB encodes this efficiently using
+This is the theoretical foundation. The extension encodes this efficiently using
 64 parallel counters (one per possible subset assignment bit).
 
 ### MI → posterior success rate
@@ -71,7 +71,7 @@ adaptation from weaker DP relaxations:
   instance-specific reasoning, but they are relaxations/generalizations of
   standard DP. Do not present them as equivalent to a formal neighboring-dataset
   DP guarantee.
-- **Individual privacy accounting** is useful for repeated PAC/SIDRA-style
+- **Individual privacy accounting** is useful for repeated PAC-style
   releases because it tracks per-participant privacy loss instead of charging
   every participant the worst-case cost of every release.
 - **Pufferfish/Blowfish** are useful related work for distribution-aware,
@@ -83,7 +83,7 @@ bootstrap DP show that aggressively shrinking the protected neighbor-pair set
 can produce very low reported privacy loss while still allowing reconstruction.
 Use those relaxations as related work, not as a safety argument for PAC.
 
-### Core mechanism (SIMD-PAC-DB implementation)
+### Core mechanism (implementation)
 
 - Each aggregate maintains **64 parallel counters** (one per bit of a hashed key)
 - Each row's value is added to ~32 counters (determined by pac_hash of the PU key)

@@ -351,8 +351,7 @@ plot_count_optimizations <- function(platform, platform_name, results_dir, outpu
 plot_sum_optimizations <- function(platform, platform_name, results_dir, output_dir) {
   sum_files <- list.files(file.path(results_dir, platform),
                          pattern = "^sum_avg_.*\\.csv$", full.names = TRUE)
-  # A sum_figure_*.csv, when present, is the input of this figure (see results/README.md);
-  # the SIMD comparison keeps reading the plain sum_avg_*.csv run.
+  # A sum_figure_*.csv, when present, is the input of this figure; the SIMD comparison reads sum_avg_*.csv.
   figure_files <- list.files(file.path(results_dir, platform),
                             pattern = "^sum_figure_.*\\.csv$", full.names = TRUE)
   if (length(figure_files) > 0) {

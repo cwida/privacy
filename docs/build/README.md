@@ -10,7 +10,7 @@
 ## Clone
 
 ```bash
-git clone --recurse-submodules https://github.com/cwida/privacy.git
+git clone --recurse-submodules <repository-url> privacy
 cd privacy
 ```
 

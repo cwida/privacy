@@ -462,7 +462,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 	}
 
 	// Compute normalized query hash once for file naming.
-	// When another optimizer extension (e.g. OpenIVM's IVM rewrite) replans a query
+	// When another optimizer extension replans a query
 	// inside its own hook, the new Optimizer runs on a Connection context whose
 	// active_query is NULL. DuckDB's GetCurrentQuery() dereferences that unique_ptr
 	// and throws InternalException. The query string is only used for the compiled-

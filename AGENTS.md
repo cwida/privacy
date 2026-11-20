@@ -18,7 +18,7 @@ Never execute git commands that could lose code. Ask the user before destructive
 - Before implementing anything, search the existing codebase for similar patterns or solutions. Reuse local helpers and patterns before inventing new ones.
 - Factor shared logic into helpers rather than duplicating code. Check `src/include/utils/` and existing helpers in the file being edited.
 - Never edit the `duckdb/` submodule. DuckDB source is read-only. PAC logic lives in `src/` and `test/`.
-- Keep the paper in mind. The PAC mechanism is described in `SIMD-PAC-DB: Pretty Performant PAC Privacy` (`https://arxiv.org/abs/2603.15023`).
+- Keep the paper in mind. The PAC mechanism is described in the PAC-privacy paper this extension implements (summarized in `docs/pac/`).
 - Add `PRIVACY_DEBUG_PRINT` statements at major code flow points when changing compilation or rewrite logic. Use `src/include/privacy_debug.hpp`; it compiles out when `PRIVACY_DEBUG` is 0.
 
 ## What This Extension Does

@@ -1,6 +1,6 @@
 # Paper Figure Data
 
-Inputs and rendered figures for the evaluation of the revised paper (DuckDB v2.0.0). `figures/` holds the PNGs
+Inputs and rendered figures for the evaluation of the revised paper. `figures/` holds the PNGs
 exactly as they appear in the paper; every one of them regenerates byte-identically from the inputs listed below with
 the plot scripts in this repository. Fresh benchmark runs write to `benchmark/results/utility/` and do not touch this
 directory.

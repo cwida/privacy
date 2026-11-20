@@ -1,123 +1,107 @@
-# WIP: Star Schema Benchmark with sampled worlds
+# Star Schema Benchmark (SSB)
 
-For the Graviton4 server configuration, persistent launch commands, and artifact
-provenance, see [EC2 reproducibility](../EC2_REPRODUCIBILITY.md).
+The benchmark runs all 13 SSB queries on the five original tables and evaluates each of them over 64 sampled worlds.
+The SQL follows the listings of the [SSB specification](https://www.cs.umb.edu/~poneil/StarSchemaB.PDF), including
+Q1.3 quantity 26--35 and Q2.3 brand `MFGR#2221`. Original queries are in `queries/`; the rewritten queries are in
+`as_queries/`.
 
-The benchmark executes all 13 joined SSB queries on the five original tables.
-SQL follows the [SSB specification](https://www.cs.umb.edu/~poneil/StarSchemaB.PDF)
-listings, including Q1.3 quantity 26--35 and Q2.3 brand `MFGR#2221`.
+## Sampling model
 
-## Data and execution
+- **Sampling entity.** CUSTOMER. A LINEORDER row belongs to the worlds of its customer (`lo_custkey`), so all facts
+  of a customer are sampled together. PART, SUPPLIER and DATE are shared by every world. Customer-level sampling is
+  the experiment's choice; it is not part of SSB.
+- **Membership.** `priv_hash(hash(lo_custkey))` returns a 64-bit mask whose bit *w* says whether the customer is in
+  world *w*. The mask is computed inside every timed query; no sample table or mask column is materialized.
+  LINEORDER already carries the customer key, so obtaining it needs no extra join.
+- **Shape of the worlds.** With `pac_hash_repair=true` every mask has exactly 32 bits set: each customer is in 32 of
+  the 64 worlds. The worlds overlap and are not independent Bernoulli samples.
+- **Determinism.** `privacy_seed=42` fixes the masks and `pac_mi=0` disables noise, so every method sees the same
+  64 worlds and the outputs can be compared value by value.
 
-Use [electrum/ssb-dbgen](https://github.com/electrum/ssb-dbgen) commit
-`219403ad7d1dd32ae1f97b5553abf92129fccd7f`. On macOS, apply
-`benchmark/ssb/dbgen-macos.patch` in that external checkout and rebuild:
+## Compared methods
 
-```sh
-make dbgen CFLAGS='-O2 -std=gnu89 -include unistd.h -DDBNAME=\"dss\" -DMAC -DDB2 -DSSBM'
+| Paper name | `mode` in the CSV | What runs | What is timed |
+|---|---|---|---|
+| DuckDB | `duckdb_full` | The original query on all rows. | The whole query. |
+| Naive-SA | `repeated_sql` | The original query once per world, with LINEORDER replaced by the rows of that world (below). | World 0 only; the reported time is that latency × 64. |
+| SIMD-ASA | `asa` | One rewritten query: `as_sum(mask, value)` for the aggregates and `as_count(mask)` for group presence. | The whole query. |
+
+DuckDB is a cost reference: it answers the query on the full data and its result is not comparable with a sampled
+world.
+
+The naive baseline restricts LINEORDER to one world and leaves the rest of the query unchanged:
+
+```sql
+(SELECT * FROM lineorder WHERE ((priv_hash(hash(lo_custkey)) >> w) & 1) <> 0) AS ssb_input
 ```
 
-The patch enlarges the order-priority buffer to fit `4-NOT SPECIFIED` and fixes
-out-of-bounds RNG bookkeeping: stream IDs 97/98 must use the same fallback as
-`UnifInt`. Generate every scale with the same patched source.
+Its reported runtime is extrapolated: world 0 is timed and multiplied by 64 (`timing_scope=world0_x64` in the CSV;
+the other modes have `complete_query`). The remaining 63 worlds are executed too, untimed, because every one of them
+is needed to validate the SIMD-ASA result. `repro.md` reports a check of this extrapolation on TPC-H.
+
+All three methods read the same original tables. A timing covers planning, mask computation and world filtering
+where they apply, joins, aggregation, the original `ORDER BY` and result materialization. Each mode gets one
+untimed warm-up, the order of the modes rotates between repetitions, and the figure shows the median of five
+repetitions. Build, data generation, import and result checking are outside the timings.
+
+The wrapper measures two SUM kernels in sequence, each with its own build: the default approximate SUM
+(`PAC_NOAPPROX=OFF`) and exact cascading SUM (`PAC_NOAPPROX=ON`). Results go to `approximate/` and `exact/`. The
+DuckDB and Naive-SA timings are measured in the approximate run only and reused for the exact run, which still
+recomputes the 64 reference worlds to validate itself. The wrapper restores the default build when it finishes.
+
+## Running
+
+Generate the data with [electrum/ssb-dbgen](https://github.com/electrum/ssb-dbgen) at commit
+`219403ad7d1dd32ae1f97b5553abf92129fccd7f`, with `benchmark/ssb/dbgen-macos.patch` applied in that checkout.
+Despite its name the patch is needed on every platform: it enlarges the order-priority buffer so that
+`4-NOT SPECIFIED` fits and fixes out-of-bounds bookkeeping of the random-number streams.
 
 ```sh
-bash benchmark/ssb/prepare.sh /path/to/ssb-dbgen /new/data/directory 30
-SSB_MEMORY_LIMIT=6GB caffeinate -is bash benchmark/ssb/run.sh \
-  /new/data/directory /new/output/directory 8 5
+git -C /path/to/ssb-dbgen apply "$PWD/benchmark/ssb/dbgen-macos.patch"
+# Linux
+make -C /path/to/ssb-dbgen dbgen \
+  CFLAGS='-O2 -std=gnu89 -include unistd.h -D_GNU_SOURCE -DDBNAME=\"dss\" -DLINUX -DDB2 -DSSBM'
+# macOS
+make -C /path/to/ssb-dbgen dbgen CFLAGS='-O2 -std=gnu89 -include unistd.h -DDBNAME=\"dss\" -DMAC -DDB2 -DSSBM'
 ```
 
-Arguments are the data directory, a new output directory, comma-separated thread
-counts (default `1,8`), and measured repetitions (default `5`). Use integer scale
-factors of at least 1. Generation records the commit, source patch, scale, row
-counts, and checksums; the runner requires the completion marker, verifies row
-counts and dimension keys, and refuses existing output paths.
-
-The wrapper builds and runs both SUM configurations sequentially:
-`PAC_NOAPPROX=OFF` (default approximate) and `PAC_NOAPPROX=ON` (exact cascading).
-It stores results and build configurations under `approximate/` and `exact/`,
-then restores the default approximate build. Ordinary SQL baselines are measured
-only in the approximate run. The exact run uses `--as-only`: it still computes
-the independent 64-world SQL reference for validation, but measures only AS.
-Plots reuse the first run's baseline timings rather than recording duplicates.
-Build, generation, and import times
-are outside query timing. `SSB_MEMORY_LIMIT` limits DuckDB's memory manager, not
-the entire process RSS. On AC power, macOS `caffeinate -is` prevents idle sleep;
-it does not override forced sleep or closing the lid.
-
-## SQL and measurements
-
-As in the TPC-H benchmark, original queries are in `queries/` and explicit
-AS rewrites are in `as_queries/`. The original joins, filters, and grouping keys
-are retained. CUSTOMER is the sampling entity: `priv_hash(hash(lo_custkey))`
-computes membership during each query. LINEORDER already contains its customer's
-foreign key, so no additional CUSTOMER join is needed just to obtain that key.
-Queries that use CUSTOMER attributes retain their CUSTOMER join.
-
-Settings are deterministic (`privacy_seed=42`, `pac_mi=0`,
-`pac_hash_repair=true`): each customer belongs to exactly 32 of 64 worlds,
-and all its facts inherit the same membership. Worlds overlap; their
-memberships are not independent Bernoulli trials. PART, SUPPLIER, and DATE remain
-shared. Customer-level sampling is our experimental extension, not part of SSB.
-
-- `duckdb_full`: ordinary SQL on the full original tables; a runtime reference,
-  not an answer-equivalent baseline for sampled worlds.
-- `repeated_sql`: 64 ordinary queries, each filtering LINEORDER by one bit of
-  the query-time membership expression before joining and aggregating. Reported
-  time is world 0's query latency multiplied by 64, matching the TPC-H
-  extrapolation. The other 63 worlds are evaluated for correctness only.
-- `asa`: one explicitly rewritten query, using
-  `as_sum(priv_hash(hash(lo_custkey)), value)` and `as_count` for group presence.
-
-All three modes use the same original tables. Timings include planning, hashing
-and world filtering where applicable, joins, aggregation, and result
-materialization. There is one excluded warmup per mode; measured order rotates.
-C++ conversion and correctness checks are excluded consistently. The original
-`ORDER BY` clauses execute in all timed modes. For AS, aggregate ordering keys
-are lists and DuckDB compares them lexicographically; this orders the returned
-batch, not each world's result independently. Per-world aggregate values are
-checked by world and group; SSB has no LIMIT.
-
-The aggregate API returns twice the selected sum. The checker divides by two
-to compare actual sampled-world sums, not full-data estimators.
-`as_count` distinguishes absent groups from present groups with zero sums;
-empty ungrouped SUM is NULL, and empty grouped worlds emit no rows.
-
-## Validation and outputs
-
-Every query checks all 64 worlds against independent ordinary SQL. Missing or
-extra groups, NULL mismatches, and non-finite values fail either configuration.
-Exact cascading must agree after rounding the SQL reference to the aggregate's
-FLOAT output type; this is not exact integer output beyond FLOAT's range.
-Approximate SUM reports numerical errors without an arbitrary pass threshold:
-maximum/mean relative error, maximum absolute error, and mismatches beyond output
-rounding. Relative error is `abs(actual-expected)/max(1,abs(expected))`; NULL
-answers are excluded. Structural coverage does not imply numerical equivalence.
-
-Separately, the runner checks automatic-rewriter acceptance and execution of all
-13 original queries, including their ORDER BY. CUSTOMER privacy-unit metadata,
-a protected customer key, and LINEORDER ownership metadata permit customer
-city/nation grouping while retaining key protection. Coverage is recorded, not
-silently assumed. This check is separate from per-world equivalence of the
-explicit SQL rewrites.
-
-Each configuration writes `_timings.csv`, `_coverage.csv`, `_plans.txt`,
-`_queries.sql`, and a DuckDB database containing the five original SSB tables.
-Timing rows identify `membership_mode=query_time_priv_hash`; the SQL and plans
-show exactly what was timed. `timing_scope=world0_x64` identifies extrapolated
-naive timing; `complete_query` identifies the other modes. Paper runs use five
-measured executions after one warmup and report medians.
-
-## Paper-style plot
+The paper's configuration is scale factor 30, 16 threads, a 30 GB DuckDB memory limit and five repetitions on the
+Graviton4 machine:
 
 ```sh
-Rscript benchmark/ssb/plot_ssb_results.R /new/output/directory 30 8
+bash benchmark/ssb/prepare.sh /path/to/ssb-dbgen /path/to/data/ssb_sf30 30
+SSB_MEMORY_LIMIT=30GB bash benchmark/ssb/run.sh /path/to/data/ssb_sf30 /path/to/results/ssb_sf30 16 5
+Rscript --vanilla benchmark/ssb/plot_ssb_results.R /path/to/results/ssb_sf30 30 16
 ```
 
-The adapter uses `benchmark/tpch/plot_tpch_results.R` for the paper's style.
-The combined figure has four bars per query: gray full-data DuckDB, blue repeated
-SQL, bright-green approximate AS, and darker striped exact AS. Both ordinary
-SQL series come from the first configuration rather than being duplicated.
-Labels above blue and green bars show runtime divided by full-data DuckDB
-runtime. Query labels use Q1.1--Q4.3; there is no title or caption.
-The plotter requires query-time membership timing files.
+`run.sh` takes the data directory, a new output directory, a comma-separated list of thread counts (default `1,8`)
+and the number of repetitions (default `5`). `prepare.sh` records the generator commit, patch, scale factor, row
+counts and checksums; `run.sh` requires its completion marker, verifies row counts and dimension keys, and refuses
+an existing output directory. `SSB_MEMORY_LIMIT` limits DuckDB's memory manager, not the resident size of the
+process.
+
+## Validation
+
+Every query is checked in all 64 worlds against the naive per-world SQL, by world and group. Missing or extra
+groups, NULL mismatches and non-finite values fail the run in either build.
+
+- `as_sum` returns twice the sum of the selected rows; the checker halves it before comparing.
+- `as_count` separates an absent group from a present group whose sum is zero. An empty ungrouped SUM is NULL and an
+  empty group produces no row.
+- Exact SUM must match the reference after the reference is rounded to the aggregate's FLOAT output type.
+- Approximate SUM has no pass threshold. The run reports the maximum and mean relative error
+  (`abs(actual - expected) / max(1, abs(expected))`), the maximum absolute error and the number of values that
+  differ beyond output rounding.
+- The `ORDER BY` of a rewritten query sorts lists of per-world values lexicographically. This orders the returned
+  batch, not each world's result on its own. SSB has no `LIMIT`, so the set of rows is unaffected.
+
+Separately, the runner submits the 13 original queries to the automatic rewriter and records whether each is
+accepted and executes (`_coverage.csv`). This is independent of the per-world validation of the handwritten
+rewrites.
+
+## Outputs
+
+For each build and thread count the runner writes `threads_<n>_timings.csv`, `_coverage.csv`, `_plans.txt` and
+`_queries.sql`, plus a DuckDB database with the five tables. The plot script combines both builds into one figure
+with four bars per query: DuckDB, Naive-SA, SIMD-ASA with approximate SUM and SIMD-ASA with exact SUM. Bar labels
+give the runtime relative to DuckDB.

@@ -174,7 +174,7 @@ ninja -C build clang lld
 
 ### Run benchmarks
 ```bash
-git clone --recurse-submodules https://github.com/cwida/privacy.git
+git clone --recurse-submodules <repository-url> privacy
 cd privacy/benchmark/microbench
 ./build_variants.sh
 ./create_test_db.sh

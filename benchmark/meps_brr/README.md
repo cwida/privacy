@@ -1,114 +1,84 @@
-# MEPS application workloads (WIP)
+# MEPS replicate-weight workloads
 
-For the Graviton4 server configuration, persistent launch commands, and artifact
-provenance, see [EC2 reproducibility](../EC2_REPRODUCIBILITY.md).
+Two survey analyses on the Medical Expenditure Panel Survey (MEPS), whose variance is estimated with balanced
+repeated replication (BRR). Each analysis is written as SQL in four variants: `queries/` (ordinary full-sample
+SQL), `naive_queries/`, `conditional_queries/` and `as_queries/`. The runner is `meps_brr_poc`; no R code is timed.
 
-Two workloads use explicit SQL files in `queries/`, `naive_queries/` and
-`as_queries/`, plus `conditional_queries/` for the one-query ordinary SQL baseline,
-following the TPC-H/SSB benchmark organization.
-The existing C++ target name `meps_brr_poc` is retained. No R runtime is timed.
+## Workloads
 
-## Workloads and original methodology
+- **`damico2006`**: Table 2 of [Damico (2009), The R Journal](https://journal.r-project.org/articles/RJ-2009-018/).
+  Mean expenditure of adults (`AGE06X > 17`) and of nonelderly adults (`AGE06X > 17 AND AGE06X < 65`) on HC-105,
+  with the historical HC-036BRR 1996--2006 file and its 64 replicates. The runner checks the published means
+  (4009.1, 3155.4) and both published conventions for the BRR standard error (83.6/77.5 centred on the full
+  estimate, 83.0/77.0 centred on the replicate mean), up to the rounding of the one-decimal published values.
+- **`ahrq2016`**: the estimands of
+  [AHRQ's event-analysis example](https://github.com/HHS-AHRQ/MEPS/blob/master/R/summary_tables_examples/use_events_2016.R)
+  on HC-192 persons and HC-188F/G events: office and outpatient counts and five payment-source means, each for all
+  events and for physician events, plus two office-visit means per person (people with zero visits included).
+  AHRQ's example estimates variance by Taylor linearization; here the same estimands use the 128 official BRR
+  replicates, so its standard errors are not reproduced.
 
-- **damico2006**: Table 2 of [Damico (2009), The R Journal](https://journal.r-project.org/articles/RJ-2009-018/).
-  Uses HC-105, AGE06X > 17 (adults), and AGE06X > 17 AND AGE06X < 65
-  (nonelderly adults). Uses the **historical HC-036BRR 1996–2006 file** and its
-  64 flags, not the first 64 flags from a newer design. The runner checks the
-  published means (4009.1, 3155.4) and both published BRR standard-error conventions
-  (83.6/77.5 full-estimate centered; 83.0/77.0 replicate-mean centered), allowing
-  only the rounding of the one-decimal published values. This reproduces the two
-  mean/SE examples, not every analysis in the paper.
-- **ahrq2016**: [AHRQ's event-analysis example](https://github.com/HHS-AHRQ/MEPS/blob/master/R/summary_tables_examples/use_events_2016.R).
-  Uses HC-192 persons and HC-188F/G events: office/outpatient counts and five
-  payment-source means, each for all events and physician-only events, plus two
-  office-visit means per person. The latter retains people with zero visits.
-  **Adaptation:** AHRQ's example uses Taylor variance estimation. Here the same
-  estimands use the official 128 binary BRR flags and standard BRR weights.
-  This is not a reproduction of the original Taylor standard errors.
+## Replicates as worlds
 
-The official BRR rule is [replicate weight = 2 × BRR flag × person weight](https://meps.ahrq.gov/mepsweb/data_stats/download_data/pufs/h036brr/h36brr24doc.shtml).
-Means use each replicate's own denominator. All event records inherit their person's
-flag and survey weight. No random sampling, noise, Fay adjustment or DP claim is involved.
+There is no random sampling in this benchmark: the worlds are the survey's official BRR replicates, 64 for 2006 and
+128 for 2016. Each person has one binary flag per replicate, and the
+[official rule](https://meps.ahrq.gov/mepsweb/data_stats/download_data/pufs/h036brr/h36brr24doc.shtml) defines the
+replicate weight as `2 × flag × person weight`. Event records inherit the flag and weight of their person, and a
+mean uses the denominator of its own replicate. No noise, Fay adjustment or privacy mechanism is involved.
 
-## Four SQL modes
+## Compared methods
 
-- **duckdb**: ordinary full-sample weighted SQL. One answer per metric.
-  This is a single-query cost reference, **not equivalent work** to 64/128 estimates.
-- **naive_as**: the same analysis repeated for each official BRR replicate.
-  Its SQL reads `BRR@REPLICATE@` directly and applies `2 * weight * BRR`.
-  No packed-mask construction or AS function is imposed on this baseline.
-  Reported latency is the first replicate's query time multiplied by 64 or 128,
-  matching the TPC-H extrapolation. Remaining replicates are evaluated for
-  correctness and BRR standard errors, outside reported timing.
-- **simd_as**: explicitly rewritten SQL using one or two 64-lane `as_sum` blocks.
-  The non-materialized `persons_as` view joins people to BRR and packs the indicators
-  inside the timed query. Ratios are calculated lane-wise in SQL.
-- **conditional_sql**: one ordinary SQL query computing all official replicate
-  estimates with conditional SUMs on the original BRR columns. The scan and joins
-  are shared, without packed masks or AS functions. SQL lists only package the
-  aggregate outputs; they do not expand input rows by replicate.
+| Paper name | `mode` in the CSV | What runs | What is timed |
+|---|---|---|---|
+| DuckDB | `duckdb` | The full-sample weighted analysis: one answer per metric. | The whole query. |
+| Naive-SA | `naive_as` | The analysis once per replicate. The SQL reads that replicate's flag column and weights rows by `2 * weight * flag`. | The first replicate only; the reported time is that latency × 64 or × 128. |
+| Conditional SQL | `conditional_sql` | One ordinary query with one conditional `SUM` per replicate over the original flag columns. Scans and joins are shared. | The whole query. |
+| SIMD-ASA | `simd_as` | One query using one (64 replicates) or two (128 replicates) `as_sum` aggregates. A non-materialized view packs each person's flags into 64-bit masks inside the query; ratios are computed per lane in SQL. | The whole query. |
 
-All SQL retains natural, wide aggregate expressions. There is no lateral
-metric-row expansion, contribution materialization, or precomputed aggregate table.
-The event join remains in all four SQL variants. The per-person visit-count CTE
-also runs inside each query. Standard SQL does not need a BRR join; naive/AS do.
+DuckDB is a cost reference for a single estimate; it does not do the work of 64 or 128 estimates.
 
-The runner times planning, scans, linkage, mask construction when applicable,
-joins, aggregation, SQL ratio evaluation, and result materialization. Query generation,
-EXPLAIN, result validation and final cross-replicate SE computation are outside
-`query_ms`. Import/validation are recorded separately. Download/CSV conversion is
-also outside query timing. This measures database execution, not raw-download time.
+The naive runtime is extrapolated (`timing_scope=replicate1_x_worlds`; the other modes have `complete_query`). The
+remaining replicates are still executed, untimed, because they supply the reference values and the BRR standard
+errors. Conditional SQL is the strongest ordinary-SQL baseline: it also evaluates every replicate in one pass, but
+with one aggregate per replicate instead of one vectorized aggregate.
 
-## Prepare and run
+All four variants keep the event join and the per-person visit-count CTE inside the query. The naive and SIMD-ASA
+variants additionally join the BRR file; the full-sample query does not need it. Nothing is precomputed: there is
+no materialized contribution table and no stored mask.
 
-From the repository root (Python/pandas is only for downloading/converting input):
+A timing covers planning, scans, joins, mask construction where it applies, aggregation, ratio evaluation and
+result materialization. Query generation, `EXPLAIN`, validation, the cross-replicate standard-error computation,
+download and import are outside it. Each database gets one warm-up run (run 0) followed by five measured runs in
+rotating method order; the figure shows per-query medians.
+
+## Running
+
+Python with pandas is needed only to download and convert the public input files. The paper's configuration is 16
+threads and five repetitions on the Graviton4 machine:
 
 ```sh
-python3 benchmark/meps_brr/prepare.py /path/to/data/damico2006 --workload damico2006
-python3 benchmark/meps_brr/prepare.py /path/to/data/ahrq2016 --workload ahrq2016
-caffeinate -i bash benchmark/meps_brr/run.sh /path/to/data /path/to/new/results 1,8 5
+python3 benchmark/meps_brr/prepare.py /path/to/data/meps/damico2006 --workload damico2006
+python3 benchmark/meps_brr/prepare.py /path/to/data/meps/ahrq2016 --workload ahrq2016
+bash benchmark/meps_brr/run.sh /path/to/data/meps /path/to/results/meps 16 5
+Rscript --vanilla benchmark/meps_brr/plot_meps_results.R /path/to/results/meps 16
 ```
 
-Existing input CSVs/result directories are refused. Each converter records input
-URLs/hashes/counts in its manifest. The converter fixes only the exact pandas
-XPORT zero-decoding artifact `2**-260`, without thresholding legitimate values.
+`run.sh` takes the data root, a new output directory, a comma-separated list of thread counts and the number of
+measured repetitions. Like the SSB wrapper it builds and measures the approximate SUM kernel (`PAC_NOAPPROX=OFF`)
+and the exact one (`PAC_NOAPPROX=ON`), keeps both CMake caches and restores the default build afterwards; do not run
+it concurrently with anything else that uses the same build directory. Existing input and result directories are
+refused. The converter records input URLs, hashes and row counts in a manifest, and corrects one artefact of pandas'
+XPORT reader (zeros decoded as `2**-260`).
 
-As in SSB, the wrapper builds/runs `PAC_NOAPPROX=OFF` and `ON`, retaining their
-CMake caches, then restores the default approximate build. Do not run concurrently
-with another task using the shared build. These labels identify SUM build modes;
-they do not promise bitwise equality of floating-point SQL results.
+## Validation and outputs
 
-## Validation and artifacts
+All replicate values of the naive, conditional and SIMD-ASA variants are exported together with the full-sample
+point estimates and both BRR standard errors (`_estimates.csv`; the full-sample rows carry zero as a placeholder
+standard error). Every variant must agree with the ordinary SQL reference: normalized error at most `1e-8` for
+ordinary SQL and `1e-3` for SIMD-ASA, with the observed maximum recorded. Every output must be finite and have the
+expected number of metrics and replicates. For `damico2006` the published values are an additional external check;
+for `ahrq2016` there is none, because the published standard errors use a different variance estimator.
 
-For each query the runner saves the complete standard/AS SQL, first-replicate naive
-SQL and EXPLAIN plans. The checked-in naive template specifies every other replicate.
-All replicate values from naive, conditional and AS SQL are exported, alongside full-sample
-points and both BRR standard errors. The standard SQL rows have zero SE placeholders:
-they do not estimate uncertainty by themselves.
-
-All runs must agree with the first ordinary SQL reference. The inherited numerical
-guard is normalized error <= 1e-8 for ordinary SQL and <= 1e-3 for AS outputs, with
-the observed maximum recorded. This is not an exact-equivalence claim. Every output
-must be finite, have the expected metric/replicate count, and preserve nonempty ratio
-domains. Damico's numerical checks supply an additional published external oracle.
-AHRQ's Taylor SEs are not a BRR oracle; its event-query translation still requires
-source/methodology review rather than merely comparing two implementations.
-
-The wrapper's final argument is the number of measured repetitions. It adds run
-zero as warmup, then rotates method order over runs 1--5 for a five-repetition
-paper run. These are warm executions, not OS cold-cache measurements. Report
-per-query medians separately for each workload and build. `timing_scope` marks
-the naive extrapolation separately from complete-query timings.
-Older materialized-contribution and generic-metric results are not comparable with
-this revised suite and must not supply its speedup claims.
-
-For the paper plot, run the wrapper once with five measured repetitions:
-
-```sh
-bash benchmark/meps_brr/run.sh /path/to/data /path/to/new/results 8 5
-Rscript benchmark/meps_brr/plot_meps_results.R /path/to/new/results 8
-```
-
-The combined figure uses medians of five warm executions. Ordinary SQL bars use only the
-approximate-build measurements, so controls are not counted twice. Both AS builds
-are shown separately. Raw measurements and median summaries are exported as CSV.
+For each query the runner also saves the SQL of every variant (the naive one instantiated for the first replicate)
+and the `EXPLAIN` plans. The plot script shows the ordinary-SQL bars from the approximate build only, so the
+controls are not counted twice, and one SIMD-ASA bar per SUM kernel.

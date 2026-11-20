@@ -13,7 +13,7 @@ The reported experiments use DuckDB v2.0.0 (the `duckdb/` submodule, commit `d54
 repository with its submodules, but do not modify the `duckdb/` submodule.
 
 ```bash
-git clone --recurse-submodules git@github.com:cwida/privacy.git
+git clone --recurse-submodules <repository-url> privacy
 cd privacy
 export CC=clang-22
 export CXX=clang++-22
@@ -82,10 +82,6 @@ The microbenchmark figures use these machines and suites:
 | SUM optimizations | MacBook Pro (M2 Max) | `bench_sum_avg.sh`, 1G rows, ungrouped and scattered groups |
 | MAX optimizations | Graviton4 | `bench_min_max.sh`, 1G rows, ungrouped value-distribution test |
 | SIMD improvement factors | all four | 100M rows, ungrouped: naive kernel time divided by default kernel time |
-
-In the MacBook SUM figure, the DuckDB and naive bars come from the DuckDB 2.0 run; the three optimized variants
-(Approx.+Buffering, Approx., Exact+Cascading) are the measurements of the original submission on DuckDB 1.5.4. The
-MacBook was not re-measured with `priv_state_export=false`.
 
 Some ablation cells exhaust the 90 GB temporary-storage limit and are reported as failed (`-1` in the CSV): unbuffered
 SUM and MAX and non-cascading COUNT at 10M scattered groups, and non-cascading SUM at 10M sequential groups.
@@ -167,10 +163,23 @@ Outputs:
 
 ### SSB, MEPS and TPC-DS
 
-The SSB and MEPS experiments, including data preparation, repetitions and the Graviton4 launch script, are described
-in [`benchmark/EC2_REPRODUCIBILITY.md`](benchmark/EC2_REPRODUCIBILITY.md), [`benchmark/ssb/README.md`](benchmark/ssb/README.md)
-and [`benchmark/meps_brr/README.md`](benchmark/meps_brr/README.md). TPC-DS is described in
-[`docs/benchmark/tpcds.md`](docs/benchmark/tpcds.md).
+SSB and MEPS each have a wrapper that builds both SUM kernels, runs all methods and validates every world. The
+paper's runs use the Graviton4 machine with 16 threads and five repetitions (SSB: scale factor 30 and a 30 GB memory
+limit). On a fresh Ubuntu machine they need `clang-22 cmake ninja-build build-essential git python3-venv libssl-dev
+pkg-config`.
+
+```bash
+bash benchmark/ssb/prepare.sh /path/to/ssb-dbgen /path/to/data/ssb_sf30 30
+SSB_MEMORY_LIMIT=30GB bash benchmark/ssb/run.sh /path/to/data/ssb_sf30 /path/to/results/ssb_sf30 16 5
+
+python3 benchmark/meps_brr/prepare.py /path/to/data/meps/damico2006 --workload damico2006
+python3 benchmark/meps_brr/prepare.py /path/to/data/meps/ahrq2016 --workload ahrq2016
+bash benchmark/meps_brr/run.sh /path/to/data/meps /path/to/results/meps 16 5
+```
+
+[`benchmark/ssb/README.md`](benchmark/ssb/README.md) and [`benchmark/meps_brr/README.md`](benchmark/meps_brr/README.md)
+describe the sampling model, the naive baseline, the data generator and the validation of each. TPC-DS is described
+in [`docs/benchmark/tpcds.md`](docs/benchmark/tpcds.md).
 
 ### ClickBench AS performance
 
