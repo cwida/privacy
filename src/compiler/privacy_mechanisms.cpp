@@ -96,28 +96,6 @@ static unique_ptr<Expression> BindScalarLocal(OptimizerExtensionInput &input, co
 	return expr;
 }
 
-static unique_ptr<Expression> BindAggregateLocal(OptimizerExtensionInput &input, const string &func_name,
-                                                 vector<unique_ptr<Expression>> children) {
-	FunctionBinder function_binder(input.context);
-	ErrorData error;
-	vector<LogicalType> arg_types;
-	arg_types.reserve(children.size());
-	for (auto &child : children) {
-		arg_types.push_back(child->GetReturnType());
-	}
-
-	auto &entry = Catalog::GetSystemCatalog(input.context)
-	                  .GetEntry<AggregateFunctionCatalogEntry>(
-	                      input.context, QualifiedName(Catalog::GetSystemCatalog(input.context).GetName(),
-	                                                   Identifier::DefaultSchema(), Identifier(func_name)));
-	auto best = function_binder.BindFunction(Identifier(entry.name), entry.functions, arg_types, error);
-	if (!best.IsValid()) {
-		throw InternalException("dp: failed to bind aggregate function '" + func_name + "': " + error.Message());
-	}
-	auto func = entry.functions.GetFunctionByOffset(best.GetIndex());
-	return function_binder.BindAggregateFunction(func, std::move(children), nullptr, AggregateType::NON_DISTINCT);
-}
-
 static unique_ptr<Expression> ClipToBounds(OptimizerExtensionInput &input, unique_ptr<Expression> expr, double lo,
                                            double hi, const LogicalType &restore_type);
 
@@ -1486,7 +1464,7 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 			children.push_back(
 			    BoundCastExpression::AddCastToType(input.context, std::move(value), LogicalType::DOUBLE));
 			children.push_back(make_uniq<BoundConstantExpression>(Value::BIGINT(automatic_mean_count_bound)));
-			lower_exprs.push_back(BindAggregateLocal(input, "dp_bounded_value_list", std::move(children)));
+			lower_exprs.push_back(BindPlainAggregate(input, "dp_bounded_value_list", std::move(children)));
 		} else { // sum
 			auto value = FoldFilterIntoValue(aggr, aggr.GetChildrenMutable()[0]->Copy(), /*else_zero=*/true);
 			bounds_parameters[i] = GetDpApproxBoundsParameters(value->GetReturnType());
@@ -1530,7 +1508,7 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(bounds_parameters[i].scale)));
 			children.push_back(make_uniq<BoundConstantExpression>(
 			    Value::UBIGINT(static_cast<uint64_t>(bounds_parameters[i].num_bins))));
-			agg->expressions[i] = BindAggregateLocal(input, "dp_approx_bounds_mean", std::move(children));
+			agg->expressions[i] = BindPlainAggregate(input, "dp_approx_bounds_mean", std::move(children));
 			sens.push_back(0.0);
 			PRIVACY_DEBUG_PRINT("[dp_standard] ApproxBounds AVG rewrite: eps=" + std::to_string(auto_bounds_epsilon) +
 			                    " max_contributions=" + std::to_string(automatic_mean_count_bound) + " C_u=" +
@@ -1545,7 +1523,7 @@ static vector<double> ApplyPerPuClipping(OptimizerExtensionInput &input, unique_
 			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(bounds_parameters[i].scale)));
 			children.push_back(make_uniq<BoundConstantExpression>(
 			    Value::UBIGINT(static_cast<uint64_t>(bounds_parameters[i].num_bins))));
-			agg->expressions[i] = BindAggregateLocal(input, "dp_approx_bounds_sum", std::move(children));
+			agg->expressions[i] = BindPlainAggregate(input, "dp_approx_bounds_sum", std::move(children));
 			// dp_approx_bounds_sum performs both private bound selection and value noise. The shared
 			// projection must pass it through instead of adding a second Laplace draw.
 			sens.push_back(0.0);
@@ -2407,7 +2385,7 @@ static void RewriteDistinctCountToSampleMedian(OptimizerExtensionInput &input, L
 		count_children.push_back(std::move(lane_ref));
 		count_children.push_back(BuildIsNotNullPredicate(std::move(distinct_ref)));
 		top_expressions.push_back(
-		    BindAggregateLocal(input, "as_sample_m_count_distinct_if", std::move(count_children)));
+		    BindPlainAggregate(input, "as_sample_m_count_distinct_if", std::move(count_children)));
 		if (apply_support_filter) {
 			auto support_ref = make_uniq<BoundColumnRefExpression>(
 			    support_type, ColumnBinding(TableIndex(lane_agg_index), ProjectionIndex(0)));
@@ -2521,7 +2499,7 @@ static void RewritePuDistinctCountToSampleMedian(OptimizerExtensionInput &input,
 	count_children.push_back(std::move(hash_ref));
 	count_children.push_back(std::move(value_ref));
 	top_expressions.push_back(
-	    BindAggregateLocal(input, variable_m ? "as_sample_m_count" : "as_sample_count", std::move(count_children)));
+	    BindPlainAggregate(input, variable_m ? "as_sample_m_count" : "as_sample_count", std::move(count_children)));
 
 	agg->children[0] = std::move(inner_agg);
 	agg->expressions = std::move(top_expressions);
@@ -2530,22 +2508,11 @@ static void RewritePuDistinctCountToSampleMedian(OptimizerExtensionInput &input,
 	                    string(variable_m ? "as_sample_m_count" : "as_sample_count"));
 }
 
-static void RemapExpressionBindingsLocal(Expression &e, const std::unordered_map<idx_t, idx_t> &map) {
-	if (e.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
-		auto &col_ref = e.Cast<BoundColumnRefExpression>();
-		auto it = map.find(col_ref.BindingMutable().table_index.index);
-		if (it != map.end()) {
-			col_ref.BindingMutable().table_index.index = it->second;
-		}
-	}
-	ExpressionIterator::EnumerateChildren(e, [&](Expression &child) { RemapExpressionBindingsLocal(child, map); });
-}
-
 static unique_ptr<Expression> CopyMaybeRemapped(const Expression &expr,
                                                 const std::unordered_map<idx_t, idx_t> *index_map) {
 	auto result = expr.Copy();
 	if (index_map) {
-		RemapExpressionBindingsLocal(*result, *index_map);
+		RemapBindingsInExpr(*result, *index_map);
 	}
 	return result;
 }
@@ -2679,7 +2646,7 @@ static unique_ptr<Expression> BuildSampleMedianAggregateRef(OptimizerExtensionIn
 		}
 		children.push_back(std::move(count_ref));
 	}
-	return BindAggregateLocal(input, rewrite.sample_name, std::move(children));
+	return BindPlainAggregate(input, rewrite.sample_name, std::move(children));
 }
 
 static void RewriteAggregateToSampleMedian(OptimizerExtensionInput &input, LogicalAggregate *agg,
@@ -3350,7 +3317,7 @@ static unique_ptr<Expression> BuildFilterlessLowerPair(OptimizerExtensionInput &
 	}
 	children.push_back(BuildFilterlessIsActive(input, encoded_pu));
 	children.push_back(BuildFilterlessSamplePredicate(input, encoded_pu, sample_bits));
-	return BindAggregateLocal(input, is_count ? "priv_filterless_count_pair" : "priv_filterless_sum_pair",
+	return BindPlainAggregate(input, is_count ? "priv_filterless_count_pair" : "priv_filterless_sum_pair",
 	                          std::move(children));
 }
 
@@ -3451,7 +3418,7 @@ void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, Optimizer
 			children.push_back(pre_input.HistogramRef(input, avg_info->count_pos));
 			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(visible_cell_epsilon)));
 			children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(static_cast<double>(max_groups))));
-			upper_expressions.push_back(BindAggregateLocal(input, "priv_filterless_avg", std::move(children)));
+			upper_expressions.push_back(BindPlainAggregate(input, "priv_filterless_avg", std::move(children)));
 			PRIVACY_DEBUG_PRINT("[dp_filterless] fused upper AVG " + std::to_string(i) +
 			                    " epsilon=" + std::to_string(visible_cell_epsilon));
 			continue;
@@ -3460,7 +3427,7 @@ void CompileDPFilterlessQuery(const PrivacyCompatibilityResult &check, Optimizer
 		children.push_back(pre_input.HistogramRef(input, i));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(visible_cell_epsilon)));
 		children.push_back(make_uniq<BoundConstantExpression>(Value::DOUBLE(static_cast<double>(max_groups))));
-		upper_expressions.push_back(BindAggregateLocal(
+		upper_expressions.push_back(BindPlainAggregate(
 		    input, count_components[i] ? "filterless_count" : "filterless_sum", std::move(children)));
 		PRIVACY_DEBUG_PRINT("[dp_filterless] component " + std::to_string(i) +
 		                    (count_components[i] ? " COUNT" : " SUM") +

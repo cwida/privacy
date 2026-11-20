@@ -895,8 +895,7 @@ bool ColumnBelongsToTable(LogicalOperator &plan, const string &table_name, const
 	return false;
 }
 
-// Recursively remap BoundColumnRefExpression bindings in an expression tree.
-static void RemapBindingsInExpr(Expression &e, const std::unordered_map<idx_t, idx_t> &map) {
+void RemapBindingsInExpr(Expression &e, const std::unordered_map<idx_t, idx_t> &map) {
 	if (e.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 		auto &col_ref = e.Cast<BoundColumnRefExpression>();
 		auto it = map.find(col_ref.BindingMutable().table_index.index);

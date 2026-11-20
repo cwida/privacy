@@ -636,23 +636,11 @@ static unique_ptr<LogicalOperator> BuildNonDistinctBranch(
 	return agg_node;
 }
 
-// Helper: remap expression bindings using an index map
-static void RemapExpressionBindings(Expression &e, const std::unordered_map<idx_t, idx_t> &map) {
-	if (e.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
-		auto &col_ref = e.Cast<BoundColumnRefExpression>();
-		auto it = map.find(col_ref.BindingMutable().table_index.index);
-		if (it != map.end()) {
-			col_ref.BindingMutable().table_index.index = it->second;
-		}
-	}
-	ExpressionIterator::EnumerateChildren(e, [&](Expression &child) { RemapExpressionBindings(child, map); });
-}
-
 static unique_ptr<Expression> CopyBranchExpression(const Expression &expr,
                                                    const std::unordered_map<idx_t, idx_t> *index_map) {
 	auto result = expr.Copy();
 	if (index_map) {
-		RemapExpressionBindings(*result, *index_map);
+		RemapBindingsInExpr(*result, *index_map);
 	}
 	return result;
 }
@@ -835,7 +823,7 @@ static void InsertMultiBranchPreAggregation(OptimizerExtensionInput &input, uniq
 				for (auto &expr : branch_agg.expressions) {
 					auto &bound_agg = expr->Cast<BoundAggregateExpression>();
 					if (bound_agg.GetChildrenMutable().size() > 1) {
-						RemapExpressionBindings(*bound_agg.GetChildrenMutable()[1], *index_map);
+						RemapBindingsInExpr(*bound_agg.GetChildrenMutable()[1], *index_map);
 					}
 				}
 				subtree->ResolveOperatorTypes();
@@ -1141,7 +1129,7 @@ unique_ptr<Expression> BindPlainAggregate(OptimizerExtensionInput &input, const 
 	                                                   Identifier::DefaultSchema(), Identifier(func_name)));
 	auto best = function_binder.BindFunction(Identifier(entry.name), entry.functions, arg_types, error);
 	if (!best.IsValid()) {
-		throw InternalException("Privacy compiler: failed to bind aggregate '" + func_name + "'");
+		throw InternalException("Privacy compiler: failed to bind aggregate '" + func_name + "': " + error.Message());
 	}
 	auto func = entry.functions.GetFunctionByOffset(best.GetIndex());
 	return function_binder.BindAggregateFunction(func, std::move(children), nullptr, aggr_type);

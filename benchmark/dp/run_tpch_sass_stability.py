@@ -11,73 +11,26 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 TPCH_QUERY_DIR = Path(__file__).resolve().parent / "tpch_queries"
+Q01_AVG_QUERY_DIR = Path(__file__).resolve().parent / "q01_avg"
 
 
 def read_tpch_query(name):
     return (TPCH_QUERY_DIR / f"{name}.sql").read_text(encoding="utf-8")
 
+
+def read_q01_avg_query(name):
+    # The files end with a semicolon; the queries here are embedded in other statements.
+    return (Q01_AVG_QUERY_DIR / f"{name}.sql").read_text(encoding="utf-8").strip().rstrip(";") + "\n"
+
 TPCH_STOCK_DP_QUERIES = {
     "q01": read_tpch_query("q01"),
-    "q01_avg_qty_all": """
-SELECT
-    avg(l_quantity) AS avg_qty
-FROM lineitem
-WHERE l_shipdate <= CAST('1998-09-02' AS date)
-""",
-    "q01_avg_price_all": """
-SELECT
-    avg(l_extendedprice) AS avg_price
-FROM lineitem
-WHERE l_shipdate <= CAST('1998-09-02' AS date)
-""",
-    "q01_avg_disc_all": """
-SELECT
-    avg(l_discount) AS avg_disc
-FROM lineitem
-WHERE l_shipdate <= CAST('1998-09-02' AS date)
-""",
-    "q01_avg_all": """
-SELECT
-    avg(l_quantity) AS avg_qty,
-    avg(l_extendedprice) AS avg_price,
-    avg(l_discount) AS avg_disc
-FROM lineitem
-WHERE l_shipdate <= CAST('1998-09-02' AS date)
-""",
-    "q01_avg_by_linestatus": """
-SELECT
-    l_linestatus,
-    avg(l_quantity) AS avg_qty,
-    avg(l_extendedprice) AS avg_price,
-    avg(l_discount) AS avg_disc
-FROM lineitem
-WHERE l_shipdate <= CAST('1998-09-02' AS date)
-GROUP BY l_linestatus
-ORDER BY l_linestatus
-""",
-    "q01_avg_by_returnflag": """
-SELECT
-    l_returnflag,
-    avg(l_quantity) AS avg_qty,
-    avg(l_extendedprice) AS avg_price,
-    avg(l_discount) AS avg_disc
-FROM lineitem
-WHERE l_shipdate <= CAST('1998-09-02' AS date)
-GROUP BY l_returnflag
-ORDER BY l_returnflag
-""",
-    "q01_avg_by_returnflag_linestatus": """
-SELECT
-    l_returnflag,
-    l_linestatus,
-    avg(l_quantity) AS avg_qty,
-    avg(l_extendedprice) AS avg_price,
-    avg(l_discount) AS avg_disc
-FROM lineitem
-WHERE l_shipdate <= CAST('1998-09-02' AS date)
-GROUP BY l_returnflag, l_linestatus
-ORDER BY l_returnflag, l_linestatus
-""",
+    "q01_avg_qty_all": read_q01_avg_query("q01_avg_qty_all"),
+    "q01_avg_price_all": read_q01_avg_query("q01_avg_price_all"),
+    "q01_avg_disc_all": read_q01_avg_query("q01_avg_disc_all"),
+    "q01_avg_all": read_q01_avg_query("q01_avg_all"),
+    "q01_avg_by_linestatus": read_q01_avg_query("q01_avg_by_linestatus"),
+    "q01_avg_by_returnflag": read_q01_avg_query("q01_avg_by_returnflag"),
+    "q01_avg_by_returnflag_linestatus": read_q01_avg_query("q01_avg_by_returnflag_linestatus"),
     "q01_sum_count_all": """
 SELECT
     sum(l_quantity) AS sum_qty,

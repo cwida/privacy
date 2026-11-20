@@ -108,22 +108,10 @@ struct PacTopKAggInfo {
 	ColumnBinding agg_binding; // Binding in the aggregate's output (aggregate_index, agg_index)
 };
 
-static void RemapExpressionTableIndices(Expression &expr, const std::unordered_map<idx_t, idx_t> &index_map) {
-	if (expr.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
-		auto &col_ref = expr.Cast<BoundColumnRefExpression>();
-		auto it = index_map.find(col_ref.BindingMutable().table_index.index);
-		if (it != index_map.end()) {
-			col_ref.BindingMutable().table_index.index = it->second;
-		}
-	}
-	ExpressionIterator::EnumerateChildren(expr,
-	                                      [&](Expression &child) { RemapExpressionTableIndices(child, index_map); });
-}
-
 static unique_ptr<Expression> CopyExpressionWithTableMap(const Expression &expr,
                                                          const std::unordered_map<idx_t, idx_t> &index_map) {
 	auto copy = expr.Copy();
-	RemapExpressionTableIndices(*copy, index_map);
+	RemapBindingsInExpr(*copy, index_map);
 	return copy;
 }
 

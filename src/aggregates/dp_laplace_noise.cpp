@@ -10,7 +10,6 @@
 #include "duckdb/common/exception.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cerrno>
 #include <cmath>
 #include <cstring>
@@ -576,9 +575,6 @@ static double SmoothMedianSensitivity(const vector<double> &values, double beta,
 
 namespace {
 
-constexpr idx_t SMOOTH_MEDIAN_64_N = 64;
-constexpr idx_t SMOOTH_MEDIAN_64_P = 32;
-
 template <class VALUES>
 static idx_t SmoothMedianArgMax(const VALUES &x, double beta_eff, idx_t b, idx_t lower, idx_t upper) {
 	idx_t best_j = lower;
@@ -608,32 +604,8 @@ static void SmoothMedianJList(const VALUES &x, double beta_eff, INDEXES &j_star,
 	SmoothMedianJList(x, beta_eff, j_star, midpoint + 1, last, best_j, upper);
 }
 
-static double SmoothMedianSensitivityExact64(const vector<double> &values, double beta, int sample_lanes,
-                                             double lower_bound, double upper_bound) {
-	D_ASSERT(values.size() == SMOOTH_MEDIAN_64_N);
-	double beta_eff = beta / static_cast<double>(sample_lanes);
-	std::array<double, SMOOTH_MEDIAN_64_N + 2> x;
-	x[0] = lower_bound;
-	for (idx_t i = 0; i < SMOOTH_MEDIAN_64_N; i++) {
-		x[i + 1] = values[i];
-	}
-	x[SMOOTH_MEDIAN_64_N + 1] = upper_bound;
-
-	std::array<idx_t, SMOOTH_MEDIAN_64_P + 1> j_star;
-	j_star.fill(SMOOTH_MEDIAN_64_P);
-	SmoothMedianJList(x, beta_eff, j_star, 0, SMOOTH_MEDIAN_64_P, SMOOTH_MEDIAN_64_P, SMOOTH_MEDIAN_64_N + 1);
-
-	double smooth = 0.0;
-	for (idx_t i = 0; i <= SMOOTH_MEDIAN_64_P; i++) {
-		idx_t j = j_star[i];
-		double score = (x[j] - x[i]) * std::exp(-beta_eff * static_cast<double>(j - i - 1));
-		smooth = std::max(smooth, score);
-	}
-	return std::max(0.0, smooth);
-}
-static double SmoothMedianSensitivityExactM(const vector<double> &values, double beta, int sample_lanes,
-                                            double lower_bound, double upper_bound) {
-	D_ASSERT(values.size() > SMOOTH_MEDIAN_64_N);
+static double SmoothMedianSensitivityExact(const vector<double> &values, double beta, int sample_lanes,
+                                           double lower_bound, double upper_bound) {
 	// One PU can move up to `sample_lanes` lane answers, so a PU-neighbor at PU-distance d is an
 	// element-distance ≤ sample_lanes·d change. Reweighting the element-level NRS envelope by
 	// beta_eff = beta / sample_lanes makes the result (a) beta-smooth in PU distance —
@@ -725,12 +697,8 @@ static bool SmoothMedianStatsRow(const list_entry_t &entry, const UnifiedVectorF
 	double smooth;
 	if (!bounded) {
 		smooth = SmoothMedianSensitivity(values, beta, sample_lanes);
-	} else if (entry.length == SMOOTH_MEDIAN_64_N) {
-		// Preserve the allocation-free fixed-width implementation for m=64.
-		smooth = SmoothMedianSensitivityExact64(values, beta, sample_lanes, lower_bound, upper_bound);
 	} else {
-		// Larger m uses the same exact envelope over dynamically sized lane arrays.
-		smooth = SmoothMedianSensitivityExactM(values, beta, sample_lanes, lower_bound, upper_bound);
+		smooth = SmoothMedianSensitivityExact(values, beta, sample_lanes, lower_bound, upper_bound);
 	}
 	scale = (2.0 * smooth) / epsilon;
 	PRIVACY_DEBUG_PRINT("dp_sass smooth-median: median=" + std::to_string(median) +

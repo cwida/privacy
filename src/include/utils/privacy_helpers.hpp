@@ -112,6 +112,9 @@ void CollectTableIndicesRecursive(LogicalOperator *node, std::unordered_set<idx_
 // Apply an index remapping to all operator-specific table index fields in the subtree.
 void ApplyIndexMapToSubtree(LogicalOperator *node, const std::unordered_map<idx_t, idx_t> &map);
 
+// Recursively remap the table index of every BoundColumnRefExpression in an expression tree.
+void RemapBindingsInExpr(Expression &e, const std::unordered_map<idx_t, idx_t> &map);
+
 // Walk all expressions in a subtree, updating BoundColumnRefExpression bindings per the map.
 void RemapBindingsInSubtree(LogicalOperator &op, const std::unordered_map<idx_t, idx_t> &map);
 
