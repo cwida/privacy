@@ -22,7 +22,7 @@ SQL tests are located in `test/sql/` and use DuckDB's [SQLLogicTest](https://duc
 
 ```bash
 # From repository root
-cd /path/to/pac
+cd /path/to/privacy
 
 # Run all SQL tests
 ./build/release/test/unittest --test-dir . [sql]
@@ -56,7 +56,7 @@ SQL tests use a simple format:
 # description: Test description
 # group: [sql]
 
-require pac
+require privacy
 
 statement ok
 CREATE PU TABLE test (id INTEGER, PRIVACY_KEY (id));
@@ -80,7 +80,7 @@ Query does not contain any allowed aggregation
 | `statement error` | Statement should fail (can specify expected error) |
 | `query <types>` | Query returning results (I=integer, R=real, T=text) |
 | `----` | Separator between query and expected result |
-| `require pac` | Load the PAC extension |
+| `require privacy` | Load the privacy extension |
 
 ## C++ Tests
 
@@ -92,13 +92,13 @@ C++ tests are compiled into a standalone `pac_test_runner` executable:
 
 ```bash
 # From repository root
-cd /path/to/pac
+cd /path/to/privacy
 
-# Build the test runner
-make debug
+# Build the extension and the test runner
+GEN=ninja make
 
 # Run C++ tests
-./build/debug/pac_test_runner
+./build/release/extension/privacy/pac_test_runner
 ```
 
 ### Test Files
@@ -152,10 +152,10 @@ gdb --args ./build/debug/test/unittest --test-dir . [sql] test/sql/failing_test.
 test/
 └── sql/
     ├── privacy_parser.test              # Parser and syntax tests
-    ├── pac_bitslice_compiler.test   # Compiler tests
-    ├── pac_sum.test                 # pac_sum aggregate tests
-    ├── pac_count.test               # pac_count aggregate tests
-    ├── pac_min_max.test             # pac_min/pac_max tests
+    ├── pac_bitslice_compiler_correlated_subqueries.test   # Compiler tests
+    ├── pac_sum.test                 # as_sum aggregate tests
+    ├── pac_count.test               # as_count aggregate tests
+    ├── pac_min_max.test             # as_min/as_max tests
     └── ...
 ```
 

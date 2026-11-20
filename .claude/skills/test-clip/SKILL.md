@@ -1,6 +1,6 @@
 ---
 name: test-clip
-description: Build and run pac_clip_sum unit tests.
+description: Build and run as_clip_sum unit tests.
 ---
 
 ## Instructions

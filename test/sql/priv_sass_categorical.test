@@ -6,8 +6,7 @@
 # The SASS pipeline (CompileDPSampleMedianQuery) does not yet auto-invoke the
 # PAC categorical rewriter, so these tests exercise the new as_sample_count
 # aggregate directly. End-to-end wiring (running RewriteCategoricalQuery
-# inside the SASS compiler) is a follow-up — the variant lookup and the SASS
-# filter/select scalars are already in place (see priv_sass_filter.test).
+# inside the SASS compiler) is a follow-up.
 
 require privacy
 

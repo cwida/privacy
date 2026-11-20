@@ -86,7 +86,7 @@ Use those relaxations as related work, not as a safety argument for PAC.
 ### Core mechanism (implementation)
 
 - Each aggregate maintains **64 parallel counters** (one per bit of a hashed key)
-- Each row's value is added to ~32 counters (determined by pac_hash of the PU key)
+- Each row's value is added to ~32 counters (determined by priv_hash of the PU key)
 - At finalization, noise calibrated to a **mutual information bound** (pac_mi) is
   added, and the result is estimated from the counters
 - PAC does NOT compute sensitivity (unlike differential privacy)
@@ -98,7 +98,7 @@ Use those relaxations as related work, not as a safety argument for PAC.
 - This enables processing 4 counters per instruction without actual SIMD intrinsics
 - Overflow cascades to 32-bit overflow counters when 16-bit counters saturate
 
-### pac_clip_sum (contribution clipping)
+### as_clip_sum (contribution clipping)
 
 - **Pre-aggregation**: Query rewriter inserts `GROUP BY pu_hash` to sum each user's
   rows into a single contribution (handles the "50K small items" case)
@@ -106,15 +106,15 @@ Use those relaxations as related work, not as a safety argument for PAC.
   Level 0: 0-255, Level 1: 256-1023, Level 2: 1024-4095, etc.
 - **Bitmap tracking**: Each level maintains a 64-bit bitmap of distinct contributors
   (using birthday-paradox estimation from popcount)
-- **Hard-zero**: Levels with fewer distinct contributors than `pac_clip_support`
+- **Hard-zero**: Levels with fewer distinct contributors than `priv_clip_support`
   contribute nothing to the result (prevents variance side-channel attacks)
 
 ### Key settings
 
 - `pac_mi`: Mutual information bound (0 = deterministic/no noise)
 - `privacy_seed`: RNG seed for reproducible noise
-- `pac_clip_support`: Minimum distinct contributors per magnitude level (NULL = disabled)
-- `pac_hash_repair`: Ensure pac_hash outputs exactly 32 bits set
+- `priv_clip_support`: Minimum distinct contributors per magnitude level (NULL = disabled)
+- `pac_hash_repair`: Ensure priv_hash outputs exactly 32 bits set
 
 ### Calibration Transfer (Blueprint, April 2026)
 
@@ -139,7 +139,7 @@ doesn't transfer → the noise is insufficient → attack succeeds.
 Δ = N(0, spectral_gap) is valid for D₁. The compensation Δ is instance-based
 (proportional to actual distributional distance, not worst-case like DP).
 
-**Connection to clipping**: pac_clip_support bounds per-PU influence on Σ.
+**Connection to clipping**: priv_clip_support bounds per-PU influence on Σ.
 This keeps d(D₀, D₁) small regardless of filter → calibration transfers →
 attacks fail. Clipping is the mechanism that makes the transfer bound tight.
 

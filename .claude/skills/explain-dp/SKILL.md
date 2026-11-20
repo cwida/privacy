@@ -104,7 +104,7 @@ different guarantees.
   DP can adapt to local data geometry.
 - **Elastic sensitivity / FLEX** (Johnson, Near, Song 2018): SQL-specific
   local-sensitivity upper bound for equijoins. It is the most relevant
-  DP-compatible prior art for `dp_elastic_compiler.cpp`.
+  DP-compatible prior art for `src/compiler/privacy_mechanisms.cpp`.
 - **Per-instance DP / pDP** (Yu-Xiang Wang 2019): captures privacy of a
   specific individual with respect to a fixed dataset. It preserves composition,
   post-processing, and side-information robustness per instance, but it is a

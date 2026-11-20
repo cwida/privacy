@@ -3,7 +3,8 @@
 Implementation reference for the extension's three **differential-privacy** modes
 (`dp_standard`, `dp_elastic`, `dp_sass`), selected via `SET privacy_mode = '…'`, and
 their correspondence to the SIMD-ASA paper and the DP literature. Source references
-are given as `file — Function`.
+are given as `file — Function`. The experimental fifth mode, `dp_filterless`, is described
+separately in [filterless_encoded_pu.md](filterless_encoded_pu.md).
 
 ---
 

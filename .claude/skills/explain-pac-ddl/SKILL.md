@@ -97,12 +97,12 @@ PRAGMA clear_privacy_metadata;
 corresponding `privacy_metadata_*.json` file. Stale metadata causes confusing errors
 (references to tables/columns that no longer exist).
 
-For in-memory databases, metadata file is named `privacy_metadata_memory_main.json`
-in the current working directory.
+For in-memory databases no metadata file is written.
 
 ### Key source files
 
 - `src/parser/privacy_parser.cpp` — main parser hook (intercepts SQL statements)
 - `src/parser/privacy_parser_helpers.cpp` — extraction of PRIVACY_KEY, PRIVACY_LINK, PROTECTED
-- `src/core/pac_metadata.cpp` — in-memory metadata storage for PU/link/protected info
+- `src/metadata/privacy_metadata_manager.cpp` — in-memory metadata storage for PU/link/protected info
+- `src/metadata/privacy_metadata_serialization.cpp` — reading and writing the metadata JSON file
 - `src/core/privacy_extension.cpp` — auto-loading of metadata on extension load (LoadInternal)

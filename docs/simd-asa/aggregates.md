@@ -173,7 +173,7 @@ the mode-agnostic engine — they apply the privacy mechanism:
   categorical terminals (`priv_select`/`priv_filter` families). See
   `../pac/query_operators.md`.
 - **DP**: `dp_noise` (Laplace), `dp_smooth_median_noise`, `dp_gupt_mean_noise`,
-  `dp_sample_median`, `dp_sample_mask`. See `../dp/dp_mechanisms.md`.
+  `dp_sample_mask`. See `../dp/dp_mechanisms.md`.
 
 Example — the counter list is the boundary; the terminal collapses it:
 

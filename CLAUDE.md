@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Working with the user
 
-When you're stuck — either unable to fix a bug after 2-3 attempts, or tempted to work around the actual problem by redefining the objective — **stop and ask the user for directions**. Explain clearly what the specific problem is (e.g., "pac_clip_sum(UBIGINT, DOUBLE) has no matching overload — should I add a DOUBLE overload or cast?"). The user knows this codebase deeply and can often point you to the right solution in one sentence. Do not silently change the goal, declare something impossible, or add bloated workarounds without consulting first. We work as a team.
+When you're stuck — either unable to fix a bug after 2-3 attempts, or tempted to work around the actual problem by redefining the objective — **stop and ask the user for directions**. Explain clearly what the specific problem is (e.g., "as_clip_sum(UBIGINT, DOUBLE) has no matching overload — should I add a DOUBLE overload or cast?"). The user knows this codebase deeply and can often point you to the right solution in one sentence. Do not silently change the goal, declare something impossible, or add bloated workarounds without consulting first. We work as a team.
 
 Always test your changes with real queries (e.g., TPC-H on sf1) before declaring success, not just unit tests. Unit tests with wide boolean thresholds can pass even when the code is fundamentally broken.
 
@@ -22,12 +22,13 @@ Never execute git commands that could lose code. Always ask the user for permiss
 
 ## What is this extension?
 
-`privacy` is a DuckDB extension that automatically privatizes SQL aggregate queries. It supports four privacy mechanisms, selected by the single `SET privacy_mode` setting (the `dp_*` settings tune the chosen mechanism, they do not select it):
+`privacy` is a DuckDB extension that automatically privatizes SQL aggregate queries. It supports five privacy mechanisms, selected by the single `SET privacy_mode` setting (the `dp_*` settings tune the chosen mechanism, they do not select it):
 
 - **`pac`** (default): PAC Privacy — empirical MIA resistance. Maintains 64 parallel counters per aggregate (one per "world" bit), adds noise calibrated to the query variance across sub-samples. Provides theoretical mutual-information bounds. Not differential privacy.
 - **`dp_standard`**: Global-sensitivity DP — pure ε-DP for **ungrouped** queries, (ε,δ)-DP for **grouped** ones (see partition selection below). Bounds each privacy unit's *total* contribution to a fixed constant (per-PU contribution clipping), so global sensitivity equals that constant — data-independent. On a single PU table this is per-row clipping (COUNT sensitivity = 1, SUM = `dp_sum_bound`); on a join it pre-aggregates per PU (grouping by the PU-adjacent FK), clips each PU's partial to `dp_sum_bound`/`dp_count_bound`, then sums — so a join with COUNT requires `dp_count_bound`. Laplace noise calibrated to `bound/epsilon`. **Grouped queries apply private partition selection by default** (noised `COUNT(DISTINCT pu) ≥ τ`, the same Wilson/Google mechanism as `dp_sass`): the released key set is data-dependent, so this reserves `ε_η = ε/(c+1)` and needs `δ_η`, making grouped `dp_standard` (ε,δ)-DP and **requiring `dp_delta`**; ungrouped `dp_standard` stays pure ε-DP.
 - **`dp_elastic`**: Elastic sensitivity DP — formal (ε,δ)-DP **at the row level** (FLEX/Chorus neighbor = change one tuple). Same Laplace pipeline as `dp_standard` but uses per-row clipping and the smoothed join-frequency envelope (`2·SES_β`, β derived from ε,δ) for sensitivity. Requires `dp_delta`. **Not user-level**: `∏mf` bounds a single-tuple change, not a whole PU's contribution — a user-level extension would need per-user statistics and a new sensitivity proof (future work). It follows FLEX's public/enumerated-partition model (no *DP* partition selection), unlike the user-level `dp_standard`/`dp_sass`. Its `privacy_min_group_count` gate is a **raw (un-noised) admin support filter, not DP partition selection** — under FLEX's public-partition assumption it's a utility convenience; making it row-level-DP-safe would need a noised τ with `C_u = 1` (the row-level branch), deferred.
-- **`dp_sass`**: Sample-and-aggregate. Computes 64 sample (lane) aggregates per privacy unit and releases either the **median** (`dp_sass_release='median'`, default; smooth-sensitivity Laplace, (ε,δ)-DP, requires `dp_delta`) or the **mean** (`dp_sass_release='average'`; GUPT-style, pure ε-DP, no `dp_delta`). Per-PU contribution is clipped (`dp_count_bound`/`dp_sum_bound`); the cross-group bound `dp_max_groups_contributed` (C_u) enters each aggregate's budget. **Grouped queries apply private partition selection automatically** (per the paper's Algorithm 2): a noised `COUNT(DISTINCT pu)` is released only when `≥ τ = 1 − C_u·log(2−2(1−δ_η)^{1/C_u})/ε_η`, reserving `ε_η = ε/(c+1)` and `δ_η = δ/(c+1)` so each of the c aggregates gets `ε/((c+1)·C_u)`. Grouped `dp_sass` therefore requires `dp_delta` (the pure-ε `average` release is only valid ungrouped). The released value is clamped to a public output domain (`dp_sass_count_output_bound`, `dp_sass_sum_output_bound`, `dp_sass_avg_lower/upper_bound`, `dp_sass_minmax_lower/upper_bound`); with `dp_sass_private_range=true` (average release only) a fraction `dp_sass_range_budget_fraction` of ε privately estimates that range (pure-ε exp-mechanism quantiles). Supports COUNT, COUNT(DISTINCT), SUM, AVG, MIN, MAX.
+- **`dp_sass`**: Sample-and-aggregate. Computes 64 sample (lane) aggregates per privacy unit and releases either the **median** (`dp_sass_release='median'`, default; smooth-sensitivity Laplace, (ε,δ)-DP, requires `dp_delta`) or the **mean** (`dp_sass_release='average'`; GUPT-style, pure ε-DP, no `dp_delta`). Per-PU contribution is clipped (`dp_count_bound`/`dp_sum_bound`); the cross-group bound `dp_max_groups_contributed` (C_u) enters each aggregate's budget. **Grouped queries apply private partition selection automatically** (per the paper's Algorithm 2): a noised `COUNT(DISTINCT pu)` is released only when `≥ τ = 1 − C_u·log(2−2(1−δ_η)^{1/C_u})/ε_η`, reserving `ε_η = ε/(c+1)` and `δ_η = δ/(c+1)` so each of the c aggregates gets `ε/((c+1)·C_u)`. Grouped `dp_sass` therefore requires `dp_delta` (the pure-ε `average` release is only valid ungrouped). The released value is clamped to a public output domain (`dp_sass_count_output_bound`, `dp_sass_sum_output_bound`, `dp_sass_avg_lower/upper_bound`, `dp_sass_minmax_lower/upper_bound`). Supports COUNT, COUNT(DISTINCT), SUM, AVG, MIN, MAX.
+- **`dp_filterless`**: Experimental sample-and-aggregate variant with sampled filter retention and exponential per-PU clipping bounds (`CompileDPFilterlessQuery`; see `docs/dp/filterless_encoded_pu.md`).
 
 `dp_standard` and `dp_elastic` share one code path (`CompileDPLaplaceQuery` in `privacy_mechanisms.cpp`); they differ only in how contributions are clipped and how sensitivity is derived (`ClipAndComputeSensitivities`). All four modes share the same DDL (`PRIVACY_KEY`, `PRIVACY_LINK`, `PROTECTED`) and rewrite aggregate plans transparently — users write normal SQL.
 
@@ -35,13 +36,13 @@ Never execute git commands that could lose code. Always ask the user for permiss
 
 ```bash
 GEN=ninja make                # build (release)
-make test                     # run all tests (~25 tests, ~2200 assertions)
+make test                     # run all SQL tests (35 test files, ~4300 assertions), then the C++ unit tests
 
 # single test
 build/release/test/unittest "test/sql/pac_sum.test"
 
-# C++ unit tests (parser, traversal, compiler)
-build/release/extension/privacy/pac_test_runner
+# C++ unit tests only (parser, traversal, compiler)
+make test_cpp
 ```
 
 Build outputs go to `build/release/`. DuckDB is a git submodule in `duckdb/`.
@@ -57,11 +58,11 @@ The optimizer hook runs in `pre_optimize_function` — BEFORE DuckDB's built-in 
 ### PAC pipeline phases (in order)
 
 1. **Compatibility check** (`privacy_compatibility_check.cpp`) — decides if query needs PAC rewrite; rejects unsupported patterns (window functions, protected columns in GROUP BY)
-2. **FK join injection** (`pac_bitslice_add_fkjoins.cpp`) — adds missing joins to reach PU tables
-3. **Aggregate transformation** (`pac_bitslice_compiler.cpp` → `pac_expression_builder.cpp`) — replaces SUM/COUNT/etc. with pac_noised_sum/pac_noised_count/etc., inserts pac_hash projections above scans
-4. **Categorical rewrite** (`pac_categorical_rewriter.cpp`) — when PAC aggregates appear in filters/comparisons, converts to counter lists (LIST\<FLOAT\>) with pac_filter/pac_select terminals
-5. **AVG decomposition** (`pac_avg_rewriter.cpp`) — rewrites pac_noised_avg into pac_noised_div(pac_sum, pac_count)
-6. **Clip rewrite** (`pac_expression_builder.cpp:RewriteClipAggregates`) — when `pac_clip_support` is set, inserts lower aggregate for per-PU pre-aggregation with clipping
+2. **FK join injection** (`privacy_bitslice_add_fkjoins.cpp`) — adds missing joins to reach PU tables
+3. **Aggregate transformation** (`privacy_compiler.cpp` → `privacy_expression_builder.cpp`) — replaces SUM/COUNT/etc. with as_noised_sum/as_noised_count/etc., inserts priv_hash projections above scans
+4. **Categorical rewrite** (`pac_categorical_rewriter.cpp`) — when PAC aggregates appear in filters/comparisons, converts to counter lists (LIST\<FLOAT\>) with priv_filter/priv_select terminals
+5. **AVG decomposition** (`pac_avg_rewriter.cpp`) — rewrites as_noised_avg into as_noised_div(as_sum, as_count)
+6. **Clip rewrite** (`privacy_expression_builder.cpp:RewriteClipAggregates`) — when `priv_clip_support` is set, inserts lower aggregate for per-PU pre-aggregation with clipping
 
 ### DP-elastic / DP-standard pipeline phases (in order)
 
@@ -69,43 +70,43 @@ The optimizer hook runs in `pre_optimize_function` — BEFORE DuckDB's built-in 
 
 
 1. **Compatibility check** (`privacy_compatibility_check.cpp`) — shared structural checks; PU columns can only appear inside aggregates
-2. **FK chain extraction** (`dp_elastic_compiler.cpp:ExtractFKChain`) — validates a linear FK path to the PU; chain may be explicit (joins in the SQL) or implicit (derived from PRIVACY_LINK metadata when the PU table is absent)
-3. **AVG rewrite** (`dp_elastic_compiler.cpp:RewriteAvgAggregates`) — each `AVG(x)` is replaced in-place by `SUM(x)` and a `COUNT(*)` is appended; the original `FILTER (WHERE …)` predicate is propagated to both
-4. **Clipping** (`dp_elastic_compiler.cpp:ClipSumInputs`) — SUM (and AVG-derived SUM) arguments wrapped in `greatest(least(v, C), -C)` where C = `dp_sum_bound`
-5. **Sensitivity computation** (`dp_elastic_compiler.cpp:ComputeMfK` + `ComputeElasticSensitivity`) — per-table max frequency; global ES = ∏ mf; smooth ES with β = ε/(2·ln(2/δ)) when δ > 0
+2. **FK chain extraction** (`privacy_mechanisms.cpp:ExtractFKChain`) — validates a linear FK path to the PU; chain may be explicit (joins in the SQL) or implicit (derived from PRIVACY_LINK metadata when the PU table is absent)
+3. **AVG rewrite** (`privacy_mechanisms.cpp:RewriteAvgAggregates`) — each `AVG(x)` is replaced in-place by `SUM(x)` and a `COUNT(*)` is appended; the original `FILTER (WHERE …)` predicate is propagated to both
+4. **Clipping** (`privacy_mechanisms.cpp:ClipSumInputs`) — SUM (and AVG-derived SUM) arguments wrapped in `greatest(least(v, C), -C)` where C = `dp_sum_bound`
+5. **Sensitivity computation** (`privacy_mechanisms.cpp:ComputeMfK` + `ComputeElasticSensitivity`) — per-table max frequency; global ES = ∏ mf; smooth ES with β = ε/(2·ln(2/δ)) when δ > 0
 6. **Budget split** (`CompileDPElasticQuery`) — with k user-visible aggregates each gets ε/k (scale × k); AVG components further split to ε/(2k) (scale × 2k)
-7. **Noise injection** (`dp_elastic_compiler.cpp:WrapAggregateWithLaplace`) — projection above the aggregate adds `dp_laplace_noise(agg, scale)` per column, cast back to the original type
-8. **τ-thresholding** (`dp_elastic_compiler.cpp:ApplyGroupSuppression`) — if `privacy_min_group_count` set, a filter above the noise projection drops groups where `|noised| < threshold · √2 · scale` (skipped for AVG positions, whose ratio is not a simple Laplace output)
-9. **AVG ratio projection** (`dp_elastic_compiler.cpp:WrapAvgRatioProjection`) — inserted above the suppression filter (or directly above the noise projection if no suppression). Computes `cast(noised_sum, DOUBLE) / greatest(cast(noised_count, DOUBLE), 1.0)` for each AVG; non-AVG outputs pass through. ColumnBindingReplacer remaps upstream references (including any HAVING filter) so they read the ratio rather than the raw SUM
+7. **Noise injection** (`privacy_mechanisms.cpp:WrapAggregateWithLaplace`) — projection above the aggregate adds `dp_noise(agg, scale)` per column, cast back to the original type
+8. **Group suppression** (`privacy_mechanisms.cpp:FinalizeDPLaplace`, `AddSupportAggregate`) — `dp_standard`: private partition selection on a noised `COUNT(DISTINCT pu)` for grouped queries; `dp_elastic`: when `privacy_min_group_count` is set, a raw (un-noised) support filter, which is not DP partition selection
+9. **AVG ratio projection** (`privacy_mechanisms.cpp:WrapAvgRatioProjection`) — inserted above the suppression filter (or directly above the noise projection if no suppression). Computes `cast(noised_sum, DOUBLE) / greatest(cast(noised_count, DOUBLE), 1.0)` for each AVG; non-AVG outputs pass through. ColumnBindingReplacer remaps upstream references (including any HAVING filter) so they read the ratio rather than the raw SUM
 
 ### Aggregate naming convention
 
 | Name pattern | Returns | Purpose |
 |---|---|---|
-| `pac_sum/count/min/max` | LIST\<FLOAT\> | 64 counters (used by categorical/clip rewrites) |
-| `pac_noised_sum/count/min/max` | scalar | Fused counters + noise (direct query output) |
-| `pac_clip_sum/count/min/max` | LIST\<FLOAT\> | Counters with per-level support clipping |
-| `pac_noised_clip_sum/count/min/max` | scalar | Fused clip + noise |
+| `as_sum/count/min/max` | LIST\<FLOAT\> | 64 counters (used by categorical/clip rewrites) |
+| `as_noised_sum/count/min/max` | scalar | Fused counters + noise (direct query output) |
+| `as_clip_sum/count/min/max` | LIST\<FLOAT\> | Counters with per-level support clipping |
+| `as_noised_clip_sum/count/min/max` | scalar | Fused clip + noise |
 
-pac_noised_* is the fused version of pac_noised(pac_*()). The unfused form is used when expressions operate on counters (list_transform/lambdas in categorical queries).
+as_noised_* is the fused version of as_noised(as_*()). The unfused form is used when expressions operate on counters (list_transform/lambdas in categorical queries).
 
 ### Key architectural rules
 
-- **pac_hash is always computed in a Projection above the scan**, never inside an aggregate
+- **priv_hash is always computed in a Projection above the scan**, never inside an aggregate
 - **Pre-computed bindings become stale after RewriteBottomUp** — always re-compute at point of use
 - **Use `binder.GenerateTableIndex()`** for new table indices, never manual tracking
 - **Always call `ResolveOperatorTypes()`** after creating or modifying a LogicalAggregate
-- **pac_noised_sum on DECIMAL** uses `BindDecimalPacSum` to dispatch by physical type and set return_type to DECIMAL(38, scale) — any new sum variant needs the same pattern
+- **as_noised_sum on DECIMAL** uses `BindDecimalPacSum` to dispatch by physical type and set return_type to DECIMAL(38, scale) — any new sum variant needs the same pattern
 
 ## Key source files
 
-- `src/core/privacy_optimizer.cpp` — optimizer hook entry point; dispatches to PAC or DP-elastic based on `privacy_mode`
-- `src/compiler/pac_bitslice_compiler.cpp` — PAC compilation orchestrator (`CompilePacBitsliceQuery`)
-- `src/compiler/dp_elastic_compiler.cpp` — DP-elastic compilation (`CompileDPElasticQuery`, `ExtractFKChain`, `ComputeMfK`)
-- `src/query_processing/pac_expression_builder.cpp` — aggregate modification, clip rewrite, expression binding
-- `src/query_processing/pac_plan_traversal.cpp` — plan traversal utilities (FindAllAggregates, AggregateGroupsByPUKey, etc.)
-- `src/include/aggregates/pac_aggregate.hpp` — PacBindData, noise calibration, p-tracking
-- `src/categorical/pac_categorical_rewriter.cpp` — categorical query transformation (~1770 lines)
+- `src/core/privacy_optimizer.cpp` — optimizer hook entry point; calls `CompilePrivQuery`, which dispatches on `privacy_mode`
+- `src/compiler/privacy_compiler.cpp` — `CompilePrivQuery` and the PAC compilation orchestrator (`CompilePacMechanism`, `ModifyPlanWithPU`)
+- `src/compiler/privacy_mechanisms.cpp` — the DP mechanisms (`CompileDPLaplaceQuery`, `CompileDPSampleMedianQuery`, `CompileDPFilterlessQuery`, `ExtractFKChain`, `ComputeMfK`)
+- `src/query_processing/privacy_expression_builder.cpp` — aggregate modification, clip rewrite, expression binding
+- `src/query_processing/privacy_plan_traversal.cpp` — plan traversal utilities (FindAllAggregates, AggregateGroupsByPUKey, etc.)
+- `src/include/aggregates/as_aggregate.hpp` — PrivBindData, noise calibration, p-tracking
+- `src/categorical/pac_categorical_rewriter.cpp` — categorical query transformation
 - `src/metadata/privacy_compatibility_check.cpp` — shared compatibility check for both modes
 
 ## Debugging
@@ -124,7 +125,7 @@ ALTER TABLE orders ADD PRIVACY_LINK (o_custkey) REFERENCES customer (c_custkey);
 SET privacy_mode = 'pac';
 SET pac_mi = 0;                      -- disable noise for testing
 SET privacy_seed = 42;               -- reproducible results
-SET pac_clip_support = 40;           -- enable clip rewrite with support threshold
+SET priv_clip_support = 40;          -- enable clip rewrite with support threshold
 SET privacy_min_group_count = 4;     -- suppress low-SNR cells
 
 -- DP-standard mode (formal pure ε-DP, per-PU contribution clipping)
@@ -149,9 +150,8 @@ SET dp_max_groups_contributed = 10;  -- C_u: groups one PU may affect (grouped q
 SET dp_sass_count_output_bound = 1000000;  -- public output domain (per agg kind)
 SET dp_sass_release = 'median';      -- 'median' (needs dp_delta) or 'average' (GUPT, pure-ε)
 SET dp_delta = 1e-6;                 -- required only for 'median'
--- GUPT mean release + private range estimation (pure-ε):
+-- GUPT mean release (pure-ε, ungrouped queries):
 -- SET dp_sass_release = 'average'; SET dp_delta = NULL;
--- SET dp_sass_private_range = true; SET dp_sass_range_budget_fraction = 0.25;
 ```
 
 ## Code style (clang-tidy)
