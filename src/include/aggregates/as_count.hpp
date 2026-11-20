@@ -9,10 +9,11 @@
 #define PAC_NOCASCADING 1
 #endif
 
-// PAC_GODBOLT mode: cpp -DPAC_GODBOLT -P -E -w  src/include/as_count.hpp
+// AS_GODBOLT mode: cpp -DAS_GODBOLT -P -E -w src/include/aggregates/as_count.hpp
 // Isolates the SIMD kernel for Godbolt analysis (-P removes line markers)
-#ifdef PAC_GODBOLT
+#ifdef AS_GODBOLT
 using uint8_t = unsigned char;
+using uint16_t = unsigned short;
 using uint64_t = unsigned long long;
 #else
 #include "duckdb.hpp"
@@ -53,7 +54,7 @@ void RegisterPacClipCountFunctions(ExtensionLoader &);
 #endif
 #define PAC_COUNT_MASK                                                                                                 \
 	(1ULL | (1ULL << 8) | (1ULL << 16) | (1ULL << 24) | (1ULL << 32) | (1ULL << 40) | (1ULL << 48) | (1ULL << 56))
-#ifndef PAC_GODBOLT
+#ifndef AS_GODBOLT
 // For each of the 8 iterations i, we then do (hash_key>>i) & PAC_COUNT_MASK which selects 8 bits, and then add these
 // with a single uint64_t ADD to a uint64 subtotal.
 //
@@ -72,7 +73,7 @@ void RegisterPacClipCountFunctions(ExtensionLoader &);
 // rather than individual values reduces cache misses and increases chances for SIMD
 #endif
 
-#ifndef PAC_GODBOLT
+#ifndef AS_GODBOLT
 template <typename S> // forward template declaration
 static inline void PacCountUpdateOne(S &agg, uint64_t hash, ArenaAllocator &a);
 #endif
@@ -93,7 +94,7 @@ struct PacCountState {
 	uint64_t *probabilistic_total; // low bit tags exact uint16_t totals; otherwise uint64_t[64]
 #endif
 
-#ifndef PAC_GODBOLT
+#ifndef AS_GODBOLT
 	bool HasTotals() const {
 #ifdef PAC_NOCASCADING
 		return true;
@@ -221,7 +222,7 @@ struct PacCountState {
 #endif
 };
 
-#ifndef PAC_GODBOLT
+#ifndef AS_GODBOLT
 #ifdef PAC_NOCASCADING
 // NOCASCADING: simple direct update to uint64_t[64]
 template <>
@@ -240,10 +241,10 @@ inline void PacCountUpdateOne(PacCountState &agg, uint64_t hash, ArenaAllocator 
 	}
 }
 #endif // PAC_NOCASCADING
-#endif // PAC_GODBOLT
+#endif // AS_GODBOLT
 
 #ifndef PAC_NOCASCADING
-#ifdef PAC_GODBOLT
+#ifdef AS_GODBOLT
 __attribute__((used, noinline))
 #else
 AUTOVECTORIZE static inline
@@ -254,7 +255,7 @@ void PacCountUpdateSWAR(PacCountState &state, uint64_t key_hash) {
 	}
 }
 
-#ifndef PAC_GODBOLT
+#ifndef AS_GODBOLT
 template <>
 inline void PacCountUpdateOne(PacCountState &agg, uint64_t hash, ArenaAllocator &a) {
 	agg.key_hash |= hash;
@@ -263,10 +264,10 @@ inline void PacCountUpdateOne(PacCountState &agg, uint64_t hash, ArenaAllocator 
 		agg.FlushLevel(a); // flushes SWAR and adds swar_fill (255) to update_count
 	}
 }
-#endif // PAC_GODBOLT
+#endif // AS_GODBOLT
 #endif // PAC_NOCASCADING
 
-#ifndef PAC_GODBOLT
+#ifndef AS_GODBOLT
 #if !defined(PAC_NOBUFFERING) && !defined(PAC_NOCASCADING)
 // Wrapped aggregation state: buffers 3 hashes before allocating PacCountState.
 // Uses pointer tagging: lower 3 bits store n_buffered (0-3), upper 61 bits store PacCountState*.
@@ -343,6 +344,6 @@ AUTOVECTORIZE inline void PacCountBufferOrUpdateOne(PacCountStateWrapper &agg, u
 #endif // PAC_NOBUFFERING && PAC_NOCASCADING
 
 } // namespace duckdb
-#endif // PAC_GODBOLT
+#endif // AS_GODBOLT
 
 #endif // PAC_COUNT_HPP

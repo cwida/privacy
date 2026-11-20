@@ -18,9 +18,9 @@
 #define PAC_SIGNEDSUM 1
 #endif
 
-// PAC_GODBOLT mode: cpp -DPAC_GODBOLT -P -E -w src/include/pac_sum_avg.hpp
+// AS_GODBOLT mode: cpp -DAS_GODBOLT -P -E -w src/include/aggregates/as_sum.hpp
 // Isolates the SIMD kernel for Godbolt analysis (-P removes line markers)
-#ifdef PAC_GODBOLT
+#ifdef AS_GODBOLT
 using uint8_t = unsigned char;
 using int8_t = signed char;
 using uint16_t = unsigned short;
@@ -29,6 +29,7 @@ using uint32_t = unsigned int;
 using int32_t = signed int;
 using uint64_t = unsigned long long;
 using int64_t = signed long long;
+#define PAC_RESTRICT __restrict__
 #else
 #include "duckdb.hpp"
 #include "as_aggregate.hpp"
@@ -114,7 +115,7 @@ void RegisterPacSampleMSumIfFunctions(ExtensionLoader &loader);
 // Simple version for double/[u]int64_t/hugeint (uses multiplication for conditional add)
 // This auto-vectorizes well for 64-bits data-types because key_hash is also 64-bits
 template <typename ACCUM_T, typename VALUE_T>
-#ifndef PAC_GODBOLT
+#ifndef AS_GODBOLT
 AUTOVECTORIZE static inline
 #endif
     void
@@ -148,7 +149,7 @@ AUTOVECTORIZE static inline
 // MASK: broadcast mask (one bit per element, e.g., 0x0101010101010101 for 8-bit)
 // VALUE_T: input value type
 template <typename SIGNED_T, typename UNSIGNED_T, uint64_t MASK, typename VALUE_T>
-#ifndef PAC_GODBOLT
+#ifndef AS_GODBOLT
 AUTOVECTORIZE static inline
 #endif
     void
@@ -173,7 +174,7 @@ AUTOVECTORIZE static inline
 	}
 }
 
-#ifdef PAC_GODBOLT
+#ifdef AS_GODBOLT
 // Explicit instantiations for Godbolt analysis
 template void AddToTotalsSWAR<int8_t, uint8_t, 0x0101010101010101ULL, int64_t>(uint64_t *, int64_t, uint64_t);
 template void AddToTotalsSWAR<int16_t, uint16_t, 0x0001000100010001ULL, int64_t>(uint64_t *, int64_t, uint64_t);
@@ -822,6 +823,6 @@ void PacSumAvgFinalizeCounters(Vector &states, AggregateFinalizeInputData &input
                                idx_t offset);
 
 } // namespace duckdb
-#endif // PAC_GODBOLT
+#endif // AS_GODBOLT
 
 #endif // PAC_SUM_HPP

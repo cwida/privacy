@@ -9,9 +9,9 @@
 #define PAC_NOCASCADING 1
 #endif
 
-// PAC_GODBOLT mode: cpp -DPAC_GODBOLT -P -E -w src/include/as_min_max.hpp
+// AS_GODBOLT mode: cpp -DAS_GODBOLT -P -E -w src/include/aggregates/as_min_max.hpp
 // Isolates the SIMD kernel for Godbolt analysis (-P removes line markers)
-#ifdef PAC_GODBOLT
+#ifdef AS_GODBOLT
 using uint8_t = unsigned char;
 using int8_t = signed char;
 using uint16_t = unsigned short;
@@ -59,7 +59,7 @@ void RegisterPacClipMaxFunctions(ExtensionLoader &loader);
 // allocation until multiple values have been received (buffering). Processing a buffer
 // rather than individual values reduces cache misses and increases chances for SIMD.
 #endif
-#ifndef PAC_GODBOLT
+#ifndef AS_GODBOLT
 static constexpr uint16_t BOUND_RECOMPUTE_INTERVAL = 2048;
 #endif
 
@@ -73,7 +73,7 @@ static constexpr uint16_t BOUND_RECOMPUTE_INTERVAL = 2048;
 // FLOAT=true: for float/double, uses union to convert between T and UintT
 // FLOAT=false: for integers, uses neutral value approach (SIGNED distinguishes signed vs unsigned)
 template <typename T, typename UintT, typename BitsT, int SHIFTS, uint64_t MASK, bool IS_MAX, bool FLOAT, bool SIGNED>
-#ifndef PAC_GODBOLT
+#ifndef AS_GODBOLT
 AUTOVECTORIZE inline
 #endif
     void
@@ -105,7 +105,7 @@ AUTOVECTORIZE inline
 	}
 }
 
-#ifdef PAC_GODBOLT
+#ifdef AS_GODBOLT
 // Explicit instantiations for Godbolt analysis (omit hugeint)
 // Template params: <T, UintT, BitsT, SHIFTS, MASK, IS_MAX, FLOAT, SIGNED>
 template void UpdateExtremesSIMD<uint8_t, uint8_t, uint8_t, 8, 0x0101010101010101ULL, true, false, false>(uint8_t *,
@@ -157,7 +157,7 @@ AUTOVECTORIZE inline void UpdateExtremesSIMD(uhugeint_t *extremes, uint64_t key_
 }
 #endif
 
-#ifndef PAC_GODBOLT
+#ifndef AS_GODBOLT
 // Simple branching update for PAC_NOSIMD benchmarking
 template <typename T, bool IS_MAX>
 inline void UpdateExtremesScalar(T *extremes, uint64_t key_hash, T value) {
@@ -652,6 +652,6 @@ inline void PacMinMaxUpdateOne(PacMinMaxStateWrapper<T, IS_MAX> &agg, uint64_t k
 #endif // PAC_NOBUFFERING
 
 } // namespace duckdb
-#endif // PAC_GODBOLT
+#endif // AS_GODBOLT
 
 #endif // PAC_MIN_MAX_HPP

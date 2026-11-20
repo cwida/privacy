@@ -281,8 +281,7 @@ inline void PacSumUpdateOne(PacSumIntStateWrapper<SIGNED> &agg, uint64_t key_has
 #endif // PAC_NOBUFFERING
 
 // Update a single state from the original input vectors and an optional group selection.
-template <bool SELECTED, class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE,
-          class HASH_TRANSFORM = PacIdentityHash>
+template <bool SELECTED, class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
 static void PacSumUpdateValues(const UnifiedVectorFormat &hash_data, const UnifiedVectorFormat &value_data,
                                State &state, idx_t count, ArenaAllocator &allocator, int sample_lanes,
                                const sel_t *selection) {
@@ -294,8 +293,7 @@ static void PacSumUpdateValues(const UnifiedVectorFormat &hash_data, const Unifi
 			auto row = SELECTED ? selection[i] : i;
 			auto h_idx = hash_data.sel->get_index(row);
 			auto v_idx = value_data.sel->get_index(row);
-			PacSumUpdateOne<SIGNED>(state,
-			                        TransformPacUpdateHash(HASH_TRANSFORM::Transform(hashes[h_idx]), sample_lanes),
+			PacSumUpdateOne<SIGNED>(state, TransformPacUpdateHash(hashes[h_idx], sample_lanes),
 			                        ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 		}
 	} else {
@@ -306,8 +304,7 @@ static void PacSumUpdateValues(const UnifiedVectorFormat &hash_data, const Unifi
 			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 				continue;
 			}
-			PacSumUpdateOne<SIGNED>(state,
-			                        TransformPacUpdateHash(HASH_TRANSFORM::Transform(hashes[h_idx]), sample_lanes),
+			PacSumUpdateOne<SIGNED>(state, TransformPacUpdateHash(hashes[h_idx], sample_lanes),
 			                        ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 		}
 	}
@@ -331,7 +328,7 @@ static void PacSumUpdateClusters(Vector inputs[], const ClusteredAggr &clusters,
 	}
 }
 
-template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE, class HASH_TRANSFORM = PacIdentityHash>
+template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
 static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator,
                                 int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data, sdata;
@@ -350,7 +347,7 @@ static void PacSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, Ar
 		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 			continue; // ignore NULLs
 		}
-		PacSumUpdateOne<SIGNED>(*state, TransformPacUpdateHash(HASH_TRANSFORM::Transform(hashes[h_idx]), sample_lanes),
+		PacSumUpdateOne<SIGNED>(*state, TransformPacUpdateHash(hashes[h_idx], sample_lanes),
 		                        ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator);
 	}
 }

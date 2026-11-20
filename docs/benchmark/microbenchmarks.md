@@ -98,6 +98,13 @@ groups. See the "Aggregate State Export" section of
 All run Ubuntu. On the Graviton instance, format and mount the instance SSD and point `temp_directory` in
 `QUERY_SETUP` at it. A full run of the three suites takes about six hours per machine.
 
+To inspect a kernel's machine code in isolation (for example on Compiler Explorer), preprocess its header with
+`AS_GODBOLT`, which strips everything that depends on DuckDB:
+
+```bash
+cpp -DAS_GODBOLT -P -E -w src/include/aggregates/as_count.hpp   # also as_sum.hpp, as_min_max.hpp
+```
+
 `binomial.sql` computes the distribution of set bits in the membership masks shown in the hash-distribution plot.
 
 ## SUM accuracy

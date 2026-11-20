@@ -119,12 +119,6 @@ static inline bool GetPacHashRepair(duckdb::ClientContext &ctx) {
 	return true;
 }
 
-struct PacIdentityHash {
-	static inline uint64_t Transform(uint64_t key_hash) {
-		return key_hash;
-	}
-};
-
 // Cross-platform popcount for 64-bit integers
 // MSVC doesn't have __builtin_popcountll, so we need to handle it differently
 #if defined(_MSC_VER)

@@ -87,11 +87,11 @@ AUTOVECTORIZE inline void PacClipSumUpdateOneInternal(PacClipSumIntState<NL> &st
 // Value routing: two-sided (pos/neg) dispatch
 // ============================================================================
 // Route a uint64_t value — when SIGNED, the bits represent a signed int64_t (two's complement)
-template <int NL = CLIP_NUM_LEVELS_64, bool SIGNED = true, class HASH_TRANSFORM = PacIdentityHash>
+template <int NL = CLIP_NUM_LEVELS_64, bool SIGNED = true>
 inline void PacClipSumRouteValue(PacClipSumStateWrapper<NL> &wrapper, PacClipSumIntState<NL> *pos_state,
                                  uint64_t support_hash, uint64_t value, ArenaAllocator &a, int sample_lanes = 0) {
 	if (DUCKDB_LIKELY(support_hash)) {
-		uint64_t counter_hash = TransformPacUpdateHash(HASH_TRANSFORM::Transform(support_hash), sample_lanes);
+		uint64_t counter_hash = TransformPacUpdateHash(support_hash, sample_lanes);
 		int64_t sval = static_cast<int64_t>(value); // reinterpret bits as signed
 		if (SIGNED && sval < 0) {
 			uint64_t abs_value =
@@ -146,15 +146,14 @@ inline void PacClipSumRouteHugeint(PacClipSumStateWrapper<NL> &wrapper, PacClipS
 // ============================================================================
 // Buffer flush
 // ============================================================================
-template <int NL = CLIP_NUM_LEVELS_64, bool SIGNED = true, class HASH_TRANSFORM = PacIdentityHash>
+template <int NL = CLIP_NUM_LEVELS_64, bool SIGNED = true>
 inline void PacClipSumFlushBuffer(PacClipSumStateWrapper<NL> &src, PacClipSumStateWrapper<NL> &dst, ArenaAllocator &a,
                                   int sample_lanes = 0) {
 	uint64_t cnt = src.n_buffered & PacClipSumStateWrapper<NL>::BUF_MASK;
 	if (cnt > 0) {
 		auto *dst_state = dst.EnsureState(a);
 		for (uint64_t i = 0; i < cnt; i++) {
-			PacClipSumRouteValue<NL, SIGNED, HASH_TRANSFORM>(dst, dst_state, src.hash_buf[i], src.val_buf[i], a,
-			                                                 sample_lanes);
+			PacClipSumRouteValue<NL, SIGNED>(dst, dst_state, src.hash_buf[i], src.val_buf[i], a, sample_lanes);
 		}
 		src.n_buffered &= ~PacClipSumStateWrapper<NL>::BUF_MASK;
 	}
@@ -163,19 +162,16 @@ inline void PacClipSumFlushBuffer(PacClipSumStateWrapper<NL> &src, PacClipSumSta
 // ============================================================================
 // Buffered update
 // ============================================================================
-template <int NL = CLIP_NUM_LEVELS_64, bool SIGNED = true, typename ValueT = uint64_t,
-          class HASH_TRANSFORM = PacIdentityHash>
+template <int NL = CLIP_NUM_LEVELS_64, bool SIGNED = true, typename ValueT = uint64_t>
 AUTOVECTORIZE inline void PacClipSumUpdateOne(PacClipSumStateWrapper<NL> &agg, uint64_t key_hash, ValueT value,
                                               ArenaAllocator &a, int sample_lanes = 0) {
 	uint64_t cnt = agg.n_buffered & PacClipSumStateWrapper<NL>::BUF_MASK;
 	if (DUCKDB_UNLIKELY(cnt == PacClipSumStateWrapper<NL>::BUF_SIZE)) {
 		auto *dst_state = agg.EnsureState(a);
 		for (int i = 0; i < PacClipSumStateWrapper<NL>::BUF_SIZE; i++) {
-			PacClipSumRouteValue<NL, SIGNED, HASH_TRANSFORM>(agg, dst_state, agg.hash_buf[i], agg.val_buf[i], a,
-			                                                 sample_lanes);
+			PacClipSumRouteValue<NL, SIGNED>(agg, dst_state, agg.hash_buf[i], agg.val_buf[i], a, sample_lanes);
 		}
-		PacClipSumRouteValue<NL, SIGNED, HASH_TRANSFORM>(agg, dst_state, key_hash, static_cast<uint64_t>(value), a,
-		                                                 sample_lanes);
+		PacClipSumRouteValue<NL, SIGNED>(agg, dst_state, key_hash, static_cast<uint64_t>(value), a, sample_lanes);
 		agg.n_buffered &= ~PacClipSumStateWrapper<NL>::BUF_MASK;
 	} else {
 		agg.val_buf[cnt] = static_cast<uint64_t>(value);
@@ -196,8 +192,7 @@ inline void PacClipSumUpdateOne(PacClipSumStateWrapper<NL> &agg, uint64_t key_ha
 // ============================================================================
 // Vectorized Update and ScatterUpdate
 // ============================================================================
-template <int NL = CLIP_NUM_LEVELS_64, bool SIGNED = true, class VALUE_TYPE = uint64_t, class INPUT_TYPE = uint64_t,
-          class HASH_TRANSFORM = PacIdentityHash>
+template <int NL = CLIP_NUM_LEVELS_64, bool SIGNED = true, class VALUE_TYPE = uint64_t, class INPUT_TYPE = uint64_t>
 static void PacClipSumUpdate(Vector inputs[], PacClipSumStateWrapper<NL> &state, idx_t count, ArenaAllocator &allocator,
                              int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data;
@@ -210,7 +205,7 @@ static void PacClipSumUpdate(Vector inputs[], PacClipSumStateWrapper<NL> &state,
 		for (idx_t i = 0; i < count; i++) {
 			auto h_idx = hash_data.sel->get_index(i);
 			auto v_idx = value_data.sel->get_index(i);
-			PacClipSumUpdateOne<NL, SIGNED, VALUE_TYPE, HASH_TRANSFORM>(
+			PacClipSumUpdateOne<NL, SIGNED, VALUE_TYPE>(
 			    state, hashes[h_idx], ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator, sample_lanes);
 		}
 	} else {
@@ -220,14 +215,13 @@ static void PacClipSumUpdate(Vector inputs[], PacClipSumStateWrapper<NL> &state,
 			if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 				continue;
 			}
-			PacClipSumUpdateOne<NL, SIGNED, VALUE_TYPE, HASH_TRANSFORM>(
+			PacClipSumUpdateOne<NL, SIGNED, VALUE_TYPE>(
 			    state, hashes[h_idx], ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator, sample_lanes);
 		}
 	}
 }
 
-template <int NL = CLIP_NUM_LEVELS_64, bool SIGNED = true, class VALUE_TYPE = uint64_t, class INPUT_TYPE = uint64_t,
-          class HASH_TRANSFORM = PacIdentityHash>
+template <int NL = CLIP_NUM_LEVELS_64, bool SIGNED = true, class VALUE_TYPE = uint64_t, class INPUT_TYPE = uint64_t>
 static void PacClipSumScatterUpdate(Vector inputs[], Vector &states, idx_t count, ArenaAllocator &allocator,
                                     int sample_lanes = 0) {
 	UnifiedVectorFormat hash_data, value_data, sdata;
@@ -246,7 +240,7 @@ static void PacClipSumScatterUpdate(Vector inputs[], Vector &states, idx_t count
 		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 			continue;
 		}
-		PacClipSumUpdateOne<NL, SIGNED, VALUE_TYPE, HASH_TRANSFORM>(
+		PacClipSumUpdateOne<NL, SIGNED, VALUE_TYPE>(
 		    *state, hashes[h_idx], ConvertValue<VALUE_TYPE>::convert(values[v_idx]), allocator, sample_lanes);
 	}
 }
@@ -421,7 +415,7 @@ static void PacClipSumScatterUpdateUHugeInt(Vector inputs[], AggregateInputData 
 // ============================================================================
 // Float/Double update: scale to int64, route through signed path
 // ============================================================================
-template <typename FLOAT_TYPE, int SHIFT, class HASH_TRANSFORM = PacIdentityHash>
+template <typename FLOAT_TYPE, int SHIFT>
 static void PacClipSumUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx_t input_count,
                                   const ClusteredAggr &clusters, idx_t count) {
 	ExecutePrivClusters(inputs, input_count, clusters, [&](Vector inputs[], data_ptr_t state_p, idx_t count) {
@@ -437,7 +431,7 @@ static void PacClipSumUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx
 			for (idx_t i = 0; i < count; i++) {
 				auto h_idx = hash_data.sel->get_index(i);
 				auto v_idx = value_data.sel->get_index(i);
-				PacClipSumUpdateOne<CLIP_NUM_LEVELS_64, true, int64_t, HASH_TRANSFORM>(
+				PacClipSumUpdateOne<CLIP_NUM_LEVELS_64, true, int64_t>(
 				    state, hashes[h_idx], ScaleFloatToInt64<FLOAT_TYPE, SHIFT>(values[v_idx]), aggr.allocator,
 				    sample_lanes);
 			}
@@ -448,7 +442,7 @@ static void PacClipSumUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx
 				if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 					continue;
 				}
-				PacClipSumUpdateOne<CLIP_NUM_LEVELS_64, true, int64_t, HASH_TRANSFORM>(
+				PacClipSumUpdateOne<CLIP_NUM_LEVELS_64, true, int64_t>(
 				    state, hashes[h_idx], ScaleFloatToInt64<FLOAT_TYPE, SHIFT>(values[v_idx]), aggr.allocator,
 				    sample_lanes);
 			}
@@ -456,7 +450,7 @@ static void PacClipSumUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx
 	});
 }
 
-template <typename FLOAT_TYPE, int SHIFT, class HASH_TRANSFORM = PacIdentityHash>
+template <typename FLOAT_TYPE, int SHIFT>
 static void PacClipSumScatterUpdateFloat(Vector inputs[], AggregateInputData &aggr, idx_t, Vector &states,
                                          idx_t count) {
 	int sample_lanes = GetPrivSampleLanes(aggr);
@@ -475,7 +469,7 @@ static void PacClipSumScatterUpdateFloat(Vector inputs[], AggregateInputData &ag
 		if (!hash_data.validity.RowIsValid(h_idx) || !value_data.validity.RowIsValid(v_idx)) {
 			continue;
 		}
-		PacClipSumUpdateOne<CLIP_NUM_LEVELS_64, true, int64_t, HASH_TRANSFORM>(
+		PacClipSumUpdateOne<CLIP_NUM_LEVELS_64, true, int64_t>(
 		    *state, hashes[h_idx], ScaleFloatToInt64<FLOAT_TYPE, SHIFT>(values[v_idx]), aggr.allocator, sample_lanes);
 	}
 }
@@ -511,7 +505,7 @@ static void DpSampleClipSumScatterUpdateDouble(Vector inputs[], AggregateInputDa
 // ============================================================================
 // Combine
 // ============================================================================
-template <int NL = CLIP_NUM_LEVELS_64, class HASH_TRANSFORM = PacIdentityHash>
+template <int NL = CLIP_NUM_LEVELS_64>
 AUTOVECTORIZE static void PacClipSumCombineInt(Vector &src, Vector &dst, idx_t count, ArenaAllocator &allocator,
                                                int sample_lanes = 0) {
 	auto src_wrapper = FlatVector::GetData<PacClipSumStateWrapper<NL> *>(src);
@@ -519,7 +513,7 @@ AUTOVECTORIZE static void PacClipSumCombineInt(Vector &src, Vector &dst, idx_t c
 
 	for (idx_t i = 0; i < count; i++) {
 		// Flush src's buffer into dst
-		PacClipSumFlushBuffer<NL, true, HASH_TRANSFORM>(*src_wrapper[i], *dst_wrapper[i], allocator, sample_lanes);
+		PacClipSumFlushBuffer<NL, true>(*src_wrapper[i], *dst_wrapper[i], allocator, sample_lanes);
 
 		auto *s = src_wrapper[i]->GetState();
 		if (!s) {
