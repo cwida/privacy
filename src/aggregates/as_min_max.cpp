@@ -286,6 +286,7 @@ static unique_ptr<FunctionData> PacMinMaxBind(BindAggregateFunctionInput &bind_i
 	}
 #undef BIND_TYPE
 
+	ApplyStateExportSetting(ctx, function);
 	return MakePrivBindData(ctx, args, 2, IS_MAX ? "as_noised_max" : "as_noised_min");
 }
 
@@ -387,6 +388,7 @@ static unique_ptr<FunctionData> PacMinMaxCountersBind(BindAggregateFunctionInput
 	}
 #undef BIND_COUNTERS_TYPE
 
+	ApplyStateExportSetting(ctx, function);
 	return MakePrivBindData(ctx, args, 2, IS_MAX ? "as_max" : "as_min");
 }
 

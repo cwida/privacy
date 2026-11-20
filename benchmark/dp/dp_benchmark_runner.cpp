@@ -10,6 +10,7 @@
 #include "duckdb/main/connection.hpp"
 #include "benchmark_json.hpp"
 #include "benchmark_paths.hpp"
+#include "benchmark_settings.hpp"
 #include "tpch_stock_queries.hpp"
 
 #include <algorithm>
@@ -1842,6 +1843,7 @@ static void ConfigureConnection(Connection &con, const Config &config, const Dat
 	RunStatement(con, "SET threads=" + std::to_string(config.threads));
 	RunStatement(con, "SET privacy_noise=true");
 	RunStatement(con, "SET privacy_diffcols=NULL");
+	RunStatement(con, ANALYTICAL_STATE_EXPORT_SQL);
 }
 
 static void PrepareDatasetRun(const Config &config, DatasetRun &dataset_run,

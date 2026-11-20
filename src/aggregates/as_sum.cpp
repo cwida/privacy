@@ -1,6 +1,7 @@
 #include "duckdb/common/vector/list_vector.hpp"
 #include "aggregates/as_sum.hpp"
 #include "aggregates/as_sum_state_export.hpp"
+#include "aggregates/aggregate_state_export.hpp"
 #include "categorical/pac_categorical.hpp"
 #include "privacy_debug.hpp"
 #include "utils/privacy_helpers.hpp"
@@ -701,27 +702,11 @@ static unique_ptr<FunctionData> PacBindWithScaleDivisor(ClientContext &ctx, vect
 	return MakePrivBindData(ctx, args, 2, "as_noised_sum", scale_divisor);
 }
 
-// DuckDB 2.0 creates an aggregate-state spill plan only when every aggregate in a hash table exposes these
-// callbacks. With a plan, arena-backed SUM states can spill, but aggregation also turns external as soon as the
-// arena outgrows half of the per-thread memory reservation, which slows grouped SUMs that fit in memory. So the
-// callbacks registered by SpillableSum() stay on the bound function only when priv_sum_state_export is set
-// (default: PRIV_SUM_STATE_EXPORT_DEFAULT, on only for the non-cascading ablation builds).
-static void ApplySumStateExportSetting(ClientContext &ctx, BoundAggregateFunction &function) {
-	if (GetBooleanSetting(ctx, "priv_sum_state_export", PRIV_SUM_STATE_EXPORT_DEFAULT)) {
-		PRIVACY_DEBUG_PRINT("SUM bind: state export enabled (priv_sum_state_export=true)");
-		return;
-	}
-	PRIVACY_DEBUG_PRINT("SUM bind: state export disabled (priv_sum_state_export=false)");
-	function.GetCallbacks().get_state_type = nullptr;
-	function.SetExportAggregateStateCallback(nullptr);
-	function.SetImportAggregateStateCallback(nullptr);
-}
-
 unique_ptr<FunctionData> // Bind function for as_sum with optional mi parameter (must be constant)
 PacSumBind(BindAggregateFunctionInput &bind_input) {
 	auto &ctx = bind_input.GetClientContext();
 	auto &args = bind_input.GetArguments();
-	ApplySumStateExportSetting(ctx, bind_input.GetBoundFunction());
+	ApplyStateExportSetting(ctx, bind_input.GetBoundFunction());
 	return PacBindWithScaleDivisor(ctx, args, 1.0); // scale_divisor=1.0 for sum
 }
 
@@ -759,7 +744,7 @@ void PacSumDoubleInitialize(AggregateStateInput &, data_ptr_t *states, idx_t cou
 }
 
 // State export is cold-path metadata; the update kernels and native state sizes are unchanged.
-// Binding keeps these callbacks only when priv_sum_state_export is set (see ApplySumStateExportSetting).
+// Binding keeps these callbacks only when priv_state_export is set (see ApplyStateExportSetting).
 static AggregateFunction SpillableSum(AggregateFunction function) {
 	RegisterSumStateExport(function);
 	return function;
@@ -821,7 +806,7 @@ unique_ptr<FunctionData> BindDecimalPacSum(BindAggregateFunctionInput &bind_inpu
 	auto &args = bind_input.GetArguments();
 	auto decimal_type = args[1]->GetReturnType(); // value is arg 1 (arg 0 is hash)
 	function.ReplaceImplementation(SpillableSum(GetPacSumAggregate(decimal_type.InternalType())));
-	ApplySumStateExportSetting(ctx, function);
+	ApplyStateExportSetting(ctx, function);
 	function.SetName("as_noised_sum");
 	function.GetArguments()[1] = decimal_type;
 	if (args.size() == 3) {

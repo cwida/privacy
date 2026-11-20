@@ -2,6 +2,7 @@
 // Explicit AS execution and automatic-rewriter coverage are separate measurements.
 #include "duckdb.hpp"
 #include "../include/as_query_rewriter.hpp"
+#include "../include/benchmark_settings.hpp"
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -233,6 +234,7 @@ int main(int argc, char **argv) {
 		std::cerr << "DuckDB memory limit: " << memory_limit << '\n';
 		Query(con, "SET priv_rewrite=false; SET pac_sample_diversity_check=false; SET pac_mi=0; SET privacy_seed=42; "
 		           "SET pac_hash_repair=true");
+		Query(con, ANALYTICAL_STATE_EXPORT_SQL);
 		Query(con, Read(ssb + "/schema.sql"));
 		auto manifest = Query(con, "SELECT \"table\", rows::UBIGINT FROM read_csv(" + Quote(data + "/row_counts.csv") +
 		                               ", header=true)");

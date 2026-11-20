@@ -3,6 +3,7 @@
 #include "duckdb.hpp"
 #include "benchmark_json.hpp"
 #include "benchmark_paths.hpp"
+#include "benchmark_settings.hpp"
 
 #include <chrono>
 #include <fstream>
@@ -80,6 +81,7 @@ int main(int argc, char **argv) {
 		// privacy_noise=false bypasses PAC compilation; mi=0 disables additive noise without bypassing it.
 		Query(con, "SET priv_rewrite=false; SET pac_mi=0; SET privacy_noise=true; SET privacy_seed=42; "
 		           "SET pac_sample_diversity_check=false; SET pac_conservative_mode=true;");
+		Query(con, ANALYTICAL_STATE_EXPORT_SQL);
 		if (string(argv[2]) == "--prepare") {
 			auto extension_dir = JsonString(config, "extension_directory");
 			if (!extension_dir.empty()) {

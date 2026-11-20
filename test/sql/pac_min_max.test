@@ -556,6 +556,11 @@ WHERE a.mi[j+1] IS DISTINCT FROM coalesce(b.mi,0) OR a.ma[j+1] IS DISTINCT FROM 
 ----
 0
 
+# State export (EXPORT_STATE and DuckDB's aggregate-state spilling) is opt-in.
+# The tests above ran with the default; the export and spill tests below enable it.
+statement ok
+SET priv_state_export=true;
+
 # Both still-narrow and already-promoted states use the full-width wire format.
 query I
 WITH a AS(SELECT g,as_max(h,v) EXPORT_STATE s FROM compact_extreme_input WHERE step<3 GROUP BY g),
@@ -576,3 +581,33 @@ DROP TABLE compact_unsigned_input;
 
 statement ok
 DROP TABLE compact_extreme_input;
+
+# With priv_state_export off, MIN/MAX expose no state layout, so EXPORT_STATE is
+# rejected. Results must not depend on the setting.
+statement ok
+SET priv_state_export=false;
+
+statement error
+SELECT as_max(18446744073709551615::UBIGINT,i) EXPORT_STATE s FROM range(10)t(i)
+----
+does not have a state type callback
+
+statement ok
+CREATE TABLE minmax_export_off AS
+SELECT i%1000 g,as_min(hash(i),i)mi,as_max(hash(i),i)ma FROM range(200000)t(i) GROUP BY g;
+
+statement ok
+SET priv_state_export=true;
+
+query I
+SELECT count(*) FROM minmax_export_off a JOIN (
+ SELECT i%1000 g,as_min(hash(i),i)mi,as_max(hash(i),i)ma FROM range(200000)t(i) GROUP BY g
+)b USING(g) WHERE a.mi IS DISTINCT FROM b.mi OR a.ma IS DISTINCT FROM b.ma;
+----
+0
+
+statement ok
+RESET priv_state_export;
+
+statement ok
+DROP TABLE minmax_export_off;

@@ -19,6 +19,7 @@
 #include "core/privacy_optimizer.hpp"
 #include "aggregates/as_aggregate.hpp"
 #include "aggregates/as_count.hpp"
+#include "aggregates/aggregate_state_export.hpp"
 #include "aggregates/as_sum.hpp"
 #include "aggregates/as_clip_sum.hpp"
 #include "aggregates/as_min_max.hpp"
@@ -553,12 +554,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Control whether priv_hash() repairs hashes to exactly 32 bits set
 	db.config.AddExtensionOption("pac_hash_repair", "[INTERNAL] priv_hash() repairs hash to exactly 32 bits set",
 	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
-	// Expose as_sum/as_noised_sum states to DuckDB's state export: EXPORT_STATE and spilling of arena-backed
+	// Expose SUM, COUNT/AVG and MIN/MAX states to DuckDB's state export: EXPORT_STATE and spilling of arena-backed
 	// aggregate states. Off by default: with exportable states, DuckDB 2.0 aggregates externally under state
-	// pressure, which slows grouped SUMs that would fit in memory. The non-cascading ablation builds default to on.
-	db.config.AddExtensionOption("priv_sum_state_export",
-	                             "Let DuckDB export and spill as_sum/as_noised_sum aggregate states",
-	                             LogicalType::BOOLEAN, Value::BOOLEAN(PRIV_SUM_STATE_EXPORT_DEFAULT));
+	// pressure, which slows grouped aggregates that would fit in memory.
+	db.config.AddExtensionOption("priv_state_export",
+	                             "Let DuckDB export and spill stochastic SUM, COUNT, AVG, MIN and MAX states",
+	                             LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	// Propagate PAC metadata through CREATE TABLE AS SELECT
 	db.config.AddExtensionOption("pac_ctas", "[INTERNAL] Propagate PAC metadata through CTAS", LogicalType::BOOLEAN,
 	                             Value::BOOLEAN(true));

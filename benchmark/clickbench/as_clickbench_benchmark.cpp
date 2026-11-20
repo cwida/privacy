@@ -6,6 +6,7 @@
 #include "as_query_rewriter.hpp"
 #include "benchmark_json.hpp"
 #include "benchmark_paths.hpp"
+#include "benchmark_settings.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/common/printer.hpp"
@@ -420,6 +421,11 @@ int RunASClickBenchBenchmark(const string &db_path, const string &queries_dir, c
 		}
 		con.Query("SET pac_sample_diversity_check=false;");
 		con.Query("SET privacy_seed=42;");
+		auto r_export = con.Query(ANALYTICAL_STATE_EXPORT_SQL);
+		if (!r_export || r_export->HasError()) {
+			throw std::runtime_error(string(ANALYTICAL_STATE_EXPORT_SQL) + " failed" +
+			                         (r_export ? ": " + r_export->GetError() : string()));
+		}
 		con.Query("SET temp_directory='" + db_actual + ".tmp';");
 
 		bool table_exists = false;

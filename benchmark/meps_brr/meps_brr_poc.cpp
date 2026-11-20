@@ -1,5 +1,6 @@
 // WIP: explicit standard / naive BRR / conditional / AS SQL; query-only timing as in SSB.
 #include "duckdb.hpp"
+#include "benchmark_settings.hpp"
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -161,6 +162,7 @@ int main(int argc, char **argv) {
 		Query(con, "SET threads=" + std::to_string(threads));
 		Query(con, "SET priv_rewrite=false");
 		Query(con, "SET pac_sample_diversity_check=false");
+		Query(con, ANALYTICAL_STATE_EXPORT_SQL);
 		for (const auto &table : std::vector<string> {"persons_input", "brr", "events"}) {
 			if (table == "events" && workload == "damico2006")
 				continue;

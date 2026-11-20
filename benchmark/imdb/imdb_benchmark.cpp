@@ -1,6 +1,7 @@
 // IMDb/JOB benchmark runner for the privacy extension.
 
 #include "duckdb.hpp"
+#include "benchmark_settings.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/main/connection.hpp"
 
@@ -469,6 +470,7 @@ int RunIMDBBenchmark(const string &db_path, const string &queries_path, const st
 		Connection con(db);
 		ExecuteOrThrow(con, "LOAD privacy", "load privacy extension");
 		ExecuteOrThrow(con, "SET memory_limit='60GB'", "set memory limit");
+		ExecuteOrThrow(con, ANALYTICAL_STATE_EXPORT_SQL, "enable aggregate state export");
 
 		string schema_sql = ReadFileToString(schema_file);
 		string setup_sql = ReadFileToString(setup_file);

@@ -2,8 +2,29 @@
 
 #include "aggregates/as_aggregate.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
+#include "privacy_debug.hpp"
+#include "utils/privacy_helpers.hpp"
 
 namespace duckdb {
+
+// DuckDB 2.0 creates an aggregate-state spill plan only when every aggregate in a hash table exposes the state
+// export callbacks. With a plan, arena-backed states can spill, but aggregation also turns external as soon as the
+// arena outgrows half of the per-thread memory reservation, which slows grouped aggregates that fit in memory. So
+// the callbacks registered by AggregateStateExport::Register() stay on a bound SUM, COUNT/AVG or MIN/MAX only when
+// priv_state_export is set (default off, in every build). Without export the states cannot leave the arena: if the
+// arena alone outgrows the per-thread memory reservation, DuckDB 2.0 spills a new, nearly empty block set for every
+// input chunk until the temp directory is full. Call this from the bind callback, after the implementation has
+// been selected.
+inline void ApplyStateExportSetting(ClientContext &ctx, BoundAggregateFunction &function) {
+	if (GetBooleanSetting(ctx, "priv_state_export", false)) {
+		PRIVACY_DEBUG_PRINT("Aggregate bind: state export enabled (priv_state_export=true)");
+		return;
+	}
+	PRIVACY_DEBUG_PRINT("Aggregate bind: state export disabled (priv_state_export=false)");
+	function.GetCallbacks().get_state_type = nullptr;
+	function.SetExportAggregateStateCallback(nullptr);
+	function.SetImportAggregateStateCallback(nullptr);
+}
 
 // Cold-path state transport shared by the stochastic aggregate implementations.
 class AggregateStateWriter {

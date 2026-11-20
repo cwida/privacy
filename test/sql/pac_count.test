@@ -248,6 +248,11 @@ SELECT count(*) FROM (
 ----
 0
 
+# State export (EXPORT_STATE and DuckDB's aggregate-state spilling) is opt-in.
+# The tests above ran with the default; the export and spill tests below enable it.
+statement ok
+SET priv_state_export=true;
+
 # Narrow states export as full-width counters; combining them can exceed 16 bits.
 query II
 SELECT list_min(c),list_max(c) FROM (
@@ -318,3 +323,35 @@ FROM (SELECT as_count(NULL::UBIGINT) EXPORT_STATE s FROM range(0))a,
      (SELECT as_count(0::UBIGINT) EXPORT_STATE s FROM range(1000))b;
 ----
 0	0
+
+# With priv_state_export off, COUNT exposes no state layout, so EXPORT_STATE is
+# rejected. Results must not depend on the setting.
+statement ok
+SET priv_state_export=false;
+
+statement error
+SELECT as_count(18446744073709551615::UBIGINT) EXPORT_STATE s FROM range(10)
+----
+does not have a state type callback
+
+statement ok
+CREATE TABLE count_export_off AS
+SELECT i%1000 g,as_count(hash(i))c,as_count(hash(i),CASE WHEN i%11=0 THEN NULL ELSE i END)cv
+FROM range(200000)t(i) GROUP BY g;
+
+statement ok
+SET priv_state_export=true;
+
+query I
+SELECT count(*) FROM count_export_off a JOIN (
+ SELECT i%1000 g,as_count(hash(i))c,as_count(hash(i),CASE WHEN i%11=0 THEN NULL ELSE i END)cv
+ FROM range(200000)t(i) GROUP BY g
+)b USING(g) WHERE a.c IS DISTINCT FROM b.c OR a.cv IS DISTINCT FROM b.cv;
+----
+0
+
+statement ok
+RESET priv_state_export;
+
+statement ok
+DROP TABLE count_export_off;

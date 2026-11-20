@@ -20,11 +20,13 @@ static unique_ptr<FunctionData> PacCountBind(BindAggregateFunctionInput &bind_in
 			corr_idx = args.size() - 1;
 		}
 	}
+	ApplyStateExportSetting(ctx, bind_input.GetBoundFunction());
 	return MakePrivBindData(ctx, args, corr_idx, "as_noised_count");
 }
 
 // AVG reserves its third argument for correction; its second argument is always a value.
 static unique_ptr<FunctionData> PacAvgBind(BindAggregateFunctionInput &bind_input) {
+	ApplyStateExportSetting(bind_input.GetClientContext(), bind_input.GetBoundFunction());
 	return MakePrivBindData(bind_input.GetClientContext(), bind_input.GetArguments(), 2, "as_avg");
 }
 
@@ -526,6 +528,7 @@ static void DpSampleCountMaskFinalizeCounters(Vector &states, AggregateFinalizeI
 
 static unique_ptr<FunctionData> DpSampleCountBind(BindAggregateFunctionInput &bind_input) {
 	auto &ctx = bind_input.GetClientContext();
+	ApplyStateExportSetting(ctx, bind_input.GetBoundFunction());
 	return MakeDpSampleBindData(ctx);
 }
 
