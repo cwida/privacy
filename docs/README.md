@@ -34,7 +34,7 @@ the PAC privacy layer (`pac/`); and the differential-privacy layer (`dp/`).
 
 | Document                                             | Description |
 |------------------------------------------------------|-------------|
-| [dp/dp_mechanisms.md](dp/dp_mechanisms.md)           | Implementation reference for all three DP modes (`dp_standard`, `dp_elastic`, `dp_sass`) |
+| [dp/dp_mechanisms.md](dp/dp_mechanisms.md)           | Implementation reference for the DP modes `dp_standard`, `dp_elastic` and `dp_sass` |
 | [dp/dp_sass_smooth_sensitivity.md](dp/dp_sass_smooth_sensitivity.md) | `dp_sass` smooth-sensitivity deep-dive |
 
 ### Benchmarks
@@ -45,6 +45,7 @@ the PAC privacy layer (`pac/`); and the differential-privacy layer (`dp/`).
 | [benchmark/tpch.md](benchmark/tpch.md)               | TPC-H benchmark instructions |
 | [benchmark/microbenchmarks.md](benchmark/microbenchmarks.md) | Microbenchmark suite |
 | [benchmark/clickbench.md](benchmark/clickbench.md)   | ClickBench benchmark |
+| [benchmark/tpcds.md](benchmark/tpcds.md)             | TPC-DS benchmark |
 | [benchmark/sqlstorm.md](benchmark/sqlstorm.md)       | SQLStorm benchmark |
 | [benchmark/utility.md](benchmark/utility.md)         | DP utility metrics and diagnostics |
 | [repro.md](../repro.md)                              | Paper reproduction instructions |

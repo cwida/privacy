@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# WIP: explicit SQL workloads, compared under the same exact/approx builds as SSB.
+# Explicit SQL workloads, compared under the same exact/approx builds as SSB.
 set -euo pipefail
 if [ "$#" -lt 2 ] || [ "$#" -gt 4 ]; then
   echo 'Usage: bash benchmark/meps_brr/run.sh DATA_ROOT NEW_OUTPUT_DIR [THREADS_CSV] [REPETITIONS]' >&2
@@ -29,7 +29,7 @@ output_dir="$(cd "$output_dir" && pwd)"
 build_dir="$repo_dir/build/release"
 build_mode() {
   cmake -S "$repo_dir/duckdb" -B "$build_dir" -DPAC_NOAPPROX="$1"
-  cmake --build "$build_dir" --target meps_brr_poc -j 4
+  cmake --build "$build_dir" --target as_meps_benchmark -j 4
 }
 restore_needed=1
 cleanup() {
@@ -66,7 +66,7 @@ for kernel in approximate exact; do
     for threads in "${thread_counts[@]}"; do
       prefix="$mode_dir/$workload/threads_$threads"
       echo "Running $workload / $kernel / $threads threads." >&2
-      if ! "$build_dir/extension/privacy/meps_brr_poc" "$data_dir/$workload" "$prefix.db" \
+      if ! "$build_dir/extension/privacy/as_meps_benchmark" "$data_dir/$workload" "$prefix.db" \
           "$repo_dir/benchmark/meps_brr" "$prefix" "$threads" "$((repetitions + 1))" "$workload" \
           > "$prefix.log" 2>&1; then
         tail -30 "$prefix.log" >&2

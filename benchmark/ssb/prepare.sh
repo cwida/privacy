@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# WIP: run the pinned SSB generator outside the measured query phase.
+# Run the pinned SSB generator outside the measured query phase.
 set -euo pipefail
 if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
   echo 'Usage: bash benchmark/ssb/prepare.sh DBGEN_REPO NEW_DATA_DIR [SCALE_FACTOR]' >&2

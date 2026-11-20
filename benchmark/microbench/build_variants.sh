@@ -93,7 +93,8 @@ build_variant() {
 
     # Clean and build
     rm -rf build/release
-    CXX=../llvm-project/build/bin/clang++ CXXFLAGS="$flags" GEN=ninja make -j$(sysctl -n hw.ncpu 2>/dev/null || nproc)
+    # Uses the compiler selected by CC/CXX in the environment.
+    CXXFLAGS="$flags" GEN=ninja make -j$(sysctl -n hw.ncpu 2>/dev/null || nproc)
 
     # Copy binary
     cp build/release/duckdb "$binary"

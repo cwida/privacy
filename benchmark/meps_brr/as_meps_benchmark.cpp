@@ -1,4 +1,4 @@
-// WIP: explicit standard / naive BRR / conditional / AS SQL; query-only timing as in SSB.
+// MEPS benchmark: explicit standard / naive BRR / conditional / AS SQL; query-only timing as in SSB.
 #include "duckdb.hpp"
 #include "benchmark_settings.hpp"
 #include <chrono>
@@ -145,7 +145,7 @@ static double Compare(const Results &actual, const Results &reference) {
 int main(int argc, char **argv) {
 	try {
 		if (argc != 8) {
-			std::cerr << "Usage: meps_brr_poc DATA_DIR NEW_DB QUERY_ROOT OUT_PREFIX THREADS REPETITIONS "
+			std::cerr << "Usage: as_meps_benchmark DATA_DIR NEW_DB QUERY_ROOT OUT_PREFIX THREADS REPETITIONS "
 			             "damico2006|ahrq2016\n";
 			return 2;
 		}

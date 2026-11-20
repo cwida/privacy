@@ -5,7 +5,6 @@ cmake-build-debug
 duckdb_unittest_tempdir/
 .DS_Store
 testext
-test/python/__pycache__/
 .Rhistory
 *.db
 *.pdf
@@ -21,7 +20,9 @@ benchmark/**/__pycache__/
 benchmark/results/*
 !benchmark/results/paper/
 !benchmark/results/paper/**
-!benchmark/microbench/plots/*.png
+benchmark/microbench/binaries/
+benchmark/microbench/plots/
+benchmark/microbench/results/*.csv
 benchmark/dp/tmp/
 benchmark/tpch/dp_elastic_*.csv
 benchmark/tpch/dp_sass_*.csv
@@ -38,7 +39,6 @@ benchmark/sqlstorm/data/
 benchmark/tpch/*_paper_summary.csv
 
 # Serialized privacy-metadata dumps
-pac_metadata_*.json
 privacy_metadata_*.json
 *.json.bak
 
@@ -48,15 +48,6 @@ paper_rewrite_materials/
 # Stray local files
 /true
 .codex
-# LaTeX build artifacts
-docs/dp/*.aux
-docs/dp/*.bbl
-docs/dp/*.blg
-docs/dp/*.log
-docs/dp/*.out
 # Python caches
 __pycache__/
 *.pyc
-
-# ...but the findings document is a deliverable: keep it readable without a LaTeX run
-!docs/dp/findings.pdf

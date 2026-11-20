@@ -1,121 +1,74 @@
 # SIMD-AS Microbenchmark Suite
 
-Performance benchmarks for the SIMD-AS aggregate functions (`as_count`, `as_sum`, `as_avg`, `as_min`, and `as_max`)
-under several optimization configurations. Compile the extension with Clang.
+Performance benchmarks for the stochastic aggregates (`as_count`, `as_sum`, `as_avg`, `as_min`, `as_max`) under
+several optimization configurations. Each configuration is a separate DuckDB binary.
 
-## Quick Start
-Install the required dependencies (assuming a Debian-based system):
+## Quick start
+
+Build with Clang; the paper uses Clang 22.1.2 (`clang-22` on Ubuntu). The build uses the compiler named by `CC` and
+`CXX`.
+
 ```bash
-sudo apt install make ninja-build cmake clang
-export CC=clang
-export CXX=clang++
-```
-Then, run the scripts from `benchmark/microbench/`:
-```bash
+sudo apt install make ninja-build cmake clang-22
+export CC=clang-22 CXX=clang++-22
+
+cd benchmark/microbench
 ./create_test_db.sh
-
-# Build all variants and run all benchmarks
-./run_all.sh
-
-# Quick test (smaller data, single run)
-./run_all.sh -q
-
-# Build only
-./run_all.sh -b
-
-# Run specific benchmark only
-./run_all.sh -r count
-./run_all.sh -r min_max
-
-# Analyze results
-./analyze_results.py
+./run_all.sh            # build all variants, then run all benchmarks
+./run_all.sh -q         # quick test: smaller data
+./run_all.sh -b         # build only
+./run_all.sh -r count   # one suite: count, sum_avg or min_max
 ```
 
-## Build Variants
+`build_variants.sh` (called by `run_all.sh`) rebuilds `build/release` once per variant, copies each `duckdb` binary
+to `benchmark/microbench/binaries/` and leaves the last variant, exact SUM, in `build/release`. Rebuild the default
+configuration (`rm -rf build/release && GEN=ninja make`) before running anything else from `build/release`.
 
-The suite builds multiple DuckDB binaries with different optimization flags:
+## Build variants
+
+The flags are C++ macros passed through `CXXFLAGS`, not CMake options.
 
 | Variant | Flags | Description |
 |---------|-------|-------------|
 | `default` | (none) | All optimizations enabled |
-| `nobuffering` | `-DPAC_NOBUFFERING` | Disable input buffering (lazy allocation) |
-| `nocascading` | `-DPAC_NOCASCADING` | Pre-allocate all accumulator levels |
-| `nosimd` | `-DPAC_NOSIMD` | SIMD-unfriendly kernels, auto-vectorization disabled |
-| `noboundopt` | `-DPAC_NOBOUNDOPT` | Disable bound optimization (min/max only) |
-| `signedsum` | `-DPAC_SIGNEDSUM` | Disable separate negative counter handling |
-| `exactsum` | `-DPAC_EXACTSUM` | Exact cascading instead of approximate sum |
+| `nobuffering` | `-DPAC_NOBUFFERING` | No input buffering before a group's state is allocated |
+| `nocascading` | `-DPAC_NOCASCADING` | No cascading counters: full-width counters from the start |
+| `nosimd` | `-DPAC_NOCASCADING -DPAC_NOSIMD -fno-vectorize -fno-slp-vectorize` | SIMD-unfriendly kernels, auto-vectorization disabled |
+| `noboundopt` | `-DPAC_NOBOUNDOPT` | No bound pruning (MIN/MAX only) |
+| `signedsum` | `-DPAC_SIGNEDSUM` | No separate handling of negative values in SUM |
+| `exactsum` | `-DPAC_EXACTSUM` | Exact cascading SUM instead of approximate SUM |
 
-## Benchmarks
+## Suites
 
-### ASCount (`bench_count.sh`)
+- **`bench_count.sh`**: COUNT, ungrouped and with 10 to 10M groups, on 10M, 100M and 1000M rows.
+- **`bench_sum_avg.sh`**: SUM and AVG over value domains of different widths, ungrouped and grouped, with
+  sequential and scattered group keys.
+- **`bench_min_max.sh`**: MIN and MAX over data types and value distributions (random, monotonically increasing,
+  monotonically decreasing), which exercise bound pruning in its worst and best case.
 
-Tests counter overflow handling and banked vs non-banked performance:
+`create_test_db.sh` generates all data with `range()`; random values are `hash(i) % domain`.
 
-- **Ungrouped**: 10M, 100M, 500M, 1B+ rows (tests 16→32→64 bit counter upgrade)
-- **Grouped**: 1 to 10M groups (tests per-group state overhead)
+## Results and plots
 
-### ASSum and ASAvg (`bench_sum_avg.sh`)
-
-Tests cascading accumulator performance:
-
-- **Data types**: int8, int16, int32, int64, float, double
-- **Distributions**: small (0-100), medium (0-10K), large (0-1M)
-- **Grouped vs ungrouped**
-- **Scaling**: 10M to 500M rows
-
-### ASMin and ASMax (`bench_min_max.sh`)
-
-Tests bound optimization and bank allocation:
-
-- **Data types**: int8-64, uint8-64, float, double
-- **Distributions**: random, monotonic increasing, monotonic decreasing
-- **Bound optimization impact**: worst case (random) vs best case (monotonic)
-- **Grouped vs ungrouped**
-
-## Data Generation
-
-All data is generated using DuckDB's `range()` function:
-
-```sql
--- Random values via hash
-(hash(i) % domain)::TYPE
-
--- Monotonic increasing
-(i % domain)::TYPE
-
--- Monotonic decreasing
-((domain - i % domain))::TYPE
-```
-
-## Results
-
-Results are saved to `results/` as CSV files with timestamps:
-
-```
-results/
-├── count_YYYYMMDD_HHMMSS.csv
-├── sum_avg_YYYYMMDD_HHMMSS.csv
-└── min_max_YYYYMMDD_HHMMSS.csv
-```
-
-CSV columns:
-- `test`: test category (ungrouped, grouped, scaling, etc.)
-- `aggregate`: function (count, sum, avg, min, max)
-- `variant`: build variant (default, nonbanked, etc.)
-- `data_size_m`: data size in millions
-- `groups`: number of groups
-- `dtype`: data type
-- `distribution`: value distribution
-- `time_sec`: median time in seconds
-- `times`: all run times
-
-## Environment Variables
+Each suite writes one CSV named `<suite>_<timestamp>.csv` into `RESULTS_DIR` (default `benchmark/microbench/results/`).
+The plot script reads one sub-directory per machine and uses the newest file of each suite in it, so write the
+results of a machine into its own directory:
 
 ```bash
-WARMUP_RUNS=1    # Warmup iterations (default: 1)
-BENCH_RUNS=3     # Benchmark iterations (default: 3)
-FORCE_REBUILD=1  # Force rebuild binaries
+RESULTS_DIR=$PWD/results/graviton ./run_all.sh -r count
+Rscript --vanilla plot_microbenchmark.R    # writes plots/*.png
 ```
+
+The directories `graviton`, `granite-rapids`, `epyc` and `macbook` hold the measurements behind the paper's
+figures (see `results/README.md`); a newer file in one of them replaces that machine's data in the plots.
+
+CSV columns: `test` (benchmark case), `aggregate` (not in the COUNT file), `variant`, `rows_m` (rows in millions),
+`groups`, `dtype` (data type or value domain; not in the COUNT file), `wall_sec` and `agg_sec` (median wall time and
+median time inside the aggregation operator; `-1` if the configuration failed), and `wall_times` / `agg_times`
+(all measured runs).
+
+Environment variables: `WARMUP_RUNS` (default 1), `BENCH_RUNS` (default 3), `FORCE_REBUILD=1` to rebuild existing
+binaries, `QUERY_SETUP` (below) and `RESULTS_DIR`.
 
 ## Query settings and state export
 
@@ -134,62 +87,18 @@ CSV): unbuffered SUM and MAX and non-cascading COUNT at 10M scattered groups, an
 groups. See the "Aggregate State Export" section of
 [`repro.md`](../../repro.md).
 
-## Reproducibility
-
-### EC2 Instances
+## Machines
 
 | Instance | CPU | RAM | Storage |
 |----------|-----|-----|---------|
-| i8gd.4xlarge | 16x Graviton4 2.7GHz | 32GB | 950GB SSD |
-| c8i.4xlarge | 16x Granite Rapids 3.9GHz | 32GB | EBS io2 90GB |
-| c8a.4xlarge | 16x EPYC 9R45 4.5GHz | 32GB | EBS io2 90GB |
+| `c8gd.4xlarge` | 16x Graviton4 | 32 GB | 950 GB instance SSD |
+| `c8i.4xlarge` | 16x Granite Rapids | 32 GB | EBS io2 |
+| `c8a.4xlarge` | 16x EPYC 9R45 | 32 GB | EBS io2 |
 
-Use Ubuntu 24 as the OS.
+All run Ubuntu. On the Graviton instance, format and mount the instance SSD and point `temp_directory` in
+`QUERY_SETUP` at it. A full run of the three suites takes about six hours per machine.
 
-### Graviton instance SSD setup
-```bash
-sudo parted /dev/nvme0n1 -- mklabel gpt
-sudo parted /dev/nvme0n1 -- mkpart primary ext4 0% 200GB
-sudo mkfs.ext4 /dev/nvme0n1p1
-sudo mkdir -p /mnt/instance-store
-sudo mount /dev/nvme0n1p1 /mnt/instance-store
-cd /mnt/instance-store/
-chmod 777 .
-```
-
-### Build toolchain (all instances)
-```bash
-sudo apt update
-sudo apt install -y clang cmake ninja-build python3
-export CC=clang
-export CXX=clang++
-git clone --depth 1 https://github.com/llvm/llvm-project.git
-cd llvm-project
-cmake -S llvm -B build -G Ninja \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DLLVM_ENABLE_PROJECTS="clang;lld" \
-    -DLLVM_TARGETS_TO_BUILD="X86"  # or "AArch64" for Graviton
-ninja -C build clang lld
-```
-
-### Run benchmarks
-```bash
-git clone --recurse-submodules <repository-url> privacy
-cd privacy/benchmark/microbench
-./build_variants.sh
-./create_test_db.sh
-nohup ./run_all.sh &
-# Results in results/ directory. Experiments take ~6 hours, ~$3/machine.
-```
-
-### Analysis and plotting
-```bash
-benchmark/microbench/analyze_results.py
-Rscript --vanilla benchmark/microbench/plot_microbenchmark.R
-benchmark/microbench/approx_sum_stability.sql  # run with duckdb_default and duckdb_exactsum
-benchmark/microbench/binomial.sql              # generate hash-distribution validation data
-```
-
+`binomial.sql` computes the distribution of set bits in the membership masks shown in the hash-distribution plot.
 
 ## SUM accuracy
 

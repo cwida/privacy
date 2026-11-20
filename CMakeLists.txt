@@ -99,11 +99,11 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
   # TPCH + AS benchmark runner
   add_executable(as_tpch_benchmark benchmark/tpch/as_tpch_benchmark.cpp)
 
-  # WIP rebuttal experiment: four-way MEPS balanced repeated replication
+  # MEPS balanced repeated replication: four SQL variants
   # benchmark
-  add_executable(meps_brr_poc benchmark/meps_brr/meps_brr_poc.cpp)
+  add_executable(as_meps_benchmark benchmark/meps_brr/as_meps_benchmark.cpp)
 
-  # WIP rebuttal experiment: standard joined SSB queries and 64 sampled worlds
+  # SSB: the 13 joined queries over 64 sampled worlds
   add_executable(as_ssb_benchmark benchmark/ssb/as_ssb_benchmark.cpp)
 
   # ClickBench + AS benchmark runner
@@ -140,7 +140,7 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
     PRIVACY_RUNNER IN
     ITEMS pac_test_runner
           as_tpch_benchmark
-          meps_brr_poc
+          as_meps_benchmark
           as_ssb_benchmark
           as_clickbench_benchmark
           as_tpcds_benchmark

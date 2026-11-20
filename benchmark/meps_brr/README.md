@@ -2,7 +2,7 @@
 
 Two survey analyses on the Medical Expenditure Panel Survey (MEPS), whose variance is estimated with balanced
 repeated replication (BRR). Each analysis is written as SQL in four variants: `queries/` (ordinary full-sample
-SQL), `naive_queries/`, `conditional_queries/` and `as_queries/`. The runner is `meps_brr_poc`; no R code is timed.
+SQL), `naive_queries/`, `conditional_queries/` and `as_queries/`. The runner is `as_meps_benchmark`; no R code is timed.
 
 ## Workloads
 

@@ -1,11 +1,14 @@
 # Privacy — Automatic Query Privatization for DuckDB
 
-`privacy` is a DuckDB extension that automatically privatizes SQL aggregate queries. It supports two privacy mechanisms:
+`privacy` is a DuckDB extension that automatically privatizes SQL aggregate queries. The mechanism is selected with `SET privacy_mode`:
 
-- **PAC mode** (default): Empirical membership-inference-attack (MIA) resistance via the PAC Privacy framework. Adds calibrated noise derived from the query's own variance over parallel sub-samples. Tight theoretical MI bounds; no per-query sensitivity analysis needed.
-- **DP-elastic mode**: Formal (ε,δ)-differential privacy via elastic sensitivity. Computes a per-query sensitivity bound from the join structure (max frequency per table), then injects calibrated Laplace noise. Provides a provable ε-DP guarantee.
+- **`pac`** (default): Empirical membership-inference-attack (MIA) resistance via the PAC Privacy framework. Adds calibrated noise derived from the query's own variance over parallel sub-samples. Tight theoretical MI bounds; no per-query sensitivity analysis needed. Not differential privacy.
+- **`dp_standard`**: Global-sensitivity differential privacy at the user level. Each privacy unit's total contribution is clipped to a fixed bound and Laplace noise is calibrated to that bound.
+- **`dp_elastic`**: Formal (ε,δ)-differential privacy at the row level via elastic sensitivity. Computes a per-query sensitivity bound from the join structure (max frequency per table), then injects calibrated Laplace noise.
+- **`dp_sass`**: Sample-and-aggregate at the user level. Evaluates the query on 64 samples and releases a noised median or mean.
+- **`dp_filterless`**: An experimental variant of sample-and-aggregate; see [docs/dp](docs/dp/filterless_encoded_pu.md).
 
-Both modes share the same DDL and require no changes to query syntax — the extension rewrites aggregate query plans transparently.
+All modes share the same DDL and require no changes to query syntax — the extension rewrites aggregate query plans transparently. [docs/dp/dp_mechanisms.md](docs/dp/dp_mechanisms.md) is the reference for the DP modes; the examples below use `pac` and `dp_elastic`. [repro.md](repro.md) describes how to reproduce the paper's experiments.
 
 This branch targets DuckDB v2.0.0. See https://duckdb.org/install to install. Or if you do not want to install anything: this extension is also distributed in WASM, so you can run the examples also in https://shell.duckdb.org in a browser.
 
@@ -183,7 +186,7 @@ SELECT l_returnflag, l_linestatus, SUM(l_extendedprice) FROM lineitem GROUP BY A
 └──────────────┴──────────────┴──────────────────────┘
 ```
 
-The extension computes elastic sensitivity as the product of per-table max frequencies along the `lineitem → orders → customer` chain (via auxiliary `MAX(COUNT(*))` queries, not by executing the join), clips each value to `[-dp_sum_bound, dp_sum_bound]`, and injects `Laplace(sensitivity/ε)` noise into the aggregate result. This gives a formal (ε,δ)-DP guarantee at the privacy-unit (customer) level.
+The extension computes elastic sensitivity as the product of per-table max frequencies along the `lineitem → orders → customer` chain (via auxiliary `MAX(COUNT(*))` queries, not by executing the join), clips each value to `[-dp_sum_bound, dp_sum_bound]`, and injects `Laplace(sensitivity/ε)` noise into the aggregate result. This gives a formal (ε,δ)-DP guarantee at the row level (neighboring databases differ in one tuple).
 
 ## How It Works
 
@@ -201,13 +204,13 @@ Uses elastic sensitivity (Flex, Johnson/Near/Song VLDB 2018) to derive a per-que
 
 `AVG(x)` is rewritten to noised `SUM(x) / COUNT(*)`. With *k* user-visible aggregates in a query the budget is split evenly under sequential composition — each consumes ε/k, and AVG further splits its share into ε/(2k) per component, so the total cost across the query stays at ε. `WHERE`, `HAVING`, and `FILTER (WHERE …)` aggregate clauses are honoured: the predicates run before noise is added (or, for `HAVING`, against the already-noised value, which is post-processing and DP-safe). When `privacy_min_group_count` is set, low-count groups are dropped via τ-thresholding (a filter on the noised value, also post-processing).
 
-This gives a formal (ε,δ)-DP guarantee at the **user level** — neighboring datasets differ by removing all rows belonging to one privacy unit across all linked tables. Requires δ > 0 for smooth elastic sensitivity (tighter noise); set `dp_delta = 0` for pure ε-DP with global elastic sensitivity.
+This gives a formal (ε,δ)-DP guarantee at the **row level** — neighboring datasets differ in one tuple, because the product of max frequencies bounds the effect of a single-tuple change, not of a whole privacy unit. `dp_standard` and `dp_sass` give user-level guarantees. `dp_delta` must be set to a value in (0, 0.5).
 
 ## Settings
 
 | Setting | Default | Mode | Description |
 |---------|---------|------|-------------|
-| `privacy_mode` | `pac` | both | Active privacy mechanism: `pac` or `dp_elastic` |
+| `privacy_mode` | `pac` | all | Active privacy mechanism: `pac`, `dp_standard`, `dp_elastic`, `dp_sass` or `dp_filterless` |
 | `privacy_seed` | random | both | Fix seed for reproducible results |
 | `privacy_noise` | `true` | both | Toggle noise injection |
 | `privacy_min_group_count` | `NULL` | both | Suppress GROUP BY cells below this count (PAC: low-SNR suppression; DP: τ-thresholding) |
@@ -215,7 +218,7 @@ This gives a formal (ε,δ)-DP guarantee at the **user level** — neighboring d
 | `pac_ctas` | `true` | pac | Propagate PAC metadata through CTAS |
 | `privacy_diffcols` | `NULL` | both | [Utility diff](docs/pac/utility.md): compare noised vs exact results |
 | `dp_epsilon` | `1.0` | dp_elastic | Privacy budget ε |
-| `dp_delta` | `1e-6` | dp_elastic | Failure probability δ (0 = pure DP) |
+| `dp_delta` | required | dp_elastic | Failure probability δ, in (0, 0.5) |
 | `dp_sum_bound` | required | dp_elastic | Clipping bound for `SUM`/`AVG` inputs: values are clipped to `[-bound, bound]` |
 
 For PAC, a fixed `privacy_seed` repeats the random draws when the query, data,

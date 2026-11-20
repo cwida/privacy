@@ -8,8 +8,8 @@ Run commands from the repository root. Build the paper executables with:
 
 ```bash
 cmake --build build/release --target \
-  as_tpch_benchmark as_clickbench_benchmark \
-  dp_benchmark_runner
+  as_tpch_benchmark as_clickbench_benchmark as_ssb_benchmark \
+  as_tpcds_benchmark as_meps_benchmark dp_benchmark_runner
 ```
 
 ## Paper Benchmarks
@@ -19,6 +19,9 @@ cmake --build build/release --target \
 | TPC-H AS | `as_tpch_benchmark` | `benchmark/configs/utility/as_tpch_sf30.json` |
 | TPC-H variable `m` | `as_tpch_benchmark` | `benchmark/configs/utility/as_tpch_sf30_m_sweep.json` |
 | ClickBench AS | `as_clickbench_benchmark` | `benchmark/configs/utility/as_clickbench_graviton.json` |
+| SSB | `as_ssb_benchmark` | `benchmark/ssb/run.sh` (see its README) |
+| MEPS | `as_meps_benchmark` | `benchmark/meps_brr/run.sh` (see its README) |
+| TPC-DS | `as_tpcds_benchmark` | `benchmark/configs/utility/as_tpcds_sf30.json` |
 | TPC-H DP utility | `dp_benchmark_runner` | `benchmark/configs/utility/dp_tpch_sf30_utility.json` |
 | TPC-H Q01 AVG | `dp_benchmark_runner` | `benchmark/configs/utility/dp_tpch_sf30_q01_avg_*.json` |
 
@@ -35,6 +38,9 @@ databases and results are ignored by Git and written below `benchmark/results/` 
 
 - [TPC-H](tpch.md)
 - [ClickBench](clickbench.md)
+- [SSB](../../benchmark/ssb/README.md)
+- [MEPS](../../benchmark/meps_brr/README.md)
+- [TPC-DS](tpcds.md)
 - [SQLStorm](sqlstorm.md)
 - [Microbenchmarks](microbenchmarks.md)
 - [Utility evaluation](utility.md)

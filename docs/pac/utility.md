@@ -149,7 +149,6 @@ SET privacy_diffcols = NULL;
 1. **Use deterministic settings for reproducible results:**
    ```sql
    SET privacy_seed = 42;
-   SET pac_deterministic_noise = true;
    SET threads = 1;
    ```
 
@@ -176,4 +175,3 @@ SET privacy_diffcols = NULL;
 | `privacy_noise` | Must be `true` for meaningful utility comparison |
 | `pac_mi` | Counter index affects noise level |
 | `privacy_seed` | Set for reproducible PAC results |
-| `pac_deterministic_noise` | Use `true` for reproducible testing |

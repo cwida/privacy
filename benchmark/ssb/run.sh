@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# WIP: compare approximate and exact SUM on identical SSB data and world masks.
+# Compare approximate and exact SUM on identical SSB data and world masks.
 set -euo pipefail
 if [ "$#" -lt 2 ] || [ "$#" -gt 4 ]; then
   echo 'Usage: bash benchmark/ssb/run.sh DATA_DIR NEW_OUTPUT_DIR [THREADS_CSV] [REPETITIONS]' >&2

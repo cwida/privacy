@@ -876,7 +876,7 @@ plot_simd_improvements <- function(results_dir, output_dir) {
 # ============================================================================
 
 plot_hash_distribution <- function(output_dir) {
-  # Data from binomial.out
+  # Data produced by binomial.sql
   num_ones <- 20:44
   observed <- c(4692, 10057, 19764, 35913, 61227, 98015, 147038, 206522, 273576,
                 338837, 395711, 434562, 446854, 432363, 395100, 339178, 272061,

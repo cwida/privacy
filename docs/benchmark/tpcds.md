@@ -65,10 +65,8 @@ handwritten queries, unsupported constructs, compilation/runtime errors, timeout
 are reported explicitly. Small-scale or empty results remain preliminary diagnostics rather than paper-scale
 evidence.
 
-Q17 is the one query without a working stochastic version: it needs a STDDEV aggregate (`as_stddev_samp`) that the
-extension does not provide. Its files in `as_queries/` and `validation_queries/` therefore fail with a catalog
-error, the automatic rewriter rejects it, and the figure excludes it. `q17_fixture.sql` is a small synthetic dataset
-on which Q17 returns rows, for testing those two files once the aggregate exists.
+Q17 has no stochastic version: it needs a STDDEV aggregate, which the extension does not provide. It runs in the
+ordinary DuckDB and naive modes only and is not part of the figure.
 
 ## Figure
 

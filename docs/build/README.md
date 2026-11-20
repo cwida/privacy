@@ -61,7 +61,8 @@ make test
 ## Build Flags
 
 Compile-time flags control algorithm variants, primarily for benchmarking and scientific reproducibility.
-Set them via `cmake` defines (e.g., `-DPAC_NOBUFFERING=1`).
+They are C++ macros: pass them through `CXXFLAGS` (e.g., `CXXFLAGS="-DPAC_NOBUFFERING" GEN=ninja make`), as
+`benchmark/microbench/build_variants.sh` does. The only CMake option is `PAC_NOAPPROX=ON`, which defines `PAC_EXACTSUM`.
 
 | Flag | Effect |
 |------|--------|

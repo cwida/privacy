@@ -1,4 +1,4 @@
-// WIP SSB benchmark: original and explicitly rewritten joined SQL queries.
+// SSB benchmark: original and explicitly rewritten joined SQL queries.
 // Explicit AS execution and automatic-rewriter coverage are separate measurements.
 #include "duckdb.hpp"
 #include "../include/as_query_rewriter.hpp"

@@ -26,7 +26,7 @@ To rebuild only the paper benchmark executables:
 ```bash
 cmake --build build/release --target \
   as_tpch_benchmark as_clickbench_benchmark as_ssb_benchmark \
-  as_tpcds_benchmark meps_brr_poc dp_benchmark_runner
+  as_tpcds_benchmark as_meps_benchmark dp_benchmark_runner
 ```
 
 The paper uses the following machines:
@@ -50,9 +50,13 @@ They cover 10M, 100M, and 1B rows; several value distributions and domains; and 
 cd benchmark/microbench
 ./build_variants.sh
 ./create_test_db.sh
-./run_all.sh
+RESULTS_DIR=$PWD/results/<machine> ./run_all.sh   # graviton, granite-rapids, epyc or macbook
 Rscript --vanilla plot_microbenchmark.R
 ```
+
+`build_variants.sh` rebuilds `build/release` once per variant and leaves the exact-SUM variant there. Rebuild the
+default configuration (`rm -rf build/release && GEN=ninja make`) before running the standalone benchmarks below.
+The plot script uses the newest CSV in each machine directory; the tracked files there are the paper's measurements.
 
 The seven variants are `default`, `nobuffering`, `noboundopt`, `signedsum`, `exactsum`, `nocascading`, and `nosimd`.
 Results and the R plotting program remain self-contained in that directory.

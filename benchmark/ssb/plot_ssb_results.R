@@ -1,5 +1,5 @@
 #!/usr/bin/env Rscript
-# WIP: prepare SSB inputs for the paper's existing TPC-H runtime plotter.
+# Prepare SSB inputs for the paper's existing TPC-H runtime plotter.
 script_file <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE)[1])
 source(file.path(dirname(dirname(normalizePath(script_file))), "plot_common.R"))
 plotter <- file.path(dirname(dirname(normalizePath(script_file))), "tpch", "plot_tpch_results.R")
