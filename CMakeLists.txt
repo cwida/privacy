@@ -136,9 +136,6 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
   target_include_directories(dp_benchmark_runner
                              PRIVATE "${TPCH_QUERY_GENERATED_DIR}")
 
-  # IMDb/JOB benchmark runner
-  add_executable(imdb_benchmark benchmark/imdb/imdb_benchmark.cpp)
-
   foreach(
     PRIVACY_RUNNER IN
     ITEMS pac_test_runner
@@ -147,8 +144,7 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
           as_ssb_benchmark
           as_clickbench_benchmark
           as_tpcds_benchmark
-          dp_benchmark_runner
-          imdb_benchmark)
+          dp_benchmark_runner)
     target_link_libraries(${PRIVACY_RUNNER} PRIVATE duckdb_static)
     link_extension_libraries(${PRIVACY_RUNNER} PRIVATE)
   endforeach()

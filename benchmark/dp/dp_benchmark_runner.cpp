@@ -818,9 +818,6 @@ static vector<QuerySpec> LoadDatasetQueries(const DatasetConfig &dataset) {
 		return ReadQueriesFromFile("benchmark/clickbench/clickbench_queries/queries.sql", dataset.key_cols,
 		                           dataset.query_limit);
 	}
-	if (dir.empty() && dataset.name == "imdb") {
-		return ReadQueriesFromFile("benchmark/imdb/queries.sql", dataset.key_cols, dataset.query_limit);
-	}
 	if (dir.empty()) {
 		throw std::runtime_error("dataset " + dataset.name + " needs queries_dir, queries_file, or queries");
 	}
@@ -836,9 +833,6 @@ static string DefaultPrivacySqlPath(const DatasetConfig &dataset) {
 	}
 	if (dataset.name == "clickbench") {
 		return "benchmark/clickbench/clickbench_queries/setup.sql";
-	}
-	if (dataset.name == "imdb") {
-		return "benchmark/imdb/setup.sql";
 	}
 	return "";
 }
@@ -861,9 +855,6 @@ static double ReadGenericPrivacyUnitCount(Connection &con, const DatasetConfig &
 	}
 	if (dataset.name == "clickbench") {
 		return ReadScalarDouble(con, "SELECT COUNT(DISTINCT UserID) FROM hits");
-	}
-	if (dataset.name == "imdb") {
-		return ReadScalarDouble(con, "SELECT COUNT(DISTINCT id) FROM name");
 	}
 	return 0.0;
 }
