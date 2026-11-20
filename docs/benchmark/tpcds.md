@@ -2,8 +2,15 @@
 
 The benchmark submits all 99 original DuckDB TPC-DS queries to the automatic rewriter and times the available
 handwritten AS queries. It reports four modes: ordinary DuckDB, handwritten SIMD-ASA, automatically compiled
-SIMD-ASA, and repeated sampled-world execution. The handwritten queries and the separate per-world references
-are in `benchmark/tpcds/as_queries/` and `benchmark/tpcds/reference_queries/`.
+SIMD-ASA, and repeated sampled-world execution (the naive baseline).
+
+- `benchmark/tpcds/as_queries/` holds the handwritten SIMD-ASA version of each query. These are the queries the
+  benchmark times; like the automatic rewrite they return one scalar or categorical result.
+- `benchmark/tpcds/validation_queries/` holds a second handwritten version of each query that returns the complete
+  result of every one of the 64 worlds. Only `--validate-worlds` runs them, to compare each world against ordinary
+  SQL; they are never timed.
+- The naive baseline has no query files. The runner executes the original query over views that restrict CUSTOMER
+  and the six sales and returns tables to the customers of one world.
 
 ```bash
 cmake --build build/release --target as_tpcds_benchmark
@@ -55,8 +62,13 @@ Use the same configuration with one of these mutually exclusive modes:
 
 Validation summaries record exact and floating-point mismatches and maximum absolute/relative error. Missing
 handwritten queries, unsupported constructs, compilation/runtime errors, timeouts, and absent stochastic operators
-are reported explicitly. `q17_fixture.sql` supplies a small nonempty correctness fixture for Q17; it is not a
-performance dataset. Small-scale or empty results remain preliminary diagnostics rather than paper-scale evidence.
+are reported explicitly. Small-scale or empty results remain preliminary diagnostics rather than paper-scale
+evidence.
+
+Q17 is the one query without a working stochastic version: it needs a STDDEV aggregate (`as_stddev_samp`) that the
+extension does not provide. Its files in `as_queries/` and `validation_queries/` therefore fail with a catalog
+error, the automatic rewriter rejects it, and the figure excludes it. `q17_fixture.sql` is a small synthetic dataset
+on which Q17 returns rows, for testing those two files once the aggregate exists.
 
 ## Figure
 

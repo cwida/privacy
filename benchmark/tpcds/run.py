@@ -31,7 +31,7 @@ def main():
     if args.validate_compiled or args.validate_worlds:
         args.validate = True
     config = json.loads(pathlib.Path(args.config).read_text())
-    handwritten_dir = pathlib.Path(config.get("reference_queries_dir", "benchmark/tpcds/reference_queries") if args.validate_worlds else config.get("as_queries_dir", "benchmark/tpcds/as_queries"))
+    handwritten_dir = pathlib.Path(config.get("validation_queries_dir", "benchmark/tpcds/validation_queries") if args.validate_worlds else config.get("as_queries_dir", "benchmark/tpcds/as_queries"))
     default_ids = sorted(int(p.stem[1:]) for p in handwritten_dir.glob("q[0-9][0-9].sql")) if args.validate else list(range(1, 100))
     query_ids = [int(q) for q in args.queries.split(",")] if args.queries else default_ids
     suffix = "_compiled_validation" if args.validate_compiled else "_validation" if args.validate_worlds else "_pac_validation" if args.validate else ""

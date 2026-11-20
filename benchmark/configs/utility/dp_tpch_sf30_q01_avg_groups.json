@@ -44,12 +44,12 @@
       "sf": 30,
       "db": "tpch_sf30_graviton.db",
       "queries": [
-        "benchmark/queries/q01_avg/q01_avg_all.sql"
+        "benchmark/dp/q01_avg/q01_avg_all.sql"
       ],
       "query_names": [
         "q01_avg_all"
       ],
-      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "privacy_sql": "benchmark/dp/q01_avg/tpch_privacy_schema.sql",
       "key_cols": 0,
       "c_u": [
         1
@@ -66,12 +66,12 @@
       "sf": 30,
       "db": "tpch_sf30_graviton.db",
       "queries": [
-        "benchmark/queries/q01_avg/q01_avg_all.sql"
+        "benchmark/dp/q01_avg/q01_avg_all.sql"
       ],
       "query_names": [
         "q01_avg_all"
       ],
-      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "privacy_sql": "benchmark/dp/q01_avg/tpch_privacy_schema.sql",
       "key_cols": 0,
       "c_u": [
         1
@@ -105,12 +105,12 @@
       "sf": 30,
       "db": "tpch_sf30_graviton.db",
       "queries": [
-        "benchmark/queries/q01_avg/q01_avg_all.sql"
+        "benchmark/dp/q01_avg/q01_avg_all.sql"
       ],
       "query_names": [
         "q01_avg_all"
       ],
-      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "privacy_sql": "benchmark/dp/q01_avg/tpch_privacy_schema.sql",
       "key_cols": 0,
       "c_u": [
         1
@@ -144,12 +144,12 @@
       "sf": 30,
       "db": "tpch_sf30_graviton.db",
       "queries": [
-        "benchmark/queries/q01_avg/q01_avg_by_linestatus.sql"
+        "benchmark/dp/q01_avg/q01_avg_by_linestatus.sql"
       ],
       "query_names": [
         "q01_avg_by_linestatus"
       ],
-      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "privacy_sql": "benchmark/dp/q01_avg/tpch_privacy_schema.sql",
       "key_cols": 1,
       "c_u": [
         2
@@ -166,12 +166,12 @@
       "sf": 30,
       "db": "tpch_sf30_graviton.db",
       "queries": [
-        "benchmark/queries/q01_avg/q01_avg_by_linestatus.sql"
+        "benchmark/dp/q01_avg/q01_avg_by_linestatus.sql"
       ],
       "query_names": [
         "q01_avg_by_linestatus"
       ],
-      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "privacy_sql": "benchmark/dp/q01_avg/tpch_privacy_schema.sql",
       "key_cols": 1,
       "c_u": [
         2
@@ -205,12 +205,12 @@
       "sf": 30,
       "db": "tpch_sf30_graviton.db",
       "queries": [
-        "benchmark/queries/q01_avg/q01_avg_by_linestatus.sql"
+        "benchmark/dp/q01_avg/q01_avg_by_linestatus.sql"
       ],
       "query_names": [
         "q01_avg_by_linestatus"
       ],
-      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "privacy_sql": "benchmark/dp/q01_avg/tpch_privacy_schema.sql",
       "key_cols": 1,
       "c_u": [
         2
@@ -244,12 +244,12 @@
       "sf": 30,
       "db": "tpch_sf30_graviton.db",
       "queries": [
-        "benchmark/queries/q01_avg/q01_avg_by_returnflag.sql"
+        "benchmark/dp/q01_avg/q01_avg_by_returnflag.sql"
       ],
       "query_names": [
         "q01_avg_by_returnflag"
       ],
-      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "privacy_sql": "benchmark/dp/q01_avg/tpch_privacy_schema.sql",
       "key_cols": 1,
       "c_u": [
         3
@@ -266,12 +266,12 @@
       "sf": 30,
       "db": "tpch_sf30_graviton.db",
       "queries": [
-        "benchmark/queries/q01_avg/q01_avg_by_returnflag.sql"
+        "benchmark/dp/q01_avg/q01_avg_by_returnflag.sql"
       ],
       "query_names": [
         "q01_avg_by_returnflag"
       ],
-      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "privacy_sql": "benchmark/dp/q01_avg/tpch_privacy_schema.sql",
       "key_cols": 1,
       "c_u": [
         3
@@ -305,12 +305,12 @@
       "sf": 30,
       "db": "tpch_sf30_graviton.db",
       "queries": [
-        "benchmark/queries/q01_avg/q01_avg_by_returnflag.sql"
+        "benchmark/dp/q01_avg/q01_avg_by_returnflag.sql"
       ],
       "query_names": [
         "q01_avg_by_returnflag"
       ],
-      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "privacy_sql": "benchmark/dp/q01_avg/tpch_privacy_schema.sql",
       "key_cols": 1,
       "c_u": [
         3
@@ -344,12 +344,12 @@
       "sf": 30,
       "db": "tpch_sf30_graviton.db",
       "queries": [
-        "benchmark/queries/q01_avg/q01_avg_by_returnflag_linestatus.sql"
+        "benchmark/dp/q01_avg/q01_avg_by_returnflag_linestatus.sql"
       ],
       "query_names": [
         "q01_avg_by_returnflag_linestatus"
       ],
-      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "privacy_sql": "benchmark/dp/q01_avg/tpch_privacy_schema.sql",
       "key_cols": 2,
       "c_u": [
         5
@@ -366,12 +366,12 @@
       "sf": 30,
       "db": "tpch_sf30_graviton.db",
       "queries": [
-        "benchmark/queries/q01_avg/q01_avg_by_returnflag_linestatus.sql"
+        "benchmark/dp/q01_avg/q01_avg_by_returnflag_linestatus.sql"
       ],
       "query_names": [
         "q01_avg_by_returnflag_linestatus"
       ],
-      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "privacy_sql": "benchmark/dp/q01_avg/tpch_privacy_schema.sql",
       "key_cols": 2,
       "c_u": [
         5
@@ -405,12 +405,12 @@
       "sf": 30,
       "db": "tpch_sf30_graviton.db",
       "queries": [
-        "benchmark/queries/q01_avg/q01_avg_by_returnflag_linestatus.sql"
+        "benchmark/dp/q01_avg/q01_avg_by_returnflag_linestatus.sql"
       ],
       "query_names": [
         "q01_avg_by_returnflag_linestatus"
       ],
-      "privacy_sql": "benchmark/queries/q01_avg/tpch_privacy_schema.sql",
+      "privacy_sql": "benchmark/dp/q01_avg/tpch_privacy_schema.sql",
       "key_cols": 2,
       "c_u": [
         5

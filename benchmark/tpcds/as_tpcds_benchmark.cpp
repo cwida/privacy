@@ -80,6 +80,14 @@ static void SetHandwrittenAggregates(Connection &con, bool conditional, idx_t fi
 			}
 			expression += "]";
 		} else if (operation == "stddev_samp") {
+			// Only Q17 needs STDDEV. Without the aggregate, remove the macro so that Q17 alone fails,
+			// instead of silently reusing the conditional-SQL definition.
+			auto available =
+			    con.Query("SELECT 1 FROM duckdb_functions() WHERE function_name = 'as_stddev_samp' LIMIT 1");
+			if (available->HasError() || available->RowCount() == 0) {
+				Query(con, "DROP MACRO IF EXISTS tpcds_stddev_samp");
+				continue;
+			}
 			expression = "as_stddev_samp(m, v)";
 		} else if (operation == "count") {
 			expression = "list_transform(as_count(m, v), lambda x: x / 2.0)";
@@ -252,7 +260,7 @@ static ValidationComparison CompareWorldRows(const WorldRows &expected, const Wo
 static void ValidateHandwritten(Connection &con, const JsonValue &config, int id) {
 	auto name = Name(id);
 	auto output = JsonString(config, "out_dir");
-	auto directory = JsonString(config, "reference_queries_dir", "benchmark/tpcds/reference_queries");
+	auto directory = JsonString(config, "validation_queries_dir", "benchmark/tpcds/validation_queries");
 	auto handwritten = Read(directory + "/" + name + ".sql");
 	auto original = Read(JsonString(config, "queries_dir") + "/" + name + ".sql");
 	Query(con, "SET priv_rewrite=false");
