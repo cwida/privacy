@@ -13,15 +13,12 @@
 // condition. The final selection happens at the outermost categorical boundary using priv_filter().
 //
 // Key Functions:
-// - pac_counters(hash, value) -> LIST[DOUBLE] : Returns all 64 counter values (no noise/selection yet)
-// - pac_gt(value, counters) -> UBIGINT : Returns mask where bit i = 1 if value > counters[i]
-// - pac_lt(value, counters) -> UBIGINT : Returns mask where bit i = 1 if value < counters[i]
-// - pac_gte(value, counters) -> UBIGINT : Returns mask where bit i = 1 if value >= counters[i]
-// - pac_lte(value, counters) -> UBIGINT : Returns mask where bit i = 1 if value <= counters[i]
+// - as_sum / as_count / as_min / as_max (hash, value) -> LIST<FLOAT> : all 64 counter values (no noise/selection yet)
+// - priv_filter_<cmp>(value, counters) -> BOOLEAN : true if the majority of counters satisfy value <cmp> counter,
+//   for <cmp> in gt, gte, lt, lte, eq, neq
+// - priv_select_<cmp>(hash, value, counters) -> UBIGINT : mask where value <cmp> counter holds, applied to hash
 // - priv_select(hash, list<bool>) -> UBIGINT : Convert booleans to mask, combined with hash subsampling
-// - priv_filter(mask) -> BOOLEAN : Probabilistically filter based on popcount(mask)/64
-// - priv_filter(list<bool>) -> BOOLEAN : Convert to mask, then filter
-// - NOT: ~mask (negate condition)
+// - priv_filter(list<bool>) -> BOOLEAN : Convert to mask, then filter on popcount(mask)/64
 
 #ifndef PAC_CATEGORICAL_HPP
 #define PAC_CATEGORICAL_HPP
@@ -34,7 +31,7 @@ namespace duckdb {
 // Register all PAC categorical functions with the extension loader
 void RegisterPacCategoricalFunctions(ExtensionLoader &loader);
 
-// Add a PAC list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) to an existing function set.
+// Add a PAC list aggregate overload (LIST<FLOAT> → LIST<FLOAT>) to an existing function set.
 // Used to merge the list variant into the same AggregateFunctionSet as the counters variant.
 // aggr_type: "sum", "count", "min", or "max"
 void AddPacListAggregateOverload(AggregateFunctionSet &set, const string &aggr_type);

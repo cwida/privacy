@@ -442,7 +442,7 @@ static void RegisterPacSelectCmp(ExtensionLoader &loader, const Identifier &name
 	loader.RegisterFunction(std::move(info));
 }
 
-// priv_coalesce(LIST<DOUBLE>) -> LIST<DOUBLE>
+// priv_coalesce(LIST<FLOAT>) -> LIST<FLOAT>
 // If the input list is NULL, returns a list of 64 NULL doubles.
 // Otherwise returns the input unchanged. This is needed because COALESCE
 // with a constant fallback list would have only 1 element, but priv_filter
@@ -785,10 +785,10 @@ static unique_ptr<FunctionData> PacCategoricalBind(BindScalarFunctionInput &bind
 }
 
 // ============================================================================
-// PAC List Aggregates: Aggregate over LIST<DOUBLE> inputs element-wise
+// PAC List Aggregates: Aggregate over LIST<FLOAT> inputs element-wise
 // ============================================================================
-// These aggregates take LIST<DOUBLE> inputs (from PAC _counters results) and
-// produce LIST<DOUBLE> outputs. They aggregate element-wise across all input lists.
+// These aggregates take LIST<FLOAT> inputs (from PAC _counters results) and
+// produce LIST<FLOAT> outputs. They aggregate element-wise across all input lists.
 //
 // Design: Uses template specialization for SIMD-friendly code generation.
 // Each aggregate type has specialized ops that compile to tight vectorizable loops.

@@ -353,21 +353,21 @@ void PacCountFinalize(Vector &states, AggregateFinalizeInputData &input, Vector 
 }
 
 // ============================================================================
-// PAC_COUNT_COUNTERS: Returns all 64 counters as LIST<DOUBLE> for categorical queries
+// PAC_COUNT_COUNTERS: Returns all 64 counters as LIST<FLOAT> for categorical queries
 // ============================================================================
 // This variant is used when the count result will be used in a comparison
 // in an outer categorical query. Instead of picking one counter and adding noise,
 // it returns all 64 counters so the outer query can evaluate the comparison
 // against all subsamples and produce a mask.
 
-// Returns LIST<DOUBLE> with exactly 64 elements (no NULLs).
+// Returns LIST<FLOAT> with exactly 64 elements (no NULLs).
 // Position j is 0 if key_hash bit j is 0, otherwise value * 2 * correction.
 void PacCountFinalizeCounters(Vector &states, AggregateFinalizeInputData &input, Vector &result, idx_t count,
                               idx_t offset) {
 	auto aggs = FlatVector::GetData<ScatterState *>(states);
 	double correction = input.bind_data ? input.bind_data->Cast<PrivBindData>().correction : 1.0;
 
-	// Result is LIST<DOUBLE>
+	// Result is LIST<FLOAT>
 	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
 	auto &child_vec = ListVector::GetChildMutable(result);
 
@@ -1301,7 +1301,7 @@ void RegisterPacSampleMCountIfFunctions(ExtensionLoader &loader) {
 }
 
 // ============================================================================
-// PAC_COUNT_COUNTERS: Returns all 64 counters as LIST<DOUBLE> for categorical queries
+// PAC_COUNT_COUNTERS: Returns all 64 counters as LIST<FLOAT> for categorical queries
 // ============================================================================
 void RegisterPacCountCountersFunctions(ExtensionLoader &loader) {
 	auto list_double_type = LogicalType::LIST(PacFloatLogicalType());
@@ -1323,7 +1323,7 @@ void RegisterPacCountCountersFunctions(ExtensionLoader &loader) {
 	    PacCountInitialize, PacCountColumnScatterUpdate, PacCountCombine, PacCountFinalizeCounters,
 	    FunctionNullHandling::DEFAULT_NULL_HANDLING, PacCountColumnUpdate, PacCountBind));
 
-	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts
+	// Add list aggregate overload (LIST<FLOAT> → LIST<FLOAT>) for subquery/categorical contexts
 	AddPacListAggregateOverload(counters_set, "count");
 
 	CreateAggregateFunctionInfo counters_info(counters_set);

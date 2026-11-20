@@ -5,13 +5,13 @@
 // Detection is in pac_categorical_detection.hpp/.cpp.
 //
 // Rewriting:
-// - Replaces pac_* aggregates with pac_*_counters variants (return LIST<DOUBLE>)
-// - Wraps comparisons with pac_gt/pac_lt/etc. functions (return UBIGINT mask)
-// - Adds priv_filter at the outermost filter to make final probabilistic decision
+// - Replaces as_noised_* aggregates with their counter-list variants as_* (return LIST<FLOAT>)
+// - Replaces comparisons with priv_filter_<cmp> / priv_select_<cmp> calls over the counter list
+// - The outermost filter makes the final probabilistic decision
 //
 // Example transformation for TPC-H Q20:
-//   BEFORE: ps_availqty > (SELECT 0.5 * as_sum(hash, l_quantity) FROM ...)
-//   AFTER:  priv_filter(pac_gt(ps_availqty, (SELECT 0.5 * as_sum(hash, l_quantity) FROM ...)))
+//   BEFORE: ps_availqty > (SELECT 0.5 * as_noised_sum(hash, l_quantity) FROM ...)
+//   AFTER:  priv_filter_gt(ps_availqty, <64-element list of 0.5 * counter, from as_sum(hash, l_quantity)>)
 
 #ifndef PAC_CATEGORICAL_REWRITER_HPP
 #define PAC_CATEGORICAL_REWRITER_HPP

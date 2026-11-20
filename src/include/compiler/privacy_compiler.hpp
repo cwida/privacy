@@ -38,7 +38,7 @@ struct PrivAggregateHashInfo {
 // Helper to ensure PK columns are present in a LogicalGet's column_ids and projection_ids.
 void AddPKColumns(LogicalGet &get, const vector<string> &pks);
 
-// Helper to inspect FK paths and populate lists of GETs present/missing. Defined in privacy_compiler.cpp
+// Helper to inspect FK paths and populate lists of GETs present/missing. Defined in privacy_compiler_helpers.cpp
 void PopulateGetsFromFKPath(const PrivacyCompatibilityResult &check, vector<string> &gets_present,
                             vector<string> &gets_missing, string &start_table_out, vector<string> &target_pus_out);
 

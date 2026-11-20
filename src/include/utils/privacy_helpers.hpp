@@ -17,15 +17,13 @@ string Sanitize(const string &in);
 // Determine the next available table index by scanning existing logical operators in the plan
 idx_t GetNextTableIndex(unique_ptr<LogicalOperator> &plan);
 
-// Update the plan tree by inserting `new_parent` as the parent of `child_ref`.
+// Replace `old_node` in the plan tree with `new_node`.
 // - `root` is the top of the logical plan (used to run a ColumnBindingReplacer so bindings
-//   above the inserted node are updated).
-// - `child_ref` is a reference to the unique_ptr holding the child in its parent->children vector.
-//   The function will consume `new_parent` and replace `child_ref` with it, making the original
-//   child a child of `new_parent`.
-// - `new_parent` must not have any children prior to calling this function.
-// The function will try to propagate column binding changes using ColumnBindingReplacer so that
-// expressions above the insertion point keep referring to the correct ColumnBindings.
+//   above the replaced node are updated).
+// - `old_node` is a reference to the unique_ptr slot that holds the node to replace.
+// - `new_node` is moved into that slot.
+// Column binding changes are propagated with ColumnBindingReplacer so that expressions above the
+// replaced node keep referring to the correct ColumnBindings.
 void ReplaceNode(unique_ptr<LogicalOperator> &root, unique_ptr<LogicalOperator> &old_node,
                  unique_ptr<LogicalOperator> &new_node, Binder *binder = nullptr);
 

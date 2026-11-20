@@ -42,7 +42,7 @@ void PACDropTableRule::PACDropTableRuleFunction(OptimizerExtensionInput &input, 
 	if (!plan || plan->type != LogicalOperatorType::LOGICAL_DROP) {
 		return;
 	}
-	// Cast to LogicalSimple to access the parse info (DROP operations use LogicalSimple)
+	// DROP statements are LogicalDrop nodes; their parse info names the dropped object
 	auto &simple = plan->Cast<LogicalDrop>();
 	if (simple.info->info_type != ParseInfoType::DROP_INFO) {
 		return;
@@ -517,7 +517,7 @@ void PACRewriteRule::PACPreOptimizeFunction(OptimizerExtensionInput &input, uniq
 			// For DML targeting derived_pu tables: convert as_noised_* → as_* counter variants
 			// so the table stores raw 64-element counter lists instead of noised scalars.
 			// Check the DML TARGET table (not source tables) for derived_pu.
-			// PropagateCTASMetadata already ran (line 276) and set derived_pu on the target.
+			// PropagateCTASMetadata already ran and set derived_pu on the target.
 			if (privacy_mode == "pac" && is_dml_wrapper) {
 				string target_table;
 				if (outer_plan->type == LogicalOperatorType::LOGICAL_CREATE_TABLE) {

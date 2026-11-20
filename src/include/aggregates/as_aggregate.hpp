@@ -263,13 +263,13 @@ std::shared_ptr<PacPState> GetOrCreatePState(uint64_t query_hash);
 // Throws InvalidInputException if mi < 0.
 double ComputeDeltaFromValues(const vector<PAC_FLOAT> &values, double mi);
 
-// Register priv_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
+// Register priv_hash scalar function (UBIGINT -> UBIGINT; exactly 32 bits set when pac_hash_repair is on)
 void RegisterPacHashFunction(ExtensionLoader &loader);
 
 // Repair a 64-bit hash to exactly 32 set bits. This is the same operation used by priv_hash().
 uint64_t PacRepairHash32(uint64_t num);
 
-// Register priv_finalize scalar function (LIST<DOUBLE> -> DOUBLE, read-time noise for derived tables)
+// Register priv_finalize scalar function (LIST<FLOAT> -> DOUBLE, read-time noise for derived tables)
 void RegisterPacFinalizeFunction(ExtensionLoader &loader);
 
 // Declare the noisy-sample helper so other translation units (as_count.cpp) can call it.

@@ -97,9 +97,7 @@ void RegisterPacSampleMSumIfFunctions(ExtensionLoader &loader);
 //
 // for DECIMAL types, we look at binding time which physical type is used and choose a relevant integer type.
 //
-// we also implement PAC_AVG(key_hash, value) with the same implementation functions as PAC_SUM(). To keep the
-// code simple, we added an update_counter also to PAC_SUM(). The only difference is that in the Finalize() for
-// PAC_AVG() we divide the counter numbers by this update_counter first.
+// AVG has no kernel of its own: the rewriter turns it into a stochastic SUM divided by a stochastic COUNT.
 //
 // The cascading counter state could be quite large: ~2KB per aggregate result value. In aggregations with very many
 // distinct GROUP BY values (and relatively modest sums, therefore), the bigger counters are often not needed.
@@ -213,8 +211,8 @@ constexpr uint64_t PAC_APPROX_REMAINDER_MASK = static_cast<uint64_t>(PAC_APPROX_
 // Uses lazy allocation via DuckDB's ArenaAllocator for memory management.
 // Arena handles cleanup automatically when aggregate operation completes.
 //
-// By default uses the approximate algorithm with 13 levels of 16-bit counters.
-// Define PAC_EXACTSUM to use the exact 5-level cascading implementation instead.
+// By default uses the approximate algorithm (PAC_APPROX_NUM_LEVELS levels).
+// Define PAC_EXACTSUM to use the exact cascading implementation instead.
 template <bool SIGNED>
 struct PacSumIntState {
 	// Type aliases based on signedness

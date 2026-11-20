@@ -7,7 +7,7 @@
 // This means TopN operates on noisy values, potentially selecting wrong groups.
 //
 // Solution: When pac_pushdown_topk=true, rewrite the plan so that:
-// 1. The aggregate produces raw counter lists (pac_*_counters) instead of noised scalars
+// 1. The aggregate produces raw counter lists (as_sum, as_count, ...) instead of noised scalars
 // 2. A "mean projection" computes priv_mean(counters) for ordering
 // 3. TopN selects the top-k groups based on the true mean
 // 4. A "noised projection" applies as_noised() only to the selected k rows,

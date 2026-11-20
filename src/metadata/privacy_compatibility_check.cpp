@@ -1156,8 +1156,6 @@ PrivacyCompatibilityResult PrivRewriteQueryCheck(unique_ptr<LogicalOperator> &pl
 		}
 
 		// Check that GROUP BY columns don't come from PU tables
-		// NOTE: The plan is already optimized without COLUMN_LIFETIME and COMPRESSED_MATERIALIZATION
-		// because the pre-optimizer disabled them before built-in optimizers ran.
 		if (!result.scanned_pu_tables.empty()) {
 			CheckOutputColumnsNotFromPU(*plan, *plan, result.scanned_pu_tables, tables_with_protected_columns);
 		}

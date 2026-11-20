@@ -3,7 +3,7 @@
 //
 // When privacy_diffcols is set, this wraps the complete privacy plan and the
 // deep-copied reference plan in a FULL OUTER JOIN and builds a diff projection
-// on top that encodes utility % for numeric columns and NULL patterns for
+// on top that encodes the relative error % of numeric columns and NULL patterns for
 // extra/missing rows.  Both plans (including any LIMIT/ORDER BY) go under the
 // join unchanged, so each side independently limits its own output.
 //
@@ -38,7 +38,7 @@ namespace duckdb {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Check whether a logical type is numeric (for utility % computation).
+// Check whether a logical type is numeric (for the relative-error computation).
 static bool IsNumericType(const LogicalType &type) {
 	switch (type.id()) {
 	case LogicalTypeId::TINYINT:

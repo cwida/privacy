@@ -623,10 +623,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register priv_mean scalar function (used by top-k pushdown for ordering)
 	RegisterPacMeanFunction(loader);
 
-	// Register priv_finalize scalar function (LIST<DOUBLE> -> DOUBLE, read-time noise for derived tables)
+	// Register priv_finalize scalar function (LIST<FLOAT> -> DOUBLE, read-time noise for derived tables)
 	RegisterPacFinalizeFunction(loader);
 
-	// Register priv_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
+	// Register priv_hash scalar function (UBIGINT -> UBIGINT; exactly 32 bits set when pac_hash_repair is on)
 	RegisterPacHashFunction(loader);
 
 	// Register dp_noise scalar function (value, scale) -> value + Lap(scale)

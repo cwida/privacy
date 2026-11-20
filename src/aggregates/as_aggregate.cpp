@@ -284,7 +284,7 @@ PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, 
 	return static_cast<PAC_FLOAT>(static_cast<double>(yJ) + normal_dist(gen));
 }
 
-// Compute second-moment variance (not unbiased estimator)
+// Compute the sample variance (divides by n - 1)
 // Internal math stays double for numerical stability
 static double ComputeSecondMomentVariance(const vector<PAC_FLOAT> &values) {
 	idx_t n = values.size();
@@ -320,7 +320,7 @@ double ComputeDeltaFromValues(const vector<PAC_FLOAT> &values, double mi) {
 }
 
 // ============================================================================
-// priv_hash: UBIGINT -> UBIGINT with exactly 32 bits set
+// priv_hash: UBIGINT -> UBIGINT; exactly 32 bits set when pac_hash_repair is on
 // ============================================================================
 
 // 64-bit prime with exactly 32 bits set (irregular pattern), used for hashing in hash32_32

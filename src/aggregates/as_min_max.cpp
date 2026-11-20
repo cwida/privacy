@@ -291,14 +291,14 @@ static unique_ptr<FunctionData> PacMinMaxBind(BindAggregateFunctionInput &bind_i
 }
 
 // ============================================================================
-// PAC_MIN/MAX_COUNTERS: Returns all 64 counters as LIST<DOUBLE> for categorical queries
+// PAC_MIN/MAX_COUNTERS: Returns all 64 counters as LIST<FLOAT> for categorical queries
 // ============================================================================
 template <typename T, bool IS_MAX>
 static void PacMinMaxFinalizeCounters(Vector &states, AggregateFinalizeInputData &input, Vector &result, idx_t count,
                                       idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<MinMaxState<T, IS_MAX> *>(states);
 
-	// Result is LIST<DOUBLE>
+	// Result is LIST<FLOAT>
 	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
 	auto &child_vec = ListVector::GetChildMutable(result);
 
@@ -345,7 +345,7 @@ static void PacMinMaxFinalizeCounters(Vector &states, AggregateFinalizeInputData
 	}
 }
 
-// Bind function for as_min/max_counters - similar to PacMinMaxBind but returns LIST<DOUBLE>
+// Bind function for as_min/max_counters - similar to PacMinMaxBind but returns LIST<FLOAT>
 template <bool IS_MAX>
 static unique_ptr<FunctionData> PacMinMaxCountersBind(BindAggregateFunctionInput &bind_input) {
 	auto &ctx = bind_input.GetClientContext();
@@ -393,7 +393,7 @@ static unique_ptr<FunctionData> PacMinMaxCountersBind(BindAggregateFunctionInput
 }
 
 // ============================================================================
-// SASS MIN/MAX counters: Returns all 64 sample values as LIST<DOUBLE>
+// SASS MIN/MAX counters: Returns all 64 sample values as LIST<FLOAT>
 // ============================================================================
 template <typename T, bool IS_MAX>
 static void DpSampleMinMaxFinalizeCounters(Vector &states, AggregateFinalizeInputData &input, Vector &result,
@@ -734,7 +734,7 @@ void RegisterPacMinCountersFunctions(ExtensionLoader &loader) {
 	    "as_min", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, nullptr, nullptr, nullptr, nullptr,
 	    nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxCountersBind<false>));
 
-	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts
+	// Add list aggregate overload (LIST<FLOAT> → LIST<FLOAT>) for subquery/categorical contexts
 	AddPacListAggregateOverload(fcn_set, "min");
 
 	CreateAggregateFunctionInfo info(fcn_set);
@@ -752,7 +752,7 @@ void RegisterPacMaxCountersFunctions(ExtensionLoader &loader) {
 	    "as_max", {LogicalType::UBIGINT, LogicalType::ANY}, list_double_type, nullptr, nullptr, nullptr, nullptr,
 	    nullptr, FunctionNullHandling::DEFAULT_NULL_HANDLING, nullptr, PacMinMaxCountersBind<true>));
 
-	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts
+	// Add list aggregate overload (LIST<FLOAT> → LIST<FLOAT>) for subquery/categorical contexts
 	AddPacListAggregateOverload(fcn_set, "max");
 
 	CreateAggregateFunctionInfo info(fcn_set);

@@ -870,7 +870,7 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 }
 
 // ============================================================================
-// PAC_SUM_COUNTERS: Returns all 64 counters as LIST<DOUBLE> for categorical queries
+// PAC_SUM_COUNTERS: Returns all 64 counters as LIST<FLOAT> for categorical queries
 // ============================================================================
 // This variant is used when the sum result will be used in a comparison
 // in an outer categorical query. Instead of picking one counter and adding noise,
@@ -880,14 +880,14 @@ void RegisterPacSumFunctions(ExtensionLoader &loader) {
 enum class PacSumCountersFinalizeMode : uint8_t { PAC, DP_SAMPLE, DP_SAMPLE_NULLABLE };
 
 // FinalizeCounters for as_sum.
-// Returns LIST<DOUBLE> with exactly 64 elements (no NULLs).
+// Returns LIST<FLOAT> with exactly 64 elements (no NULLs).
 // Position j is 0 if key_hash bit j is 0, otherwise value * 2 (to compensate for 50% sampling).
 template <class State, bool SIGNED, PacSumCountersFinalizeMode MODE>
 static void PacSumAvgFinalizeCountersInternal(Vector &states, AggregateFinalizeInputData &input, Vector &result,
                                               idx_t count, idx_t offset) {
 	auto state_ptrs = FlatVector::GetData<State *>(states);
 
-	// Result is LIST<DOUBLE>
+	// Result is LIST<FLOAT>
 	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
 	auto &child_vec = ListVector::GetChildMutable(result);
 
@@ -1066,7 +1066,7 @@ void RegisterPacSumCountersFunctions(ExtensionLoader &loader) {
 	               PacSumScatterUpdateDouble, PacSumCombineDoubleWrapper, PacSumFinalizeCountersDouble,
 	               PacSumUpdateDouble);
 
-	// Add list aggregate overload (LIST<DOUBLE> → LIST<DOUBLE>) for subquery/categorical contexts
+	// Add list aggregate overload (LIST<FLOAT> → LIST<FLOAT>) for subquery/categorical contexts
 	AddPacListAggregateOverload(counters_set, "sum");
 
 	CreateAggregateFunctionInfo counters_info(counters_set);

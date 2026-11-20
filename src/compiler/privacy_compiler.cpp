@@ -136,59 +136,6 @@ static unique_ptr<Expression> HandlePassthroughDeepHash(OptimizerExtensionInput 
 	return make_uniq<BoundColumnRefExpression>(LogicalType::UBIGINT, propagated_to_outer);
 }
 
-/**
- * ModifyPlanWithPU: Transforms a query plan when the privacy unit (PU) table IS scanned directly
- *
- * Purpose: When the query directly scans the PU table, we build hash expressions from the PU's
- * primary key columns and transform aggregates to use PAC functions.
- *
- * Arguments:
- * @param input - Optimizer extension input containing context and optimizer
- * @param plan - The logical plan to modify
- * @param pu_table_names - List of privacy unit table names that are scanned in the query
- * @param check - Compatibility check result containing table metadata
- *
- * Logic:
- * 1. Find ALL aggregate nodes in the plan
- * 2. Filter to aggregates that have at least one PU table in their subtree
- * 3. For each target aggregate:
- *    - For each PU table in the aggregate's subtree:
- *      * Use PRIVACY_KEY columns for hashing
- *      * Build hash expression: hash(pk) or hash(xor(pk1, pk2, ...)) for composite PRIVACY_KEYs
- *      * Propagate the hash expression through projections to the aggregate level
- *    - Combine all PU hash expressions with AND (for multi-PU queries)
- *    - Transform the aggregate to use PAC functions
- *
- * Correlated Subquery Handling:
- * - If the PU table appears in BOTH outer query and subquery, we transform aggregates in BOTH
- * - Each aggregate gets its own hash expression from the PU instance in its subtree
- * - Example: Query with outer aggregate on customer and subquery aggregate on customer:
- *   * Both aggregates are transformed with as_sum(hash(c_custkey), value)
- *   * Each uses its respective customer table instance
- *
- * Nested Aggregate Rules (IMPORTANT):
- * - If we have 2 aggregates stacked on top of each other:
- *   * ONLY transform the inner aggregate if it directly operates on PU tables
- *   * The outer aggregate is NOT transformed if it only depends on the inner result
- *   * EXCEPTION: Transform the outer aggregate ONLY if it also has PU tables in its subtree
- *     (meaning it has its own FK path that needs joins and PAC transformation)
- *
- * Example from user's TPC-H Q17-style query:
- *   SELECT sum(l_extendedprice) / 7.0 AS avg_yearly
- *   FROM lineitem, part
- *   WHERE p_partkey = l_partkey AND ... AND l_quantity < (SELECT 0.2 * avg(l_quantity) FROM lineitem WHERE ...)
- *
- * Transformation:
- *   - Inner aggregate (avg in subquery): Has lineitem (PU table) -> as_avg(hash(pac_key), l_quantity)
- *   - Outer aggregate (sum): Also has lineitem (PU table) -> as_sum(hash(pac_key), l_extendedprice)
- *   - Division by 7.0 happens AFTER PAC aggregation, not transformed
- *
- * Counter-example where outer is NOT transformed:
- *   SELECT sum(inner_sum) FROM (SELECT sum(customer_col) FROM customer) AS subq
- *   - Inner: Has customer (PU) -> as_sum(hash(c_custkey), customer_col)
- *   - Outer: No PU tables, only depends on subquery result -> Regular sum(), NOT transformed
- */
-
 // Check if a CTE_SCAN's bound_columns include all the given column names.
 static bool CTERefExposesColumns(const LogicalCTERef &ref, const vector<string> &columns) {
 	for (auto &col : columns) {
@@ -1166,6 +1113,58 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 	return result;
 }
 
+/**
+ * ModifyPlanWithPU: Transforms a query plan when the privacy unit (PU) table IS scanned directly
+ *
+ * Purpose: When the query directly scans the PU table, we build hash expressions from the PU's
+ * primary key columns and transform aggregates to use PAC functions.
+ *
+ * Arguments:
+ * @param input - Optimizer extension input containing context and optimizer
+ * @param plan - The logical plan to modify
+ * @param pu_table_names - List of privacy unit table names that are scanned in the query
+ * @param check - Compatibility check result containing table metadata
+ *
+ * Logic:
+ * 1. Find ALL aggregate nodes in the plan
+ * 2. Filter to aggregates that have at least one PU table in their subtree
+ * 3. For each target aggregate:
+ *    - For each PU table in the aggregate's subtree:
+ *      * Use PRIVACY_KEY columns for hashing
+ *      * Build hash expression: hash(pk) or hash(xor(pk1, pk2, ...)) for composite PRIVACY_KEYs
+ *      * Propagate the hash expression through projections to the aggregate level
+ *    - Combine all PU hash expressions with AND (for multi-PU queries)
+ *    - Transform the aggregate to use PAC functions
+ *
+ * Correlated Subquery Handling:
+ * - If the PU table appears in BOTH outer query and subquery, we transform aggregates in BOTH
+ * - Each aggregate gets its own hash expression from the PU instance in its subtree
+ * - Example: Query with outer aggregate on customer and subquery aggregate on customer:
+ *   * Both aggregates are transformed with as_sum(hash(c_custkey), value)
+ *   * Each uses its respective customer table instance
+ *
+ * Nested Aggregate Rules (IMPORTANT):
+ * - If we have 2 aggregates stacked on top of each other:
+ *   * ONLY transform the inner aggregate if it directly operates on PU tables
+ *   * The outer aggregate is NOT transformed if it only depends on the inner result
+ *   * EXCEPTION: Transform the outer aggregate ONLY if it also has PU tables in its subtree
+ *     (meaning it has its own FK path that needs joins and PAC transformation)
+ *
+ * Example from user's TPC-H Q17-style query:
+ *   SELECT sum(l_extendedprice) / 7.0 AS avg_yearly
+ *   FROM lineitem, part
+ *   WHERE p_partkey = l_partkey AND ... AND l_quantity < (SELECT 0.2 * avg(l_quantity) FROM lineitem WHERE ...)
+ *
+ * Transformation:
+ *   - Inner aggregate (avg in subquery): Has lineitem (PU table) -> as_avg(hash(pac_key), l_quantity)
+ *   - Outer aggregate (sum): Also has lineitem (PU table) -> as_sum(hash(pac_key), l_extendedprice)
+ *   - Division by 7.0 happens AFTER PAC aggregation, not transformed
+ *
+ * Counter-example where outer is NOT transformed:
+ *   SELECT sum(inner_sum) FROM (SELECT sum(customer_col) FROM customer) AS subq
+ *   - Inner: Has customer (PU) -> as_sum(hash(c_custkey), customer_col)
+ *   - Outer: No PU tables, only depends on subquery result -> Regular sum(), NOT transformed
+ */
 void ModifyPlanWithPU(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
                       const vector<string> &pu_table_names, const PrivacyCompatibilityResult &check,
                       const CTETableMap &cte_map, PacAggregateInfoMap &pac_agg_info) {
