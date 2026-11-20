@@ -241,7 +241,7 @@ static inline LogicalType PacFloatLogicalType() {
 }
 
 // Header for privacy aggregate helpers and public declarations used across pac_* files.
-// Contains bindings and small helpers shared between pac_aggregate, as_count and as_sum implementations.
+// Contains bindings and small helpers shared between the as_count and as_sum implementations.
 
 // ============================================================================
 // PacPState: per-query Bayesian posterior tracker for persistent secret composition
@@ -275,10 +275,6 @@ void RegisterPacHashFunction(ExtensionLoader &loader);
 // Repair a 64-bit hash to exactly 32 set bits. This is the same operation used by priv_hash().
 uint64_t PacRepairHash32(uint64_t num);
 
-// Register pac_aggregate scalar function (LIST vals, LIST cnts, DOUBLE mi, INTEGER k -> DOUBLE):
-// terminal for the naive PAC sample-and-aggregate path (collapses per-subsample answers + PAC noise)
-void RegisterPacAggregateFunctions(ExtensionLoader &loader);
-
 // Register priv_finalize scalar function (LIST<DOUBLE> -> DOUBLE, read-time noise for derived tables)
 void RegisterPacFinalizeFunction(ExtensionLoader &loader);
 
@@ -292,12 +288,6 @@ PAC_FLOAT PacNoisySampleFrom64Counters(const PAC_FLOAT counters[64], double mi, 
                                        uint64_t is_null = 0, uint64_t counter_selector = 0,
                                        const std::shared_ptr<PacPState> &pstate = nullptr,
                                        double *out_noise_variance = nullptr);
-
-// PacNoisedSelect: returns true with probability proportional to popcount(key_hash)/64
-// Uses rnd&63 as threshold, returns true if bitcount > threshold
-static inline bool PacNoisedSelect(uint64_t key_hash, uint64_t rnd) {
-	return pac_popcount64(key_hash) > static_cast<int>(rnd & 63);
-}
 
 // PacNoiseInNull: probabilistically returns true based on bit count in key_hash.
 // mi: controls probabilistic (mi>0) vs deterministic (mi<=0) mode
@@ -333,10 +323,6 @@ struct PrivBindData; // forward declaration
 // suspicious or not, and throws if total_exact_count >= threshold AND suspicious > nonsuspicious.
 void CheckPacSampleDiversity(uint64_t key_hash, const PAC_FLOAT *buf, uint64_t update_count, const char *aggr_name,
                              PrivBindData &bind_data);
-
-// Helper function to generate a random seed (defined in as_aggregate.cpp)
-// This avoids including <random> in the header for std::random_device
-uint64_t PacGenerateRandomSeed();
 
 // Helper to read pac_mi from session setting.
 // Returns 1.0/128 if not found or null.

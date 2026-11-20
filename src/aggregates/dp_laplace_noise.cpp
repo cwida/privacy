@@ -879,70 +879,6 @@ static void DpSmoothMedianRecordNoiseScaleFunction(DataChunk &args, ExpressionSt
 	DpSmoothMedianNoiseFunctionInternal(args, state, result, false, true);
 }
 
-// dp_aggregate: scalar terminal for the "naive" DP sample-and-aggregate path. Mirrors the
-// pac_aggregate signature so the naive PAC and DP queries are structurally identical, differing
-// only in this terminal. Each row carries 64 per-lane sample answers; the second `counts` list is
-// accepted purely for signature symmetry with pac_aggregate and is currently UNUSED by the median
-// path (the per-lane answers already encode the aggregate). Always bounded (lower/upper required).
-// Signature: dp_aggregate(LIST<FLOAT> samples, LIST<FLOAT> counts, DOUBLE epsilon, DOUBLE delta,
-//                         INTEGER lanes, DOUBLE lower, DOUBLE upper) -> DOUBLE
-static void DpAggregateFunction(DataChunk &args, ExpressionState &state, Vector &result) {
-	auto &context = state.GetContext();
-	bool noise_enabled = true;
-	Value noise_val;
-	if (context.TryGetCurrentSetting(Identifier("privacy_noise"), noise_val) && !noise_val.IsNull()) {
-		noise_enabled = noise_val.GetValue<bool>();
-	}
-
-	idx_t count = args.size();
-	auto &list_vec = args.data[0]; // samples (counts at args.data[1] is intentionally ignored)
-	UnifiedVectorFormat list_data, epsilon_data, delta_data, sample_lanes_data, lower_data, upper_data;
-	list_vec.ToUnifiedFormat(list_data);
-	args.data[2].ToUnifiedFormat(epsilon_data);
-	args.data[3].ToUnifiedFormat(delta_data);
-	args.data[4].ToUnifiedFormat(sample_lanes_data);
-	args.data[5].ToUnifiedFormat(lower_data);
-	args.data[6].ToUnifiedFormat(upper_data);
-
-	auto &child_vec = ListVector::GetChild(list_vec);
-	UnifiedVectorFormat child_data;
-	child_vec.ToUnifiedFormat(child_data);
-	auto child_values = UnifiedVectorFormat::GetData<PAC_FLOAT>(child_data);
-	auto list_entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
-	auto epsilons = UnifiedVectorFormat::GetData<double>(epsilon_data);
-	auto deltas = UnifiedVectorFormat::GetData<double>(delta_data);
-	auto sample_lanes_values = UnifiedVectorFormat::GetData<int32_t>(sample_lanes_data);
-	auto lower_values = UnifiedVectorFormat::GetData<double>(lower_data);
-	auto upper_values = UnifiedVectorFormat::GetData<double>(upper_data);
-	auto result_data = FlatVector::GetDataMutable<double>(result);
-	auto &result_validity = FlatVector::ValidityMutable(result);
-
-	for (idx_t i = 0; i < count; i++) {
-		auto list_idx = list_data.sel->get_index(i);
-		auto eps_idx = epsilon_data.sel->get_index(i);
-		auto delta_idx = delta_data.sel->get_index(i);
-		auto sample_lanes_idx = sample_lanes_data.sel->get_index(i);
-		auto lower_idx = lower_data.sel->get_index(i);
-		auto upper_idx = upper_data.sel->get_index(i);
-		if (!list_data.validity.RowIsValid(list_idx) || !epsilon_data.validity.RowIsValid(eps_idx) ||
-		    !delta_data.validity.RowIsValid(delta_idx) || !sample_lanes_data.validity.RowIsValid(sample_lanes_idx) ||
-		    !lower_data.validity.RowIsValid(lower_idx) || !upper_data.validity.RowIsValid(upper_idx)) {
-			result_validity.SetInvalid(i);
-			continue;
-		}
-		double lower_bound = lower_values[lower_idx];
-		double upper_bound = upper_values[upper_idx];
-		double released = 0.0;
-		if (SmoothMedianNoiseRow(list_entries[list_idx], child_data, child_values, epsilons[eps_idx], deltas[delta_idx],
-		                         sample_lanes_values[sample_lanes_idx], /*bounded=*/true, lower_bound, upper_bound,
-		                         /*empty_default=*/(lower_bound + upper_bound) / 2.0, noise_enabled, released)) {
-			result_data[i] = released;
-		} else {
-			result_validity.SetInvalid(i);
-		}
-	}
-}
-
 // GUPT-style release (pure-ε, no δ): the MEAN of all 64 lane (block) answers clipped to the public
 // [lower,upper] envelope, plus Laplace noise. Every lane contributes — empty subsamples get a public
 // in-range default — so the block count is a fixed, data-independent 64 (not the data-dependent
@@ -1523,19 +1459,6 @@ void RegisterDpSmoothMedianNoiseFunction(ExtensionLoader &loader) {
 	    "[INTERNAL] Records numerator/count noise scales for the non-empty-lane SASS mean.";
 	nonempty_mean_record_info.descriptions.push_back(std::move(nonempty_mean_record_desc));
 	loader.RegisterFunction(std::move(nonempty_mean_record_info));
-
-	// dp_aggregate: naive DP sample-and-aggregate terminal, mirroring pac_aggregate's shape
-	// (samples, counts, ...). `counts` is accepted for symmetry and ignored by the median path.
-	ScalarFunction dp_aggregate("dp_aggregate",
-	                            {list_type, LogicalType::LIST(LogicalType::DOUBLE), LogicalType::DOUBLE,
-	                             LogicalType::DOUBLE, LogicalType::INTEGER, LogicalType::DOUBLE, LogicalType::DOUBLE},
-	                            LogicalType::DOUBLE, DpAggregateFunction);
-	CreateScalarFunctionInfo agg_info(dp_aggregate);
-	FunctionDescription agg_desc;
-	agg_desc.description =
-	    "Naive DP sample-and-aggregate terminal: median + smooth-sensitivity Laplace over 64 lane answers.";
-	agg_info.descriptions.push_back(std::move(agg_desc));
-	loader.RegisterFunction(std::move(agg_info));
 }
 
 } // namespace duckdb

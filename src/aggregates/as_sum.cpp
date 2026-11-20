@@ -313,15 +313,6 @@ static void PacSumUpdateValues(const UnifiedVectorFormat &hash_data, const Unifi
 	}
 }
 
-template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE, class HASH_TRANSFORM = PacIdentityHash>
-static void PacSumUpdate(Vector inputs[], State &state, idx_t count, ArenaAllocator &allocator, int sample_lanes = 0) {
-	UnifiedVectorFormat hash_data, value_data;
-	inputs[0].ToUnifiedFormat(hash_data);
-	inputs[1].ToUnifiedFormat(value_data);
-	PacSumUpdateValues<false, State, SIGNED, VALUE_TYPE, INPUT_TYPE, HASH_TRANSFORM>(
-	    hash_data, value_data, state, count, allocator, sample_lanes, nullptr);
-}
-
 template <class State, bool SIGNED, class VALUE_TYPE, class INPUT_TYPE>
 static void PacSumUpdateClusters(Vector inputs[], const ClusteredAggr &clusters, ArenaAllocator &allocator,
                                  int sample_lanes) {

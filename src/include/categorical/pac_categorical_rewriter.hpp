@@ -49,16 +49,6 @@ bool ReferencesCounterBinding(Expression *expr, const unordered_map<uint64_t, Co
 // Rewrite-specific inlined helper methods
 // ==========================================================================================
 
-// Get struct field name for index (a, b, c, ..., z, aa, ab, ...)
-static inline string GetStructFieldName(idx_t index) {
-	if (index < 26) {
-		return string(1, static_cast<char>('a' + static_cast<unsigned char>(index)));
-	}
-	// For indices >= 26, use aa, ab, etc.
-	return string(1, static_cast<char>('a' + static_cast<unsigned char>(index / 26 - 1))) +
-	       string(1, static_cast<char>('a' + static_cast<unsigned char>(index % 26)));
-}
-
 // ============================================================================
 // Algebraic simplification: try to emit priv_filter_<cmp> instead of lambda
 // ============================================================================

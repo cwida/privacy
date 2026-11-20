@@ -37,10 +37,6 @@ void FindAllAggregates(unique_ptr<LogicalOperator> &op, vector<LogicalAggregate 
 // is scanned multiple times in different subqueries).
 LogicalGet *FindTableScanInSubtree(LogicalOperator *subtree, const string &table_name);
 
-// Find the parent LogicalProjection of a given child node.
-// Returns nullptr if not found.
-LogicalProjection *FindParentProjection(unique_ptr<LogicalOperator> &root, LogicalOperator *target_child);
-
 // Find the unique_ptr reference to a LogicalGet node by table name.
 // Optionally returns the parent node and child index.
 // Returns nullptr if not found.
@@ -89,13 +85,6 @@ LogicalMaterializedCTE *FindMaterializedCTE(LogicalOperator *op, idx_t cte_table
 // Find all LogicalGet nodes with a specific table index in the plan tree.
 void FindAllNodesByTableIndex(unique_ptr<LogicalOperator> *root, idx_t table_index,
                               vector<unique_ptr<LogicalOperator> *> &results);
-
-// Filter aggregates to only those that have specified tables in their subtree
-// AND have base tables in their DIRECT children (not through nested aggregates).
-// This filters out outer aggregates that only depend on inner aggregate results.
-vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate *> &all_aggregates,
-                                                  const vector<string> &target_table_names,
-                                                  const CTETableMap &cte_map = {});
 
 // Extended version of FilterTargetAggregates that handles the edge case where inner aggregate
 // groups by PU key (PAC key/PK of Privacy Unit or FK referencing it).

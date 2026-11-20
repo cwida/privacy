@@ -490,9 +490,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	db.config.AddExtensionOption("pac_sample_diversity_check",
 	                             "[INTERNAL] Reject PAC/AS aggregates that lack sample diversity", LogicalType::BOOLEAN,
 	                             Value::BOOLEAN(true));
-	// Correction factor: multiplies sum/avg/count results; reduces NULL probability for all aggregates
-	db.config.AddExtensionOption("pac_correction", "Correction factor multiplied into aggregate results (default: 1.0)",
-	                             LogicalType::DOUBLE, Value::DOUBLE(1.0));
 	// Utility diff mode: number of key columns for matching + optional output path
 	db.config.AddExtensionOption(
 	    "privacy_diffcols",
@@ -512,11 +509,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Enable privacy query plan rewriting (the core optimizer that injects noise)
 	db.config.AddExtensionOption("priv_rewrite", "[INTERNAL] Enable privacy query plan rewriting", LogicalType::BOOLEAN,
 	                             Value::BOOLEAN(true));
-	// Number of per-sample subsets (m) used by PAC (default 128)
+	// Number of per-sample subsets (m): a power of two from 64 to 512 (default 64)
 	db.config.AddExtensionOption("pac_m", "[INTERNAL] Number of per-sample subsets", LogicalType::INTEGER);
-	// Toggle enforcement of per-sample array length == pac_m
-	db.config.AddExtensionOption("enforce_m_values", "[INTERNAL] Enforce per-sample array length equals pac_m",
-	                             LogicalType::BOOLEAN);
 	// Path where compiled privacy artifacts (CTEs) are written
 	db.config.AddExtensionOption("priv_compiled_path", "[INTERNAL] Path to write compiled privacy artifacts",
 	                             LogicalType::VARCHAR);
@@ -637,9 +631,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register priv_hash scalar function (UBIGINT -> UBIGINT with exactly 32 bits set)
 	RegisterPacHashFunction(loader);
-
-	// Register pac_aggregate scalar function (naive PAC sample-and-aggregate terminal)
-	RegisterPacAggregateFunctions(loader);
 
 	// Register dp_noise scalar function (value, scale) -> value + Lap(scale)
 	RegisterDpLaplaceNoiseFunction(loader);

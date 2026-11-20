@@ -27,17 +27,6 @@
 namespace duckdb {
 
 // ============================================================================
-// Cross-platform popcount helper
-// ============================================================================
-static inline int Popcount64(uint64_t x) {
-#ifdef _MSC_VER
-	return static_cast<int>(__popcnt64(x));
-#else
-	return __builtin_popcountll(x);
-#endif
-}
-
-// ============================================================================
 // Bind data for PAC categorical functions
 // ============================================================================
 // TODO(priv-rename): PacCategoricalBindData / PacCategoricalLocalState /
@@ -154,16 +143,6 @@ static inline bool FilterFromCount(idx_t true_count, idx_t lane_count, double mi
 		auto random_threshold = static_cast<idx_t>(gen() % range);
 		return true_count > random_threshold;
 	}
-}
-
-// Returns true with probability proportional to popcount(mask)/64
-// mi: controls probabilistic (mi>0) vs deterministic (mi<=0) mode
-// correction: considers correction times more non-nulls (increases true probability)
-// When mi <= 0: deterministic, true when popcount(mask) * correction >= 32
-// When mi > 0: probabilistic, P(true) = popcount(mask) * correction / 64
-static inline bool FilterFromMask(uint64_t mask, double mi, double correction, PacRandomEngine &gen) {
-	int popcount = Popcount64(mask);
-	return FilterFromCount(popcount, 64, mi, correction, gen);
 }
 
 // ============================================================================

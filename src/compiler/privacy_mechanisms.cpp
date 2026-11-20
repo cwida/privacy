@@ -3215,11 +3215,6 @@ struct FilterlessPreAggregationInput {
 	vector<LogicalType> group_types;
 	vector<LogicalType> aggregate_types;
 
-	unique_ptr<Expression> GroupRef(idx_t index) const {
-		return make_uniq<BoundColumnRefExpression>(
-		    group_types[index], ColumnBinding(TableIndex(group_table_index), ProjectionIndex(index)));
-	}
-
 	unique_ptr<Expression> PuRef() const {
 		return make_uniq<BoundColumnRefExpression>(
 		    LogicalType::UBIGINT, ColumnBinding(TableIndex(group_table_index), ProjectionIndex(group_count)));

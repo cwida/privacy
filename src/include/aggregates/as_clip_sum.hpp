@@ -340,7 +340,6 @@ struct PacClipSumIntState {
 template <int NUM_LEVELS = CLIP_NUM_LEVELS_64>
 struct PacClipSumStateWrapper {
 	using State = PacClipSumIntState<NUM_LEVELS>;
-	using Value = uint64_t;
 	static constexpr int BUF_SIZE = 2;
 	static constexpr uint64_t BUF_MASK = 3ULL;
 

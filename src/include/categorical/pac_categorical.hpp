@@ -76,28 +76,6 @@ void AddPacListAggregateOverload(AggregateFunctionSet &set, const string &aggr_t
 // priv_filter(list<bool>) -> BOOLEAN
 // Convenience: converts list to mask, then applies filter logic
 
-// ============================================================================
-// Helper: Check if a mask has any bits set (for NULL handling)
-// ============================================================================
-static inline bool PacMaskHasAnyBit(uint64_t mask) {
-	return mask != 0;
-}
-
-// ============================================================================
-// Helper: Combine masks for AND/OR operations
-// ============================================================================
-static inline uint64_t PacMaskAnd(uint64_t mask1, uint64_t mask2) {
-	return mask1 & mask2;
-}
-
-static inline uint64_t PacMaskOr(uint64_t mask1, uint64_t mask2) {
-	return mask1 | mask2;
-}
-
-static inline uint64_t PacMaskNot(uint64_t mask) {
-	return ~mask;
-}
-
 } // namespace duckdb
 
 #endif // PAC_CATEGORICAL_HPP

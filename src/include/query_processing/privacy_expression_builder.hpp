@@ -19,9 +19,6 @@ idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name);
 // Ensure PK columns are present in a LogicalGet's column_ids and projection_ids
 void AddPKColumns(LogicalGet &get, const vector<string> &pks);
 
-// Helper to ensure rowid is present in the output columns of a LogicalGet
-void AddRowIDColumn(LogicalGet &get);
-
 // Hash one or more column expressions: hash(c1) XOR hash(c2) XOR ...
 unique_ptr<Expression> BuildXorHash(OptimizerExtensionInput &input, vector<unique_ptr<Expression>> cols);
 
@@ -32,12 +29,12 @@ unique_ptr<Expression> BuildXorHashFromPKs(OptimizerExtensionInput &input, Logic
 // Remaps all existing references to the get's bindings using ColumnBindingReplacer.
 // Returns the ColumnBinding for the new hash column in the projection's output.
 ColumnBinding InsertHashProjectionAboveGet(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                           LogicalGet &get, const vector<string> &key_columns, bool use_rowid);
+                                           LogicalGet &get, const vector<string> &key_columns);
 
 // Caching wrapper around InsertHashProjectionAboveGet. Keyed by get.table_index.index.
 // Returns cached binding if hash projection was already inserted for this get.
 ColumnBinding GetOrInsertHashProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                        LogicalGet &get, const vector<string> &key_columns, bool use_rowid,
+                                        LogicalGet &get, const vector<string> &key_columns,
                                         std::unordered_map<idx_t, ColumnBinding> &cache);
 
 // Insert a hash projection above a CTE_SCAN (LogicalCTERef) node.

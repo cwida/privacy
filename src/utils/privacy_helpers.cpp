@@ -582,21 +582,6 @@ string GetPacCompiledPath(ClientContext &context, const string &default_path) {
 	return path;
 }
 
-int64_t GetPacM(ClientContext &context, int64_t default_m) {
-	Value v;
-	context.TryGetCurrentSetting(Identifier("pac_m"), v);
-	if (!v.IsNull()) {
-		try {
-			int64_t m = v.GetValue<int64_t>();
-			return std::max<int64_t>(1, m);
-		} catch (...) {
-			// fallback to default if conversion fails
-			return default_m;
-		}
-	}
-	return default_m;
-}
-
 bool IsPacNoiseEnabled(ClientContext &context, bool default_value) {
 	Value v;
 	context.TryGetCurrentSetting(Identifier("privacy_noise"), v);
@@ -683,26 +668,6 @@ bool TryGetDpMaxGroupsContributed(ClientContext &context, double &out) {
 
 bool TryGetDpDelta(ClientContext &context, double &out) {
 	return TryGetDoubleSetting(context, "dp_delta", out);
-}
-
-// Add implementation for GetPacCompileMethod
-string GetPacCompileMethod(ClientContext &context, const string &default_method) {
-	Value v;
-	context.TryGetCurrentSetting(Identifier("pac_compile_method"), v);
-	if (v.IsNull()) {
-		return default_method;
-	}
-	try {
-		string s = v.ToString();
-		std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
-		if (s == "standard" || s == "bitslice") {
-			return s;
-		}
-		// fallback
-		return default_method;
-	} catch (...) {
-		return default_method;
-	}
 }
 
 // Helper to safely retrieve boolean settings with defaults

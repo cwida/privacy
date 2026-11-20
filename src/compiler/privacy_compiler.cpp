@@ -110,7 +110,7 @@ static unique_ptr<Expression> HandlePassthroughDeepHash(OptimizerExtensionInput 
                                                         LogicalAggregate *inner_agg, LogicalGet &inner_get,
                                                         const vector<string> &key_cols,
                                                         std::unordered_map<idx_t, ColumnBinding> &hash_cache) {
-	auto inner_hash_binding = GetOrInsertHashProjection(input, plan, inner_get, key_cols, false, hash_cache);
+	auto inner_hash_binding = GetOrInsertHashProjection(input, plan, inner_get, key_cols, hash_cache);
 
 	auto propagated_to_inner = PropagateSingleBinding(*plan, inner_hash_binding.table_index.index, inner_hash_binding,
 	                                                  LogicalType::UBIGINT, inner_agg);
@@ -838,7 +838,7 @@ private:
 			if (!owner) {
 				throw InvalidInputException("Private UNION could not resolve branch privacy-unit ownership");
 			}
-			source = InsertHashProjectionAboveGet(input, plan, *owner, keys, false);
+			source = InsertHashProjectionAboveGet(input, plan, *owner, keys);
 		} else {
 			// A public branch is present in every world.
 			target.expressions.push_back(
@@ -987,7 +987,7 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 				}
 
 				// Direct path: insert hash projection above get and propagate
-				auto hash_binding = GetOrInsertHashProjection(input, plan, get, pks, false, hash_cache);
+				auto hash_binding = GetOrInsertHashProjection(input, plan, get, pks, hash_cache);
 				auto propagated = PropagateSingleBinding(*plan, hash_binding.table_index.index, hash_binding,
 				                                         LogicalType::UBIGINT, target_agg);
 				if (propagated.table_index.index == DConstants::INVALID_INDEX) {
@@ -1070,8 +1070,7 @@ vector<PrivAggregateHashInfo> BuildPUHashExpressionsForAggregates(OptimizerExten
 							continue;
 						}
 						// Direct path: insert hash projection and propagate
-						auto fk_hash_binding =
-						    GetOrInsertHashProjection(input, plan, *fk_get_ptr, fk_cols, false, hash_cache);
+						auto fk_hash_binding = GetOrInsertHashProjection(input, plan, *fk_get_ptr, fk_cols, hash_cache);
 						auto fk_propagated = PropagateSingleBinding(*plan, fk_hash_binding.table_index.index,
 						                                            fk_hash_binding, LogicalType::UBIGINT, target_agg);
 

@@ -115,21 +115,6 @@ void FindAllAggregates(unique_ptr<LogicalOperator> &op, vector<LogicalAggregate 
 	}
 }
 
-LogicalProjection *FindParentProjection(unique_ptr<LogicalOperator> &root, LogicalOperator *target_child) {
-	if (!root) {
-		return nullptr;
-	}
-	for (auto &child : root->children) {
-		if (child.get() == target_child && root->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-			return &root->Cast<LogicalProjection>();
-		}
-		if (auto *proj = FindParentProjection(child, target_child)) {
-			return proj;
-		}
-	}
-	return nullptr;
-}
-
 unique_ptr<LogicalOperator> *FindNodeRefByTable(unique_ptr<LogicalOperator> *root, const string &table_name,
                                                 LogicalOperator **parent_out, idx_t *child_idx_out) {
 	if (!root || !root->get()) {
@@ -531,53 +516,6 @@ void FindAllNodesByTableIndex(unique_ptr<LogicalOperator> *root, idx_t table_ind
 	for (auto &child : cur->children) {
 		FindAllNodesByTableIndex(&child, table_index, results);
 	}
-}
-
-// Filter aggregates to only those that have specified tables in their subtree
-// AND have base tables in their DIRECT children (not through nested aggregates).
-// This filters out outer aggregates that only depend on inner aggregate results.
-vector<LogicalAggregate *> FilterTargetAggregates(const vector<LogicalAggregate *> &all_aggregates,
-                                                  const vector<string> &target_table_names,
-                                                  const CTETableMap &cte_map) {
-	vector<LogicalAggregate *> target_aggregates;
-
-	for (auto *agg : all_aggregates) {
-		// Check if this aggregate has at least one target table in its subtree
-		// Use CTE-aware version if we have a CTE map
-		bool has_target_table = false;
-		for (auto &table_name : target_table_names) {
-			bool found =
-			    cte_map.empty() ? HasTableInSubtree(agg, table_name) : HasTableInSubtreeCTE(agg, table_name, cte_map);
-			if (found) {
-				has_target_table = true;
-				break;
-			}
-		}
-
-		if (!has_target_table) {
-			continue;
-		}
-
-		// Check if this aggregate has base tables in its DIRECT children (not nested aggregates)
-		// HasBaseTableInSubtree already recognizes CTE_REF as a valid leaf data source
-		bool has_direct_base_table = false;
-		for (auto &child : agg->children) {
-			// Skip if the child is another aggregate
-			if (child->type == LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY) {
-				continue;
-			}
-			if (HasBaseTableInSubtree(child.get())) {
-				has_direct_base_table = true;
-				break;
-			}
-		}
-
-		if (has_direct_base_table) {
-			target_aggregates.push_back(agg);
-		}
-	}
-
-	return target_aggregates;
 }
 
 // Check if a specific node pointer exists anywhere in the subtree.

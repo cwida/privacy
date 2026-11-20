@@ -639,8 +639,6 @@ struct PacSumDoubleState {
 		}
 	}
 	// Interface methods for wrapper compatibility
-	inline void Flush32(double value, bool force = false) {
-	}
 	void Flush(ArenaAllocator &) {
 	}
 	PacSumDoubleState *GetState() {
@@ -659,7 +657,6 @@ struct PacSumDoubleState {
 template <typename InnerState, typename ValueT>
 struct PacSumStateWrapper {
 	using State = InnerState;
-	using Value = ValueT;
 	static constexpr int BUF_SIZE = 2;
 	static constexpr uint64_t BUF_MASK = 3ULL;
 

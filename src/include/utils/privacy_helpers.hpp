@@ -78,9 +78,7 @@ private:
 // Configuration helpers that read PAC-related settings from the client's context and
 // return a canonicalized value or a default when not configured.
 string GetPacCompiledPath(ClientContext &context, const string &default_path = ".");
-int64_t GetPacM(ClientContext &context, int64_t default_m = 128);
 bool IsPacNoiseEnabled(ClientContext &context, bool default_value = true);
-string GetPacCompileMethod(ClientContext &context, const string &default_method = "standard");
 
 // Return the selected privacy mechanism: "pac" (default), "dp_standard", "dp_filterless", "dp_elastic", or
 // "dp_sass".

@@ -99,7 +99,6 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
   add_executable(as_tpch_benchmark benchmark/tpch/as_tpch_benchmark.cpp)
 
   # MEPS balanced repeated replication: four SQL variants
-  # benchmark
   add_executable(as_meps_benchmark benchmark/meps_brr/as_meps_benchmark.cpp)
 
   # SSB: the 13 joined queries over 64 sampled worlds

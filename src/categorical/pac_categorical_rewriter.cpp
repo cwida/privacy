@@ -153,40 +153,6 @@ static void ReplaceAggregatesOverCounters(LogicalOperator *op, ClientContext &co
 	}
 }
 
-// Minimal processing for filter-pattern projection slots:
-// update counter col_ref types but don't wrap with any terminal.
-// The parent filter/join will expand these expressions and generate list_transform + priv_filter.
-static void PrepareFilterPatternSlot(LogicalProjection &proj, idx_t i,
-                                     const unordered_map<uint64_t, ColumnBinding> &counter_bindings) {
-	auto &expr = proj.expressions[i];
-	auto pac_bindings = FindCounterBindings(expr.get(), counter_bindings);
-	if (pac_bindings.empty()) {
-		return;
-	}
-	auto list_type = LogicalType::LIST(PacFloatLogicalType());
-	// col_ref types are already fixed by the universal type fix above.
-	// Update projection output type
-	if (i < proj.types.size()) {
-		if (expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
-			proj.types[i] = list_type;
-		} else if (expr->GetExpressionType() == ExpressionType::BOUND_FUNCTION) {
-			proj.types[i] = expr->GetReturnType();
-		} else if (expr->GetExpressionType() == ExpressionType::CASE_EXPR &&
-		           IsScalarSubqueryWrapper(expr->Cast<BoundCaseExpression>())) {
-			// first(value) now returns a counter list, but DuckDB's scalar-subquery
-			// cardinality-check CASE still has its original scalar result type.
-			auto &wrapper = expr->Cast<BoundCaseExpression>();
-			if (wrapper.Else().GetReturnType() == list_type) {
-				wrapper.CaseChecksMutable()[0].then_expr = BoundCastExpression::AddDefaultCastToType(
-				    std::move(wrapper.CaseChecksMutable()[0].then_expr), list_type);
-				wrapper.SetReturnType(list_type);
-				proj.types[i] = list_type;
-				PRIVACY_DEBUG_PRINT("Categorical rewrite: preserving counter lists through scalar-subquery wrapper");
-			}
-		}
-	}
-}
-
 // Unified expression rewrite: build list_transform over PAC counters and wrap.
 // pac_bindings: all PAC aggregate bindings in the expression
 // expr: the expression to transform (boolean for filter, numeric for projection)

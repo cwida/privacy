@@ -44,45 +44,6 @@ static void EnsureProjectionIdsPopulated(LogicalGet &get) {
 	}
 }
 
-#if PRIVACY_DEBUG
-// Helper function to find a LogicalGet by table_index in the operator tree
-static LogicalGet *FindLogicalGetByTableIndex(LogicalOperator &op, idx_t table_index) {
-	if (op.type == LogicalOperatorType::LOGICAL_GET) {
-		auto &get = op.Cast<LogicalGet>();
-		if (get.table_index.index == table_index) {
-			return &get;
-		}
-	}
-	for (auto &child : op.children) {
-		auto result = FindLogicalGetByTableIndex(*child, table_index);
-		if (result) {
-			return result;
-		}
-	}
-	return nullptr;
-}
-
-// Helper function to resolve a column name from a binding by finding the corresponding LogicalGet
-static string ResolveColumnNameFromBinding(LogicalOperator &root, const ColumnBinding &binding) {
-	auto get = FindLogicalGetByTableIndex(root, binding.table_index.index);
-	if (!get) {
-		return "[" + std::to_string(binding.table_index.index) + "." + std::to_string(binding.column_index) + "]";
-	}
-
-	const auto &column_ids = get->GetColumnIds();
-	if (binding.column_index >= column_ids.size()) {
-		return "[" + std::to_string(binding.table_index.index) + "." + std::to_string(binding.column_index) + "]";
-	}
-
-	auto col_name = get->GetColumnName(column_ids[binding.column_index]).GetIdentifierName();
-	if (col_name.empty()) {
-		return "[" + std::to_string(binding.table_index.index) + "." + std::to_string(binding.column_index) + "]";
-	}
-
-	return col_name;
-}
-#endif
-
 // Ensure a column is projected in a LogicalGet and return its projection index
 idx_t EnsureProjectedColumn(LogicalGet &g, const string &col_name) {
 	// try existing projected columns by matching returned names via ColumnIndex primary
@@ -149,22 +110,6 @@ void AddPKColumns(LogicalGet &get, const vector<string> &pks) {
 	}
 }
 
-// Helper to ensure rowid is present in the output columns of a LogicalGet
-void AddRowIDColumn(LogicalGet &get) {
-	if (get.virtual_columns.find(COLUMN_IDENTIFIER_ROW_ID) != get.virtual_columns.end()) {
-		get.virtual_columns[COLUMN_IDENTIFIER_ROW_ID] = TableColumn("rowid", LogicalTypeId::BIGINT);
-	}
-
-	EnsureProjectionIdsPopulated(get);
-
-	get.AddColumnId(COLUMN_IDENTIFIER_ROW_ID);
-	get.projection_ids.push_back(ProjectionIndex(get.GetColumnIds().size() - 1));
-
-	// ResolveOperatorTypes() calls the protected ResolveTypes() which rebuilds
-	// the types vector from column_ids/projection_ids
-	get.ResolveOperatorTypes();
-}
-
 // Hash one or more column expressions: hash(c1) XOR hash(c2) XOR ...
 // Works for any column type (VARCHAR, INTEGER, etc.)
 unique_ptr<Expression> BuildXorHash(OptimizerExtensionInput &input, vector<unique_ptr<Expression>> cols) {
@@ -196,19 +141,10 @@ unique_ptr<Expression> BuildXorHashFromPKs(OptimizerExtensionInput &input, Logic
 }
 
 ColumnBinding InsertHashProjectionAboveGet(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                           LogicalGet &get, const vector<string> &key_columns, bool use_rowid) {
-	// 1. Build hash expression from the get's columns
-	unique_ptr<Expression> hash_expr;
-	if (use_rowid) {
-		AddRowIDColumn(get);
-		auto rowid_binding =
-		    ColumnBinding(TableIndex(get.table_index.index), ProjectionIndex(get.GetColumnIds().size() - 1));
-		auto rowid_col = make_uniq<BoundColumnRefExpression>(LogicalType::BIGINT, rowid_binding);
-		hash_expr = input.optimizer.BindScalarFunction("hash", std::move(rowid_col));
-	} else {
-		AddPKColumns(get, key_columns);
-		hash_expr = BuildXorHashFromPKs(input, get, key_columns);
-	}
+                                           LogicalGet &get, const vector<string> &key_columns) {
+	// 1. Build hash expression from the get's key columns
+	AddPKColumns(get, key_columns);
+	auto hash_expr = BuildXorHashFromPKs(input, get, key_columns);
 
 	// 1b. Wrap in priv_hash() to XOR with query_hash and optionally repair to 32 bits set
 	hash_expr = input.optimizer.BindScalarFunction("priv_hash", std::move(hash_expr));
@@ -267,13 +203,13 @@ ColumnBinding InsertHashProjectionAboveGet(OptimizerExtensionInput &input, uniqu
 }
 
 ColumnBinding GetOrInsertHashProjection(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan,
-                                        LogicalGet &get, const vector<string> &key_columns, bool use_rowid,
+                                        LogicalGet &get, const vector<string> &key_columns,
                                         std::unordered_map<idx_t, ColumnBinding> &cache) {
 	auto it = cache.find(get.table_index.index);
 	if (it != cache.end()) {
 		return it->second;
 	}
-	auto binding = InsertHashProjectionAboveGet(input, plan, get, key_columns, use_rowid);
+	auto binding = InsertHashProjectionAboveGet(input, plan, get, key_columns);
 	cache[get.table_index.index] = binding;
 	return binding;
 }
